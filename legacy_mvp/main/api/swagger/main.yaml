@@ -1,0 +1,618 @@
+swagger: "2.0"
+info:
+  description: "Continuous market API for cryptocurrency trading and account management"
+  version: "0.1.0"
+  title: "market.main"
+schemes:
+  - "http"
+  - "https"
+paths:
+  /market/{bid_id}:
+    get:
+      summary: "Get bid info by id"
+      operationId: "get_bid_by_id"
+      produces:
+        - "application/json"
+      parameters:
+        - name: "bid_id"
+          in: "path"
+          description: "ID of bid to return"
+          type: "string"
+          required: true
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            $ref: "#/definitions/bid"
+        404:
+          description: "Bid not found"
+          schema:
+            $ref: "#/definitions/Error"
+        403:
+          description: "No access"
+          schema:
+            $ref: "#/definitions/Error"
+      security:
+        - api_key: [ ]
+    delete:
+      summary: "Cancel bid"
+      operationId: "cancel_bid"
+      produces:
+        - "application/json"
+      parameters:
+        - name: "bid_id"
+          in: "path"
+          description: "ID of bid to cancel"
+          required: true
+          type: "string"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+                enum: [ cancelled ]
+        403:
+          description: "No access"
+          schema:
+            $ref: "#/definitions/Error"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+      security:
+        - api_key: [ ]
+  /bid:
+    post:
+      summary: "Create bid"
+      operationId: "create_bid"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      parameters:
+        - name: "body"
+          in: "body"
+          required: true
+          schema:
+            type: object
+            required:
+              - from_currency
+              - to_currency
+              - min_price
+              - max_price
+              - amount_to_buy
+            properties:
+              from_currency:
+                type: string
+                enum: [ USDT, BTC ]
+              to_currency:
+                type: string
+                enum: [ USDT, BTC ]
+              min_price:
+                type: number
+                format: float
+                minimum: 0
+              max_price:
+                type: number
+                format: float
+                minimum: 0
+              amount_to_buy:
+                type: number
+                format: float
+                minimum: 0
+              buy_speed:
+                type: number
+                format: float
+                minimum: 0
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+                example: bid_123
+        403:
+          description: "No access"
+          schema:
+            $ref: "#/definitions/Error"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+      security:
+        - api_key: [ ]
+  /account/balance:
+    get:
+      summary: "Get user's balance"
+      description: "Returns balance of all cryptocurrencies for the authenticated user"
+      produces:
+        - "application/json"
+      security:
+        - api_key: [ ]
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: array
+            items:
+              type: object
+              required:
+                - currency
+                - amount
+              properties:
+                currency:
+                  type: string
+                  enum: [ USDT, BTC ]
+                  example: USDT
+                amount:
+                  type: number
+                  format: float
+                  minimum: 0
+                  example: 100.50
+        401:
+          description: "Unauthorized"
+          schema:
+            $ref: "#/definitions/Error"
+  /bids:
+    get:
+      summary: "Get bids & ask history"
+      description: "Returns the user's market maker requests"
+      produces:
+        - "application/json"
+      security:
+        - api_key: [ ]
+      parameters:
+        - in: query
+          name: status
+          type: string
+          enum: [ finished, processing, cancelled, pending ]
+          description: "Filter by purchase status"
+        - in: query
+          name: date_from
+          type: integer
+          format: int64
+          description: "Filter purchases from this Unix timestamp"
+        - in: query
+          name: date_to
+          type: integer
+          format: int64
+          description: "Filter purchases up to this Unix timestamp"
+        - in: query
+          name: limit
+          type: integer
+          format: int64
+          minimum: 1
+          default: 100
+          description: "Maximum number of results"
+        - in: query
+          name: offset
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+          description: "Number of results to skip"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/bid"
+        401:
+          description: "Unauthorized"
+          schema:
+            $ref: "#/definitions/Error"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+  /transactions/transfers:
+    get:
+      summary: "Get withdrawal and deposit history"
+      description: "Returns the user's withdrawal and deposit history with optional filters"
+      produces:
+        - "application/json"
+      security:
+        - api_key: [ ]
+      parameters:
+        - in: query
+          name: min_amount
+          type: number
+          format: float
+          minimum: 0
+          description: "Minimum transaction amount"
+        - in: query
+          name: max_amount
+          type: number
+          format: float
+          minimum: 0
+          description: "Maximum transaction amount"
+        - in: query
+          name: status
+          type: string
+          enum: [ finished, processing, cancelled, pending ]
+          description: "Filter by transaction status"
+        - in: query
+          name: currency
+          type: string
+          enum: [ USDT, BTC ]
+          description: "Filter by currency"
+        - in: query
+          name: operation
+          type: string
+          enum: [ deposit, withdraw ]
+          description: "Filter by operation type"
+        - in: query
+          name: date_from
+          type: integer
+          format: int64
+          description: "Filter transactions from this Unix timestamp"
+        - in: query
+          name: date_to
+          type: integer
+          format: int64
+          description: "Filter transactions up to this Unix timestamp"
+        - in: query
+          name: limit
+          type: integer
+          format: int64
+          minimum: 1
+          default: 100
+          description: "Maximum number of results"
+        - in: query
+          name: offset
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+          description: "Number of results to skip"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/transfer"
+        401:
+          description: "Unauthorized"
+          schema:
+            $ref: "#/definitions/Error"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+  /transactions/deposit:
+    post:
+      summary: "Deposit request"
+      description: "Creates a request to deposit cryptocurrency to the user's account and generates a deposit address"
+      operationId: "post_transactions_deposit"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - api_key: [ ]
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/deposit_request"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            $ref: "#/definitions/deposit_response"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+        401:
+          description: "Unauthorized"
+          schema:
+            $ref: "#/definitions/Error"
+  /transactions/withdraw:
+    post:
+      summary: "Withdrawal request"
+      description: "Creates a request to withdraw cryptocurrency from the user's account"
+      operationId: "post_transactions_withdraw"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - api_key: [ ]
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/withdraw_request"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            $ref: "#/definitions/withdraw_response"
+        400:
+          description: "Incorrect data or insufficient balance"
+          schema:
+            $ref: "#/definitions/Error"
+        401:
+          description: "Unauthorized"
+          schema:
+            $ref: "#/definitions/Error"
+  /market-maker/statuses:
+    post:
+      summary: "Update order status"
+      operationId: "update_order_status"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      parameters:
+        - name: "body"
+          in: "body"
+          required: true
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/bid_update"
+      responses:
+        200:
+          description: "Successful operation"
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: ok
+        403:
+          description: "No access"
+          schema:
+            $ref: "#/definitions/Error"
+        400:
+          description: "Incorrect data"
+          schema:
+            $ref: "#/definitions/Error"
+securityDefinitions:
+  api_key:
+    type: apiKey
+    name: api_key
+    in: header
+definitions:
+  Error:
+    type: object
+    required:
+      - error_message
+      - error_status_code
+    properties:
+      error_message:
+        type: string
+        example: "Invalid input data"
+      error_status_code:
+        type: integer
+        example: 400
+      error_code:
+        type: string
+        example: "INVALID_INPUT"
+  bid:
+    type: object
+    required:
+      - id
+      - from_currency
+      - to_currency
+      - min_price
+      - max_price
+      - amount_to_buy
+      - status
+      - create_date
+    properties:
+      id:
+        type: string
+        example: bid_123
+      from_currency:
+        type: string
+        enum: [ USDT, BTC ]
+      to_currency:
+        type: string
+        enum: [ USDT, BTC ]
+      min_price:
+        type: number
+        format: float
+        minimum: 0
+      max_price:
+        type: number
+        format: float
+        minimum: 0
+      amount_to_buy:
+        type: number
+        format: float
+        minimum: 0
+      bought_amount:
+        type: number
+        format: float
+        minimum: 0
+      buy_speed:
+        type: number
+        format: float
+        minimum: 0
+      avg_price:
+        type: number
+        format: float
+        minimum: 0
+      status:
+        type: string
+        enum: [ pending, processing, finished, cancelled ]
+      create_date:
+        type: string
+        format: date-time
+      complete_date:
+        type: string
+        format: date-time
+  purchase:
+    type: object
+    required:
+      - id
+      - currency_from
+      - currency_to
+      - amount_from
+      - amount_to
+      - status
+      - date
+    properties:
+      id:
+        type: string
+        example: bid_123
+      currency_from:
+        type: string
+        enum: [ USDT, BTC ]
+        example: USDT
+      currency_to:
+        type: string
+        enum: [ USDT, BTC ]
+        example: BTC
+      amount_from:
+        type: number
+        format: float
+        minimum: 0
+        example: 100.50
+      amount_to:
+        type: number
+        format: float
+        minimum: 0
+        example: 0.005
+      status:
+        type: string
+        enum: [ finished, processing, cancelled, pending ]
+        example: finished
+      date:
+        type: integer
+        format: int64
+        example: 1747036800
+  transfer:
+    type: object
+    required:
+      - id
+      - currency
+      - amount
+      - operation
+      - status
+      - date
+    properties:
+      id:
+        type: string
+        example: tx_dep_123456
+      currency:
+        type: string
+        enum: [ USDT, BTC ]
+        example: USDT
+      amount:
+        type: number
+        format: float
+        minimum: 0
+        example: 100.50
+      commission:
+        type: number
+        format: float
+        minimum: 0
+        example: 0.1
+      operation:
+        type: string
+        enum: [ deposit, withdraw ]
+        example: deposit
+      status:
+        type: string
+        enum: [ finished, processing, cancelled, pending ]
+        example: finished
+      date:
+        type: integer
+        format: int64
+        example: 1747036800
+      address:
+        type: string
+        example: "0x1234567890abcdef1234567890abcdef12345678"
+  deposit_request:
+    type: object
+    required:
+      - currency
+    properties:
+      currency:
+        type: string
+        enum: [ "USDT", "BTC" ]
+        example: USDT
+  withdraw_request:
+    type: object
+    required:
+      - currency
+      - amount
+      - address
+    properties:
+      currency:
+        type: string
+        enum: [ "USDT", "BTC" ]
+        example: USDT
+      amount:
+        type: number
+        format: float
+        minimum: 0
+        example: 100.50
+      address:
+        type: string
+        example: "0x1234567890abcdef1234567890abcdef12345678"
+  deposit_response:
+    type: object
+    required:
+      - id
+      - status
+      - address
+    properties:
+      id:
+        type: string
+        example: "tx_dep_some-uuid"
+      status:
+        type: string
+        enum: [ "pending", "finished", "cancelled" ]
+        example: "pending"
+      address:
+        type: string
+        example: "0xabcdef1234567890abcdef1234567890abcdef12"
+  withdraw_response:
+    type: object
+    required:
+      - id
+      - status
+    properties:
+      id:
+        type: string
+        example: "tx_with_some-uuid"
+      status:
+        type: string
+        enum: [ "pending", "finished", "cancelled" ]
+        example: "pending"
+  bid_update:
+    type: object
+    required:
+      - status
+      - order_id
+    properties:
+      status:
+        type: string
+        enum: [ "finished", "cancelled", "partial" ]
+      paid_price:
+        type: number
+        format: float
+        minimum: 0
+      bought_amount:
+        type: number
+        format: float
+        minimum: 0
+      order_id:
+        type: integer
+        format: int64

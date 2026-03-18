@@ -1,0 +1,8 @@
+.idea/
+.env
+
+
+**/server.crt
+**/server.key
+
+**/node_modules/

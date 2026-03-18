@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order_flow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order_flow
+  template:
+    metadata:
+      labels:
+        app: order_flow
+    spec:
+      containers:
+      - name: order_flow
+        image: cex/order_flow:latest
+        ports:
+        - containerPort: 50051
+        env:
+        - name: ORDER_FLOW_GRPC_LISTEN
+          value: "0.0.0.0:50051"
+        - name: RISK_GRPC_ADDR
+          value: "risk:50052"
+        - name: LEDGER_GRPC_ADDR
+          value: "ledger:50053"
+        - name: KAFKA_BROKERS
+          value: "redpanda:9092"
+---

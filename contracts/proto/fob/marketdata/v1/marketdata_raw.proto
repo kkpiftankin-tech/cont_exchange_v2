@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package fob.marketdata.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+message PriceLevel {
+  fob.common.v1.Decimal price = 1;
+  fob.common.v1.Decimal amount = 2; // base amount at this price
+}
+
+message OrderBookSnapshot {
+  string venue = 1;  // "binance", "coinbase", ...
+
+  fob.common.v1.Instrument instrument = 2;
+
+  // Similar to CCXT: timestamp/nonce
+  google.protobuf.Timestamp timestamp = 3;
+  uint64 nonce = 4;
+
+  repeated PriceLevel bids = 5;
+  repeated PriceLevel asks = 6;
+}
+
+message Ticker {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  google.protobuf.Timestamp timestamp = 3;
+
+  fob.common.v1.Decimal bid = 10;
+  fob.common.v1.Decimal ask = 11;
+  fob.common.v1.Decimal last = 12;
+
+  fob.common.v1.Decimal high = 13;
+  fob.common.v1.Decimal low = 14;
+  fob.common.v1.Decimal open = 15;
+  fob.common.v1.Decimal close = 16;
+
+  // 24h volumes if provided by venue
+  fob.common.v1.Decimal base_volume = 20;
+  fob.common.v1.Decimal quote_volume = 21;
+
+  // Optional computed metrics (can be empty if not computed)
+  fob.common.v1.Decimal vwap = 30;
+  fob.common.v1.Decimal spread = 31; // ask - bid
+}
+
+message Trade {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+
+  string trade_id = 3;
+  google.protobuf.Timestamp timestamp = 4;
+
+  fob.common.v1.Side side = 5;
+
+  fob.common.v1.Decimal price = 6;
+  fob.common.v1.Decimal amount = 7; // base amount
+  fob.common.v1.Decimal cost = 8;   // quote amount (price*amount)
+
+  fob.common.v1.Fee fee = 9;
+
+  // maker/taker flag if available
+  bool maker = 10;
+
+  // optional link to a venue order id
+  string order_id = 11;
+}
+
+message VenueSymbolMeta {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+
+  // Fees
+  fob.common.v1.Decimal maker_fee_rate = 10;
+  fob.common.v1.Decimal taker_fee_rate = 11;
+
+  // Trading constraints
+  fob.common.v1.Decimal tick_size = 20;  // minimal price increment
+  fob.common.v1.Decimal lot_size = 21;   // minimal qty increment
+
+  fob.common.v1.Decimal min_notional = 22;
+  fob.common.v1.Decimal min_qty = 23;
+  fob.common.v1.Decimal max_qty = 24;
+
+  // Optional venue-native symbol (e.g. "BTCUSDT")
+  string venue_symbol = 30;
+}
+
+message MarketDataRaw {
+  // Kafka topic: marketdata.raw
+  fob.common.v1.EventMeta meta = 1;
+
+  oneof payload {
+    OrderBookSnapshot orderbook = 10;
+    Ticker ticker = 11;
+    Trade trade = 12;
+    VenueSymbolMeta symbol_meta = 13;
+  }
+}

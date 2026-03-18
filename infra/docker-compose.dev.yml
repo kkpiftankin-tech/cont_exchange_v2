@@ -1,0 +1,153 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - "1G"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - redpanda:8082
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--brokers", "redpanda:9092"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  topics-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./kafka/create_topics.sh:/create_topics.sh:ro
+    entrypoint: ["/bin/bash","/create_topics.sh"]
+    environment:
+      BROKER: redpanda:9092
+      P: 3
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8080:8080"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "kafka:
+          brokers: [\"redpanda:9092\"]
+        " > /tmp/config.yaml
+        /app/console --config.filepath=/tmp/config.yaml
+
+  # --- Core services ---
+  risk:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: risk }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  ledger:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: ledger }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  order_flow:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: order_flow }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      risk:
+        condition: service_started
+      ledger:
+        condition: service_started
+
+  matching:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: matching }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  venues:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: venues }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  market_data:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: market_data }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  observability:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: observability }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: gateway }
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      order_flow:
+        condition: service_started
+    ports:
+      - "8088:8080"

@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package fob.ledger.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/matching/v1/batch.proto";
+import "fob/execution/v1/execution.proto";
+
+message Balance {
+  string currency = 1;
+  fob.common.v1.Decimal available = 2;
+  fob.common.v1.Decimal reserved = 3;
+  fob.common.v1.Decimal total = 4;
+}
+
+message GetBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+}
+
+message GetBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated Balance balances = 2;
+}
+
+enum ReserveReason {
+  RESERVE_REASON_UNSPECIFIED = 0;
+  RESERVE_REASON_NEW_ORDER = 1;
+  RESERVE_REASON_AMEND_ORDER = 2;
+  RESERVE_REASON_HEDGE = 3;
+}
+
+message ReserveFundsRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string reservation_id = 2; // idempotency key; can be client_order_id
+  string user_id = 3;
+
+  // Link to internal order
+  string order_id = 4;
+
+  string currency = 10;
+  fob.common.v1.Decimal amount = 11;
+
+  ReserveReason reason = 12;
+}
+
+message ReserveFundsResponse {
+  fob.common.v1.EventMeta meta = 1;
+
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+
+  // Echo actual reserved amount (can differ if partial reserve supported)
+  fob.common.v1.Decimal reserved_amount = 10;
+}
+
+message ReleaseFundsRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string reservation_id = 2;
+  string user_id = 3;
+  string order_id = 4;
+
+  string currency = 10;
+  fob.common.v1.Decimal amount = 11;
+
+  string reason = 12;
+}
+
+message ApplyBatchResultRequest {
+  // Usually Ledger consumes Kafka batch.outputs.
+  // This RPC is useful for tests, replays, or if you want sync integration.
+  fob.common.v1.EventMeta meta = 1;
+  fob.matching.v1.BatchResult batch = 2;
+}
+
+message ApplyBatchResultResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+}
+
+message ApplyExecutionReportRequest {
+  // Ledger consumes execution.reports from external venues and updates the exchange's own hedge positions.
+  fob.common.v1.EventMeta meta = 1;
+  fob.execution.v1.ExecutionReport report = 2;
+}
+
+service LedgerService {
+  // Query current balances (sync)
+  rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
+
+  // Reserve funds for a new/updated order (sync)
+  rpc ReserveFunds(ReserveFundsRequest) returns (ReserveFundsResponse);
+
+  // Release funds on cancel/reject (sync)
+  rpc ReleaseFunds(ReleaseFundsRequest) returns (google.protobuf.Empty);
+
+  // Apply internal matching results (sync alternative)
+  rpc ApplyBatchResult(ApplyBatchResultRequest) returns (ApplyBatchResultResponse);
+
+  // Apply external hedge report (sync alternative)
+  rpc ApplyExecutionReport(ApplyExecutionReportRequest) returns (google.protobuf.Empty);
+}

@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package fob.execution.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+enum ExecutionStrategy {
+  EXEC_STRATEGY_UNSPECIFIED = 0;
+  EXEC_STRATEGY_MARKET = 1;   // aggressive, immediate
+  EXEC_STRATEGY_LIMIT = 2;    // passive/limit
+  EXEC_STRATEGY_TWAP = 3;     // slice over time (optional later)
+}
+
+enum ExecutionUrgency {
+  URGENCY_UNSPECIFIED = 0;
+  URGENCY_LOW = 1;
+  URGENCY_MEDIUM = 2;
+  URGENCY_HIGH = 3;
+}
+
+message ExecutionIntent {
+  // Kafka topic: execution.intents
+  fob.common.v1.EventMeta meta = 1;
+
+  string intent_id = 2;
+
+  // Link to internal context
+  string batch_id = 3;           // if triggered by a clearing batch
+  string internal_order_id = 4;  // internal flow order that caused hedge
+  string reason = 5;             // "hedge", "arbitrage", "risk_reduction", ...
+
+  // Where and what to trade
+  string venue = 10;             // "binance", ...
+  fob.common.v1.Instrument instrument = 11;
+  string venue_symbol = 12;      // "BTCUSDT" if needed
+
+  // Direction and size
+  fob.common.v1.Side side = 20;
+  fob.common.v1.Decimal target_qty = 21;  // base qty
+
+  // Constraints
+  fob.common.v1.Decimal limit_price = 30;   // optional (0 if not used)
+  int32 max_slippage_bps = 31;              // optional; 0 means "not set"
+
+  ExecutionStrategy strategy = 40;
+  ExecutionUrgency urgency = 41;
+  fob.common.v1.TimeInForce tif = 42;
+
+  // Idempotency / venue linkage
+  string client_order_id = 50;
+}
+
+message ExecutionTrade {
+  string trade_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+
+  fob.common.v1.Decimal price = 3;
+  fob.common.v1.Decimal amount = 4; // base
+  fob.common.v1.Decimal cost = 5;   // quote
+
+  fob.common.v1.Fee fee = 6;
+
+  bool maker = 7;
+}
+
+message ExecutionReport {
+  // Kafka topic: execution.reports
+  fob.common.v1.EventMeta meta = 1;
+
+  string report_id = 2;
+  string intent_id = 3;
+
+  string venue = 10;
+  fob.common.v1.Instrument instrument = 11;
+  string venue_symbol = 12;
+
+  // CCXT-like order fields
+  string venue_order_id = 20;
+  string client_order_id = 21;
+
+  fob.common.v1.OrderStatus status = 30;
+
+  fob.common.v1.Decimal filled_qty = 31;      // base
+  fob.common.v1.Decimal remaining_qty = 32;   // base
+  fob.common.v1.Decimal average_price = 33;   // quote/base
+
+  repeated ExecutionTrade trades = 40;
+
+  // Total fee (optional rollup; can be 0 if trades have per-fill fees)
+  fob.common.v1.Fee fee_total = 50;
+
+  // Error if rejected/failed
+  fob.common.v1.Error error = 60;
+}

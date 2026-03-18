@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package fob.orders.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// Flow order = continuous-time order parametrized by a price interval and a max execution speed.
+// It is a minimal "contract DTO" compatible with FOB/CSLO model: [P_low, P_high], Q, U.
+message FlowOrder {
+  // Internal unique id (UUID).
+  string order_id = 1;
+
+  // Optional external/client-side id for idempotency.
+  string client_order_id = 2;
+
+  // Identity
+  string user_id = 3;
+  string account_id = 4;
+
+  // Instrument + direction
+  fob.common.v1.Instrument instrument = 5;
+  fob.common.v1.Side side = 6;
+
+  // Base quantity the user wants to buy/sell in total.
+  fob.common.v1.Decimal total_qty = 7;
+  fob.common.v1.Decimal remaining_qty = 8;
+
+  // Price interval (quote per 1 base).
+  // BUY: willing to pay up to price_high; SELL: willing to accept at least price_low.
+  fob.common.v1.Decimal price_low = 9;
+  fob.common.v1.Decimal price_high = 10;
+
+  // Max execution speed (base units per second).
+  fob.common.v1.Decimal max_speed = 11;
+
+  // Current status (for snapshots; not mandatory in create commands).
+  fob.common.v1.OrderStatus status = 12;
+
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+
+  // Time in force for flow order lifecycle
+  fob.common.v1.TimeInForce tif = 15;
+
+  // Free-form parameters (MM curve params, strategy hints, UI tags)
+  map<string, string> tags = 16;
+}
+
+// Commands that will be published into Kafka (orders.normalized) for the matching engine.
+message FlowOrderCreate {
+  FlowOrder order = 1;
+}
+
+message FlowOrderCancel {
+  string order_id = 1;
+  string user_id = 2;
+  string reason = 3;
+}
+
+message FlowOrderAmend {
+  string order_id = 1;
+  string user_id = 2;
+
+  // Only fields that are being changed should be filled.
+  fob.common.v1.Decimal new_total_qty = 10;
+  fob.common.v1.Decimal new_price_low = 11;
+  fob.common.v1.Decimal new_price_high = 12;
+  fob.common.v1.Decimal new_max_speed = 13;
+}
+
+// Kafka envelope
+message OrdersNormalized {
+  // Kafka topic: orders.normalized
+  fob.common.v1.EventMeta meta = 1;
+
+  oneof payload {
+    FlowOrderCreate create = 10;
+    FlowOrderCancel cancel = 11;
+    FlowOrderAmend amend = 12;
+  }
+}
+
+// Simple read model response DTOs (used by gRPC OrderFlowService).
+message FlowOrderView {
+  FlowOrder order = 1;
+  fob.common.v1.Error error = 2;
+}

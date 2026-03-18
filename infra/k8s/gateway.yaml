@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+      - name: gateway
+        image: cex/gateway:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: ORDER_FLOW_GRPC_ADDR
+          value: "order_flow:50051"
+        - name: GATEWAY_HTTP_PORT
+          value: "8080"
+        - name: KAFKA_BROKERS
+          value: "redpanda:9092"
+---

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package fob.matching.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// Per-order fill inside an internal clearing batch.
+message FlowFill {
+  // Which order got filled
+  string order_id = 1;
+  string user_id = 2;
+
+  fob.common.v1.Instrument instrument = 3;
+  fob.common.v1.Side side = 4;
+
+  // Executed base quantity in this batch
+  fob.common.v1.Decimal executed_qty = 5;
+
+  // Execution price (quote per base) used by clearing for this order in this batch
+  fob.common.v1.Decimal price = 6;
+
+  // Executed notional in quote currency: executed_qty * price
+  fob.common.v1.Decimal executed_notional = 7;
+
+  // Optional fee charged on internal execution (if any)
+  fob.common.v1.Fee fee = 8;
+}
+
+message OrderStateUpdate {
+  string order_id = 1;
+  fob.common.v1.OrderStatus status = 2;
+  fob.common.v1.Decimal remaining_qty = 3;
+
+  // cumulative filled
+  fob.common.v1.Decimal filled_qty_total = 4;
+  google.protobuf.Timestamp updated_at = 5;
+
+  // optional reason (reject/cancel)
+  string reason = 6;
+}
+
+message BatchSolverDiagnostics {
+  // residual_norm from solver = measure of imbalance
+  double residual_norm = 1;
+
+  // solve_time_ms from solver
+  uint32 solve_time_ms = 2;
+
+  // Number of active orders included
+  uint32 num_active_orders = 3;
+
+  // Free-form solver diagnostics (iterations, eps-liquidity, etc)
+  string solver_diagnostics_json = 4;
+
+  // Versioning of solver config
+  uint32 config_version = 5;
+}
+
+// Main Kafka event for topic batch.outputs.
+message BatchResult {
+  fob.common.v1.EventMeta meta = 1;
+
+  string batch_id = 2;
+  google.protobuf.Timestamp timestamp = 3;
+
+  // Clearing prices by instrument: symbol -> price
+  map<string, fob.common.v1.Decimal> clear_prices = 10;
+
+  // Executed speeds by order_id: order_id -> executed_rate (base/sec)
+  map<string, fob.common.v1.Decimal> executed_rates = 11;
+
+  repeated FlowFill fills = 12;
+  repeated OrderStateUpdate order_updates = 13;
+
+  BatchSolverDiagnostics diagnostics = 14;
+}
