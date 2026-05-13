@@ -1,0 +1,1042 @@
+.
+├── .git
+│   ├── HEAD
+│   ├── config
+│   ├── description
+│   ├── hooks
+│   │   ├── applypatch-msg.sample
+│   │   ├── commit-msg.sample
+│   │   ├── fsmonitor-watchman.sample
+│   │   ├── post-update.sample
+│   │   ├── pre-applypatch.sample
+│   │   ├── pre-commit.sample
+│   │   ├── pre-merge-commit.sample
+│   │   ├── pre-push.sample
+│   │   ├── pre-rebase.sample
+│   │   ├── pre-receive.sample
+│   │   ├── prepare-commit-msg.sample
+│   │   ├── push-to-checkout.sample
+│   │   ├── sendemail-validate.sample
+│   │   └── update.sample
+│   ├── index
+│   ├── info
+│   │   └── exclude
+│   ├── logs
+│   │   ├── HEAD
+│   │   └── refs
+│   │       ├── heads
+│   │       │   └── main
+│   │       └── remotes
+│   │           └── origin
+│   │               └── HEAD
+│   ├── objects
+│   │   ├── info
+│   │   └── pack
+│   │       ├── pack-69147fcaa85114023ffbf03d22fd8db083a95743.idx
+│   │       ├── pack-69147fcaa85114023ffbf03d22fd8db083a95743.pack
+│   │       └── pack-69147fcaa85114023ffbf03d22fd8db083a95743.rev
+│   ├── packed-refs
+│   └── refs
+│       ├── heads
+│       │   └── main
+│       ├── remotes
+│       │   └── origin
+│       │       └── HEAD
+│       └── tags
+├── .gitignore
+├── .vscode
+│   └── settings.json
+├── CMakeLists.txt
+├── Development.md
+├── Makefile
+├── README.md
+├── contracts
+│   ├── CMakeLists.txt
+│   └── proto
+│       └── fob
+│           ├── agent
+│           │   └── v1
+│           │       └── agent.proto
+│           ├── common
+│           │   └── v1
+│           │       └── common.proto
+│           ├── execution
+│           │   └── v1
+│           │       └── execution.proto
+│           ├── ledger
+│           │   └── v1
+│           │       └── ledger.proto
+│           ├── marketdata
+│           │   └── v1
+│           │       ├── marketdata_raw.proto
+│           │       └── marketdata_service.proto
+│           ├── matching
+│           │   └── v1
+│           │       └── batch.proto
+│           ├── observability
+│           │   └── v1
+│           │       └── observability.proto
+│           ├── orders
+│           │   └── v1
+│           │       ├── order_flow_service.proto
+│           │       └── orders.proto
+│           └── risk
+│               └── v1
+│                   └── risk.proto
+├── cpp
+│   ├── common
+│   │   ├── CMakeLists.txt
+│   │   ├── include
+│   │   │   └── cex
+│   │   │       └── common
+│   │   │           ├── decimal.hpp
+│   │   │           ├── env.hpp
+│   │   │           ├── kafka.hpp
+│   │   │           ├── log.hpp
+│   │   │           ├── proto.hpp
+│   │   │           ├── time.hpp
+│   │   │           └── uuid.hpp
+│   │   └── src
+│   │       ├── decimal.cpp
+│   │       ├── env.cpp
+│   │       ├── kafka.cpp
+│   │       ├── log.cpp
+│   │       ├── proto.cpp
+│   │       ├── time.cpp
+│   │       └── uuid.cpp
+│   ├── gateway
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── infra
+│   │       │   ├── order_flow_client.cpp
+│   │       │   └── order_flow_client.hpp
+│   │       ├── main.cpp
+│   │       └── transport
+│   │           ├── http_gateway.cpp
+│   │           └── http_gateway.hpp
+│   ├── ledger
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── ledger_uc.cpp
+│   │       │   └── ledger_uc.hpp
+│   │       ├── infra
+│   │       │   ├── kafka_consumers.cpp
+│   │       │   └── kafka_consumers.hpp
+│   │       ├── main.cpp
+│   │       └── transport
+│   │           ├── grpc_ledger_service.cpp
+│   │           └── grpc_ledger_service.hpp
+│   ├── market_data
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── market_data_uc.cpp
+│   │       │   └── market_data_uc.hpp
+│   │       ├── infra
+│   │       │   ├── kafka_consumer.cpp
+│   │       │   └── kafka_consumer.hpp
+│   │       ├── main.cpp
+│   │       └── transport
+│   │           ├── grpc_market_data_service.cpp
+│   │           └── grpc_market_data_service.hpp
+│   ├── matching
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── matching_loop.cpp
+│   │       │   └── matching_loop.hpp
+│   │       ├── domain
+│   │       │   └── solver.hpp
+│   │       └── main.cpp
+│   ├── observability
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── obs_loop.cpp
+│   │       │   └── obs_loop.hpp
+│   │       └── main.cpp
+│   ├── order_flow
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── order_flow_uc.cpp
+│   │       │   └── order_flow_uc.hpp
+│   │       ├── infra
+│   │       │   ├── ledger_client.cpp
+│   │       │   ├── ledger_client.hpp
+│   │       │   ├── orders_kafka_publisher.cpp
+│   │       │   ├── orders_kafka_publisher.hpp
+│   │       │   ├── risk_client.cpp
+│   │       │   └── risk_client.hpp
+│   │       ├── main.cpp
+│   │       └── transport
+│   │           ├── grpc_order_flow_service.cpp
+│   │           └── grpc_order_flow_service.hpp
+│   ├── risk
+│   │   ├── CMakeLists.txt
+│   │   └── src
+│   │       ├── app
+│   │       │   ├── risk_uc.cpp
+│   │       │   └── risk_uc.hpp
+│   │       ├── infra
+│   │       │   ├── risk_alerts_publisher.cpp
+│   │       │   └── risk_alerts_publisher.hpp
+│   │       ├── main.cpp
+│   │       └── transport
+│   │           ├── grpc_risk_service.cpp
+│   │           └── grpc_risk_service.hpp
+│   └── venues
+│       ├── CMakeLists.txt
+│       └── src
+│           ├── app
+│           │   ├── venues_loop.cpp
+│           │   └── venues_loop.hpp
+│           └── main.cpp
+├── docker
+│   └── Dockerfile.service
+├── infra
+│   ├── docker-compose.dev.yml
+│   ├── env
+│   │   └── .env-example
+│   ├── k8s
+│   │   ├── README.md
+│   │   ├── gateway.yaml
+│   │   └── order_flow.yaml
+│   └── kafka
+│       └── create_topics.sh
+├── legacy_mvp
+│   ├── .env-example
+│   ├── .gitignore
+│   ├── Dockerfile.certbot
+│   ├── Makefile
+│   ├── README.md
+│   ├── auth
+│   │   ├── Dockerfile
+│   │   ├── api
+│   │   │   └── swagger
+│   │   │       └── auth.yaml
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── impl
+│   │       │   ├── change_password.go
+│   │       │   ├── create_user.go
+│   │       │   ├── login_user.go
+│   │       │   └── validate_token.go
+│   │       ├── models
+│   │       │   └── error.go
+│   │       └── restapi
+│   │           ├── configure_market_auth.go
+│   │           ├── doc.go
+│   │           ├── embedded_spec.go
+│   │           ├── handlers
+│   │           │   ├── change_password.go
+│   │           │   ├── custom_handler.go
+│   │           │   ├── handler.go
+│   │           │   ├── login.go
+│   │           │   ├── metrics.go
+│   │           │   ├── register.go
+│   │           │   └── validate_token.go
+│   │           ├── operations
+│   │           │   ├── get_metrics.go
+│   │           │   ├── get_metrics_parameters.go
+│   │           │   ├── get_metrics_responses.go
+│   │           │   ├── get_metrics_urlbuilder.go
+│   │           │   ├── market_auth_api.go
+│   │           │   ├── post_auth_change_password.go
+│   │           │   ├── post_auth_change_password_parameters.go
+│   │           │   ├── post_auth_change_password_responses.go
+│   │           │   ├── post_auth_change_password_urlbuilder.go
+│   │           │   ├── post_auth_login.go
+│   │           │   ├── post_auth_login_parameters.go
+│   │           │   ├── post_auth_login_responses.go
+│   │           │   ├── post_auth_login_urlbuilder.go
+│   │           │   ├── post_auth_register.go
+│   │           │   ├── post_auth_register_parameters.go
+│   │           │   ├── post_auth_register_responses.go
+│   │           │   ├── post_auth_register_urlbuilder.go
+│   │           │   ├── post_auth_validate_token.go
+│   │           │   ├── post_auth_validate_token_parameters.go
+│   │           │   ├── post_auth_validate_token_responses.go
+│   │           │   └── post_auth_validate_token_urlbuilder.go
+│   │           └── server.go
+│   ├── docker-compose.yaml
+│   ├── etc
+│   │   └── pic
+│   │       └── db_diagram.png
+│   ├── executor
+│   │   ├── Dockerfile
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   ├── internal
+│   │   │   ├── application
+│   │   │   │   └── use_cases
+│   │   │   │       └── execute_order.go
+│   │   │   ├── di
+│   │   │   │   ├── providers
+│   │   │   │   │   └── kafka_brokers.go
+│   │   │   │   ├── service_locator.go
+│   │   │   │   ├── wire.go
+│   │   │   │   └── wire_gen.go
+│   │   │   ├── domain
+│   │   │   │   ├── entities
+│   │   │   │   │   ├── execution_result.go
+│   │   │   │   │   ├── order.go
+│   │   │   │   │   └── order_result.go
+│   │   │   │   ├── ports
+│   │   │   │   │   └── queue
+│   │   │   │   │       ├── i_queue_consumer.go
+│   │   │   │   │       ├── i_queue_producer.go
+│   │   │   │   │       └── types.go
+│   │   │   │   └── services
+│   │   │   │       ├── i_order_executor.go
+│   │   │   │       └── i_order_processor.go
+│   │   │   ├── entrypoints
+│   │   │   │   └── order_processor.go
+│   │   │   └── infrastructure
+│   │   │       ├── adapters
+│   │   │       │   └── queues
+│   │   │       │       └── kafka
+│   │   │       │           ├── consumer.go
+│   │   │       │           ├── producer.go
+│   │   │       │           └── utils
+│   │   │       │               ├── create_topic.go
+│   │   │       │               └── topic_exists.go
+│   │   │       ├── dto
+│   │   │       │   ├── json_execution_result.go
+│   │   │       │   ├── json_order.go
+│   │   │       │   └── json_order_result.go
+│   │   │       ├── mappers
+│   │   │       │   ├── execution_result.go
+│   │   │       │   ├── order.go
+│   │   │       │   └── order_result.go
+│   │   │       └── services
+│   │   │           ├── order_executor.go
+│   │   │           └── order_processor.go
+│   │   └── trash
+│   │       ├── binance
+│   │       │   ├── api_client.go
+│   │       │   ├── config.go
+│   │       │   ├── parser_fills.go
+│   │       │   └── request_signer.go
+│   │       └── orders_executor
+│   │           ├── execute_order.go
+│   │           └── orders_executor.go
+│   ├── fetcher
+│   │   ├── Dockerfile
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── application
+│   │       │   └── use_cases
+│   │       │       ├── get_account_balance_use_case.go
+│   │       │       ├── get_order_book_data_use_case.go
+│   │       │       └── receive_order_book_snapshot_use_case.go
+│   │       ├── di
+│   │       │   ├── providers
+│   │       │   │   └── kafka_brokers.go
+│   │       │   ├── service_locator.go
+│   │       │   ├── wire.go
+│   │       │   └── wire_gen.go
+│   │       ├── domain
+│   │       │   ├── entities
+│   │       │   │   ├── account_balance.go
+│   │       │   │   ├── order_book_data.go
+│   │       │   │   └── order_book_snapshot.go
+│   │       │   ├── ports
+│   │       │   │   ├── queue
+│   │       │   │   │   ├── i_queue_consumer.go
+│   │       │   │   │   ├── i_queue_producer.go
+│   │       │   │   │   └── types.go
+│   │       │   │   └── repositories
+│   │       │   │       ├── account_balance_repository.go
+│   │       │   │       └── i_order_book_repository.go
+│   │       │   └── services
+│   │       │       └── i_exchange_poller.go
+│   │       ├── entrypoints
+│   │       │   ├── binance_poller.go
+│   │       │   └── web.go
+│   │       ├── infrastructure
+│   │       │   ├── adapters
+│   │       │   │   ├── queues
+│   │       │   │   │   └── kafka
+│   │       │   │   │       ├── consumer.go
+│   │       │   │   │       ├── producer.go
+│   │       │   │   │       └── utils
+│   │       │   │   │           ├── create_topic.go
+│   │       │   │   │           └── topic_exists.go
+│   │       │   │   └── repositories
+│   │       │   │       ├── account_balance_repository.go
+│   │       │   │       └── order_book_repository.go
+│   │       │   ├── dto
+│   │       │   │   ├── json_account_balance.go
+│   │       │   │   └── json_order_book_snapshot.go
+│   │       │   ├── mappers
+│   │       │   │   ├── account_balance.go
+│   │       │   │   └── order_book_snapshot.go
+│   │       │   └── services
+│   │       │       └── binance_poller.go
+│   │       └── presentation
+│   │           └── web
+│   │               ├── api
+│   │               │   └── swagger
+│   │               │       └── fetcher.yaml
+│   │               ├── controllers
+│   │               │   ├── balance.go
+│   │               │   ├── market_data.go
+│   │               │   └── utils
+│   │               │       ├── catch_panic.go
+│   │               │       └── get_model_error.go
+│   │               ├── dto
+│   │               │   ├── error.go
+│   │               │   ├── my_balance.go
+│   │               │   ├── order_book_data.go
+│   │               │   └── order_book_snapshot.go
+│   │               ├── entry_point.go
+│   │               ├── mappers
+│   │               │   ├── account_balance.go
+│   │               │   ├── order_book_data.go
+│   │               │   └── order_book_snapshot.go
+│   │               └── restapi
+│   │                   ├── configure_connector_fetcher.go
+│   │                   ├── doc.go
+│   │                   ├── embedded_spec.go
+│   │                   ├── operations
+│   │                   │   ├── connector_fetcher_api.go
+│   │                   │   ├── get_balance.go
+│   │                   │   ├── get_balance_parameters.go
+│   │                   │   ├── get_balance_responses.go
+│   │                   │   ├── get_balance_urlbuilder.go
+│   │                   │   ├── get_last_market_data.go
+│   │                   │   ├── get_last_market_data_parameters.go
+│   │                   │   ├── get_last_market_data_responses.go
+│   │                   │   ├── get_last_market_data_urlbuilder.go
+│   │                   │   ├── info.go
+│   │                   │   ├── info_parameters.go
+│   │                   │   ├── info_responses.go
+│   │                   │   └── info_urlbuilder.go
+│   │                   └── server.go
+│   ├── frontend
+│   │   ├── Dockerfile
+│   │   ├── package-lock.json
+│   │   ├── package.json
+│   │   ├── public
+│   │   │   ├── favicon.ico
+│   │   │   ├── index.html
+│   │   │   ├── locales
+│   │   │   │   ├── en
+│   │   │   │   │   └── translation.json
+│   │   │   │   └── ru
+│   │   │   │       └── translation.json
+│   │   │   ├── logo192.png
+│   │   │   ├── logo512.png
+│   │   │   ├── manifest.json
+│   │   │   └── robots.txt
+│   │   └── src
+│   │       ├── App.css
+│   │       ├── App.js
+│   │       ├── api
+│   │       │   ├── authService.js
+│   │       │   ├── marketService.js
+│   │       │   └── matchingEngineService.js
+│   │       ├── assets
+│   │       │   ├── eye-closed.png
+│   │       │   ├── eye-open.png
+│   │       │   ├── logo-purple.svg
+│   │       │   ├── logo.svg
+│   │       │   └── main.svg
+│   │       ├── components
+│   │       │   ├── AuthRoute.js
+│   │       │   ├── LanguageSwitcher.js
+│   │       │   ├── MarketChart.js
+│   │       │   └── PublicRoute.js
+│   │       ├── hooks
+│   │       │   └── useInterval.js
+│   │       ├── i18n.js
+│   │       ├── i18next-parser.config.js
+│   │       ├── index.css
+│   │       ├── index.js
+│   │       ├── pages
+│   │       │   ├── About
+│   │       │   │   ├── About.css
+│   │       │   │   └── About.js
+│   │       │   ├── Login
+│   │       │   │   └── Login.js
+│   │       │   ├── Main
+│   │       │   │   ├── Main.css
+│   │       │   │   └── Main.js
+│   │       │   ├── Profile
+│   │       │   │   ├── Profile.css
+│   │       │   │   └── Profile.js
+│   │       │   └── Register
+│   │       │       ├── Register.css
+│   │       │       └── Register.js
+│   │       ├── reportWebVitals.js
+│   │       └── setupTests.js
+│   ├── generator
+│   │   ├── Dockerfile
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── application
+│   │       │   └── use_cases
+│   │       │       ├── create_continuous_order_from_order_book_snapshot_use_case.go
+│   │       │       ├── get_order_book_snapshot_use_case.go
+│   │       │       └── send_continuous_order_use_case.go
+│   │       ├── di
+│   │       │   ├── providers
+│   │       │   │   ├── kafka_brokers.go
+│   │       │   │   └── snapshots_topic.go
+│   │       │   ├── service_locator.go
+│   │       │   ├── wire.go
+│   │       │   └── wire_gen.go
+│   │       ├── domain
+│   │       │   ├── entities
+│   │       │   │   ├── continuous_order.go
+│   │       │   │   ├── order_book_snapshot.go
+│   │       │   │   └── trading_pair.go
+│   │       │   ├── ports
+│   │       │   │   ├── queue
+│   │       │   │   │   ├── i_queue_consumer.go
+│   │       │   │   │   ├── i_queue_producer.go
+│   │       │   │   │   └── types.go
+│   │       │   │   ├── repositories
+│   │       │   │   │   └── order_book_snapshots_repository.go
+│   │       │   │   └── senders
+│   │       │   │       └── continuous_order_sender.go
+│   │       │   └── services
+│   │       │       └── synthetic_continuous_orders_processor.go
+│   │       ├── entrypoints
+│   │       │   └── order_poller.go
+│   │       └── infrastructure
+│   │           ├── adapters
+│   │           │   ├── delivery
+│   │           │   │   └── web
+│   │           │   │       ├── api
+│   │           │   │       │   └── swagger
+│   │           │   │       │       └── delivery.yaml
+│   │           │   │       └── client
+│   │           │   │           ├── generator_synthetic_orders_client.go
+│   │           │   │           └── operations
+│   │           │   │               ├── operations_client.go
+│   │           │   │               ├── send_continuous_order_parameters.go
+│   │           │   │               └── send_continuous_order_responses.go
+│   │           │   ├── queues
+│   │           │   │   └── kafka
+│   │           │   │       ├── consumer.go
+│   │           │   │       ├── producer.go
+│   │           │   │       └── utils
+│   │           │   │           ├── create_topic.go
+│   │           │   │           └── topic_exists.go
+│   │           │   ├── repositories
+│   │           │   │   └── binance_snapshot_repository.go
+│   │           │   └── senders
+│   │           │       └── continuous_order_sender.go
+│   │           ├── dto
+│   │           │   ├── continuous_order.go
+│   │           │   ├── error.go
+│   │           │   ├── json_continuous_order.go
+│   │           │   └── success_response.go
+│   │           ├── mappers
+│   │           │   └── continious_order.go
+│   │           └── services
+│   │               └── synthetic_orders_processor.go
+│   ├── keycloak
+│   │   └── config
+│   │       └── realm-export.json
+│   ├── main
+│   │   ├── Dockerfile
+│   │   ├── api
+│   │   │   └── swagger
+│   │   │       └── main.yaml
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── implementation
+│   │       │   ├── blockchain_client.go
+│   │       │   ├── cancel_bid.go
+│   │       │   ├── create_bid.go
+│   │       │   ├── crypto_service.go
+│   │       │   ├── deposit.go
+│   │       │   ├── get_balance.go
+│   │       │   ├── get_bid.go
+│   │       │   ├── get_bids.go
+│   │       │   ├── get_transfers.go
+│   │       │   ├── hot_wallet.go
+│   │       │   ├── service.go
+│   │       │   ├── update_status.go
+│   │       │   ├── update_user_currency_balance.go
+│   │       │   └── withdraw.go
+│   │       ├── models
+│   │       │   ├── bid.go
+│   │       │   ├── bid_update.go
+│   │       │   ├── deposit_request.go
+│   │       │   ├── deposit_response.go
+│   │       │   ├── error.go
+│   │       │   ├── purchase.go
+│   │       │   ├── transfer.go
+│   │       │   ├── user.go
+│   │       │   ├── withdraw_request.go
+│   │       │   └── withdraw_response.go
+│   │       ├── restapi
+│   │       │   ├── configure_market_main.go
+│   │       │   ├── doc.go
+│   │       │   ├── embedded_spec.go
+│   │       │   ├── handlers
+│   │       │   │   ├── cancel_bid.go
+│   │       │   │   ├── create_bid.go
+│   │       │   │   ├── deposit.go
+│   │       │   │   ├── get_balance.go
+│   │       │   │   ├── get_bid.go
+│   │       │   │   ├── get_bids.go
+│   │       │   │   ├── get_transactions.go
+│   │       │   │   ├── handler.go
+│   │       │   │   ├── update_order_status.go
+│   │       │   │   └── withdraw.go
+│   │       │   ├── operations
+│   │       │   │   ├── cancel_bid.go
+│   │       │   │   ├── cancel_bid_parameters.go
+│   │       │   │   ├── cancel_bid_responses.go
+│   │       │   │   ├── cancel_bid_urlbuilder.go
+│   │       │   │   ├── create_bid.go
+│   │       │   │   ├── create_bid_parameters.go
+│   │       │   │   ├── create_bid_responses.go
+│   │       │   │   ├── create_bid_urlbuilder.go
+│   │       │   │   ├── get_account_balance.go
+│   │       │   │   ├── get_account_balance_parameters.go
+│   │       │   │   ├── get_account_balance_responses.go
+│   │       │   │   ├── get_account_balance_urlbuilder.go
+│   │       │   │   ├── get_bid_by_id.go
+│   │       │   │   ├── get_bid_by_id_parameters.go
+│   │       │   │   ├── get_bid_by_id_responses.go
+│   │       │   │   ├── get_bid_by_id_urlbuilder.go
+│   │       │   │   ├── get_bids.go
+│   │       │   │   ├── get_bids_parameters.go
+│   │       │   │   ├── get_bids_responses.go
+│   │       │   │   ├── get_bids_urlbuilder.go
+│   │       │   │   ├── get_metrics.go
+│   │       │   │   ├── get_metrics_parameters.go
+│   │       │   │   ├── get_metrics_responses.go
+│   │       │   │   ├── get_metrics_urlbuilder.go
+│   │       │   │   ├── get_transactions_transfers.go
+│   │       │   │   ├── get_transactions_transfers_parameters.go
+│   │       │   │   ├── get_transactions_transfers_responses.go
+│   │       │   │   ├── get_transactions_transfers_urlbuilder.go
+│   │       │   │   ├── market_main_api.go
+│   │       │   │   ├── post_transactions_deposit.go
+│   │       │   │   ├── post_transactions_deposit_parameters.go
+│   │       │   │   ├── post_transactions_deposit_responses.go
+│   │       │   │   ├── post_transactions_deposit_urlbuilder.go
+│   │       │   │   ├── post_transactions_withdraw.go
+│   │       │   │   ├── post_transactions_withdraw_parameters.go
+│   │       │   │   ├── post_transactions_withdraw_responses.go
+│   │       │   │   ├── post_transactions_withdraw_urlbuilder.go
+│   │       │   │   ├── update_order_status.go
+│   │       │   │   ├── update_order_status_parameters.go
+│   │       │   │   ├── update_order_status_responses.go
+│   │       │   │   └── update_order_status_urlbuilder.go
+│   │       │   └── server.go
+│   │       └── utils
+│   │           ├── catch_panic.go
+│   │           └── handle_error.go
+│   ├── matching_engine
+│   │   ├── .env-example
+│   │   ├── CMakeLists.txt
+│   │   ├── Dockerfile
+│   │   ├── include
+│   │   │   ├── crow
+│   │   │   │   ├── TinySHA1.hpp
+│   │   │   │   ├── app.h
+│   │   │   │   ├── ci_map.h
+│   │   │   │   ├── common.h
+│   │   │   │   ├── compression.h
+│   │   │   │   ├── exceptions.h
+│   │   │   │   ├── http_connection.h
+│   │   │   │   ├── http_parser_merged.h
+│   │   │   │   ├── http_request.h
+│   │   │   │   ├── http_response.h
+│   │   │   │   ├── http_server.h
+│   │   │   │   ├── json.h
+│   │   │   │   ├── logging.h
+│   │   │   │   ├── middleware.h
+│   │   │   │   ├── middleware_context.h
+│   │   │   │   ├── middlewares
+│   │   │   │   │   ├── cookie_parser.h
+│   │   │   │   │   ├── cors.h
+│   │   │   │   │   ├── session.h
+│   │   │   │   │   └── utf-8.h
+│   │   │   │   ├── mime_types.h
+│   │   │   │   ├── multipart.h
+│   │   │   │   ├── multipart_view.h
+│   │   │   │   ├── mustache.h
+│   │   │   │   ├── parser.h
+│   │   │   │   ├── query_string.h
+│   │   │   │   ├── returnable.h
+│   │   │   │   ├── routing.h
+│   │   │   │   ├── settings.h
+│   │   │   │   ├── socket_adaptors.h
+│   │   │   │   ├── task_timer.h
+│   │   │   │   ├── utility.h
+│   │   │   │   ├── version.h
+│   │   │   │   └── websocket.h
+│   │   │   └── crow.h
+│   │   ├── internal
+│   │   │   ├── contracts
+│   │   │   │   ├── backend_client.hpp
+│   │   │   │   ├── cancel_queue_usecase.hpp
+│   │   │   │   ├── exchange_connector_client.hpp
+│   │   │   │   ├── exchange_connector_usecase.hpp
+│   │   │   │   ├── fill_details_repo.hpp
+│   │   │   │   ├── get_ask_curve_use_case.hpp
+│   │   │   │   ├── get_bid_curve_use_case.hpp
+│   │   │   │   ├── get_clearing_price_use_case.hpp
+│   │   │   │   ├── order_book_configuration_usecase.hpp
+│   │   │   │   ├── order_book_repo.hpp
+│   │   │   │   ├── order_book_usecase.hpp
+│   │   │   │   ├── order_queue_usecase.hpp
+│   │   │   │   ├── order_translator_usecase.hpp
+│   │   │   │   ├── order_updates_sender.hpp
+│   │   │   │   ├── price_calc.hpp
+│   │   │   │   ├── user_order_book_repo.hpp
+│   │   │   │   └── user_order_book_usecase.hpp
+│   │   │   ├── domain
+│   │   │   │   ├── asset.hpp
+│   │   │   │   ├── config.hpp
+│   │   │   │   ├── continuous_order.hpp
+│   │   │   │   ├── curve_fracture.hpp
+│   │   │   │   ├── env_loader.hpp
+│   │   │   │   ├── fill_details.hpp
+│   │   │   │   ├── limit_exchange_order.hpp
+│   │   │   │   ├── matched_details.hpp
+│   │   │   │   └── trading_pair.hpp
+│   │   │   ├── pkg
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── app
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── matching_engine.cpp
+│   │   │   │   │   └── matching_engine.hpp
+│   │   │   │   ├── repository
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── fill_details_repo
+│   │   │   │   │   │   ├── fill_details_repo.cpp
+│   │   │   │   │   │   └── fill_details_repo.hpp
+│   │   │   │   │   ├── order_book
+│   │   │   │   │   │   ├── linear
+│   │   │   │   │   │   │   ├── linear.cpp
+│   │   │   │   │   │   │   └── linear.hpp
+│   │   │   │   │   │   └── optimal
+│   │   │   │   │   │       ├── ask_curve_repository.cpp
+│   │   │   │   │   │       ├── ask_curve_repository.hpp
+│   │   │   │   │   │       ├── bid_curve_repository.cpp
+│   │   │   │   │   │       ├── bid_curve_repository.hpp
+│   │   │   │   │   │       ├── constants.hpp
+│   │   │   │   │   │       └── segment_treap
+│   │   │   │   │   │           ├── segment_treap.hpp
+│   │   │   │   │   │           └── segment_treap.ipp
+│   │   │   │   │   └── user_order_book
+│   │   │   │   │       ├── linear
+│   │   │   │   │       │   ├── linear.cpp
+│   │   │   │   │       │   └── linear.hpp
+│   │   │   │   │       ├── optimal
+│   │   │   │   │       │   ├── orders_repository.cpp
+│   │   │   │   │       │   ├── orders_repository.hpp
+│   │   │   │   │       │   └── treap
+│   │   │   │   │       │       ├── treap.hpp
+│   │   │   │   │       │       └── treap.ipp
+│   │   │   │   │       └── segment_tree
+│   │   │   │   │           ├── segment_tree.cpp
+│   │   │   │   │           └── segment_tree.hpp
+│   │   │   │   └── transport
+│   │   │   │       ├── CMakeLists.txt
+│   │   │   │       ├── api
+│   │   │   │       │   └── rest
+│   │   │   │       │       ├── mappers.hpp
+│   │   │   │       │       └── server.hpp
+│   │   │   │       ├── client
+│   │   │   │       │   ├── backend_client.cpp
+│   │   │   │       │   ├── backend_client.hpp
+│   │   │   │       │   └── exchange_connector.hpp
+│   │   │   │       ├── notification
+│   │   │   │       │   └── kafka
+│   │   │   │       │       ├── kafka.cpp
+│   │   │   │       │       └── kafka.hpp
+│   │   │   │       └── order_updates_sender
+│   │   │   │           ├── order_updates_sender.cpp
+│   │   │   │           └── order_updates_sender.hpp
+│   │   │   └── usecases
+│   │   │       ├── CMakeLists.txt
+│   │   │       ├── cancel_queue
+│   │   │       │   ├── cancel_queue.cpp
+│   │   │       │   └── cancel_queue.hpp
+│   │   │       ├── engine_manager
+│   │   │       │   ├── engine_manager.cpp
+│   │   │       │   └── engine_manager.hpp
+│   │   │       ├── exchange_connector
+│   │   │       │   ├── exchange_connector.cpp
+│   │   │       │   └── exchange_connector.hpp
+│   │   │       ├── get_ask_curve
+│   │   │       │   ├── get_ask_curve.cpp
+│   │   │       │   └── get_ask_curve.hpp
+│   │   │       ├── get_bid_curve
+│   │   │       │   ├── get_bid_curve.cpp
+│   │   │       │   └── get_bid_curve.hpp
+│   │   │       ├── get_clearing_price
+│   │   │       │   ├── get_clearing_price.cpp
+│   │   │       │   └── get_clearing_price.hpp
+│   │   │       ├── order_book
+│   │   │       │   ├── order_book.cpp
+│   │   │       │   └── order_book.hpp
+│   │   │       ├── order_book_configuration
+│   │   │       │   ├── order_book_configuration.cpp
+│   │   │       │   └── order_book_configuration.hpp
+│   │   │       ├── order_queue
+│   │   │       │   ├── order_queue.cpp
+│   │   │       │   └── order_queue.hpp
+│   │   │       ├── order_translator
+│   │   │       │   ├── order_translator.cpp
+│   │   │       │   └── order_translator.hpp
+│   │   │       ├── price_calculator
+│   │   │       │   ├── linear
+│   │   │       │   │   ├── linear_price_calculator.cpp
+│   │   │       │   │   └── linear_price_calculator.hpp
+│   │   │       │   └── segment_treap
+│   │   │       │       ├── segment_treap_price_calculator.cpp
+│   │   │       │       └── segment_treap_price_calculator.hpp
+│   │   │       ├── user_account_manager
+│   │   │       │   ├── user_account_manager.cpp
+│   │   │       │   └── user_account_manager.hpp
+│   │   │       └── user_order_book
+│   │   │           ├── user_order_book.cpp
+│   │   │           └── user_order_book.hpp
+│   │   ├── main.cpp
+│   │   └── tests
+│   │       └── CMakeLists.txt
+│   ├── nginx
+│   │   └── conf.d
+│   │       └── default.conf
+│   ├── package-lock.json
+│   ├── pkg
+│   │   ├── client
+│   │   │   ├── admin_login_method.go
+│   │   │   ├── check_token_method.go
+│   │   │   ├── client.go
+│   │   │   └── get_telegram_id_method.go
+│   │   ├── config
+│   │   │   └── config.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   ├── jaeger
+│   │   │   └── jaeger.go
+│   │   ├── middlewares
+│   │   │   ├── count.go
+│   │   │   ├── duration.go
+│   │   │   ├── error_count.go
+│   │   │   └── prometheus.go
+│   │   └── models
+│   │       └── user.go
+│   ├── receiver
+│   │   ├── Dockerfile
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── application
+│   │       │   └── use_cases
+│   │       │       └── receive_order_use_case.go
+│   │       ├── di
+│   │       │   ├── providers
+│   │       │   │   └── kafka_brokers.go
+│   │       │   ├── service_locator.go
+│   │       │   ├── wire.go
+│   │       │   └── wire_gen.go
+│   │       ├── domain
+│   │       │   ├── entities
+│   │       │   │   └── order.go
+│   │       │   └── ports
+│   │       │       ├── queue
+│   │       │       │   ├── i_queue_consumer.go
+│   │       │       │   ├── i_queue_producer.go
+│   │       │       │   └── types.go
+│   │       │       └── repositories
+│   │       │           └── i_orders_repository.go
+│   │       ├── entrypoints
+│   │       │   └── web.go
+│   │       ├── infrastructure
+│   │       │   ├── adapters
+│   │       │   │   ├── queues
+│   │       │   │   │   └── kafka
+│   │       │   │   │       ├── consumer.go
+│   │       │   │   │       ├── producer.go
+│   │       │   │   │       └── utils
+│   │       │   │   │           ├── create_topic.go
+│   │       │   │   │           └── topic_exists.go
+│   │       │   │   └── repositories
+│   │       │   │       └── orders_repository.go
+│   │       │   ├── dto
+│   │       │   │   └── json_order.go
+│   │       │   └── mappers
+│   │       │       └── order.go
+│   │       └── presentation
+│   │           └── web
+│   │               ├── api
+│   │               │   └── swagger
+│   │               │       └── receiver.yaml
+│   │               ├── controllers
+│   │               │   ├── orders.go
+│   │               │   └── utils
+│   │               │       ├── catch_panic.go
+│   │               │       └── get_model_error.go
+│   │               ├── dto
+│   │               │   ├── error.go
+│   │               │   ├── order.go
+│   │               │   └── success.go
+│   │               ├── entry_point.go
+│   │               ├── mappers
+│   │               │   └── order.go
+│   │               └── restapi
+│   │                   ├── configure_connector_receiver.go
+│   │                   ├── doc.go
+│   │                   ├── embedded_spec.go
+│   │                   ├── operations
+│   │                   │   ├── connector_receiver_api.go
+│   │                   │   ├── info.go
+│   │                   │   ├── info_parameters.go
+│   │                   │   ├── info_responses.go
+│   │                   │   ├── info_urlbuilder.go
+│   │                   │   ├── receive_order.go
+│   │                   │   ├── receive_order_parameters.go
+│   │                   │   ├── receive_order_responses.go
+│   │                   │   └── receive_order_urlbuilder.go
+│   │                   └── server.go
+│   ├── reporter
+│   │   ├── Dockerfile
+│   │   ├── cmd
+│   │   │   └── main.go
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── internal
+│   │       ├── application
+│   │       │   └── use_cases
+│   │       │       └── send_order_result.go
+│   │       ├── di
+│   │       │   ├── providers
+│   │       │   │   ├── client_service.go
+│   │       │   │   ├── kafka_brokers.go
+│   │       │   │   └── matching_engine_config.go
+│   │       │   ├── service_locator.go
+│   │       │   ├── wire.go
+│   │       │   └── wire_gen.go
+│   │       ├── domain
+│   │       │   ├── entities
+│   │       │   │   ├── execution_result.go
+│   │       │   │   ├── order.go
+│   │       │   │   └── order_result.go
+│   │       │   ├── ports
+│   │       │   │   ├── delivery
+│   │       │   │   │   └── i_order_result_sender.go
+│   │       │   │   └── queue
+│   │       │   │       ├── i_queue_consumer.go
+│   │       │   │       ├── i_queue_producer.go
+│   │       │   │       └── types.go
+│   │       │   └── services
+│   │       │       └── i_order_result_notifier.go
+│   │       ├── entrypoints
+│   │       │   └── order_result_notifier.go
+│   │       └── infrastructure
+│   │           ├── adapters
+│   │           │   ├── delivery
+│   │           │   │   ├── order_result_sender.go
+│   │           │   │   └── web
+│   │           │   │       ├── api
+│   │           │   │       │   └── swagger
+│   │           │   │       │       └── delivery.yaml
+│   │           │   │       └── client
+│   │           │   │           ├── fetcher_delivery_client.go
+│   │           │   │           └── operations
+│   │           │   │               ├── deliver_order_result_parameters.go
+│   │           │   │               ├── deliver_order_result_responses.go
+│   │           │   │               └── operations_client.go
+│   │           │   └── queues
+│   │           │       └── kafka
+│   │           │           ├── consumer.go
+│   │           │           ├── producer.go
+│   │           │           └── utils
+│   │           │               ├── create_topic.go
+│   │           │               └── topic_exists.go
+│   │           ├── dto
+│   │           │   ├── error.go
+│   │           │   ├── execution_result.go
+│   │           │   ├── json_execution_result.go
+│   │           │   ├── json_order.go
+│   │           │   ├── json_order_result.go
+│   │           │   ├── order.go
+│   │           │   ├── order_result.go
+│   │           │   └── success.go
+│   │           ├── mappers
+│   │           │   ├── execution_result.go
+│   │           │   ├── order.go
+│   │           │   └── order_result.go
+│   │           └── services
+│   │               └── order_result_notifier.go
+│   └── scripts
+│       ├── generate_certificates.sh
+│       ├── generate_from_swagger.sh
+│       ├── init_sql
+│       │   └── init_main.sql
+│       ├── multiple_db.sh
+│       ├── swagger_generate.sh
+│       └── wire_generate.sh
+├── repo-tree.txt
+└── third_party
+    └── crow
+        └── include
+            ├── crow
+            │   ├── TinySHA1.hpp
+            │   ├── app.h
+            │   ├── ci_map.h
+            │   ├── common.h
+            │   ├── compression.h
+            │   ├── exceptions.h
+            │   ├── http_connection.h
+            │   ├── http_parser_merged.h
+            │   ├── http_request.h
+            │   ├── http_response.h
+            │   ├── http_server.h
+            │   ├── json.h
+            │   ├── logging.h
+            │   ├── middleware.h
+            │   ├── middleware_context.h
+            │   ├── middlewares
+            │   │   ├── cookie_parser.h
+            │   │   ├── cors.h
+            │   │   ├── session.h
+            │   │   └── utf-8.h
+            │   ├── mime_types.h
+            │   ├── multipart.h
+            │   ├── multipart_view.h
+            │   ├── mustache.h
+            │   ├── parser.h
+            │   ├── query_string.h
+            │   ├── returnable.h
+            │   ├── routing.h
+            │   ├── settings.h
+            │   ├── socket_adaptors.h
+            │   ├── task_timer.h
+            │   ├── utility.h
+            │   ├── version.h
+            │   └── websocket.h
+            └── crow.h
+
+332 directories, 708 files
