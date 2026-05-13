@@ -1,3 +1,12 @@
+# =============================================================================
+# Сборка сервиса `observability` — простой агрегатор интересных событий.
+#
+# В MVP подписывается на ключевые топики Kafka (risk.alerts, batch.outputs,
+# execution.reports) и пишет краткие JSON-сводки в stdout. В прод-стенде
+# здесь должны быть OpenTelemetry/Prometheus экспортёры и заливка в
+# ClickHouse/Loki, чтобы строить дашборды и алерты.
+# =============================================================================
+
 cmake_minimum_required(VERSION 3.24)
 project(observability LANGUAGES CXX)
 

@@ -1,4 +1,12 @@
 #pragma once
+// =============================================================================
+// RiskClient — синхронный gRPC клиент к сервису risk.
+// При сетевой ошибке гарантированно возвращает RISK_DECISION_REJECT —
+// то есть "дефолт-deny": если risk недоступен, ордера не принимаются.
+// Это безопаснее, чем let-fail: лучше отказать клиенту, чем пропустить
+// потенциально опасный заказ без проверки рисков.
+// =============================================================================
+
 #include <memory>
 #include <string>
 
@@ -12,6 +20,8 @@ class RiskClient {
  public:
   explicit RiskClient(const std::string& target);
 
+  // Pre-trade проверка нового ордера. Никогда не выбрасывает —
+  // все ошибки канала превращает в REJECT с error.code="GRPC_ERROR".
   fob::risk::v1::PreTradeCheckResponse CheckNewOrder(
       const fob::risk::v1::PreTradeCheckRequest& req);
 

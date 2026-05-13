@@ -1,3 +1,7 @@
+// =============================================================================
+// Реализация фонового консьюмера marketdata.raw.
+// =============================================================================
+
 #include "infra/kafka_consumer.hpp"
 
 #include "cex/common/log.hpp"
@@ -20,6 +24,8 @@ void MarketDataKafkaConsumer::stop() {
 }
 
 void MarketDataKafkaConsumer::loop() {
+  // Отдельный consumer group "marketdata" — у этого сервиса один входной топик,
+  // дробить группы не имеет смысла.
   cex::common::KafkaConsumer consumer({
       .brokers=brokers_,
       .group_id="marketdata",
@@ -36,7 +42,7 @@ void MarketDataKafkaConsumer::loop() {
       fob::marketdata::v1::MarketDataRaw evt;
       if (!cex::common::from_bytes(payload, evt)) {
         cex::common::log_json("ERROR", "Failed to parse MarketDataRaw");
-        return;
+        return; // битое сообщение — пропускаем; коммит произойдёт всё равно
       }
       uc_->OnMarketDataRaw(evt);
     });

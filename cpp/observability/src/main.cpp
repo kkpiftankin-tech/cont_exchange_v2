@@ -1,3 +1,8 @@
+// =============================================================================
+// Entrypoint сервиса observability. Простой long-running процесс, который
+// поднимает один консьюмер на несколько важных топиков и пишет логи.
+// =============================================================================
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -15,6 +20,7 @@ int main() {
   cex::observability::app::ObsLoop loop(brokers);
   loop.start();
 
+  // Главный поток просто спит — реальная работа в фоновом потоке ObsLoop.
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(60));
   }

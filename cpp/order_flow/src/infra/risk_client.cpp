@@ -1,3 +1,7 @@
+// =============================================================================
+// Реализация RiskClient. Все сетевые ошибки -> REJECT (fail-safe).
+// =============================================================================
+
 #include "infra/risk_client.hpp"
 
 #include "cex/common/log.hpp"
@@ -16,6 +20,8 @@ fob::risk::v1::PreTradeCheckResponse RiskClient::CheckNewOrder(
   grpc::ClientContext ctx;
   auto status = stub_->CheckNewOrder(&ctx, req, &resp);
   if (!status.ok()) {
+    // Default-deny: при сетевой ошибке отправляем явный REJECT с
+    // GRPC_ERROR — это позволит UI показать понятную ошибку.
     cex::common::log_json("ERROR", "Risk CheckNewOrder gRPC failed",
                           {{"code", std::to_string(status.error_code())},
                            {"msg", status.error_message()}});

@@ -1,3 +1,11 @@
+// =============================================================================
+// Реализация KafkaConsumers. Каждая loop_*-функция:
+//   1) создаёт собственного consumer'а (со своим group_id, чтобы оффсеты
+//      одного потока не пересекались с другим);
+//   2) подписывается на нужный топик;
+//   3) в цикле poll'ит, парсит payload, формирует request и зовёт use-case.
+// =============================================================================
+
 #include "infra/kafka_consumers.hpp"
 
 #include "cex/common/log.hpp"
@@ -25,7 +33,9 @@ void KafkaConsumers::stop() {
   if (t2_.joinable()) t2_.join();
 }
 
+// Поток 1: чтение результатов матчинга и применение их к балансам.
 void KafkaConsumers::loop_batch_outputs() {
+  // group_id "ledger-batch" — отдельная группа специально для этого потока.
   cex::common::KafkaConsumer consumer({
       .brokers=brokers_,
       .group_id="ledger-batch",
@@ -38,18 +48,21 @@ void KafkaConsumers::loop_batch_outputs() {
     bool ok = consumer.poll_once(500, [this](const std::string& topic,
                                            const std::string& key,
                                            const std::string& payload) {
-      (void)topic; (void)key;
+      (void)topic; (void)key; // не используются здесь
       fob::matching::v1::BatchResult batch;
       if (!cex::common::from_bytes(payload, batch)) {
         cex::common::log_json("ERROR", "Failed to parse BatchResult");
         return;
       }
 
+      // Оборачиваем в gRPC-запрос, как если бы пришло по сети — это
+      // позволяет переиспользовать ту же реализацию use-case'а.
       fob::ledger::v1::ApplyBatchResultRequest req;
       auto* meta = req.mutable_meta();
       meta->set_event_id(cex::common::uuid_v4());
       *meta->mutable_ts_event() = cex::common::now_ts();
       meta->set_source("ledger");
+      // correlation_id наследуем из батча, чтобы трасса связывала события матчинга и ledger'а.
       meta->set_correlation_id(batch.meta().correlation_id());
 
       *req.mutable_batch() = batch;
@@ -58,10 +71,12 @@ void KafkaConsumers::loop_batch_outputs() {
       cex::common::log_json("INFO", "Ledger applied batch", {{"batch_id", batch.batch_id()}});
     });
 
-    if (!ok) break;
+    if (!ok) break; // фатальная ошибка Kafka — поток выходит, k8s рестартует
   }
 }
 
+// Поток 2: чтение execution-репортов от внешних venue (Binance/Coinbase и т.п.).
+// В MVP бэкэнд просто логирует — здесь готова инфраструктура для будущего хедж-учёта.
 void KafkaConsumers::loop_execution_reports() {
   cex::common::KafkaConsumer consumer({
       .brokers=brokers_,

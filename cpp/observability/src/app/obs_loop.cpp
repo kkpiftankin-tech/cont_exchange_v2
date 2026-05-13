@@ -1,3 +1,8 @@
+// =============================================================================
+// Реализация ObsLoop. По типу топика парсит соответствующий proto-тип
+// и логирует отдельные интересные поля. Расширяется простым добавлением веток.
+// =============================================================================
+
 #include "app/obs_loop.hpp"
 
 #include "cex/common/log.hpp"
@@ -11,10 +16,14 @@ namespace cex::observability::app {
 
 ObsLoop::ObsLoop(const std::string& brokers)
     : brokers_(brokers),
+      // Один общий group_id "observability" — оффсеты по всем подписанным
+      // топикам коммитятся в одной группе, что упрощает учёт.
       consumer_({.brokers=brokers, .group_id="observability", .client_id="observability", .enable_auto_commit=false}) {}
 
 void ObsLoop::start() {
   running_.store(true);
+  // Подписываемся сразу на три потока — нам интересны риск-алерты, итоги
+  // батчей матчинга и репорты по реальной хедж-исполнению.
   consumer_.subscribe({"risk.alerts", "batch.outputs", "execution.reports"});
   t_ = std::thread([this] { loop(); });
 }
@@ -30,6 +39,7 @@ void ObsLoop::loop() {
                                             const std::string& key,
                                             const std::string& payload) {
       (void)key;
+      // RISK alerts — потенциально критичные события (kill switch и т.п.).
       if (topic == "risk.alerts") {
         fob::risk::v1::RiskAlert a;
         if (!cex::common::from_bytes(payload, a)) return;
@@ -39,6 +49,7 @@ void ObsLoop::loop() {
                                {"instrument", a.instrument_symbol()},
                                {"msg", a.error().message()}});
       } else if (topic == "batch.outputs") {
+        // Сводка по батчу матчинга: id, кол-во fill'ов и активных ордеров.
         fob::matching::v1::BatchResult b;
         if (!cex::common::from_bytes(payload, b)) return;
         cex::common::log_json("INFO", "BATCH",
@@ -46,6 +57,7 @@ void ObsLoop::loop() {
                                {"fills", std::to_string(b.fills_size())},
                                {"active", std::to_string(b.diagnostics().num_active_orders())}});
       } else if (topic == "execution.reports") {
+        // Отчёт о хедж-исполнении на внешнем venue.
         fob::execution::v1::ExecutionReport r;
         if (!cex::common::from_bytes(payload, r)) return;
         cex::common::log_json("INFO", "EXEC_REPORT",
@@ -53,6 +65,8 @@ void ObsLoop::loop() {
                                {"status", std::to_string(r.status())},
                                {"venue", r.venue()}});
       }
+      // Неизвестные топики просто игнорируются — мы могли подписаться на что-то,
+      // что в текущей версии proto не имеет своего парсинга.
     });
 
     if (!ok) break;

@@ -1,3 +1,7 @@
+// =============================================================================
+// Реализация RiskUseCases. Минимальный набор pre-trade чеков + kill switch.
+// =============================================================================
+
 #include "app/risk_uc.hpp"
 
 #include "cex/common/log.hpp"
@@ -12,6 +16,8 @@ using cex::common::Decimal;
 RiskUseCases::RiskUseCases(infra::RiskAlertsPublisher publisher)
     : publisher_(std::move(publisher)) {}
 
+// Утилита: текущий halt-статус для инструмента (учитывает и global_halt_).
+// Должна вызываться под захваченным mu_.
 bool RiskUseCases::is_halted_locked(const std::string& symbol) const {
   if (global_halt_) return true;
   auto it = instrument_halt_.find(symbol);
@@ -19,12 +25,15 @@ bool RiskUseCases::is_halted_locked(const std::string& symbol) const {
   return it->second;
 }
 
+// Pre-trade проверка нового ордера. Возвращает Decision: ACCEPT/REJECT/HALT.
+// При ACCEPT также прикладывает оценку начальной маржи (placeholder).
 fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
     const fob::risk::v1::PreTradeCheckRequest& req) {
   fob::risk::v1::PreTradeCheckResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("risk");
 
+  // 1) Kill switch — самая первая и самая жёсткая проверка.
   {
     std::lock_guard<std::mutex> lg(mu_);
     if (is_halted_locked(req.order().instrument().symbol())) {
@@ -36,7 +45,7 @@ fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
     }
   }
 
-  // Minimal sanity checks.
+  // 2) Базовые sanity-чеки.
   if (req.order().total_qty().units() <= 0) {
     resp.set_decision(fob::risk::v1::RISK_DECISION_REJECT);
     auto* e = resp.mutable_error();
@@ -54,30 +63,33 @@ fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
     return resp;
   }
 
-  // Placeholder margin estimate: required_initial_margin = notional * 10%
-  // Notional approximated as total_qty * reference_price.
+  // 3) Очень упрощённая оценка начальной маржи: 10% от условной стоимости.
+  //    notional ≈ total_qty * reference_price; margin = notional * 0.1.
+  //    Реальная формула зависит от типа инструмента и режима маржи.
   Decimal qty = Decimal::from_proto(req.order().total_qty());
   Decimal ref = Decimal::from_proto(req.reference_price());
   Decimal notional = Decimal::mul(qty, ref);
 
-  // Multiply by 0.1 => units/10 (keep scale)
   Decimal margin = notional;
-  margin.units /= 10;
-
+  margin.units /= 10; // *0.1, scale сохраняем
   *resp.mutable_required_initial_margin() = margin.to_proto();
+
   resp.set_decision(fob::risk::v1::RISK_DECISION_ACCEPT);
   return resp;
 }
 
+// Включение/выключение kill-switch + публикация алерта.
 fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
     const fob::risk::v1::KillSwitchRequest& req) {
   fob::risk::v1::KillSwitchResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("risk");
 
+  // 1) Обновление состояния.
   {
     std::lock_guard<std::mutex> lg(mu_);
     if (req.instrument_symbol().empty()) {
+      // Пустой symbol = глобальный halt.
       global_halt_ = req.halt();
       resp.set_effective_halt(global_halt_);
     } else {
@@ -86,19 +98,20 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
     }
   }
 
-  // Emit an alert event so Observability / Operator UI can show it.
+  // 2) Публикуем алерт — observability/operator UI должен показать его сразу.
   fob::risk::v1::RiskAlert alert;
   auto* meta = alert.mutable_meta();
   meta->set_event_id(cex::common::uuid_v4());
   *meta->mutable_ts_event() = cex::common::now_ts();
   meta->set_source("risk");
   meta->set_correlation_id(req.meta().correlation_id());
+  // Если symbol пустой — относим алерт к "GLOBAL" партиции.
   meta->set_partition_key(req.instrument_symbol().empty() ? "GLOBAL" : req.instrument_symbol());
 
   alert.set_alert_id(cex::common::uuid_v4());
   alert.set_severity(req.halt() ? fob::risk::v1::RISK_SEVERITY_CRITICAL
                                 : fob::risk::v1::RISK_SEVERITY_INFO);
-  alert.set_user_id(""); // operator action => no user
+  alert.set_user_id(""); // действие оператора, конкретного пользователя нет
   alert.set_instrument_symbol(req.instrument_symbol());
   alert.set_alert_type("KILL_SWITCH");
   auto* e = alert.mutable_error();
@@ -111,8 +124,9 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
   return resp;
 }
 
+// Post-trade обновление: на сейчас просто лог диагностики солвера. В будущем —
+// апдейт открытых позиций пользователей и пересчёт лимитов.
 void RiskUseCases::OnBatchResult(const fob::risk::v1::PostTradeUpdateRequest& req) {
-  // MVP: just log diagnostics from the batch solver.
   const auto& d = req.batch().diagnostics();
   cex::common::log_json("INFO", "OnBatchResult",
                         {{"batch_id", req.batch().batch_id()},

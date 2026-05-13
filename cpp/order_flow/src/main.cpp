@@ -1,3 +1,15 @@
+// =============================================================================
+// Entrypoint сервиса order_flow.
+//
+// Зависит от трёх внешних компонентов:
+//   1) RiskClient   — gRPC к сервису risk (pre-trade проверки);
+//   2) LedgerClient — gRPC к сервису ledger (резерв средств);
+//   3) Kafka producer — публикатор событий orders.normalized.
+//
+// Адреса соседей читаются из env: ORDER_FLOW_GRPC_LISTEN, RISK_GRPC_ADDR,
+// LEDGER_GRPC_ADDR, KAFKA_BROKERS. Дефолты подходят для docker-compose.
+// =============================================================================
+
 #include <grpcpp/grpcpp.h>
 
 #include "cex/common/env.hpp"
@@ -13,21 +25,23 @@ int main() {
   const std::string listen_addr =
       cex::common::Env::get_string("ORDER_FLOW_GRPC_LISTEN", "0.0.0.0:50051");
 
+  // Адреса соседних gRPC-сервисов в docker-compose сети.
   const std::string risk_addr =
       cex::common::Env::get_string("RISK_GRPC_ADDR", "risk:50052");
-
   const std::string ledger_addr =
       cex::common::Env::get_string("LEDGER_GRPC_ADDR", "ledger:50053");
 
   const std::string brokers =
       cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
 
+  // Готовим инфраструктурные клиенты. Все они — value-types, перемещаются в use-case.
   cex::common::KafkaProducer producer({.brokers = brokers, .client_id = "order_flow"});
   cex::order_flow::infra::OrdersKafkaPublisher publisher(std::move(producer));
 
   cex::order_flow::infra::RiskClient risk(risk_addr);
   cex::order_flow::infra::LedgerClient ledger(ledger_addr);
 
+  // Use-case владеет клиентами — это упрощает тесты с моками.
   cex::order_flow::app::OrderFlowUseCases uc(std::move(risk), std::move(ledger), std::move(publisher));
   cex::order_flow::transport::GrpcOrderFlowService svc(&uc);
 

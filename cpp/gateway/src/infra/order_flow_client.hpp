@@ -1,4 +1,11 @@
 #pragma once
+// =============================================================================
+// OrderFlowClient — тонкий gRPC-клиент к OrderFlowService для шлюза.
+// HTTP-обработчик в HttpGateway формирует proto-запрос и зовёт этот класс.
+// При gRPC-ошибке оборачиваем результат в accepted=false / GRPC_ERROR — UI
+// получит читаемую ошибку без 500'ок на транспорте.
+// =============================================================================
+
 #include <memory>
 #include <string>
 
@@ -8,12 +15,12 @@
 
 namespace cex::gateway::infra {
 
-// Thin gRPC client used by the HTTP Gateway.
-// It maps HTTP JSON -> proto -> gRPC call and back.
 class OrderFlowClient {
  public:
   explicit OrderFlowClient(const std::string& target);
 
+  // Создание flow-ордера. Никогда не выбрасывает: ошибки канала маппятся
+  // в accepted=false с error.code="GRPC_ERROR".
   fob::orders::v1::CreateFlowOrderResponse CreateFlowOrder(
       const fob::orders::v1::CreateFlowOrderRequest& req);
 

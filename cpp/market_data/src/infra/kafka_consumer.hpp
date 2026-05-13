@@ -1,4 +1,9 @@
 #pragma once
+// =============================================================================
+// Фоновый Kafka-консьюмер для топика marketdata.raw. Парсит payload
+// в proto MarketDataRaw и зовёт MarketDataUseCases::OnMarketDataRaw.
+// =============================================================================
+
 #include <atomic>
 #include <thread>
 
@@ -9,14 +14,17 @@ namespace cex::market_data::infra {
 
 class MarketDataKafkaConsumer {
  public:
+  // uc должен жить дольше, чем этот объект. brokers — обычный bootstrap-список.
   MarketDataKafkaConsumer(app::MarketDataUseCases* uc,
                           const std::string& brokers);
 
+  // Запустить фоновый поток. Не блокирующий.
   void start();
+  // Сигнал останова + join потока.
   void stop();
 
  private:
-  void loop();
+  void loop(); // тело фонового потока
 
   app::MarketDataUseCases* uc_;
   std::string brokers_;

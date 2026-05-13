@@ -1,4 +1,18 @@
 #pragma once
+// =============================================================================
+// Контракт солвера непрерывного клиринга. Это тот самый "точечный шов" между
+// application-слоем и доменом: подменяя реализацию IContinuousClearingSolver,
+// можно перейти от MVP-симулятора к настоящей оптимизационной задаче без
+// изменения остального кода сервиса.
+//
+// Ожидаемая модель:
+//   * переменные решения: исполненные скорости x_i (или dq_i на интервал dt);
+//   * ограничения: 0 <= x_i <= u_i (доступная скорость), бюджет/инвентарь и т.п.;
+//   * цель: максимизация welfare / минимизация выпуклой стоимости + регуляризация.
+//
+// В MVP метод ничем не реализуется — солвер встроен прямо в matching_loop.cpp.
+// =============================================================================
+
 #include <vector>
 
 #include "fob/orders/v1/orders.pb.h"
@@ -6,18 +20,13 @@
 
 namespace cex::matching::domain {
 
-// Placeholder interface for the real continuous clearing optimizer.
-// This is exactly the place where you will implement the LP/QP formulation:
-// - decision variables: executed speeds x_i (or dq_i for dt)
-// - constraints: 0 <= x_i <= u_i, inventory/budget constraints, etc.
-// - objective: maximize welfare / minimize convex cost / add regularization.
-//
-// In MVP we use a simulator (see app/matching_loop.cpp).
 struct IContinuousClearingSolver {
+  // Виртуальный деструктор обязателен, т.к. через интерфейс будут владеть наследниками.
   virtual ~IContinuousClearingSolver() = default;
 
-  // Solve one clearing step for the active flow orders.
-  // Returns BatchResult.fills + executed_rates + clear_prices etc.
+  // Один шаг клиринга по списку активных flow-ордеров.
+  // Должен вернуть полный BatchResult: fills, executed_rates, clear_prices,
+  // order_updates и diagnostics.
   virtual fob::matching::v1::BatchResult Solve(
       const std::vector<fob::orders::v1::FlowOrder>& active_orders) = 0;
 };

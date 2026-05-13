@@ -1,3 +1,7 @@
+// =============================================================================
+// Реализация OrderFlowClient: одно gRPC-stub на всё время жизни сервиса.
+// =============================================================================
+
 #include "infra/order_flow_client.hpp"
 
 #include "cex/common/log.hpp"
@@ -16,6 +20,8 @@ fob::orders::v1::CreateFlowOrderResponse OrderFlowClient::CreateFlowOrder(
   grpc::ClientContext ctx;
   auto status = stub_->CreateFlowOrder(&ctx, req, &resp);
   if (!status.ok()) {
+    // Ошибки канала — наружу как accepted=false + GRPC_ERROR; HTTP остаётся 200,
+    // потому что для клиента это валидный бизнес-ответ "не приняли".
     cex::common::log_json("ERROR", "CreateFlowOrder gRPC failed",
                           {{"code", std::to_string(status.error_code())},
                            {"msg", status.error_message()}});

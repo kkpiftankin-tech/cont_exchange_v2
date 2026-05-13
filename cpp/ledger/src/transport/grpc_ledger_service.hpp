@@ -1,13 +1,22 @@
 #pragma once
+// =============================================================================
+// gRPC-обёртка вокруг LedgerUseCases. Никакой бизнес-логики — только маппинг
+// gRPC-вызовов в методы use-case'а. Это даёт чистую границу между транспортом
+// и доменом: в тестах use-cases можно прогонять без поднятия gRPC-сервера.
+// =============================================================================
+
 #include "fob/ledger/v1/ledger.grpc.pb.h"
 #include "app/ledger_uc.hpp"
 
 namespace cex::ledger::transport {
 
+// final, потому что наследоваться дальше не предполагается.
 class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
  public:
+  // uc живёт снаружи (в main); здесь только хранится указатель.
   explicit GrpcLedgerService(app::LedgerUseCases* uc) : uc_(uc) {}
 
+  // Все методы — переопределение чисто-виртуальных из сгенерированного gRPC-стаба.
   grpc::Status GetBalances(grpc::ServerContext* context,
                            const fob::ledger::v1::GetBalancesRequest* request,
                            fob::ledger::v1::GetBalancesResponse* response) override;
@@ -29,7 +38,7 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                                     google::protobuf::Empty* response) override;
 
  private:
-  app::LedgerUseCases* uc_;
+  app::LedgerUseCases* uc_; // невладеющий указатель
 };
 
 }  // namespace cex::ledger::transport

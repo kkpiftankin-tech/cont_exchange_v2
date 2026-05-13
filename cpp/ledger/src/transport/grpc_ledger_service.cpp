@@ -1,3 +1,8 @@
+// =============================================================================
+// Реализация gRPC-обёртки. Все методы тривиально делегируют в use-cases —
+// статус OK всегда, потому что use-case сам формирует success/error в payload'е.
+// =============================================================================
+
 #include "transport/grpc_ledger_service.hpp"
 
 namespace cex::ledger::transport {
@@ -22,6 +27,7 @@ grpc::Status GrpcLedgerService::ReleaseFunds(
     grpc::ServerContext*,
     const fob::ledger::v1::ReleaseFundsRequest* request,
     google::protobuf::Empty*) {
+  // ReleaseFunds void-функция — здесь нечего возвращать клиенту.
   uc_->ReleaseFunds(*request);
   return grpc::Status::OK;
 }

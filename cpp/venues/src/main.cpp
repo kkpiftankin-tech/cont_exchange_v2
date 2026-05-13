@@ -1,3 +1,9 @@
+// =============================================================================
+// Entrypoint сервиса venues. Запускает VenuesLoop, который держит два потока:
+//   * генерация синтетических market data (publisher);
+//   * ответы на execution intents (consumer + publisher).
+// =============================================================================
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -15,6 +21,7 @@ int main() {
   cex::venues::app::VenuesLoop loop(brokers);
   loop.start();
 
+  // Главный поток просто живёт; полезная работа в фоновых потоках loop'а.
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(60));
   }

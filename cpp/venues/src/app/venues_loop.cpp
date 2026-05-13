@@ -1,3 +1,7 @@
+// =============================================================================
+// Реализация VenuesLoop — простого симулятора биржи.
+// =============================================================================
+
 #include "app/venues_loop.hpp"
 
 #include <chrono>
@@ -15,6 +19,7 @@ namespace cex::venues::app {
 
 using cex::common::Decimal;
 
+// Утилита: построить proto Decimal из (units, scale).
 static fob::common::v1::Decimal dec_from_int(int64_t units, int32_t scale) {
   fob::common::v1::Decimal d;
   d.set_units(units);
@@ -29,22 +34,25 @@ VenuesLoop::VenuesLoop(const std::string& brokers)
 
 void VenuesLoop::start() {
   running_.store(true);
+  // Подписка только на execution.intents — рыночные данные мы только публикуем.
   consumer_.subscribe({"execution.intents"});
-  t_md_ = std::thread([this] { md_publish_loop(); });
+  t_md_   = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
 }
 
 void VenuesLoop::stop() {
   running_.store(false);
-  if (t_md_.joinable()) t_md_.join();
+  if (t_md_.joinable())   t_md_.join();
   if (t_exec_.joinable()) t_exec_.join();
 }
 
+// Поток-1: каждые 500 мс публикует тикер по BTC/USDT с ценой ~100.00.
+// Цена слегка осцилирует, чтобы dashboards показывали движение.
 void VenuesLoop::md_publish_loop() {
   using namespace std::chrono;
 
-  // Simple synthetic ticker stream for BTC/USDT around 100.00
-  int64_t price_units = 10000; // 100.00 with scale=2
+  // Стартуем с 100.00 USDT (units=10000, scale=2).
+  int64_t price_units = 10000;
 
   while (running_.load()) {
     fob::marketdata::v1::MarketDataRaw evt;
@@ -53,6 +61,8 @@ void VenuesLoop::md_publish_loop() {
     *meta->mutable_ts_event() = cex::common::now_ts();
     meta->set_source("venues");
     meta->set_correlation_id(cex::common::uuid_v4());
+    // Партиционирование MD: одна пара "venue|symbol" -> одна партиция,
+    // что упрощает рассинхрон между ценами.
     meta->set_partition_key("binance|BTC/USDT");
 
     auto* t = evt.mutable_ticker();
@@ -62,12 +72,12 @@ void VenuesLoop::md_publish_loop() {
     t->mutable_instrument()->set_quote("USDT");
     *t->mutable_timestamp() = cex::common::now_ts();
 
-    // small oscillation
+    // Симуляция движения цены: чередуем +1 / -1 единицу младшего разряда.
     price_units += (price_units % 2 == 0 ? 1 : -1);
 
-    *t->mutable_bid() = dec_from_int(price_units - 1, 2);
-    *t->mutable_ask() = dec_from_int(price_units + 1, 2);
-    *t->mutable_last() = dec_from_int(price_units, 2);
+    *t->mutable_bid()    = dec_from_int(price_units - 1, 2);
+    *t->mutable_ask()    = dec_from_int(price_units + 1, 2);
+    *t->mutable_last()   = dec_from_int(price_units, 2);
     *t->mutable_spread() = dec_from_int(2, 2);
 
     producer_.produce("marketdata.raw", meta->partition_key(), cex::common::to_bytes(evt));
@@ -76,6 +86,8 @@ void VenuesLoop::md_publish_loop() {
   }
 }
 
+// Поток-2: на каждый ExecutionIntent сразу формируем "filled" ExecutionReport.
+// Это делает E2E-тестирование возможным без реального подключения к бирже.
 void VenuesLoop::exec_consume_loop() {
   while (running_.load()) {
     bool ok = consumer_.poll_once(500, [this](const std::string& topic,
@@ -88,7 +100,8 @@ void VenuesLoop::exec_consume_loop() {
         return;
       }
 
-      // Simulate immediate fill at limit_price if set, else at 100.00.
+      // Формируем отчёт об "исполнении". В реальности здесь — REST/WS
+      // взаимодействие с биржей и асинхронный приём заполнений.
       fob::execution::v1::ExecutionReport rep;
       auto* meta = rep.mutable_meta();
       meta->set_event_id(cex::common::uuid_v4());
@@ -102,15 +115,17 @@ void VenuesLoop::exec_consume_loop() {
       rep.set_venue(intent.venue());
       *rep.mutable_instrument() = intent.instrument();
       rep.set_venue_symbol(intent.venue_symbol());
+      // Симулируем venue_order_id, чтобы у репорта был "внешний" id.
       rep.set_venue_order_id("VENUE-" + intent.intent_id());
       rep.set_client_order_id(intent.client_order_id());
 
       rep.set_status(fob::common::v1::ORDER_STATUS_FILLED);
       *rep.mutable_filled_qty() = intent.target_qty();
+      // remaining = 0 в той же шкале, что и target_qty.
       rep.mutable_remaining_qty()->set_units(0);
       rep.mutable_remaining_qty()->set_scale(intent.target_qty().scale());
 
-      // avg price
+      // Средняя цена: если задана limit_price — берём её, иначе 100.00 USDT.
       if (intent.has_limit_price() && intent.limit_price().units() != 0) {
         *rep.mutable_average_price() = intent.limit_price();
       } else {

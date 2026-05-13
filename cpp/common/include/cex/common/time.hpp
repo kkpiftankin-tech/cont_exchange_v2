@@ -1,10 +1,19 @@
 #pragma once
+// =============================================================================
+// Утилиты работы со временем.
+//
+// Вся биржа использует google.protobuf.Timestamp как канонический тип
+// временной метки в proto-сообщениях. Этот заголовок даёт единый способ
+// получить "сейчас" в этом формате, чтобы не дублировать код по сервисам.
+// =============================================================================
+
 #include <chrono>
 #include "google/protobuf/timestamp.pb.h"
 
 namespace cex::common {
 
-// Convert system_clock::now() into protobuf Timestamp.
+// Текущее время системы (UTC, через std::chrono::system_clock) в виде
+// protobuf Timestamp с наносекундной точностью.
 google::protobuf::Timestamp now_ts();
 
 }  // namespace cex::common
