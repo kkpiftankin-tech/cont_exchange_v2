@@ -6,10 +6,11 @@
 
 ## Состав
 
-- [runbook.md](runbook.md) — общий runbook (старт/стоп/деплой/инциденты).
-- (планируется) `slo.md` — целевые SLO/SLI.
-- (планируется) `on-call.md` — дежурство, эскалация.
-- (планируется) `incidents/` — постмортемы.
+- [deployment-guide.md](deployment-guide.md) — пошаговый план запуска (локально, удалённо, CI/CD).
+- [runbook.md](runbook.md) — общий runbook (старт/стоп/инциденты).
+- `slo.md` — целевые SLO/SLI (planned).
+- `on-call.md` — дежурство, эскалация (planned).
+- `incidents/` — постмортемы (planned).
 
 ## Связанные разделы
 
