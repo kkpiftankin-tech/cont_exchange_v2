@@ -25,7 +25,7 @@ jobs:
             target=$(echo "$rest" | sed -n 's/.*](\([^)]*\)).*/\1/p')
             [ -z "$target" ] && continue
             case "$target" in
-              http://*|https://*|#*|mailto:*) continue ;;
+              http://*|https://*|"#"*|mailto:*) continue ;;
             esac
             # убираем якорь
             target_noanchor="${target%%#*}"
