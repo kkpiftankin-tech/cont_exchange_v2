@@ -99,7 +99,7 @@ storageSchema:
           max_position: { type: NUMERIC, nullable: true }
           max_leverage: { type: NUMERIC, nullable: true }
           max_order_rate: { type: INT, nullable: true }
-          asset_whitelist: { type: TEXT[], nullable: true }
+          asset_whitelist: { type: 'TEXT[]', nullable: true }
           kill_switch: BOOLEAN
           updated_at: TIMESTAMPTZ
           updated_by: { type: UUID, fk: users }
