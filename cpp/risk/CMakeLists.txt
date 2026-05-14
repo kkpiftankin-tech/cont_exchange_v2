@@ -8,7 +8,7 @@
 #   * публиковать risk.alerts в Kafka, чтобы их видели observability и оператор.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(risk LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

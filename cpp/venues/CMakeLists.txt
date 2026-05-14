@@ -8,7 +8,7 @@
 # end-to-end флоу в dev-среде.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(venues LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

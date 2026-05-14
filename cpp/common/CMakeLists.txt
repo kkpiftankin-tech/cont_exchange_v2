@@ -7,7 +7,7 @@
 # =============================================================================
 
 # Минимально требуемая версия CMake (3.24 — для современных команд find_package).
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 # Имя проекта/библиотеки и язык — только C++.
 project(cex_common LANGUAGES CXX)
 

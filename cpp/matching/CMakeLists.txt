@@ -7,7 +7,7 @@
 # результат батча в топик batch.outputs.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(matching LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
