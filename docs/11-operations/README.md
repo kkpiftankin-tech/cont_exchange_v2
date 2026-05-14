@@ -7,6 +7,7 @@
 ## Состав
 
 - [deployment-guide.md](deployment-guide.md) — пошаговый план запуска (локально, удалённо, CI/CD).
+- [server-sizing.md](server-sizing.md) — расчёт ресурсов сервера и выбор провайдера (FirstVDS / Hetzner / DO).
 - [runbook.md](runbook.md) — общий runbook (старт/стоп/инциденты).
 - `slo.md` — целевые SLO/SLI (planned).
 - `on-call.md` — дежурство, эскалация (planned).

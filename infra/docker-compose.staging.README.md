@@ -2,7 +2,18 @@
 
 Этот файл описывает, как развернуть [docker-compose.staging.yml](docker-compose.staging.yml) на чистом Linux-хосте (Ubuntu 22.04 / Debian 12).
 
-Полный план запуска проекта — [../docs/11-operations/deployment-guide.md](../docs/11-operations/deployment-guide.md). Этот README — сжатая шпаргалка только под staging.
+Полный план запуска проекта — [../docs/11-operations/deployment-guide.md](../docs/11-operations/deployment-guide.md). Расчёт ресурсов и выбор провайдера — [../docs/11-operations/server-sizing.md](../docs/11-operations/server-sizing.md). Этот README — сжатая шпаргалка только под staging.
+
+## 0. Чеклист заказа сервера
+
+- [ ] Заказать VDS (рекомендуется **FirstVDS Форсаж 4.0** или **Hetzner CPX31**): 4 vCPU / 8 GB / 100 GB NVMe, Ubuntu 22.04 LTS, backup включить.
+- [ ] Сгенерировать SSH-ключ: `ssh-keygen -t ed25519 -f ~/.ssh/staging_fob -C "staging-fob"`. Public part — в панель провайдера или `~/.ssh/authorized_keys`.
+- [ ] Дождаться provisioning, записать `STAGING_HOST` (IP/hostname).
+- [ ] Подключиться по SSH, выполнить раздел 1 ниже.
+- [ ] Настроить GitHub Environment `staging` + secrets (`STAGING_SSH_KEY`, `STAGING_HOST`, `STAGING_USER`, `STAGING_GHCR_TOKEN`, опц. `STAGING_SSH_PORT`).
+- [ ] Запустить `gh workflow run deploy-staging.yml --ref main` либо `docker compose up -d` вручную (раздел 2).
+
+Детальное обоснование sizing'а — [server-sizing.md](../docs/11-operations/server-sizing.md).
 
 ## 1. Предварительные шаги (один раз на сервере)
 

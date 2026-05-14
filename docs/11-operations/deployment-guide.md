@@ -52,14 +52,18 @@ brew install cmake pkg-config grpc protobuf librdkafka boost
 
 ### 0.3. Удалённый сервер (минимальные характеристики)
 
-Для dev/staging single-host:
+Для dev/staging single-host (краткая выжимка; подробный покомпонентный расчёт, сравнение провайдеров FirstVDS / Hetzner / DO, прогноз масштабирования по фазам F-XX — в [server-sizing.md](server-sizing.md)):
 
 - **OS:** Ubuntu 22.04 LTS / Debian 12 (рекомендуется).
 - **CPU:** 4 vCPU.
-- **RAM:** 8 GB (Redpanda минимум 1 GB + сервисы по ~256 MB).
-- **Disk:** 50 GB SSD.
-- **Network:** публичный IP, порты `8088` (HTTP API), `8080` (Redpanda Console — опционально через VPN).
+- **RAM:** 8 GB.
+- **Disk:** 80–100 GB NVMe.
+- **Network:** публичный IP, порты `8088` (HTTP API), `8080` (Redpanda Console — bound to 127.0.0.1, SSH-tunnel).
 - **Tooling:** Docker Engine ≥ 24, Docker Compose v2, `ufw` для firewall.
+
+Для prod-staging с PostgreSQL + ClickHouse (после T-F04-120 / T-F04-140): добавить +6 vCPU, +8 GB RAM, +100 GB Disk.
+
+**Конкретный провайдер первого выбора** — FirstVDS Форсаж 4.0 (~1 100 ₽/мес для MVP) или Hetzner CPX31 (~14 €/мес). См. [server-sizing.md §3](server-sizing.md#3-конкретные-провайдеры-и-конфигурации).
 
 Для prod-staging с PostgreSQL + ClickHouse (после T-F04-120/T-F04-140): добавить +4 vCPU и +16 GB RAM.
 
