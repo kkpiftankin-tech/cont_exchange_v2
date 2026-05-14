@@ -38,7 +38,7 @@ related:
 | Инструмент | Версия | Установка (Ubuntu/Debian) |
 | --- | --- | --- |
 | Build essentials | gcc/g++ 11+, make | `sudo apt install build-essential` |
-| CMake | ≥ 3.24 | `sudo apt install cmake` или `pip install cmake` |
+| CMake | ≥ 3.22 (Ubuntu 22.04 apt baseline) | `sudo apt install cmake` или `pip install cmake` |
 | pkg-config | любая | `sudo apt install pkg-config` |
 | gRPC + Protobuf C++ | ≥ 1.46 | `sudo apt install libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev` |
 | librdkafka | ≥ 1.9 | `sudo apt install librdkafka-dev` |
