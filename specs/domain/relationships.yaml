@@ -1,0 +1,91 @@
+relationships:
+  - id: order-flow-creates-orders-normalized
+    from: order-flow
+    to: matching
+    channel: kafka
+    topic: orders.normalized
+    messageType: fob.orders.v1.OrdersNormalized
+    feature: F-02
+
+  - id: matching-publishes-batch-result
+    from: matching
+    to: [ledger, observability]
+    channel: kafka
+    topic: batch.outputs
+    messageType: fob.matching.v1.BatchResult
+    feature: F-04
+
+  - id: venues-publishes-marketdata
+    from: venues
+    to: market-data
+    channel: kafka
+    topic: marketdata.raw
+    messageType: fob.marketdata.v1.MarketDataRaw
+    feature: F-05
+
+  - id: venues-publishes-execution-reports
+    from: venues
+    to: [ledger, observability]
+    channel: kafka
+    topic: execution.reports
+    messageType: fob.execution.v1.ExecutionReport
+    feature: F-12
+
+  - id: matching-publishes-execution-intents
+    from: matching
+    to: venues
+    channel: kafka
+    topic: execution.intents
+    messageType: fob.execution.v1.ExecutionIntent
+    feature: F-12
+    status: planned
+
+  - id: risk-publishes-alerts
+    from: risk
+    to: observability
+    channel: kafka
+    topic: risk.alerts
+    messageType: fob.risk.v1.RiskAlert
+    feature: F-07
+
+  - id: order-flow-calls-risk
+    from: order-flow
+    to: risk
+    channel: grpc
+    rpc: fob.risk.v1.RiskService.CheckNewOrder
+    feature: [F-02, F-07]
+
+  - id: order-flow-calls-ledger-reserve
+    from: order-flow
+    to: ledger
+    channel: grpc
+    rpc: fob.ledger.v1.LedgerService.ReserveFunds
+    feature: [F-02, F-06]
+
+  - id: order-flow-calls-ledger-release
+    from: order-flow
+    to: ledger
+    channel: grpc
+    rpc: fob.ledger.v1.LedgerService.ReleaseFunds
+    feature: [F-02, F-06]
+
+  - id: gateway-calls-order-flow
+    from: gateway
+    to: order-flow
+    channel: grpc
+    rpc: fob.orders.v1.OrderFlowService.CreateFlowOrder
+    feature: F-02
+
+  - id: cpp-common-linked-by-all
+    from:
+      - gateway
+      - order-flow
+      - matching
+      - ledger
+      - risk
+      - market-data
+      - venues
+      - observability
+    to: cpp-common
+    channel: build-time-link
+    feature: null

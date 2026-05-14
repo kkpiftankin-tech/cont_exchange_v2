@@ -1,0 +1,80 @@
+component:
+  id: ledger
+  name: Ledger Service
+  layer: core
+  status: active-mvp-in-memory
+  codePath: cpp/ledger
+  owner: core-team
+
+responsibility:
+  summary: >
+    Учёт балансов пользователей. Хранит available/reserved по парам
+    (user, currency). Резервирует средства под ордера, применяет fills из
+    batch.outputs, принимает execution.reports.
+
+sourceTreeEvidence:
+  main:
+    - cpp/ledger/src/main.cpp
+  app:
+    - cpp/ledger/src/app/ledger_uc.hpp
+    - cpp/ledger/src/app/ledger_uc.cpp
+  infra:
+    - cpp/ledger/src/infra/kafka_consumers.hpp
+    - cpp/ledger/src/infra/kafka_consumers.cpp
+  transport:
+    - cpp/ledger/src/transport/grpc_ledger_service.hpp
+    - cpp/ledger/src/transport/grpc_ledger_service.cpp
+  build:
+    - cpp/ledger/CMakeLists.txt
+
+features:
+  - F-04
+  - F-06
+  - F-12
+
+protoContracts:
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - Balance
+  - Reservation
+  - ApplyBatchResultRequest
+
+dependencies:
+  upstream:
+    - order-flow  # ReserveFunds/ReleaseFunds
+  downstream: []
+
+grpc:
+  port: 50053
+  envListen: LEDGER_GRPC_LISTEN
+  services:
+    - fob.ledger.v1.LedgerService
+
+kafkaConsumes:
+  - topic: batch.outputs
+    messageType: fob.matching.v1.BatchResult
+    consumerGroup: ledger-batch
+  - topic: execution.reports
+    messageType: fob.execution.v1.ExecutionReport
+    consumerGroup: ledger-exec
+
+knownIssues:
+  - id: no-persistence
+    severity: feature-gap
+    description: Всё in-memory; при рестарте состояние теряется
+  - id: scale-inflation
+    severity: bug
+    description: Decimal::mul удваивает scale; через несколько операций scale становится 10+
+    location: cpp/ledger/src/app/ledger_uc.cpp#L158-L176
+  - id: no-hedge-accounting
+    severity: feature-gap
+    description: ApplyExecutionReport только логирует, не обновляет позиции
+
+tests:
+  unit: []
+  integration: []
+  contract: []

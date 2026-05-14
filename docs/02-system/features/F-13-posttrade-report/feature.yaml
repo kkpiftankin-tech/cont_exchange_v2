@@ -1,0 +1,41 @@
+feature:
+  id: F-13
+  name: Post-Trade Report
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Детальный отчёт по завершённой FlowOrder: фактический VWAP, IS
+  (среднее, std, квантили), профиль исполнения во времени, декомпозиция
+  IS на spread/temporary/permanent impact/volatility. Экспорт CSV/PDF.
+
+primaryComponents:
+  - observability
+  - gateway
+
+protoContracts:
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/observability/v1/observability.proto
+
+codePaths: []
+
+kafkaTopics:
+  produces: []
+  consumes:
+    - batch.outputs
+
+acceptanceCriteria:
+  - "GET /v1/reports/orders/{order_id} возвращает агрегированный отчёт."
+  - "Отчёт включает фактический VWAP, IS, квантили IS."
+  - "Декомпозиция IS на 4 компоненты выполняется и отображается."
+  - "Возможен экспорт в CSV и PDF."
+
+knownIssues:
+  - id: no-clickhouse
+    severity: blocker
+    description: Без ClickHouse невозможна агрегация исторических fills
+
+tests:
+  unit: []
+  integration: []
+  contract: []

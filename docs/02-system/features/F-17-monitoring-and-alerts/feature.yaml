@@ -1,0 +1,52 @@
+feature:
+  id: F-17
+  name: Monitoring & Alerting (Observability)
+  status: partially-implemented-mvp
+  owner: core-team
+
+description: >
+  Непрерывный сбор метрик производительности (solve time, fill rate, IS,
+  latency) и риска (margin events, kill-switches, venue connectivity).
+  Алерты при пересечении порогов в UI оператора и внешних каналах
+  (email, Telegram, Slack). Хранение в ClickHouse для исторического анализа.
+
+primaryComponents:
+  - observability
+  - risk
+
+protoContracts:
+  - contracts/proto/fob/observability/v1/observability.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+
+codePaths:
+  - cpp/observability/src/app/obs_loop.cpp
+
+kafkaTopics:
+  produces: []
+  consumes:
+    - risk.alerts
+    - batch.outputs
+    - execution.reports
+
+acceptanceCriteria:
+  - "observability подписан на risk.alerts, batch.outputs, execution.reports."
+  - "Метрики экспортируются в Prometheus / OTel."
+  - "При превышении порогов — алерт в Operator UI и внешний канал."
+  - "Все события сохраняются в ClickHouse (fills, batch_results, risk_events)."
+
+knownIssues:
+  - id: stdout-only
+    severity: feature-gap
+    description: Сейчас observability только пишет JSON в stdout
+    location: cpp/observability/src/app/obs_loop.cpp
+  - id: no-prometheus
+    severity: feature-gap
+    description: Нет экспорта метрик в Prometheus или OpenTelemetry
+  - id: no-external-channels
+    severity: feature-gap
+    description: Нет email/Telegram/Slack интеграций
+
+tests:
+  unit: []
+  integration: []
+  contract: []

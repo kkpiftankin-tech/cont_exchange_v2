@@ -1,0 +1,73 @@
+component:
+  id: market-data
+  name: Market Data Service
+  layer: core
+  status: active-mvp
+  codePath: cpp/market_data
+  owner: core-team
+
+responsibility:
+  summary: >
+    In-memory кэш последних тикеров по парам (venue, symbol).
+    Подписан на marketdata.raw, отдаёт gRPC GetLastTicker.
+
+sourceTreeEvidence:
+  main:
+    - cpp/market_data/src/main.cpp
+  app:
+    - cpp/market_data/src/app/market_data_uc.hpp
+    - cpp/market_data/src/app/market_data_uc.cpp
+  infra:
+    - cpp/market_data/src/infra/kafka_consumer.hpp
+    - cpp/market_data/src/infra/kafka_consumer.cpp
+  transport:
+    - cpp/market_data/src/transport/grpc_market_data_service.hpp
+    - cpp/market_data/src/transport/grpc_market_data_service.cpp
+  build:
+    - cpp/market_data/CMakeLists.txt
+
+features:
+  - F-05
+  - F-11
+
+protoContracts:
+  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+  - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - Ticker
+  - MarketDataRaw
+  - GetLastTickerRequest
+
+dependencies:
+  upstream: []
+  downstream: []
+
+grpc:
+  port: 50054
+  envListen: MARKET_DATA_GRPC_LISTEN
+  services:
+    - fob.marketdata.v1.MarketDataService
+
+kafkaConsumes:
+  - topic: marketdata.raw
+    messageType: fob.marketdata.v1.MarketDataRaw
+    consumerGroup: marketdata
+
+knownIssues:
+  - id: ticker-only
+    severity: feature-gap
+    description: Trade и OrderBookL2Update игнорируются
+    location: cpp/market_data/src/app/market_data_uc.cpp#L20
+  - id: no-history
+    severity: feature-gap
+    description: Нет OHLCV/свечей/исторических данных
+  - id: no-stream-subscription
+    severity: feature-gap
+    description: Нет gRPC streaming или WebSocket для UI
+
+tests:
+  unit: []
+  integration: []
+  contract: []

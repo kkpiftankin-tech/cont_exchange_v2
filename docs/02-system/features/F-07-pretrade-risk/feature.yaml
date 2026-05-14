@@ -1,0 +1,62 @@
+feature:
+  id: F-07
+  name: Pre-trade Risk Control
+  status: in-progress-mvp
+  owner: core-team
+
+description: >
+  Синхронные pre-trade проверки нового FlowOrder: kill-switch, sanity checks,
+  оценка маржи. Возвращает ACCEPT / REJECT / HALT и публикует RiskAlert при
+  изменении kill-switch.
+
+primaryComponents:
+  - risk
+  - order-flow
+
+protoContracts:
+  - contracts/proto/fob/risk/v1/risk.proto
+
+codePaths:
+  - cpp/risk/src/app/risk_uc.cpp
+  - cpp/risk/src/transport/grpc_risk_service.cpp
+  - cpp/risk/src/infra/risk_alerts_publisher.cpp
+  - cpp/order_flow/src/infra/risk_client.cpp
+
+kafkaTopics:
+  produces:
+    - risk.alerts
+  consumes: []
+
+grpcServices:
+  exposes:
+    - fob.risk.v1.RiskService.CheckNewOrder
+    - fob.risk.v1.RiskService.SetKillSwitch
+    - fob.risk.v1.RiskService.OnBatchResult
+  calls: []
+
+acceptanceCriteria:
+  - "CheckNewOrder возвращает ACCEPT / REJECT / HALT и required_initial_margin."
+  - "При global или per-instrument kill-switch: HALT с code=KILL_SWITCH."
+  - "SetKillSwitch обновляет состояние и эмиттит RiskAlert в risk.alerts."
+  - "При gRPC error в order_flow.RiskClient: дефолт-deny (REJECT с GRPC_ERROR)."
+
+knownIssues:
+  - id: placeholder-margin
+    severity: feature-gap
+    description: margin = qty * ref_price * 0.1; не учитывает диапазон цен
+    location: cpp/risk/src/app/risk_uc.cpp#L67-L75
+  - id: stateless-risk
+    severity: feature-gap
+    description: Нет учёта open positions, лимитов пользователя, VaR
+  - id: kill-switch-not-persisted
+    severity: bug
+    description: kill-switch state in-memory, теряется при рестарте
+  - id: tautological-reference-price
+    severity: bug
+    description: order_flow подсовывает midpoint своего же ордера как reference_price
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L75-L78
+
+tests:
+  unit: []
+  integration: []
+  contract: []

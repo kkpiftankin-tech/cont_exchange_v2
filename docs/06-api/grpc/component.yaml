@@ -1,0 +1,53 @@
+component:
+  id: contracts-proto
+  name: Protobuf Contracts
+  layer: contracts
+  status: source-of-truth
+  codePath: contracts/proto
+  owner: core-team
+
+responsibility:
+  summary: >
+    Source of truth для всех межсервисных контрактов. Содержит proto-схемы
+    для gRPC сервисов и Kafka payloadов. Любое изменение требует обновления
+    specs/contracts/proto-map.yaml.
+
+sourceTreeEvidence:
+  build:
+    - contracts/CMakeLists.txt
+  protoFiles:
+    - contracts/proto/fob/common/v1/common.proto
+    - contracts/proto/fob/orders/v1/orders.proto
+    - contracts/proto/fob/orders/v1/order_flow_service.proto
+    - contracts/proto/fob/matching/v1/batch.proto
+    - contracts/proto/fob/ledger/v1/ledger.proto
+    - contracts/proto/fob/risk/v1/risk.proto
+    - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+    - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+    - contracts/proto/fob/execution/v1/execution.proto
+    - contracts/proto/fob/observability/v1/observability.proto
+    - contracts/proto/fob/agent/v1/agent.proto
+
+features:
+  - F-02
+  - F-04
+  - F-05
+  - F-06
+  - F-07
+  - F-09
+  - F-11
+  - F-12
+  - F-15
+
+dependencies:
+  upstream: []
+  downstream:
+    - cpp-common
+    - gateway
+    - order-flow
+    - matching
+    - ledger
+    - risk
+    - market-data
+    - venues
+    - observability

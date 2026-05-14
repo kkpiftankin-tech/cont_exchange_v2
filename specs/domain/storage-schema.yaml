@@ -1,0 +1,256 @@
+storageSchema:
+  postgresql:
+    role: oltp-source-of-truth
+    status: planned-not-implemented-in-mvp
+    tables:
+
+      users:
+        purpose: Учётные записи пользователей
+        owners: [auth-identity]
+        readers: [auth-identity, gateway, risk]
+        fields:
+          user_id: { type: UUID, key: PK }
+          email: { type: VARCHAR, unique: true }
+          password_hash: VARCHAR
+          display_name: VARCHAR
+          role: { type: ENUM, values: [demo, client, provider, operator, admin] }
+          kyc_status: { type: ENUM, values: [none, pending, verified, rejected] }
+          created_at: TIMESTAMPTZ
+          updated_at: TIMESTAMPTZ
+          is_active: BOOLEAN
+
+      sessions:
+        purpose: Активные сессии и токены
+        owners: [auth-identity]
+        readers: [auth-identity, gateway]
+        fields:
+          session_id: { type: UUID, key: PK }
+          user_id: { type: UUID, fk: users }
+          token_hash: VARCHAR
+          ip_address: INET
+          created_at: TIMESTAMPTZ
+          expires_at: TIMESTAMPTZ
+          is_revoked: BOOLEAN
+
+      accounts:
+        purpose: Балансы клиентов по (user, asset)
+        owners: [ledger]
+        readers: [ledger, risk, gateway]
+        fields:
+          account_id: { type: UUID, key: PK }
+          user_id: { type: UUID, fk: users }
+          asset: VARCHAR
+          free_balance: NUMERIC
+          reserved_balance: NUMERIC
+          venue_allocated: NUMERIC
+          pending_transfer: NUMERIC
+          updated_at: TIMESTAMPTZ
+
+      flow_orders:
+        purpose: Активные FlowOrder
+        owners: [order-flow, matching]
+        readers: [matching, risk, ledger, gateway]
+        fields:
+          order_id: { type: UUID, key: PK }
+          user_id: { type: UUID, fk: users }
+          provider_type: { type: ENUM, values: [ui, api, provider, internal] }
+          provider_id: { type: VARCHAR, nullable: true }
+          symbol: VARCHAR
+          side: { type: ENUM, values: [buy, sell] }
+          portfolio_weights: { type: JSONB, nullable: true }
+          p_low: NUMERIC
+          p_high: NUMERIC
+          q_rate: NUMERIC
+          q_max: NUMERIC
+          filled_cum: NUMERIC
+          time_in_force: { type: ENUM, values: [GTC, GTD, IOC] }
+          window_start: TIMESTAMPTZ
+          window_end: { type: TIMESTAMPTZ, nullable: true }
+          status:
+            type: ENUM
+            values: [new, active, partially_filled, filled, cancelled, expired, liquidated]
+          created_at: TIMESTAMPTZ
+          updated_at: TIMESTAMPTZ
+
+      positions:
+        purpose: Текущие позиции и PnL клиентов
+        owners: [ledger]
+        readers: [ledger, risk, gateway]
+        fields:
+          position_id: { type: UUID, key: PK }
+          user_id: { type: UUID, fk: users }
+          symbol: VARCHAR
+          side: { type: ENUM, values: [long, short, flat] }
+          quantity: NUMERIC
+          avg_entry_price: NUMERIC
+          unrealized_pnl: NUMERIC
+          realized_pnl: NUMERIC
+          updated_at: TIMESTAMPTZ
+
+      risk_limits:
+        purpose: Лимиты по user/role/symbol/global + kill switch
+        owners: [risk, operator-ui]
+        readers: [risk, matching, gateway]
+        fields:
+          limit_id: { type: UUID, key: PK }
+          entity_type: { type: ENUM, values: [user, role, symbol, global] }
+          entity_id: VARCHAR
+          max_notional: { type: NUMERIC, nullable: true }
+          max_position: { type: NUMERIC, nullable: true }
+          max_leverage: { type: NUMERIC, nullable: true }
+          max_order_rate: { type: INT, nullable: true }
+          asset_whitelist: { type: TEXT[], nullable: true }
+          kill_switch: BOOLEAN
+          updated_at: TIMESTAMPTZ
+          updated_by: { type: UUID, fk: users }
+
+      risk_snapshots:
+        purpose: Снимки маржинального состояния (после каждого batch)
+        owners: [risk]
+        readers: [ledger, observability]
+        fields:
+          snapshot_id: { type: UUID, key: PK }
+          entity_id: VARCHAR   # user_id or venue_id
+          free_collateral: NUMERIC
+          reserved_collateral: NUMERIC
+          initial_margin: NUMERIC
+          maintenance_margin: NUMERIC
+          risk_flags: JSONB    # margin_call, liquidation, throttled ...
+          timestamp: TIMESTAMPTZ
+
+      collateral_transfers:
+        purpose: Запросы на перевод средств между venues / custody
+        owners: [ledger]
+        readers: [ledger, custody-adapter, risk]
+        fields:
+          request_id: { type: UUID, key: PK }
+          user_id: { type: UUID, fk: users }
+          from_venue: VARCHAR
+          to_venue: VARCHAR
+          asset: VARCHAR
+          amount: NUMERIC
+          reason: { type: ENUM, values: [deposit, withdrawal, rebalance, liquidation] }
+          priority: { type: ENUM, values: [low, normal, high, urgent] }
+          status:
+            type: ENUM
+            values: [pending, processing, confirmed, failed, cancelled]
+          created_at: TIMESTAMPTZ
+          confirmed_at: { type: TIMESTAMPTZ, nullable: true }
+
+      solver_config:
+        purpose: Версионированные параметры solver'а
+        owners: [operator-ui]
+        readers: [matching, backtest-replay]
+        fields:
+          config_id: { type: UUID, key: PK }
+          version: INT
+          batch_interval_ms: INT
+          max_iterations: INT
+          epsilon_liquidity: NUMERIC
+          tolerance: NUMERIC
+          fee_model: JSONB
+          is_active: BOOLEAN
+          updated_at: TIMESTAMPTZ
+
+  clickhouse:
+    role: olap-analytics-and-history
+    status: planned-not-implemented-in-mvp
+    ingestion: kafka-table-engine
+    tables:
+
+      fills:
+        purpose: Все исполнения (FillEvent)
+        ingestSource: kafka (batch.outputs / fills)
+        readers: [observability, backtest-replay, market-data]
+        fields:
+          fill_id: UUID
+          batch_id: UUID
+          order_id: UUID
+          user_id: UUID
+          symbol: String
+          side: Enum8
+          asset_legs: String_JSON
+          exec_qty: Float64
+          exec_price: Float64
+          liquidity_source: { type: Enum8, values: [internal, cex_hedge, dex_hedge, epsilon_mm] }
+          fees: Float64
+          timestamp: DateTime64_3
+
+      batch_results:
+        purpose: Диагностика каждого batch
+        ingestSource: kafka (batch.outputs)
+        readers: [observability, backtest-replay, market-data]
+        fields:
+          batch_id: UUID
+          timestamp: DateTime64_3
+          clear_prices: String_JSON
+          executed_rates: String_JSON
+          residual_norm: Float64
+          solve_time_ms: UInt32
+          num_active_orders: UInt32
+          solver_diagnostics: String_JSON
+          config_version: UInt32
+
+      marketdata:
+        purpose: Исторические рыночные данные
+        ingestSource: kafka (marketdata.raw)
+        readers: [market-data, backtest-replay, observability]
+        fields:
+          timestamp: DateTime64_3
+          source: { type: Enum8, values: [internal, binance, coinbase, uniswap, ...] }
+          symbol: String
+          mid_price: Float64
+          best_bid: Float64
+          best_ask: Float64
+          bid_depth_json: String
+          ask_depth_json: String
+          spread: Float64
+          volume_24h: { type: Float64, nullable: true }
+
+      risk_events:
+        purpose: Лог решений risk-движка
+        ingestSource: kafka (risk.alerts)
+        readers: [observability, backtest-replay, risk]
+        fields:
+          event_id: UUID
+          timestamp: DateTime64_3
+          entity_id: String
+          event_type:
+            type: Enum8
+            values: [pre_trade_reject, pre_trade_throttle, margin_call, liquidation, kill_switch]
+          order_id: { type: UUID, nullable: true }
+          details: String_JSON
+          batch_id: { type: UUID, nullable: true }
+
+      execution_reports:
+        purpose: Отчёты по hedge-сделкам на внешних площадках
+        ingestSource: kafka (execution.reports)
+        readers: [observability, backtest-replay, ledger]
+        fields:
+          venue_order_id: String
+          intent_id: UUID
+          venue: String
+          symbol: String
+          side: Enum8
+          filled_qty: Float64
+          avg_price: Float64
+          fees: Float64
+          status: { type: Enum8, values: [filled, partially_filled, rejected, cancelled] }
+          reject_reason: { type: String, nullable: true }
+          timestamp: DateTime64_3
+
+      agent_logs:
+        purpose: State-action-reward логи агентских политик
+        ingestSource: service direct writes
+        readers: [backtest-replay, observability, research]
+        fields:
+          log_id: UUID
+          agent_id: String
+          policy_version: String
+          mode: { type: Enum8, values: [live, shadow, replay] }
+          batch_id: { type: UUID, nullable: true }
+          observation_blob: String_JSON
+          action_blob: String_JSON
+          reward_components: String_JSON
+          outcome_blob: String_JSON
+          timestamp: DateTime64_3

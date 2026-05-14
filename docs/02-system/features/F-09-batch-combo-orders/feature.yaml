@@ -1,0 +1,44 @@
+feature:
+  id: F-09
+  name: Batch and Combo Orders
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Multi-leg FlowOrder и комбо-ордера: одна заявка покрывает несколько активов
+  с весами w_i. Требует расширения proto FlowOrder и поддержки в matching.
+
+primaryComponents:
+  - order-flow
+  - matching
+  - risk
+  - ledger
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+
+codePaths: []
+
+kafkaTopics:
+  produces: []
+  consumes: []
+
+grpcServices:
+  exposes: []
+  calls: []
+
+acceptanceCriteria:
+  - "FlowOrder поддерживает массив legs: [{asset, weight}]"
+  - "matching корректно балансирует veka между ногами"
+  - "ledger применяет mirror legs (positive/negative qty)"
+
+knownIssues:
+  - id: proto-extension-needed
+    severity: blocker
+    description: Требуется расширение proto FlowOrder полем legs[]; пока не реализовано
+
+tests:
+  unit: []
+  integration: []
+  contract: []

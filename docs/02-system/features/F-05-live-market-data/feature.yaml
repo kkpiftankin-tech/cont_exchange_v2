@@ -1,0 +1,59 @@
+feature:
+  id: F-05
+  name: Live Market Data
+  status: in-progress-mvp
+  owner: core-team
+
+description: >
+  Сервис market_data принимает поток marketdata.raw из Kafka, кэширует
+  последний тикер по парам (venue, symbol) и отдаёт его по gRPC GetLastTicker.
+
+primaryComponents:
+  - market-data
+  - venues
+  - gateway
+
+protoContracts:
+  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+  - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+
+codePaths:
+  - cpp/market_data/src/app/market_data_uc.cpp
+  - cpp/market_data/src/infra/kafka_consumer.cpp
+  - cpp/market_data/src/transport/grpc_market_data_service.cpp
+  - cpp/venues/src/app/venues_loop.cpp
+
+kafkaTopics:
+  produces:
+    - marketdata.raw  # из venues
+  consumes:
+    - marketdata.raw  # в market_data
+
+grpcServices:
+  exposes:
+    - fob.marketdata.v1.MarketDataService.GetLastTicker
+  calls: []
+
+acceptanceCriteria:
+  - "GetLastTicker возвращает последний Ticker по (venue, symbol)."
+  - "При отсутствии данных: found=false, error.code=NOT_FOUND."
+  - "Кэш потокобезопасен (защищён мьютексом)."
+
+knownIssues:
+  - id: ticker-only
+    severity: feature-gap
+    description: Trade и OrderBookL2Update игнорируются
+  - id: no-history-ohlcv
+    severity: feature-gap
+    description: Нет OHLCV свечей и истории
+  - id: no-stream-api
+    severity: feature-gap
+    description: Нет gRPC streaming / WebSocket для UI
+  - id: simulator-only-source
+    severity: feature-gap
+    description: venues только симулирует BTC/USDT, нет реальных площадок
+
+tests:
+  unit: []
+  integration: []
+  contract: []

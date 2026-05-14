@@ -1,0 +1,69 @@
+component:
+  id: observability
+  name: Observability Aggregator
+  layer: support
+  status: active-mvp
+  codePath: cpp/observability
+  owner: core-team
+
+responsibility:
+  summary: >
+    Подписан на risk.alerts, batch.outputs, execution.reports и пишет
+    структурированные JSON-логи в stdout. В проде должен экспортировать
+    метрики в Prometheus и заливать в ClickHouse/Loki.
+
+sourceTreeEvidence:
+  main:
+    - cpp/observability/src/main.cpp
+  app:
+    - cpp/observability/src/app/obs_loop.hpp
+    - cpp/observability/src/app/obs_loop.cpp
+  build:
+    - cpp/observability/CMakeLists.txt
+
+features:
+  - F-04
+  - F-05
+  - F-07
+  - F-11
+  - F-12
+  - F-15
+
+protoContracts:
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/observability/v1/observability.proto
+
+entities:
+  - RiskAlert
+  - BatchResult
+  - ExecutionReport
+
+dependencies:
+  upstream: []
+  downstream: []
+
+kafkaConsumes:
+  - topic: risk.alerts
+    messageType: fob.risk.v1.RiskAlert
+    consumerGroup: observability
+  - topic: batch.outputs
+    messageType: fob.matching.v1.BatchResult
+    consumerGroup: observability
+  - topic: execution.reports
+    messageType: fob.execution.v1.ExecutionReport
+    consumerGroup: observability
+
+knownIssues:
+  - id: stdout-only
+    severity: feature-gap
+    description: Только JSON в stdout, без Prometheus / OTel / ClickHouse
+  - id: no-threshold-alerts
+    severity: feature-gap
+    description: Нет алертов по порогам residualNorm/solveTimeMs
+
+tests:
+  unit: []
+  integration: []
+  contract: []

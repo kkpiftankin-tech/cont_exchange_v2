@@ -1,0 +1,42 @@
+feature:
+  id: F-14
+  name: Deposit & Withdraw
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Обработка депозитов и выводов средств: on-chain переводы (для крипты),
+  fiat-каналы (для USD/EUR), KYC/AML-проверки, сверка балансов через
+  custody-провайдеров. Все операции отражаются в таблице collateral_transfers.
+
+primaryComponents:
+  - gateway
+  - ledger
+  - custody-adapter   # планируемый компонент
+
+protoContracts:
+  - contracts/proto/fob/ledger/v1/ledger.proto
+
+codePaths: []
+
+acceptanceCriteria:
+  - "POST /v1/wallet/deposit инициирует депозит с указанием актива и сети."
+  - "После N подтверждений on-chain — free_balance растёт на сумму депозита."
+  - "POST /v1/wallet/withdraw проверяет available, инициирует on-chain перевод."
+  - "Все операции проходят AML-screening; suspicious — на ручной review."
+
+knownIssues:
+  - id: no-custody-adapter
+    severity: blocker
+    description: Сервис Blockchain/Custody Adapter не реализован
+  - id: no-aml-integration
+    severity: blocker
+    description: Нет интеграции с AML-провайдером
+  - id: no-collateral-transfers-table
+    severity: feature-gap
+    description: Таблица PostgreSQL collateral_transfers не создана
+
+tests:
+  unit: []
+  integration: []
+  contract: []

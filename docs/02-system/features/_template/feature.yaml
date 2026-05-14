@@ -1,0 +1,31 @@
+feature:
+  id: F-XX
+  name: Short Feature Name
+  status: draft           # draft | in-progress | shipped | deprecated
+  owner: core-team
+
+description: >
+  Краткое описание фичи в 1-2 предложениях.
+
+primaryComponents: []     # см. docs/components/
+
+protoContracts: []        # пути к .proto
+
+codePaths: []             # пути к ключевым cpp/*
+
+kafkaTopics:
+  produces: []
+  consumes: []
+
+grpcServices:
+  exposes: []
+  calls: []
+
+acceptanceCriteria: []
+
+knownIssues: []
+
+tests:
+  unit: []
+  integration: []
+  contract: []

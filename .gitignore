@@ -1,3 +1,25 @@
-.vscode
-.DS_Store
+# Build artifacts
+/build/
 build/*
+*.o
+*.a
+
+# IDE / editor
+.idea/
+.vscode
+.obsidian/
+
+# Claude Code local settings (skills and command files are tracked separately)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python tool caches
+__pycache__/
+*.pyc
+
+# Local env overrides
+.env.local
+*.env.local

@@ -1,0 +1,263 @@
+codeMap:
+  cpp-common:
+    codePath: cpp/common
+    role: shared-library
+    docsPath: docs/09-implementation/cpp-common.md
+    files:
+      important:
+        - cpp/common/include/cex/common/decimal.hpp
+        - cpp/common/include/cex/common/kafka.hpp
+        - cpp/common/include/cex/common/proto.hpp
+        - cpp/common/include/cex/common/time.hpp
+        - cpp/common/include/cex/common/uuid.hpp
+        - cpp/common/include/cex/common/env.hpp
+        - cpp/common/include/cex/common/log.hpp
+      sources:
+        - cpp/common/src/decimal.cpp
+        - cpp/common/src/kafka.cpp
+        - cpp/common/src/proto.cpp
+        - cpp/common/src/time.cpp
+        - cpp/common/src/uuid.cpp
+        - cpp/common/src/env.cpp
+        - cpp/common/src/log.cpp
+    usedBy:
+      - gateway
+      - order-flow
+      - matching
+      - ledger
+      - risk
+      - market-data
+      - venues
+      - observability
+
+  gateway:
+    codePath: cpp/gateway
+    role: api-gateway
+    docsPath: docs/05-components/gateway
+    protoContracts:
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-02
+      - F-05
+      - F-06
+    keyFiles:
+      - cpp/gateway/src/main.cpp
+      - cpp/gateway/src/transport/http_gateway.cpp
+      - cpp/gateway/src/transport/http_gateway.hpp
+      - cpp/gateway/src/infra/order_flow_client.cpp
+      - cpp/gateway/src/infra/order_flow_client.hpp
+      - cpp/gateway/CMakeLists.txt
+    httpPort: 8080
+    kafkaProduces: []
+    kafkaConsumes: []
+
+  order-flow:
+    codePath: cpp/order_flow
+    role: order-lifecycle
+    docsPath: docs/05-components/order-flow
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-02
+      - F-07
+    keyFiles:
+      - cpp/order_flow/src/main.cpp
+      - cpp/order_flow/src/app/order_flow_uc.cpp
+      - cpp/order_flow/src/app/order_flow_uc.hpp
+      - cpp/order_flow/src/infra/ledger_client.cpp
+      - cpp/order_flow/src/infra/risk_client.cpp
+      - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+      - cpp/order_flow/src/transport/grpc_order_flow_service.cpp
+      - cpp/order_flow/CMakeLists.txt
+    grpcPort: 50051
+    kafkaProduces:
+      - orders.normalized
+    kafkaConsumes: []
+
+  matching:
+    codePath: cpp/matching
+    role: batch-clearing
+    docsPath: docs/05-components/matching-fob-core
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-04
+    keyFiles:
+      - cpp/matching/src/main.cpp
+      - cpp/matching/src/app/matching_loop.cpp
+      - cpp/matching/src/app/matching_loop.hpp
+      - cpp/matching/src/domain/solver.hpp
+      - cpp/matching/CMakeLists.txt
+    grpcPort: null
+    kafkaProduces:
+      - batch.outputs
+    kafkaConsumes:
+      - orders.normalized
+
+  ledger:
+    codePath: cpp/ledger
+    role: ledger-balances-reservations
+    docsPath: docs/05-components/ledger
+    protoContracts:
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/execution/v1/execution.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-04
+      - F-06
+      - F-12
+    keyFiles:
+      - cpp/ledger/src/main.cpp
+      - cpp/ledger/src/app/ledger_uc.cpp
+      - cpp/ledger/src/app/ledger_uc.hpp
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/ledger/src/transport/grpc_ledger_service.cpp
+      - cpp/ledger/CMakeLists.txt
+    grpcPort: 50053
+    kafkaProduces: []
+    kafkaConsumes:
+      - batch.outputs
+      - execution.reports
+
+  risk:
+    codePath: cpp/risk
+    role: risk-manager
+    docsPath: docs/05-components/risk-manager
+    protoContracts:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-07
+    keyFiles:
+      - cpp/risk/src/main.cpp
+      - cpp/risk/src/app/risk_uc.cpp
+      - cpp/risk/src/app/risk_uc.hpp
+      - cpp/risk/src/infra/risk_alerts_publisher.cpp
+      - cpp/risk/src/transport/grpc_risk_service.cpp
+      - cpp/risk/CMakeLists.txt
+    grpcPort: 50052
+    kafkaProduces:
+      - risk.alerts
+    kafkaConsumes: []
+
+  market-data:
+    codePath: cpp/market_data
+    role: live-market-data
+    docsPath: docs/05-components/market-data
+    protoContracts:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-05
+    keyFiles:
+      - cpp/market_data/src/main.cpp
+      - cpp/market_data/src/app/market_data_uc.cpp
+      - cpp/market_data/src/app/market_data_uc.hpp
+      - cpp/market_data/src/infra/kafka_consumer.cpp
+      - cpp/market_data/src/transport/grpc_market_data_service.cpp
+      - cpp/market_data/CMakeLists.txt
+    grpcPort: 50054
+    kafkaProduces: []
+    kafkaConsumes:
+      - marketdata.raw
+
+  venues:
+    codePath: cpp/venues
+    role: external-venues-adapter
+    docsPath: docs/05-components/external-venues
+    protoContracts:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/execution/v1/execution.proto
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-05
+      - F-11
+      - F-12
+    keyFiles:
+      - cpp/venues/src/main.cpp
+      - cpp/venues/src/app/venues_loop.cpp
+      - cpp/venues/src/app/venues_loop.hpp
+      - cpp/venues/CMakeLists.txt
+    grpcPort: null
+    kafkaProduces:
+      - marketdata.raw
+      - execution.reports
+    kafkaConsumes:
+      - execution.intents
+
+  observability:
+    codePath: cpp/observability
+    role: metrics-alerts-aggregator
+    docsPath: docs/05-components/observability-reporting
+    protoContracts:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/execution/v1/execution.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+    features:
+      - F-04
+      - F-05
+      - F-07
+      - F-11
+      - F-12
+      - F-15
+    keyFiles:
+      - cpp/observability/src/main.cpp
+      - cpp/observability/src/app/obs_loop.cpp
+      - cpp/observability/src/app/obs_loop.hpp
+      - cpp/observability/CMakeLists.txt
+    grpcPort: null
+    kafkaProduces: []
+    kafkaConsumes:
+      - risk.alerts
+      - batch.outputs
+      - execution.reports
+
+  contracts-proto:
+    codePath: contracts/proto
+    role: protobuf-source-of-truth
+    docsPath: docs/06-api/grpc
+    files:
+      - contracts/proto/fob/agent/v1/agent.proto
+      - contracts/proto/fob/common/v1/common.proto
+      - contracts/proto/fob/execution/v1/execution.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+    build:
+      - contracts/CMakeLists.txt
+
+  infra:
+    codePath: infra
+    role: infrastructure-and-deployment
+    docsPath: docs/08-infrastructure
+    files:
+      - infra/docker-compose.dev.yml
+      - infra/k8s/gateway.yaml
+      - infra/k8s/order_flow.yaml
+      - infra/kafka/create_topics.sh
+      - docker/Dockerfile.service
+    features: []
+
+  legacy-mvp:
+    codePath: legacy_mvp
+    role: legacy-reference-and-migration-source
+    docsPath: docs/09-implementation/migration-from-legacy-mvp.md
+    status: legacy
+    notes:
+      - "Используется как источник исторической реализации и миграционной карты, не как основной target."

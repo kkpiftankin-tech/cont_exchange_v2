@@ -1,0 +1,51 @@
+feature:
+  id: F-08
+  name: Post-trade Risk Monitoring & Liquidations
+  status: not-implemented
+  owner: core-team
+
+description: >
+  После каждого batch пересчитывает margin/VaR/exposure по пользователям.
+  При margin shortfall — генерирует margin call. При неуплате — инициирует
+  принудительную ликвидацию позиций.
+
+primaryComponents:
+  - risk
+  - ledger
+  - matching
+  - observability
+
+protoContracts:
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+
+codePaths: []
+
+kafkaTopics:
+  produces:
+    - risk.alerts
+  consumes:
+    - batch.outputs
+
+acceptanceCriteria:
+  - "После каждого BatchResult Risk пересчитывает margin для затронутых пользователей."
+  - "При margin < maintenance — формируется margin call в Kafka и UI."
+  - "При неоплате в течение N минут — принудительная ликвидация через matching."
+  - "Все liquidation-события логируются в risk_events для аудита."
+
+knownIssues:
+  - id: no-position-tracking
+    severity: blocker
+    description: Нет таблицы positions; невозможно считать margin
+  - id: no-var-cvar
+    severity: feature-gap
+    description: VaR/CVaR не считаются; risk stateless
+  - id: no-liquidation-engine
+    severity: feature-gap
+    description: Нет автоматической инициации ликвидации
+
+tests:
+  unit: []
+  integration: []
+  contract: []

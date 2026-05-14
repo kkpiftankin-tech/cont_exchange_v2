@@ -1,0 +1,55 @@
+# Файлы, которые LLM не должен использовать как контекст или модифицировать.
+
+# Бинарники и артефакты сборки
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pb.h
+*.pb.cc
+*.grpc.pb.h
+*.grpc.pb.cc
+
+# Зависимости и third-party (источник истины — upstream, не наш репо)
+third_party/
+node_modules/
+vendor/
+
+# Авто-генерация из swagger / wire (нет смысла комментировать)
+legacy_mvp/main/internal/restapi/operations/
+legacy_mvp/main/internal/restapi/embedded_spec.go
+legacy_mvp/**/wire_gen.go
+
+# Frontend bundle
+legacy_mvp/frontend/build/
+legacy_mvp/frontend/node_modules/
+legacy_mvp/frontend/public/
+
+# Локальные env и секреты — никогда не читать и не писать
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+infra/env/*.local
+
+# Кэш и временное
+.cache/
+.tmp/
+.DS_Store
+*.swp
+
+# Документация автогенерирована — LLM пишет в /generated через tools/, не вручную
+docs/generated/
+
+# Отчёты LLM-инструментов
+llm/reports/*.md
+!llm/reports/.gitkeep

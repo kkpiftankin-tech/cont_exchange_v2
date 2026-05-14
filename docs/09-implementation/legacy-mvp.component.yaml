@@ -1,0 +1,41 @@
+component:
+  id: legacy-mvp
+  name: Legacy MVP (Go/React)
+  layer: legacy
+  status: legacy-reference
+  codePath: legacy_mvp
+  owner: archive
+
+responsibility:
+  summary: >
+    Старый MVP биржи на Go (+ React frontend, C++ matching_engine).
+    Сохранён как справочный материал и источник миграционной карты;
+    не основной target для новых фич.
+
+sourceTreeEvidence:
+  services:
+    - legacy_mvp/auth
+    - legacy_mvp/main
+    - legacy_mvp/matching_engine
+    - legacy_mvp/executor
+    - legacy_mvp/fetcher
+    - legacy_mvp/generator
+    - legacy_mvp/receiver
+    - legacy_mvp/reporter
+  frontend:
+    - legacy_mvp/frontend
+  shared:
+    - legacy_mvp/pkg
+
+features: []
+
+dependencies:
+  upstream: []
+  downstream: []
+
+migrationMap: docs/09-implementation/migration-map.md
+
+notes:
+  - "Никаких новых фич не реализуется в legacy_mvp."
+  - "Документация существует, чтобы LLM могла обращаться к ней как к историческому источнику."
+  - "Большая часть Go-кода в restapi/operations и embedded_spec — автогенерация из Swagger."

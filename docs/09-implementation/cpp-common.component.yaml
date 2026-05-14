@@ -1,0 +1,58 @@
+component:
+  id: cpp-common
+  name: C++ Common Library
+  layer: shared
+  status: active
+  codePath: cpp/common
+  owner: core-team
+
+responsibility:
+  summary: >
+    Общая C++ библиотека: фиксированная точка Decimal, обёртки над Kafka,
+    JSON-логгер, утилиты времени и UUID, сериализация protobuf.
+    Линкуется во все остальные C++ сервисы.
+
+sourceTreeEvidence:
+  headers:
+    - cpp/common/include/cex/common/decimal.hpp
+    - cpp/common/include/cex/common/env.hpp
+    - cpp/common/include/cex/common/kafka.hpp
+    - cpp/common/include/cex/common/log.hpp
+    - cpp/common/include/cex/common/proto.hpp
+    - cpp/common/include/cex/common/time.hpp
+    - cpp/common/include/cex/common/uuid.hpp
+  sources:
+    - cpp/common/src/decimal.cpp
+    - cpp/common/src/env.cpp
+    - cpp/common/src/kafka.cpp
+    - cpp/common/src/log.cpp
+    - cpp/common/src/proto.cpp
+    - cpp/common/src/time.cpp
+    - cpp/common/src/uuid.cpp
+  build:
+    - cpp/common/CMakeLists.txt
+
+features: []
+
+protoContracts:
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - Decimal
+
+dependencies:
+  upstream: []
+  downstream:
+    - gateway
+    - order-flow
+    - matching
+    - ledger
+    - risk
+    - market-data
+    - venues
+    - observability
+
+tests:
+  unit: []
+  integration: []
+  contract: []

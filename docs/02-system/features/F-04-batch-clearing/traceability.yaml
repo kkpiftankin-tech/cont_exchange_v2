@@ -1,0 +1,61 @@
+featureId: F-04
+
+components:
+  - id: matching
+    role: primary
+    codePath: cpp/matching
+  - id: ledger
+    role: consumer
+    codePath: cpp/ledger
+  - id: risk
+    role: post-trade-callback
+    codePath: cpp/risk
+  - id: market-data
+    role: reference-prices-provider
+    codePath: cpp/market_data
+    status: not-integrated
+  - id: observability
+    role: telemetry-consumer
+    codePath: cpp/observability
+
+protoContracts:
+  - file: contracts/proto/fob/matching/v1/batch.proto
+    role: source-of-truth-for-BatchResult
+  - file: contracts/proto/fob/orders/v1/orders.proto
+    role: FlowOrder-and-OrdersNormalized
+  - file: contracts/proto/fob/ledger/v1/ledger.proto
+    role: ApplyBatchResult-API
+  - file: contracts/proto/fob/observability/v1/observability.proto
+    role: alerts-and-metrics
+
+kafkaTopics:
+  - name: orders.normalized
+    direction: in
+    producer: order-flow
+    consumer: matching
+  - name: batch.outputs
+    direction: out
+    producer: matching
+    consumer:
+      - ledger
+      - observability
+
+codeMap:
+  entry: cpp/matching/src/main.cpp
+  loop: cpp/matching/src/app/matching_loop.cpp
+  solverInterface: cpp/matching/src/domain/solver.hpp
+  consumer: cpp/ledger/src/infra/kafka_consumers.cpp
+  ledgerApply: cpp/ledger/src/app/ledger_uc.cpp
+
+tests:
+  unit:
+    expected:
+      - tests/unit/matching/solve_batch_symmetric
+      - tests/unit/matching/solve_batch_portfolio
+      - tests/unit/matching/residual_norm_convergence
+    actual: []
+  integration:
+    expected:
+      - tests/integration/f04-full-cycle
+      - tests/integration/f04-sla-load
+    actual: []

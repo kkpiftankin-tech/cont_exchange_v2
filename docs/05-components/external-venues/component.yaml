@@ -1,0 +1,67 @@
+component:
+  id: venues
+  name: External Venues Adapter
+  layer: edge
+  status: active-mvp-simulator
+  codePath: cpp/venues
+  owner: core-team
+
+responsibility:
+  summary: >
+    Адаптеры к внешним торговым площадкам. В MVP — симулятор: публикует
+    синтетический Ticker в marketdata.raw и отвечает на execution.intents
+    мгновенным FILLED в execution.reports.
+
+sourceTreeEvidence:
+  main:
+    - cpp/venues/src/main.cpp
+  app:
+    - cpp/venues/src/app/venues_loop.hpp
+    - cpp/venues/src/app/venues_loop.cpp
+  build:
+    - cpp/venues/CMakeLists.txt
+
+features:
+  - F-05
+  - F-11
+  - F-12
+
+protoContracts:
+  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+  - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - Ticker
+  - ExecutionIntent
+  - ExecutionReport
+
+dependencies:
+  upstream: []
+  downstream: []
+
+kafkaProduces:
+  - topic: marketdata.raw
+    messageType: fob.marketdata.v1.MarketDataRaw
+    partitionKey: venue_symbol
+  - topic: execution.reports
+    messageType: fob.execution.v1.ExecutionReport
+    partitionKey: intent_id
+
+kafkaConsumes:
+  - topic: execution.intents
+    messageType: fob.execution.v1.ExecutionIntent
+    consumerGroup: venues
+
+knownIssues:
+  - id: simulator-only
+    severity: feature-gap
+    description: Только синтетический Ticker и instant-fill; нет реальных venue
+  - id: no-lob-to-fob
+    severity: feature-gap
+    description: Нет преобразования внешнего LOB в FOB-формат (F-11)
+
+tests:
+  unit: []
+  integration: []
+  contract: []

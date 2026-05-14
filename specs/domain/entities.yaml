@@ -1,0 +1,242 @@
+entities:
+  Decimal:
+    description: Фиксированная точка; реальное значение = units * 10^(-scale)
+    source: contracts/proto/fob/common/v1/common.proto
+    cppRepresentation: cpp/common/include/cex/common/decimal.hpp
+    fields:
+      units: int64
+      scale: int32
+
+  Side:
+    description: Сторона ордера
+    source: contracts/proto/fob/common/v1/common.proto
+    type: enum
+    values:
+      - SIDE_UNSPECIFIED
+      - SIDE_BUY
+      - SIDE_SELL
+
+  Instrument:
+    description: Торговая пара
+    source: contracts/proto/fob/common/v1/common.proto
+    fields:
+      symbol: string   # "BTC/USDT"
+      base: string     # "BTC"
+      quote: string    # "USDT"
+
+  OrderStatus:
+    description: Статус ордера
+    source: contracts/proto/fob/common/v1/common.proto
+    type: enum
+    values:
+      - ORDER_STATUS_UNSPECIFIED
+      - ORDER_STATUS_NEW
+      - ORDER_STATUS_PARTIALLY_FILLED
+      - ORDER_STATUS_FILLED
+      - ORDER_STATUS_CANCELED
+      - ORDER_STATUS_REJECTED
+
+  EventMeta:
+    description: Общая meta для всех событий и запросов
+    source: contracts/proto/fob/common/v1/common.proto
+    fields:
+      event_id: string
+      ts_event: google.protobuf.Timestamp
+      source: string
+      correlation_id: string
+      partition_key: string
+
+  FlowOrder:
+    description: Поточный ордер с диапазоном цены и максимальной скоростью
+    source: contracts/proto/fob/orders/v1/orders.proto
+    features:
+      - F-02
+      - F-04
+    fields:
+      order_id: string
+      client_order_id: string
+      user_id: string
+      account_id: string
+      instrument: Instrument
+      side: Side
+      total_qty: Decimal
+      remaining_qty: Decimal
+      price_low: Decimal
+      price_high: Decimal
+      max_speed: Decimal
+      status: OrderStatus
+      created_at: google.protobuf.Timestamp
+      updated_at: google.protobuf.Timestamp
+    knownGaps:
+      - "Нет полей w_i (portfolio weights) для multi-leg"
+      - "Нет полей windowStart / windowEnd (окно активности)"
+      - "Нет filledCum (есть remaining_qty, но семантика другая)"
+
+  OrdersNormalized:
+    description: Kafka-событие команды над ордером (create/cancel/amend)
+    source: contracts/proto/fob/orders/v1/orders.proto
+    features:
+      - F-02
+      - F-04
+    kafkaTopic: orders.normalized
+    variants:
+      - create
+      - cancel
+      - amend
+
+  BatchResult:
+    description: Результат одного цикла батч-клиринга
+    source: contracts/proto/fob/matching/v1/batch.proto
+    features:
+      - F-04
+    kafkaTopic: batch.outputs
+    fields:
+      batch_id: string
+      timestamp: google.protobuf.Timestamp
+      clear_prices: map<string, Decimal>     # symbol -> price
+      executed_rates: map<string, Decimal>   # order_id -> rate
+      fills: list<Fill>
+      order_updates: list<OrderUpdate>
+      diagnostics: BatchDiagnostics
+
+  Fill:
+    description: Конкретное исполнение конкретного FlowOrder в батче
+    source: contracts/proto/fob/matching/v1/batch.proto
+    features:
+      - F-04
+    fields:
+      order_id: string
+      user_id: string
+      instrument: Instrument
+      side: Side
+      executed_qty: Decimal
+      price: Decimal
+      executed_notional: Decimal
+    plannedFields:
+      fill_id: string                   # уникальный id исполнения
+      batch_id: string                  # ссылка на BatchResult
+      liquidity_source: enum            # internal / cexhedge / dexhedge / epsilonmm
+      fees: Decimal                     # комиссия
+      timestamp: google.protobuf.Timestamp
+      asset_legs: list                  # для multi-leg portfolio orders (F-09)
+    knownGaps:
+      - "Нет fill_id (уникальный id исполнения)"
+      - "Нет liquidity_source (internal / cexhedge / dexhedge / epsilonmm)"
+      - "Нет fees"
+      - "Нет timestamp на уровне fill"
+      - "Нет asset_legs для portfolio/combo orders (F-09)"
+
+  BatchDiagnostics:
+    description: Диагностика солвера
+    source: contracts/proto/fob/matching/v1/batch.proto
+    features:
+      - F-04
+    fields:
+      residual_norm: double
+      solve_time_ms: int64
+      num_active_orders: uint32
+      solver_diagnostics_json: string
+      config_version: int32
+
+  Balance:
+    description: Баланс пользователя по валюте
+    cppRepresentation: cpp/ledger/src/app/ledger_uc.hpp
+    features:
+      - F-06
+    fields:
+      available: Decimal
+      reserved: Decimal
+
+  Reservation:
+    description: Резерв средств под открытый ордер
+    cppRepresentation: cpp/ledger/src/app/ledger_uc.hpp
+    features:
+      - F-02
+      - F-06
+    fields:
+      user_id: string
+      order_id: string
+      currency: string
+      amount: Decimal
+
+  PreTradeCheckRequest:
+    description: Запрос pre-trade проверки нового ордера
+    source: contracts/proto/fob/risk/v1/risk.proto
+    features:
+      - F-07
+    fields:
+      meta: EventMeta
+      user_id: string
+      order: FlowOrder
+      reference_price: Decimal
+
+  RiskAlert:
+    description: Алерт от risk-сервиса
+    source: contracts/proto/fob/risk/v1/risk.proto
+    features:
+      - F-07
+    kafkaTopic: risk.alerts
+    fields:
+      alert_id: string
+      severity: enum
+      user_id: string
+      instrument_symbol: string
+      alert_type: string
+      timestamp: google.protobuf.Timestamp
+
+  Ticker:
+    description: Текущая цена по паре (venue, symbol)
+    source: contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+    features:
+      - F-05
+    fields:
+      venue: string
+      instrument: Instrument
+      bid: Decimal
+      ask: Decimal
+      last: Decimal
+      spread: Decimal
+      timestamp: google.protobuf.Timestamp
+
+  MarketDataRaw:
+    description: Поток рыночных данных от venues
+    source: contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+    features:
+      - F-05
+      - F-11
+    kafkaTopic: marketdata.raw
+    variants:
+      - ticker
+      - trade
+      - order_book_l2_update
+
+  ExecutionIntent:
+    description: Намерение исполнить хедж на внешней venue
+    source: contracts/proto/fob/execution/v1/execution.proto
+    features:
+      - F-12
+    kafkaTopic: execution.intents
+    fields:
+      intent_id: string
+      venue: string
+      instrument: Instrument
+      venue_symbol: string
+      target_qty: Decimal
+      limit_price: Decimal
+      client_order_id: string
+
+  ExecutionReport:
+    description: Отчёт о хедж-операции на внешней venue
+    source: contracts/proto/fob/execution/v1/execution.proto
+    features:
+      - F-12
+    kafkaTopic: execution.reports
+    fields:
+      report_id: string
+      intent_id: string
+      venue: string
+      venue_order_id: string
+      status: OrderStatus
+      filled_qty: Decimal
+      remaining_qty: Decimal
+      average_price: Decimal

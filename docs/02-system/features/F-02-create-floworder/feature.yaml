@@ -1,0 +1,75 @@
+feature:
+  id: F-02
+  name: Create FlowOrder
+  status: in-progress-mvp
+  owner: core-team
+
+description: >
+  Клиент создаёт FlowOrder через HTTP API gateway или напрямую через gRPC.
+  Запрос проходит валидацию, pre-trade risk-check, резерв средств в ledger
+  и публикуется в Kafka как orders.normalized для матчинга.
+
+primaryComponents:
+  - gateway
+  - order-flow
+  - risk
+  - ledger
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/orders/v1/order_flow_service.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+
+codePaths:
+  - cpp/gateway/src/transport/http_gateway.cpp
+  - cpp/gateway/src/infra/order_flow_client.cpp
+  - cpp/order_flow/src/app/order_flow_uc.cpp
+  - cpp/order_flow/src/transport/grpc_order_flow_service.cpp
+  - cpp/order_flow/src/infra/risk_client.cpp
+  - cpp/order_flow/src/infra/ledger_client.cpp
+  - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+
+kafkaTopics:
+  produces:
+    - orders.normalized
+  consumes: []
+
+grpcServices:
+  exposes:
+    - fob.orders.v1.OrderFlowService.CreateFlowOrder
+    - fob.orders.v1.OrderFlowService.CancelFlowOrder
+    - fob.orders.v1.OrderFlowService.GetFlowOrder
+  calls:
+    - fob.risk.v1.RiskService.CheckNewOrder
+    - fob.ledger.v1.LedgerService.ReserveFunds
+    - fob.ledger.v1.LedgerService.ReleaseFunds
+
+acceptanceCriteria:
+  - "POST /v1/flow-orders создаёт FlowOrder и возвращает order_id."
+  - "При valid входе: risk-check → reserve funds → publish orders.normalized."
+  - "При risk REJECT: HTTP 200 с accepted=false и error.code."
+  - "При недостатке средств: accepted=false с error.code=INSUFFICIENT_FUNDS."
+  - "CancelFlowOrder идемпотентен по order_id."
+
+knownIssues:
+  - id: no-auth
+    severity: feature-gap
+    description: Нет аутентификации/авторизации на gateway
+  - id: no-rate-limit
+    severity: feature-gap
+    description: Нет rate-limiting на edge
+  - id: buy-reserve-leak
+    severity: critical
+    description: См. F-04 knownIssues
+  - id: cancel-double-count
+    severity: critical
+    description: См. F-04 knownIssues
+  - id: orders-cache-not-thread-safe
+    severity: bug
+    description: in-memory orders_ в order_flow_uc без мьютекса
+
+tests:
+  unit: []
+  integration: []
+  contract: []

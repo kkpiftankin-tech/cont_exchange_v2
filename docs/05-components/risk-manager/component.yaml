@@ -1,0 +1,74 @@
+component:
+  id: risk
+  name: Risk Manager
+  layer: core
+  status: active-mvp
+  codePath: cpp/risk
+  owner: core-team
+
+responsibility:
+  summary: >
+    Pre-trade проверки (CheckNewOrder), управление kill-switch
+    (глобальный и по инструменту), публикация RiskAlert в Kafka.
+
+sourceTreeEvidence:
+  main:
+    - cpp/risk/src/main.cpp
+  app:
+    - cpp/risk/src/app/risk_uc.hpp
+    - cpp/risk/src/app/risk_uc.cpp
+  infra:
+    - cpp/risk/src/infra/risk_alerts_publisher.hpp
+    - cpp/risk/src/infra/risk_alerts_publisher.cpp
+  transport:
+    - cpp/risk/src/transport/grpc_risk_service.hpp
+    - cpp/risk/src/transport/grpc_risk_service.cpp
+  build:
+    - cpp/risk/CMakeLists.txt
+
+features:
+  - F-07
+  - F-12
+
+protoContracts:
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - PreTradeCheckRequest
+  - PreTradeCheckResponse
+  - KillSwitchRequest
+  - RiskAlert
+
+dependencies:
+  upstream:
+    - order-flow  # CheckNewOrder
+  downstream: []
+
+grpc:
+  port: 50052
+  envListen: RISK_GRPC_LISTEN
+  services:
+    - fob.risk.v1.RiskService
+
+kafkaProduces:
+  - topic: risk.alerts
+    messageType: fob.risk.v1.RiskAlert
+    partitionKey: user_id_or_alert_id
+
+knownIssues:
+  - id: placeholder-margin
+    severity: feature-gap
+    description: margin = qty * ref_price * 0.1; не учитывает диапазон цен FOB-ордера
+    location: cpp/risk/src/app/risk_uc.cpp#L67-L75
+  - id: stateless-risk
+    severity: feature-gap
+    description: Нет учёта open positions, лимитов и VaR
+  - id: kill-switch-in-memory
+    severity: bug
+    description: Состояние kill-switch теряется при рестарте
+
+tests:
+  unit: []
+  integration: []
+  contract: []

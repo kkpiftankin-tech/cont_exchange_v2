@@ -1,0 +1,36 @@
+feature:
+  id: F-10
+  name: Market-Maker Liquidity Curves
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Маркет-мейкер публикует двухсторонние CSLO-кривые (цена-скорость) с
+  параметрами p_low, p_high, slope, max speed, inventory caps. Кривые
+  участвуют в каждом batch-clearing как часть совокупного предложения.
+
+primaryComponents:
+  - order-flow
+  - matching
+  - ledger
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+
+codePaths: []
+
+acceptanceCriteria:
+  - "MM публикует пару кривых (bid/ask) с slope и max speed."
+  - "Кривые участвуют в матчинге как поставщики ликвидности."
+  - "MM видит в real-time PnL, inventory, adverse selection."
+  - "MM может изменять параметры кривой без полной отмены."
+
+knownIssues:
+  - id: csl-not-extended
+    severity: blocker
+    description: proto FlowOrder не поддерживает slope/curve, только point parameters
+
+tests:
+  unit: []
+  integration: []
+  contract: []

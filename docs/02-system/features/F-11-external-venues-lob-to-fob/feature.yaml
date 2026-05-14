@@ -1,0 +1,46 @@
+feature:
+  id: F-11
+  name: External Venues LOB to FOB
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Преобразование внешнего лимитного ордербука (LOB) с Binance/Coinbase в
+  FOB-представление (price range + speed) для подачи в matching solver
+  как источник внешней ликвидности.
+
+primaryComponents:
+  - venues
+  - market-data
+  - matching
+
+protoContracts:
+  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+  - contracts/proto/fob/execution/v1/execution.proto
+
+codePaths:
+  - cpp/venues/src/app/venues_loop.cpp
+
+kafkaTopics:
+  produces:
+    - marketdata.raw
+  consumes: []
+
+grpcServices:
+  exposes: []
+  calls: []
+
+acceptanceCriteria:
+  - "venues подключается к real venue (REST/WS)"
+  - "OrderBookL2 transformиruется в FOB-curve и публикуется"
+  - "matching solver использует внешнюю ликвидность через виртуальные FlowOrder"
+
+knownIssues:
+  - id: no-real-venue-connector
+    severity: blocker
+    description: В cpp/venues только симулятор; нет реальных коннекторов
+
+tests:
+  unit: []
+  integration: []
+  contract: []

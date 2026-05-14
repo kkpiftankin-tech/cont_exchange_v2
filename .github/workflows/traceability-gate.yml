@@ -1,0 +1,32 @@
+name: traceability-gate
+
+on:
+  pull_request:
+
+jobs:
+  traceability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python tools
+        run: pip install pyyaml
+
+      - name: Check traceability integrity
+        run: python tools/traceability-checker/check.py
+
+      - name: Check PR title or description references a feature ID
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if echo "$PR_TITLE $PR_BODY" | grep -qE '\bF-[0-9]+\b|traceability:\s*waived'; then
+            echo "Feature ID or waiver found."
+          else
+            echo "PR title/description must contain a feature ID like F-04 OR 'traceability: waived (reason: ...)'."
+            exit 1
+          fi

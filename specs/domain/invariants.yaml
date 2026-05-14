@@ -1,0 +1,74 @@
+invariants:
+  decimal-arithmetic:
+    id: INV-001
+    description: >
+      Никакая денежная или количественная величина не должна выражаться в double/float.
+      Только Decimal{units, scale}.
+    enforced:
+      - cpp/common/include/cex/common/decimal.hpp
+    violations:
+      - location: cpp/gateway/src/transport/http_gateway.cpp:dec_from_double
+        reason: На границе HTTP/JSON допустимо как edge-конверсия; внутри сервисов не используется.
+
+  reservation-idempotency:
+    id: INV-002
+    description: >
+      ReserveFunds идемпотентен по reservation_id. Повторный вызов с тем же id
+      не должен менять баланс, должен вернуть success=true и сумму резерва.
+    enforced:
+      - cpp/ledger/src/app/ledger_uc.cpp:ReserveFunds
+    feature: F-06
+
+  fob-pricing-range:
+    id: INV-003
+    description: >
+      В FlowOrder всегда выполняется price_low <= price_high.
+    enforced:
+      - cpp/order_flow/src/app/order_flow_uc.cpp:validate_order
+      - cpp/risk/src/app/risk_uc.cpp:CheckNewOrder
+    feature: [F-02, F-07]
+
+  clearing-price-in-range:
+    id: INV-004
+    description: >
+      Для каждого инструмента в BatchResult должно выполняться:
+      min_i(price_low_i) <= clear_prices[symbol] <= max_i(price_high_i).
+    enforced:
+      - planned
+    status: not-enforced-in-current-code
+    notes:
+      - "Текущий matching выдаёт per-order midpoint, поэтому формально может нарушать инвариант."
+    feature: F-04
+
+  conservation-of-money:
+    id: INV-005
+    description: >
+      После применения BatchResult в ledger сумма всех изменений по каждой валюте должна
+      быть равна 0 (что один пользователь списывает, другой получает).
+    enforced:
+      - planned
+    status: not-enforced-in-current-code
+    notes:
+      - "Из-за per-order pricing в matching, BUY и SELL по одному инструменту могут получить разные цены, нарушая инвариант."
+    feature: F-04
+
+  kafka-at-least-once:
+    id: INV-006
+    description: >
+      Все Kafka-потребители используют enable.auto.commit=false и commitSync ПОСЛЕ обработки.
+      Это гарантирует at-least-once и допускает повторную обработку при крэше.
+    enforced:
+      - cpp/common/src/kafka.cpp:poll_once
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/matching/src/app/matching_loop.cpp
+      - cpp/market_data/src/infra/kafka_consumer.cpp
+
+  partition-key-stability:
+    id: INV-007
+    description: >
+      События по одному логическому объекту (ордеру, паре) попадают в одну партицию.
+      orders.normalized — по symbol; risk.alerts — по user_id; и т.п.
+    enforced:
+      - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+      - cpp/risk/src/infra/risk_alerts_publisher.cpp
+      - cpp/venues/src/app/venues_loop.cpp

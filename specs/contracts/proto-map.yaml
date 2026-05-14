@@ -1,0 +1,162 @@
+protoContracts:
+  common:
+    files:
+      - contracts/proto/fob/common/v1/common.proto
+    features:
+      - F-02
+      - F-04
+      - F-05
+      - F-06
+      - F-07
+    components:
+      - cpp-common
+      - gateway
+      - order-flow
+      - matching
+      - ledger
+      - risk
+      - market-data
+      - venues
+      - observability
+    entities:
+      - Decimal
+      - Side
+      - Instrument
+      - OrderStatus
+      - EventMeta
+      - ErrorInfo
+
+  orders:
+    files:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+    features:
+      - F-02
+      - F-04
+      - F-09
+    components:
+      - order-flow
+      - gateway
+      - matching
+    entities:
+      - FlowOrder
+      - OrdersNormalized
+      - CreateFlowOrderRequest
+      - CancelFlowOrderRequest
+      - GetFlowOrderRequest
+
+  matching:
+    files:
+      - contracts/proto/fob/matching/v1/batch.proto
+    features:
+      - F-04
+      - F-09
+    components:
+      - matching
+      - ledger
+      - observability
+    entities:
+      - BatchResult
+      - Fill
+      - OrderUpdate
+      - BatchDiagnostics
+
+  marketdata:
+    files:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+    features:
+      - F-05
+      - F-11
+    components:
+      - market-data
+      - venues
+    entities:
+      - MarketDataRaw
+      - Ticker
+      - Trade
+      - OrderBookL2Update
+      - GetLastTickerRequest
+      - GetLastTickerResponse
+
+  risk:
+    files:
+      - contracts/proto/fob/risk/v1/risk.proto
+    features:
+      - F-07
+      - F-12
+    components:
+      - risk
+      - order-flow
+    entities:
+      - PreTradeCheckRequest
+      - PreTradeCheckResponse
+      - KillSwitchRequest
+      - KillSwitchResponse
+      - PostTradeUpdateRequest
+      - RiskAlert
+      - RiskDecision
+
+  ledger:
+    files:
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    features:
+      - F-02
+      - F-04
+      - F-06
+      - F-12
+    components:
+      - ledger
+      - order-flow
+      - risk
+    entities:
+      - GetBalancesRequest
+      - GetBalancesResponse
+      - ReserveFundsRequest
+      - ReserveFundsResponse
+      - ReleaseFundsRequest
+      - ApplyBatchResultRequest
+      - ApplyBatchResultResponse
+      - ApplyExecutionReportRequest
+
+  execution:
+    files:
+      - contracts/proto/fob/execution/v1/execution.proto
+    features:
+      - F-12
+    components:
+      - venues
+      - ledger
+      - matching
+    entities:
+      - ExecutionIntent
+      - ExecutionReport
+
+  observability:
+    files:
+      - contracts/proto/fob/observability/v1/observability.proto
+    features:
+      - F-04
+      - F-05
+      - F-07
+      - F-11
+      - F-12
+      - F-15
+    components:
+      - observability
+    entities:
+      - MetricPoint
+      - Alert
+      - HealthStatus
+
+  agent:
+    files:
+      - contracts/proto/fob/agent/v1/agent.proto
+    features:
+      - F-15
+    components:
+      - observability
+    entities:
+      - ReplaySession
+      - AgentLog
+      - ReplaySummary

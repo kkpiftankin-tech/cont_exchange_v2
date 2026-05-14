@@ -1,0 +1,64 @@
+component:
+  id: infra
+  name: Infrastructure
+  layer: infra
+  status: active-dev
+  codePath: infra
+  owner: core-team
+
+responsibility:
+  summary: >
+    Docker-образы, docker-compose для dev, k8s манифесты, скрипты для Kafka.
+    Точка для конфигурации запуска кластера.
+
+sourceTreeEvidence:
+  docker:
+    - docker/Dockerfile.service
+  compose:
+    - infra/docker-compose.dev.yml
+  env:
+    - infra/env
+  k8s:
+    - infra/k8s/gateway.yaml
+    - infra/k8s/order_flow.yaml
+  kafka:
+    - infra/kafka/create_topics.sh
+
+features: []
+
+dependencies:
+  upstream:
+    - gateway
+    - order-flow
+    - matching
+    - ledger
+    - risk
+    - market-data
+    - venues
+    - observability
+  downstream: []
+
+kafkaTopics:
+  - name: marketdata.raw
+    retentionMs: 3600000
+  - name: orders.normalized
+    retentionMs: 604800000
+  - name: batch.outputs
+    retentionMs: 604800000
+  - name: execution.intents
+    retentionMs: 86400000
+  - name: execution.reports
+    retentionMs: 604800000
+  - name: risk.alerts
+    retentionMs: 2592000000
+
+knownIssues:
+  - id: partial-k8s
+    severity: feature-gap
+    description: k8s manifests есть только для gateway и order_flow
+  - id: no-mtls
+    severity: feature-gap
+    description: gRPC использует InsecureChannelCredentials
+  - id: no-helm
+    severity: feature-gap
+    description: Нет Helm-чартов или Kustomize overlay'ев

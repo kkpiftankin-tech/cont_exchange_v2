@@ -1,0 +1,80 @@
+systemState:
+  layers:
+    - id: contracts
+      description: Source of truth для wire-формата
+      sources: [contracts/proto/fob/**]
+      status: stable
+
+    - id: shared-libs
+      description: Общая C++ библиотека
+      sources: [cpp/common/**]
+      status: stable
+
+    - id: core-services
+      description: Активные C++ сервисы
+      sources:
+        - cpp/gateway/**
+        - cpp/order_flow/**
+        - cpp/matching/**
+        - cpp/ledger/**
+        - cpp/risk/**
+        - cpp/market_data/**
+        - cpp/venues/**
+        - cpp/observability/**
+      status: mvp
+
+    - id: infrastructure
+      description: Docker-compose, k8s manifests, Kafka topics
+      sources: [infra/**, docker/**]
+      status: dev-ready
+
+    - id: legacy
+      description: Старый Go MVP
+      sources: [legacy_mvp/**]
+      status: legacy-reference
+
+    - id: docs-overlay
+      description: Документация, спецификации, LLM инструкции
+      sources: [docs/**, specs/**, llm/**]
+      status: bootstrapping
+
+  persistence:
+    actual:
+      - type: in-memory
+        owner: ledger
+        what: balances + reservations
+      - type: in-memory
+        owner: order-flow
+        what: orders cache
+      - type: in-memory
+        owner: matching
+        what: active orders map
+      - type: in-memory
+        owner: market-data
+        what: last tickers
+      - type: in-memory
+        owner: risk
+        what: kill-switch state
+    planned:
+      - type: postgresql
+        owner: ledger
+        what: balances + reservations (event-sourced)
+      - type: postgresql
+        owner: order-flow
+        what: floworders OLTP
+      - type: clickhouse
+        owner: observability
+        what: batch_results, fills, metrics
+      - type: postgresql
+        owner: matching
+        what: solverconfig
+
+  security:
+    actual:
+      - InsecureChannelCredentials для gRPC (dev only)
+      - Нет auth/authz на gateway
+      - Нет rate-limiting
+    planned:
+      - mTLS между всеми сервисами
+      - JWT / OAuth2 на gateway
+      - Rate-limit per user/IP

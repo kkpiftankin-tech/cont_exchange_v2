@@ -1,0 +1,61 @@
+component:
+  id: gateway
+  name: HTTP API Gateway
+  layer: edge
+  status: active
+  codePath: cpp/gateway
+  owner: core-team
+
+responsibility:
+  summary: >
+    HTTP/REST edge для UI и внешних клиентов. Конвертирует JSON в proto и
+    проксирует запросы в order_flow по gRPC. Никакой бизнес-логики.
+
+sourceTreeEvidence:
+  main:
+    - cpp/gateway/src/main.cpp
+  transport:
+    - cpp/gateway/src/transport/http_gateway.hpp
+    - cpp/gateway/src/transport/http_gateway.cpp
+  infra:
+    - cpp/gateway/src/infra/order_flow_client.hpp
+    - cpp/gateway/src/infra/order_flow_client.cpp
+  build:
+    - cpp/gateway/CMakeLists.txt
+
+features:
+  - F-02
+  - F-05
+  - F-06
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/order_flow_service.proto
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - FlowOrder
+
+dependencies:
+  upstream: []
+  downstream:
+    - order-flow
+
+http:
+  port: 8080
+  envPort: GATEWAY_HTTP_PORT
+  endpoints:
+    - method: GET
+      path: /healthz
+      purpose: liveness
+    - method: GET
+      path: /readyz
+      purpose: readiness
+    - method: POST
+      path: /v1/flow-orders
+      purpose: create FlowOrder, proxy to order_flow
+
+tests:
+  unit: []
+  integration: []
+  contract: []

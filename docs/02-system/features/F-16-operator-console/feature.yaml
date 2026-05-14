@@ -1,0 +1,56 @@
+feature:
+  id: F-16
+  name: Operator Console & Kill-Switch
+  status: partially-implemented-in-risk
+  owner: core-team
+
+description: >
+  Панель оператора: обзор состояния всех сервисов, метрик batch
+  (solve time, residuals), активных алертов. Возможность приостановить
+  торги (kill-switch) глобально или по инструменту, изменить лимиты,
+  комиссии, epsilon-liquidity. Все действия логируются для аудита.
+
+primaryComponents:
+  - gateway
+  - risk
+  - matching
+  - observability
+
+protoContracts:
+  - contracts/proto/fob/risk/v1/risk.proto
+
+codePaths:
+  - cpp/risk/src/app/risk_uc.cpp   # SetKillSwitch
+  - cpp/risk/src/transport/grpc_risk_service.cpp
+
+grpcServices:
+  exposes:
+    - fob.risk.v1.RiskService.SetKillSwitch
+
+kafkaTopics:
+  produces:
+    - risk.alerts
+
+acceptanceCriteria:
+  - "SetKillSwitch с пустым symbol включает глобальный halt; CheckNewOrder возвращает HALT."
+  - "SetKillSwitch с symbol включает halt только по этой паре."
+  - "Каждое изменение публикует RiskAlert с severity CRITICAL."
+  - "Operator UI отображает текущее состояние kill_switch."
+  - "Все действия оператора логируются в risk_events для аудита."
+
+knownIssues:
+  - id: kill-switch-in-memory
+    severity: bug
+    description: Состояние kill_switch теряется при рестарте risk-сервиса
+    location: cpp/risk/src/app/risk_uc.hpp
+  - id: no-operator-ui
+    severity: feature-gap
+    description: Веб-консоль оператора не реализована
+  - id: no-audit-log
+    severity: feature-gap
+    description: Нет таблицы risk_events для постоянной фиксации действий
+
+tests:
+  unit: []
+  integration: []
+  contract: []

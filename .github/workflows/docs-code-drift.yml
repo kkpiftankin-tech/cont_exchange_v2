@@ -1,0 +1,41 @@
+name: docs-code-drift
+
+on:
+  pull_request:
+
+jobs:
+  docs-code-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python tools
+        run: pip install pyyaml
+
+      - name: Run docs-code drift check
+        id: drift
+        run: python tools/docs-code-drift/check.py
+        continue-on-error: true
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-doc-code-drift
+          path: llm/reports/latest-doc-code-drift.md
+
+      - name: Fail if drift found and no waiver
+        if: steps.drift.outcome == 'failure'
+        run: |
+          if echo "${{ github.event.pull_request.body }}" | grep -q '^drift-waiver:'; then
+            echo "Drift waiver found in PR description; allowing."
+          else
+            echo "Drift found and no waiver in PR description."
+            exit 1
+          fi

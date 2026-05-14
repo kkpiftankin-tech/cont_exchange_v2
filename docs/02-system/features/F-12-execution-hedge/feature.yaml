@@ -1,0 +1,53 @@
+feature:
+  id: F-12
+  name: Execution Hedge
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Хедж необработанной внутренним клирингом части FlowOrder на внешних venues.
+  matching формирует ExecutionIntent, venues исполняет, отдаёт ExecutionReport,
+  ledger применяет хедж-учёт.
+
+primaryComponents:
+  - venues
+  - risk
+  - ledger
+  - matching
+
+protoContracts:
+  - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+
+codePaths:
+  - cpp/venues/src/app/venues_loop.cpp
+
+kafkaTopics:
+  produces:
+    - execution.intents
+    - execution.reports
+  consumes: []
+
+grpcServices:
+  exposes: []
+  calls: []
+
+acceptanceCriteria:
+  - "matching формирует ExecutionIntent на остаток непокрытой позиции"
+  - "venues отправляет реальный ордер на внешнюю площадку"
+  - "ExecutionReport возвращается с ID venue и заполнениями"
+  - "ledger корректно учитывает хедж: списания на venue + balance adjust"
+
+knownIssues:
+  - id: no-intent-generation
+    severity: blocker
+    description: matching не генерирует ExecutionIntent
+  - id: no-hedge-accounting
+    severity: blocker
+    description: ledger ApplyExecutionReport только логирует, не обновляет балансы
+
+tests:
+  unit: []
+  integration: []
+  contract: []

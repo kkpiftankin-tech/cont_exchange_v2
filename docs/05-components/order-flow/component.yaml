@@ -1,0 +1,83 @@
+component:
+  id: order-flow
+  name: Order Flow Service
+  layer: core
+  status: active
+  codePath: cpp/order_flow
+  owner: core-team
+
+responsibility:
+  summary: >
+    Принимает команды создания/изменения FlowOrder, вызывает Risk Manager
+    (pre-trade), резервирует средства в Ledger, публикует orders.normalized
+    в Kafka. Точка входа доменной логики.
+
+sourceTreeEvidence:
+  main:
+    - cpp/order_flow/src/main.cpp
+  app:
+    - cpp/order_flow/src/app/order_flow_uc.hpp
+    - cpp/order_flow/src/app/order_flow_uc.cpp
+  infra:
+    - cpp/order_flow/src/infra/ledger_client.hpp
+    - cpp/order_flow/src/infra/ledger_client.cpp
+    - cpp/order_flow/src/infra/risk_client.hpp
+    - cpp/order_flow/src/infra/risk_client.cpp
+    - cpp/order_flow/src/infra/orders_kafka_publisher.hpp
+    - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+  transport:
+    - cpp/order_flow/src/transport/grpc_order_flow_service.hpp
+    - cpp/order_flow/src/transport/grpc_order_flow_service.cpp
+  build:
+    - cpp/order_flow/CMakeLists.txt
+
+features:
+  - F-02
+  - F-07
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/orders/v1/order_flow_service.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - FlowOrder
+  - OrdersNormalized
+  - PreTradeCheckRequest
+  - ReserveFundsRequest
+
+dependencies:
+  upstream:
+    - gateway
+  downstream:
+    - risk
+    - ledger
+    - matching  # через Kafka orders.normalized
+
+grpc:
+  port: 50051
+  envListen: ORDER_FLOW_GRPC_LISTEN
+  services:
+    - fob.orders.v1.OrderFlowService
+
+kafkaProduces:
+  - topic: orders.normalized
+    messageType: fob.orders.v1.OrdersNormalized
+    partitionKey: instrument.symbol
+
+knownIssues:
+  - id: BUY-reserve-leak
+    severity: critical
+    description: При полном fill BUY-ордера в reserved остаётся разница (price_high - midpoint) * qty
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L99-L103
+  - id: cancel-after-partial-fill-double-count
+    severity: critical
+    description: ReleaseFunds снимает оригинальную сумму, а не остаток после частичного fill
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
+
+tests:
+  unit: []
+  integration: []
+  contract: []

@@ -1,0 +1,57 @@
+feature:
+  id: F-03
+  name: FlowOrder Lifecycle (Amend / Cancel)
+  status: in-progress-mvp
+  owner: core-team
+
+description: >
+  Изменение параметров активного FlowOrder и его отмена.
+  Поддерживает amend (новые p_low/p_high/q_rate/q_max), полную отмену
+  и автоматическое истечение по time_in_force.
+
+primaryComponents:
+  - gateway
+  - order-flow
+  - risk
+  - ledger
+  - matching
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/orders/v1/order_flow_service.proto
+
+codePaths:
+  - cpp/order_flow/src/app/order_flow_uc.cpp
+  - cpp/matching/src/app/matching_loop.cpp
+
+kafkaTopics:
+  produces:
+    - orders.normalized
+  consumes: []
+
+grpcServices:
+  exposes:
+    - fob.orders.v1.OrderFlowService.CancelFlowOrder
+
+acceptanceCriteria:
+  - "CancelFlowOrder идемпотентен по order_id."
+  - "Amend пересчитывает оценку IS/VWAP и проходит повторный risk-check."
+  - "При отмене после partial fill освобождается только остаток резерва."
+  - "Время истечения GTC/GTD корректно обрабатывается scheduler'ом."
+
+knownIssues:
+  - id: amend-not-implemented
+    severity: feature-gap
+    description: gRPC AmendFlowOrder отсутствует в order_flow
+  - id: cancel-double-count
+    severity: critical
+    description: ReleaseFunds при cancel после partial fill снимает оригинальную сумму
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
+  - id: no-time-in-force-expiry
+    severity: feature-gap
+    description: Поля window_end и автоматическое expire не реализованы
+
+tests:
+  unit: []
+  integration: []
+  contract: []

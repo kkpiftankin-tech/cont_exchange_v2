@@ -1,0 +1,253 @@
+features:
+  F-01:
+    name: Registration & Authentication
+    docsPath: docs/02-system/features/F-01-auth-and-identity
+    status: not-implemented
+    primaryComponents:
+      - gateway
+      - auth-identity
+    protoContracts:
+      - contracts/proto/fob/common/v1/common.proto
+    codePaths: []
+
+  F-02:
+    name: Create FlowOrder
+    docsPath: docs/02-system/features/F-02-create-floworder
+    primaryComponents:
+      - gateway
+      - order-flow
+      - risk
+      - ledger
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    codePaths:
+      - cpp/gateway/src/transport/http_gateway.cpp
+      - cpp/gateway/src/infra/order_flow_client.cpp
+      - cpp/order_flow/src/app/order_flow_uc.cpp
+      - cpp/order_flow/src/transport/grpc_order_flow_service.cpp
+      - cpp/order_flow/src/infra/risk_client.cpp
+      - cpp/order_flow/src/infra/ledger_client.cpp
+      - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+
+  F-03:
+    name: FlowOrder Lifecycle (Amend / Cancel)
+    docsPath: docs/02-system/features/F-03-order-lifecycle
+    primaryComponents:
+      - gateway
+      - order-flow
+      - risk
+      - ledger
+      - matching
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+    codePaths:
+      - cpp/order_flow/src/app/order_flow_uc.cpp
+      - cpp/matching/src/app/matching_loop.cpp
+
+  F-04:
+    name: Batch Clearing
+    docsPath: docs/02-system/features/F-04-batch-clearing
+    primaryComponents:
+      - matching
+      - ledger
+      - risk
+      - market-data
+      - observability
+    protoContracts:
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+    codePaths:
+      - cpp/matching/src/app/matching_loop.cpp
+      - cpp/matching/src/domain/solver.hpp
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/ledger/src/app/ledger_uc.cpp
+
+  F-05:
+    name: Live Market Data
+    docsPath: docs/02-system/features/F-05-live-market-data
+    primaryComponents:
+      - market-data
+      - venues
+      - gateway
+    protoContracts:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+    codePaths:
+      - cpp/market_data/src/app/market_data_uc.cpp
+      - cpp/market_data/src/infra/kafka_consumer.cpp
+      - cpp/market_data/src/transport/grpc_market_data_service.cpp
+      - cpp/venues/src/app/venues_loop.cpp
+
+  F-06:
+    name: Positions / PnL / Margin
+    docsPath: docs/02-system/features/F-06-positions-pnl-margin
+    primaryComponents:
+      - ledger
+      - risk
+      - gateway
+    protoContracts:
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp
+      - cpp/ledger/src/transport/grpc_ledger_service.cpp
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/risk/src/app/risk_uc.cpp
+
+  F-07:
+    name: Pre-trade Risk Control
+    docsPath: docs/02-system/features/F-07-pretrade-risk
+    primaryComponents:
+      - risk
+      - order-flow
+    protoContracts:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+    codePaths:
+      - cpp/risk/src/app/risk_uc.cpp
+      - cpp/risk/src/transport/grpc_risk_service.cpp
+      - cpp/risk/src/infra/risk_alerts_publisher.cpp
+      - cpp/order_flow/src/infra/risk_client.cpp
+
+  F-08:
+    name: Post-trade Risk & Liquidations
+    docsPath: docs/02-system/features/F-08-posttrade-risk-and-liquidations
+    status: not-implemented
+    primaryComponents:
+      - risk
+      - ledger
+      - matching
+      - observability
+    protoContracts:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+    codePaths: []
+
+  F-09:
+    name: Batch and Combo Orders
+    docsPath: docs/02-system/features/F-09-batch-combo-orders
+    status: not-implemented
+    primaryComponents:
+      - order-flow
+      - matching
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+    codePaths: []
+
+  F-10:
+    name: Market-Maker Liquidity Curves
+    docsPath: docs/02-system/features/F-10-mm-curves
+    status: not-implemented
+    primaryComponents:
+      - order-flow
+      - matching
+      - ledger
+    protoContracts:
+      - contracts/proto/fob/orders/v1/orders.proto
+    codePaths: []
+
+  F-11:
+    name: External Venues LOB to FOB
+    docsPath: docs/02-system/features/F-11-external-venues-lob-to-fob
+    status: not-implemented
+    primaryComponents:
+      - venues
+      - market-data
+      - matching
+    protoContracts:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/execution/v1/execution.proto
+    codePaths:
+      - cpp/venues/src/app/venues_loop.cpp
+
+  F-12:
+    name: Execution Hedge
+    docsPath: docs/02-system/features/F-12-execution-hedge
+    status: not-implemented
+    primaryComponents:
+      - venues
+      - risk
+      - ledger
+      - matching
+    protoContracts:
+      - contracts/proto/fob/execution/v1/execution.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    codePaths:
+      - cpp/venues/src/app/venues_loop.cpp
+
+  F-13:
+    name: Post-Trade Report
+    docsPath: docs/02-system/features/F-13-posttrade-report
+    status: not-implemented
+    primaryComponents:
+      - observability
+      - gateway
+    protoContracts:
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+    codePaths: []
+
+  F-14:
+    name: Deposit & Withdraw
+    docsPath: docs/02-system/features/F-14-deposit-withdraw
+    status: not-implemented
+    primaryComponents:
+      - gateway
+      - ledger
+      - custody-adapter
+    protoContracts:
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    codePaths: []
+
+  F-15:
+    name: Backtest Replay
+    docsPath: docs/02-system/features/F-15-backtest-replay
+    status: not-implemented
+    primaryComponents:
+      - matching
+      - risk
+      - ledger
+      - observability
+    protoContracts:
+      - contracts/proto/fob/agent/v1/agent.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+    codePaths: []
+
+  F-16:
+    name: Operator Console & Kill-Switch
+    docsPath: docs/02-system/features/F-16-operator-console
+    status: partially-implemented
+    primaryComponents:
+      - gateway
+      - risk
+      - matching
+      - observability
+    protoContracts:
+      - contracts/proto/fob/risk/v1/risk.proto
+    codePaths:
+      - cpp/risk/src/app/risk_uc.cpp
+      - cpp/risk/src/transport/grpc_risk_service.cpp
+
+  F-17:
+    name: Monitoring & Alerting
+    docsPath: docs/02-system/features/F-17-monitoring-and-alerts
+    status: partially-implemented
+    primaryComponents:
+      - observability
+      - risk
+    protoContracts:
+      - contracts/proto/fob/observability/v1/observability.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+    codePaths:
+      - cpp/observability/src/app/obs_loop.cpp

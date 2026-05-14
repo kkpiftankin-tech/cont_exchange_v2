@@ -1,0 +1,44 @@
+feature:
+  id: F-01
+  name: Registration & Authentication
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Регистрация, логин, управление сессиями и ролями пользователей
+  (demo / client / provider / operator / admin). Защищает все остальные
+  фичи через сессионный токен и role-based authorization на gateway.
+
+primaryComponents:
+  - gateway
+  - auth-identity     # планируемый отдельный сервис
+
+protoContracts:
+  - contracts/proto/fob/common/v1/common.proto   # EventMeta переиспользуется
+
+codePaths: []
+
+kafkaTopics:
+  produces: []
+  consumes: []
+
+acceptanceCriteria:
+  - "POST /v1/auth/register создаёт пользователя со ролью demo и kyc_status=none."
+  - "POST /v1/auth/login возвращает токен; неверные креды -> 401."
+  - "Каждый запрос в gateway проверяет токен через Auth & Identity."
+  - "Подозрительная активность -> принудительный re-login."
+  - "Operator/admin может повысить роль пользователю до client/provider."
+
+knownIssues:
+  - id: no-auth-in-gateway
+    severity: feature-gap
+    description: gateway сейчас принимает запросы без аутентификации
+    location: cpp/gateway/src/transport/http_gateway.cpp
+  - id: no-users-table
+    severity: feature-gap
+    description: Таблица users / sessions в PostgreSQL не существует
+
+tests:
+  unit: []
+  integration: []
+  contract: []

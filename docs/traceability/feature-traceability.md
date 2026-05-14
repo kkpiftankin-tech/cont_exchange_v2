@@ -1,0 +1,34 @@
+# Feature Traceability
+
+Markdown projection of the feature → requirement → use case → sequence → contract → data → component → test → code chain.
+
+Machine-readable source of truth: [`specs/domain/feature-component-map.yaml`](../../specs/domain/feature-component-map.yaml), [`specs/domain/code-map.yaml`](../../specs/domain/code-map.yaml), [`specs/domain/traceability.yaml`](../../specs/domain/traceability.yaml).
+
+Validators:
+
+- `python3 tools/traceability-checker/check.py`
+- `python3 tools/proto-contract-auditor/check_proto_map.py`
+
+## Format
+
+Compact per-feature: use the table below for at-a-glance status; for detailed proto contracts and code paths consult the YAML files. Detailed acceptance is in each feature's `feature.yaml`.
+
+| Feature | Business Reqs | Functional Reqs | Use Cases | Sequences (System / Service) | Contracts | Data Objects | Components | Tests | Code |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [F-01](../02-system/features/F-01-auth-and-identity/) | vision §auth | TODO | [UC-F01-01](../02-system/use-cases/UC-F01-01-authenticate-user/use-case.md) | ✅ / ✅ | TODO grpc/auth, REST /auth | TODO users, sessions | [auth-identity](../05-components/auth-identity/) planned, [gateway](../05-components/gateway/) | — | — |
+| [F-02](../02-system/features/F-02-create-floworder/) | vision §FlowOrder | TODO FR-ORDER-001 | [UC-F02-01](../02-system/use-cases/UC-F02-01-create-flow-order/use-case.md) | ✅ / ✅ | orders.proto, order_flow_service.proto, risk.proto, ledger.proto, [orders.normalized](../06-api/messaging/orders-normalized.md) | TODO flow_orders | gateway, order-flow, risk-manager, ledger | smoke `mvp_e2e` | `cpp/gateway/`, `cpp/order_flow/` |
+| [F-03](../02-system/features/F-03-order-lifecycle/) | vision §lifecycle | TODO | [UC-F03-01](../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md) | ✅ / ✅ | TODO Amend/Cancel grpc, [orders.normalized](../06-api/messaging/orders-normalized.md) | TODO flow_orders | gateway, order-flow, risk, ledger, matching | — | `cpp/order_flow/`, `cpp/matching/` |
+| [F-04](../02-system/features/F-04-batch-clearing/) | vision §clearing | TODO | [UC-F04-01](../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md) | ✅ / ✅ | matching/batch.proto, [batch.outputs](../06-api/messaging/batch-outputs.md) | TODO fills/batch_results CH, positions | matching-fob-core, ledger, risk-manager, observability-reporting | unit solver | `cpp/matching/`, `cpp/ledger/` |
+| [F-05](../02-system/features/F-05-live-market-data/) | — | TODO | [UC-F05-01](../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md) | ✅ / ✅ | marketdata_service.proto, [marketdata.raw](../06-api/messaging/marketdata-raw.md) | Redis ticker cache | market-data, external-venues, gateway | — | `cpp/market_data/`, `cpp/venues/` |
+| [F-06](../02-system/features/F-06-positions-pnl-margin/) | — | TODO | [UC-F06-01](../02-system/use-cases/UC-F06-01-show-positions/use-case.md) | ✅ / ✅ | TODO GetBalances/Positions/RiskSnapshot | TODO positions, accounts, risk_snapshots | gateway, ledger, risk-manager | — | `cpp/ledger/`, `cpp/risk/` |
+| [F-07](../02-system/features/F-07-pretrade-risk/) | vision §risk | TODO | [UC-F07-01](../02-system/use-cases/UC-F07-01-pretrade-risk-check/use-case.md) | ✅ / ✅ | risk.proto, [risk.alerts](../06-api/messaging/risk-alerts.md) | TODO risk_limits | order-flow, risk-manager, ledger | unit risk | `cpp/risk/`, `cpp/order_flow/` |
+| [F-08](../02-system/features/F-08-posttrade-risk-and-liquidations/) | vision §liquidation | TODO | [UC-F08-01](../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md) | ✅ / ✅ | [risk.alerts](../06-api/messaging/risk-alerts.md), [batch.outputs](../06-api/messaging/batch-outputs.md) | TODO risk_events, risk_snapshots | risk, ledger, order-flow, matching, observability | — | — |
+| [F-09](../02-system/features/F-09-batch-combo-orders/) | vision §combo | TODO | [UC-F09-01](../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md) | ✅ / ✅ | TODO ComboOrder, [orders.normalized](../06-api/messaging/orders-normalized.md) | TODO flow_orders+combo_id | gateway, order-flow, risk, ledger, matching | — | — |
+| [F-10](../02-system/features/F-10-mm-curves/) | vision §mm | TODO | [UC-F10-01](../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md) | ✅ / ✅ | TODO UpsertCurve, [orders.normalized](../06-api/messaging/orders-normalized.md) | TODO flow_orders+mm tag | order-flow, matching, risk | — | — |
+| [F-11](../02-system/features/F-11-external-venues-lob-to-fob/) | vision §external | TODO | [UC-F11-01](../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md) | ✅ / ✅ | [marketdata.raw](../06-api/messaging/marketdata-raw.md), [orders.normalized](../06-api/messaging/orders-normalized.md) (venue) | TODO marketdata CH | external-venues, market-data, matching | — | `cpp/venues/` |
+| [F-12](../02-system/features/F-12-execution-hedge/) | vision §hedge | TODO | [UC-F12-01](../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md) | ✅ / ✅ | [execution.intents](../06-api/messaging/execution-intents.md), [execution.reports](../06-api/messaging/execution-reports.md) | TODO execution_reports CH | external-venues, risk, ledger, matching | — | `cpp/venues/` |
+| [F-13](../02-system/features/F-13-posttrade-report/) | vision §reporting | TODO | [UC-F13-01](../02-system/use-cases/UC-F13-01-generate-posttrade-report/use-case.md) | ✅ / ✅ | TODO GET /reports/post-trade | TODO fills, batch_results CH | gateway, observability-reporting | — | — |
+| [F-14](../02-system/features/F-14-deposit-withdraw/) | vision §custody | TODO | [UC-F14-01](../02-system/use-cases/UC-F14-01-deposit-funds/use-case.md) | ✅ / ✅ | TODO deposit/withdraw endpoints | TODO collateral_transfers, accounts | gateway, ledger, custody-adapter planned | — | — |
+| [F-15](../02-system/features/F-15-backtest-replay/) | vision §replay | TODO | [UC-F15-01](../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md) | ✅ / ✅ | archive [orders.normalized](../06-api/messaging/orders-normalized.md), [batch.outputs](../06-api/messaging/batch-outputs.md) | TODO agent_logs, batch_results_replay CH | backtest-replay planned, matching, observability | — | — |
+| [F-16](../02-system/features/F-16-operator-console/) | vision §operator | TODO | [UC-F16-01](../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md) | ✅ / ✅ | TODO kill-switch endpoint, [risk.alerts](../06-api/messaging/risk-alerts.md) | TODO audit log | gateway, risk-manager, matching, order-flow, observability | — | `cpp/risk/` (partial) |
+| [F-17](../02-system/features/F-17-monitoring-and-alerts/) | vision §monitoring | TODO | [UC-F17-01](../02-system/use-cases/UC-F17-01-fire-alert/use-case.md) | ✅ / ✅ | observability.proto, [risk.alerts](../06-api/messaging/risk-alerts.md) | TODO risk_events CH | observability-reporting, risk-manager | — | `cpp/observability/` |

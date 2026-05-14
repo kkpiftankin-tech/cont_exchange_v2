@@ -1,0 +1,70 @@
+feature:
+  id: F-06
+  name: Positions / PnL / Margin
+  status: in-progress-mvp
+  owner: core-team
+
+description: >
+  Учёт балансов (available/reserved), позиций и PnL пользователей.
+  Применение fills из batch.outputs к балансам.
+
+primaryComponents:
+  - ledger
+  - risk
+  - gateway
+
+protoContracts:
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+
+codePaths:
+  - cpp/ledger/src/app/ledger_uc.cpp
+  - cpp/ledger/src/transport/grpc_ledger_service.cpp
+  - cpp/ledger/src/infra/kafka_consumers.cpp
+  - cpp/risk/src/app/risk_uc.cpp
+
+kafkaTopics:
+  produces: []
+  consumes:
+    - batch.outputs
+    - execution.reports
+
+grpcServices:
+  exposes:
+    - fob.ledger.v1.LedgerService.GetBalances
+    - fob.ledger.v1.LedgerService.ReserveFunds
+    - fob.ledger.v1.LedgerService.ReleaseFunds
+    - fob.ledger.v1.LedgerService.ApplyBatchResult
+  calls: []
+
+acceptanceCriteria:
+  - "GetBalances возвращает available/reserved/total для всех валют пользователя."
+  - "ReserveFunds идемпотентен по reservation_id."
+  - "ApplyBatchResult корректно списывает reserved и начисляет available по каждому fill."
+  - "ReleaseFunds возвращает amount=0 если резерва не существует (WARN log)."
+
+knownIssues:
+  - id: no-persistence
+    severity: critical
+    description: Балансы in-memory, теряются при рестарте
+  - id: scale-inflation
+    severity: bug
+    description: Decimal::mul удваивает scale, может вызвать переполнение int64
+  - id: buy-reserve-leak
+    severity: critical
+    description: См. F-04 knownIssues
+  - id: no-position-tracking
+    severity: feature-gap
+    description: Нет учёта позиций (open/closed), только балансы
+  - id: no-pnl
+    severity: feature-gap
+    description: Realised/Unrealised PnL не вычисляется
+  - id: no-margin-calculation
+    severity: feature-gap
+    description: Margin requirements не рассчитываются (есть placeholder в risk)
+
+tests:
+  unit: []
+  integration: []
+  contract: []

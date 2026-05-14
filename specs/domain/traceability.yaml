@@ -1,0 +1,183 @@
+traceability:
+  F-01:
+    status: not-implemented
+    components: [gateway, auth-identity]
+    protoFiles:
+      - contracts/proto/fob/common/v1/common.proto
+    codePaths: []
+    kafkaTopics: []
+    storageTables: [users, sessions]
+
+  F-02:
+    components: [gateway, order-flow, risk, ledger]
+    protoFiles:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    codePaths:
+      - cpp/gateway/src/transport/http_gateway.cpp
+      - cpp/gateway/src/infra/order_flow_client.cpp
+      - cpp/order_flow/src/app/order_flow_uc.cpp
+      - cpp/order_flow/src/transport/grpc_order_flow_service.cpp
+      - cpp/order_flow/src/infra/risk_client.cpp
+      - cpp/order_flow/src/infra/ledger_client.cpp
+      - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+    kafkaTopics:
+      - orders.normalized
+    storageTables: [flow_orders, accounts]
+
+  F-03:
+    components: [gateway, order-flow, risk, ledger, matching]
+    protoFiles:
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+    codePaths:
+      - cpp/order_flow/src/app/order_flow_uc.cpp
+      - cpp/matching/src/app/matching_loop.cpp
+    kafkaTopics:
+      - orders.normalized
+    storageTables: [flow_orders, accounts]
+
+  F-04:
+    components: [matching, ledger, risk, market-data, observability]
+    protoFiles:
+      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/orders/v1/orders.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/observability/v1/observability.proto
+    codePaths:
+      - cpp/matching/src/app/matching_loop.cpp
+      - cpp/matching/src/domain/solver.hpp
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/ledger/src/app/ledger_uc.cpp
+    kafkaTopics:
+      - orders.normalized
+      - batch.outputs
+    storageTables: [flow_orders, solver_config, batch_results, fills]
+
+  F-05:
+    components: [market-data, venues, gateway]
+    protoFiles:
+      - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+    codePaths:
+      - cpp/market_data/src/app/market_data_uc.cpp
+      - cpp/market_data/src/infra/kafka_consumer.cpp
+      - cpp/market_data/src/transport/grpc_market_data_service.cpp
+      - cpp/venues/src/app/venues_loop.cpp
+    kafkaTopics:
+      - marketdata.raw
+    storageTables: [marketdata]
+
+  F-06:
+    components: [ledger, risk, gateway]
+    protoFiles:
+      - contracts/proto/fob/ledger/v1/ledger.proto
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/matching/v1/batch.proto
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp
+      - cpp/ledger/src/transport/grpc_ledger_service.cpp
+      - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/risk/src/app/risk_uc.cpp
+    kafkaTopics:
+      - batch.outputs
+      - execution.reports
+    storageTables: [accounts, positions, risk_snapshots]
+
+  F-07:
+    components: [risk, order-flow]
+    protoFiles:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/orders/v1/order_flow_service.proto
+    codePaths:
+      - cpp/risk/src/app/risk_uc.cpp
+      - cpp/risk/src/transport/grpc_risk_service.cpp
+      - cpp/risk/src/infra/risk_alerts_publisher.cpp
+      - cpp/order_flow/src/infra/risk_client.cpp
+    kafkaTopics:
+      - risk.alerts
+    storageTables: [risk_limits, risk_events]
+
+  F-08:
+    status: not-implemented
+    components: [risk, ledger, matching, observability]
+    protoFiles:
+      - contracts/proto/fob/risk/v1/risk.proto
+      - contracts/proto/fob/ledger/v1/ledger.proto
+    codePaths: []
+    kafkaTopics:
+      - batch.outputs
+      - risk.alerts
+    storageTables: [positions, risk_snapshots, risk_events]
+
+  F-09:
+    status: not-implemented
+    components: [order-flow, matching, risk, ledger]
+    codePaths: []
+    storageTables: [flow_orders]
+
+  F-10:
+    status: not-implemented
+    components: [order-flow, matching, ledger]
+    codePaths: []
+    storageTables: [flow_orders, accounts]
+
+  F-11:
+    status: not-implemented
+    components: [venues, market-data, matching]
+    codePaths:
+      - cpp/venues/src/app/venues_loop.cpp
+    kafkaTopics:
+      - marketdata.raw
+    storageTables: [marketdata]
+
+  F-12:
+    status: not-implemented
+    components: [venues, risk, ledger, matching]
+    codePaths:
+      - cpp/venues/src/app/venues_loop.cpp
+    kafkaTopics:
+      - execution.intents
+      - execution.reports
+    storageTables: [execution_reports, accounts]
+
+  F-13:
+    status: not-implemented
+    components: [observability, gateway]
+    codePaths: []
+    storageTables: [fills, batch_results]
+
+  F-14:
+    status: not-implemented
+    components: [gateway, ledger, custody-adapter]
+    codePaths: []
+    storageTables: [collateral_transfers, accounts]
+
+  F-15:
+    status: not-implemented
+    components: [matching, risk, ledger, observability]
+    codePaths: []
+    storageTables: [fills, batch_results, marketdata, agent_logs]
+
+  F-16:
+    status: partially-implemented
+    components: [gateway, risk, matching, observability]
+    codePaths:
+      - cpp/risk/src/app/risk_uc.cpp
+      - cpp/risk/src/transport/grpc_risk_service.cpp
+    kafkaTopics:
+      - risk.alerts
+    storageTables: [risk_limits, risk_events]
+
+  F-17:
+    status: partially-implemented
+    components: [observability, risk]
+    codePaths:
+      - cpp/observability/src/app/obs_loop.cpp
+    kafkaTopics:
+      - risk.alerts
+      - batch.outputs
+      - execution.reports
+    storageTables: [batch_results, fills, risk_events, execution_reports]

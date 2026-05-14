@@ -1,0 +1,25 @@
+name: proto-contract-audit
+
+on:
+  pull_request:
+    paths:
+      - "contracts/proto/**"
+      - "specs/contracts/proto-map.yaml"
+      - "docs/02-system/features/**"
+      - "docs/05-components/**"
+
+jobs:
+  proto-contract-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python tools
+        run: pip install pyyaml
+
+      - name: Check proto files are mapped to features/components
+        run: python tools/proto-contract-auditor/check_proto_map.py

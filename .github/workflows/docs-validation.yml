@@ -1,0 +1,41 @@
+name: docs-validation
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "**/*.md"
+
+jobs:
+  docs-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Markdown link integrity (relative)
+        run: |
+          set -e
+          fail=0
+          # Простая проверка: все ссылки [...](path/in/repo) должны указывать на существующие файлы
+          # Берём только относительные ссылки (без http(s)://)
+          while IFS= read -r line; do
+            file="${line%%:*}"
+            rest="${line#*:}"
+            # Извлекаем target из markdown-link: [text](target)
+            target=$(echo "$rest" | sed -n 's/.*](\([^)]*\)).*/\1/p')
+            [ -z "$target" ] && continue
+            case "$target" in
+              http://*|https://*|#*|mailto:*) continue ;;
+            esac
+            # убираем якорь
+            target_noanchor="${target%%#*}"
+            [ -z "$target_noanchor" ] && continue
+            # резолвим относительно директории файла
+            dir=$(dirname "$file")
+            full="$dir/$target_noanchor"
+            if [ ! -e "$full" ]; then
+              echo "BROKEN LINK: $file -> $target"
+              fail=1
+            fi
+          done < <(grep -rnE '\]\([^)]+\)' docs/ || true)
+          exit $fail

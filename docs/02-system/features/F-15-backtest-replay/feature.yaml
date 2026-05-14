@@ -1,0 +1,46 @@
+feature:
+  id: F-15
+  name: Backtest and Replay
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Возможность переиграть исторические Kafka события через тот же solver и
+  получить идентичный BatchResult. Используется для тестирования изменений
+  solver'а, отладки инцидентов и регрессионных тестов.
+
+primaryComponents:
+  - matching
+  - risk
+  - ledger
+  - observability
+
+protoContracts:
+  - contracts/proto/fob/agent/v1/agent.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/observability/v1/observability.proto
+
+codePaths: []
+
+kafkaTopics:
+  produces: []
+  consumes: []
+
+grpcServices:
+  exposes: []
+  calls: []
+
+acceptanceCriteria:
+  - "Можно запустить matching в replay-режиме на исторических orders.normalized"
+  - "Полученный BatchResult байт-в-байт совпадает с продакшен-результатом"
+  - "Поддерживается изоляция от продакшен-Kafka (отдельный replay-кластер)"
+
+knownIssues:
+  - id: nondeterminism-in-matching
+    severity: blocker
+    description: std::unordered_map итерация не гарантирует определённый порядок; для replay нужно фиксировать порядок
+
+tests:
+  unit: []
+  integration: []
+  contract: []

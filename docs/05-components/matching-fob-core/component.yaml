@@ -1,0 +1,79 @@
+component:
+  id: matching
+  name: Matching / Batch Clearing
+  layer: core
+  status: active-mvp-simulator
+  codePath: cpp/matching
+  owner: core-team
+
+responsibility:
+  summary: >
+    Периодически (batch_interval_ms) запускает солвер по активным FlowOrder
+    и публикует BatchResult в batch.outputs. В текущей реализации — наивный
+    per-order симулятор, НЕ настоящий многомерный солвер.
+
+sourceTreeEvidence:
+  main:
+    - cpp/matching/src/main.cpp
+  app:
+    - cpp/matching/src/app/matching_loop.hpp
+    - cpp/matching/src/app/matching_loop.cpp
+  domain:
+    - cpp/matching/src/domain/solver.hpp
+  build:
+    - cpp/matching/CMakeLists.txt
+
+features:
+  - F-04
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - FlowOrder
+  - BatchResult
+  - Fill
+  - OrderUpdate
+  - BatchDiagnostics
+
+dependencies:
+  upstream: []
+  downstream: []
+
+kafkaConsumes:
+  - topic: orders.normalized
+    messageType: fob.orders.v1.OrdersNormalized
+    consumerGroup: matching
+
+kafkaProduces:
+  - topic: batch.outputs
+    messageType: fob.matching.v1.BatchResult
+    partitionKey: batch_id
+
+knownIssues:
+  - id: no-real-solver
+    severity: feature-gap
+    description: Per-order симулятор; не решает D(p)=0; разные ордера получают разные цены
+    location: cpp/matching/src/app/matching_loop.cpp#L148-L203
+  - id: no-postgresql-input
+    severity: feature-gap
+    description: F-04 предписывает чтение floworders из PostgreSQL; код читает из Kafka
+    location: cpp/matching/src/app/matching_loop.cpp#L62-L69
+  - id: no-market-data
+    severity: feature-gap
+    description: F-04 требует reference prices от Market Data Service; не реализовано
+  - id: hardcoded-diagnostics
+    severity: bug
+    description: residual_norm=0.0 и solve_time_ms=1 захардкожены
+    location: cpp/matching/src/app/matching_loop.cpp#L118-L123
+  - id: executed-rates-wrong
+    severity: bug
+    description: executed_rates показывает max_speed вместо фактической dq/dt
+    location: cpp/matching/src/app/matching_loop.cpp#L188
+
+tests:
+  unit: []
+  integration: []
+  contract: []

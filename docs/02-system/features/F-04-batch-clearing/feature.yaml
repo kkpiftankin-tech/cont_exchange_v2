@@ -1,0 +1,117 @@
+feature:
+  id: F-04
+  name: Batch Clearing Cycle
+  status: in-progress-mvp-simulator
+  owner: core-team
+
+description: >
+  Периодический батч-клиринг FlowOrder. Solver решает систему спроса/предложения
+  на каждый интервал batchIntervalMs, формирует BatchResult с clearPrices,
+  executedRates, residualNorm, solveTimeMs и набором FillEvent. Текущая
+  реализация — наивный per-order симулятор, не настоящий многомерный солвер.
+
+primaryComponents:
+  - matching
+  - ledger
+  - risk
+  - market-data
+  - observability
+
+protoContracts:
+  - contracts/proto/fob/orders/v1/orders.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/observability/v1/observability.proto
+
+storageDependencies:
+  postgresql:
+    - flow_orders        # источник активных заявок
+    - solver_config      # параметры solver (batchIntervalMs, maxIterations, epsilonLiquidity, tolerance, feeModel)
+  clickhouse:
+    - batch_results
+    - fills
+
+codePaths:
+  - cpp/matching/src/main.cpp
+  - cpp/matching/src/app/matching_loop.cpp
+  - cpp/matching/src/app/matching_loop.hpp
+  - cpp/matching/src/domain/solver.hpp
+  - cpp/ledger/src/infra/kafka_consumers.cpp
+  - cpp/ledger/src/app/ledger_uc.cpp
+
+kafkaTopics:
+  produces:
+    - batch.outputs
+  consumes:
+    - orders.normalized
+
+grpcServices:
+  exposes: []
+  calls:
+    - fob.ledger.v1.LedgerService.ApplyBatchResult  # планируется
+    - fob.risk.v1.RiskService.OnBatchResult         # планируется
+
+acceptanceCriteria:
+  - "Для каждого батча формируется BatchResult с валидными clearPrices и executedRates."
+  - "FillEvent корректно отражают исполненные объёмы и цены по всем FlowOrder."
+  - "Median solveTimeMs <= 500 ms, p95 <= 1000 ms на N=1000 активных FlowOrder."
+  - "residualNorm <= tolerance из solverconfig."
+  - "Детерминированность: одинаковые входы -> одинаковый BatchResult."
+  - "При residualNorm > tolerance или достижении maxIterations создаётся BatchResult с флагом ошибки + alert."
+  - "При solveTimeMs > SLA генерируется alert; опционально kill-switch (F-16)."
+
+knownIssues:
+  - id: no-real-solver
+    severity: feature-gap
+    description: Per-order симулятор; не решает D(p)=0
+    location: cpp/matching/src/app/matching_loop.cpp#L148-L203
+  - id: per-order-pricing
+    severity: critical
+    description: Каждый ордер исполняется по своему midpoint, а не единой клиринговой цене
+    location: cpp/matching/src/app/matching_loop.cpp#L172-L185
+  - id: hardcoded-residual
+    severity: bug
+    description: residualNorm = 0.0 захардкожен
+    location: cpp/matching/src/app/matching_loop.cpp#L120
+  - id: hardcoded-solve-time
+    severity: bug
+    description: solveTimeMs = 1 захардкожен; не измеряется реальное время
+    location: cpp/matching/src/app/matching_loop.cpp#L121
+  - id: executed-rates-wrong
+    severity: bug
+    description: executed_rates показывает max_speed вместо фактической dq/dt
+    location: cpp/matching/src/app/matching_loop.cpp#L188
+  - id: no-postgresql-input
+    severity: feature-gap
+    description: F-04 требует чтения floworders из PostgreSQL; код использует Kafka
+  - id: no-market-data
+    severity: feature-gap
+    description: Нет gRPC вызова Market Data Service для reference prices
+  - id: no-fills-topic
+    severity: feature-gap
+    description: F-04 требует отдельный Kafka топик "fills"; код кладёт fills в batch.outputs
+  - id: missing-fill-fields
+    severity: feature-gap
+    description: В Fill отсутствуют liquidity_source, fees, fill_id
+  - id: no-fallback
+    severity: feature-gap
+    description: Нет fallback при residualNorm > tolerance или maxIterations exhaustion
+  - id: no-sla-alert
+    severity: feature-gap
+    description: Нет измерения solveTimeMs и алертов при превышении SLA
+  - id: no-multileg
+    severity: feature-gap
+    description: Multi-leg / portfolio orders не поддерживаются
+  - id: buy-reserve-leak
+    severity: critical
+    description: При FILLED BUY не освобождается разница (price_high - midpoint) * qty в ledger
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L99-L103
+  - id: cancel-double-count
+    severity: critical
+    description: ReleaseFunds при cancel после partial fill снимает оригинальную сумму
+    location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
+
+tests:
+  unit: []
+  integration: []
+  contract: []

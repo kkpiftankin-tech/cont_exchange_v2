@@ -1,0 +1,54 @@
+# =============================================================================
+# Makefile.docs — отдельный Makefile для документации и spec-валидации.
+# Не пересекается с основным Makefile (который собирает C++).
+# Запуск:
+#   make -f Makefile.docs <target>
+# =============================================================================
+
+.PHONY: help docs-lint validate-yaml validate-traceability validate-proto-map \
+        docs-code-drift validate-docs generate-code-map all
+
+help:
+	@echo "Available targets:"
+	@echo "  validate-yaml         — YAML syntax check for docs/ and specs/"
+	@echo "  validate-traceability — feature↔code↔proto integrity"
+	@echo "  validate-proto-map    — каждый .proto учтён в proto-map.yaml"
+	@echo "  docs-code-drift       — отчёт о расхождении кода и доков"
+	@echo "  validate-docs         — все валидации сразу"
+	@echo "  generate-code-map     — обновить docs/generated/code-map.md"
+	@echo "  docs-lint             — markdown lint (TODO)"
+
+docs-lint:
+	@echo "TODO: integrate markdownlint or vale"
+
+validate-yaml:
+	@python3 - <<'PY'
+	from pathlib import Path
+	import yaml, sys
+	ok = True
+	for p in list(Path("docs").rglob("*.yaml")) + list(Path("specs").rglob("*.yaml")):
+	    try:
+	        yaml.safe_load(p.read_text(encoding="utf-8"))
+	        print("valid:", p)
+	    except Exception as e:
+	        print("INVALID:", p, e)
+	        ok = False
+	sys.exit(0 if ok else 1)
+	PY
+
+validate-traceability:
+	@python3 tools/traceability-checker/check.py
+
+validate-proto-map:
+	@python3 tools/proto-contract-auditor/check_proto_map.py
+
+docs-code-drift:
+	@python3 tools/docs-code-drift/check.py
+
+generate-code-map:
+	@python3 tools/code-map-generator/generate.py
+
+validate-docs: validate-yaml validate-traceability validate-proto-map
+	@echo "All validations passed."
+
+all: validate-docs generate-code-map

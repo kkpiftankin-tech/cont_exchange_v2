@@ -1,0 +1,46 @@
+name: spec-validation
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "specs/**"
+      - "contracts/proto/**"
+      - "llm/**"
+      - "tools/**"
+
+jobs:
+  spec-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Validate YAML syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml, sys
+          ok = True
+          for p in list(Path("docs").rglob("*.yaml")) + list(Path("specs").rglob("*.yaml")):
+              try:
+                  yaml.safe_load(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  print(f"INVALID YAML: {p}: {e}")
+                  ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Validate traceability
+        run: python tools/traceability-checker/check.py
+
+      - name: Validate proto map
+        run: python tools/proto-contract-auditor/check_proto_map.py
