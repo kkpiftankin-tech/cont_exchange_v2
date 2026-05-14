@@ -7,7 +7,7 @@
 # публикуется в Kafka (orders.normalized) для матчинга.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(order_flow LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

@@ -7,7 +7,7 @@
 # Использует Crow (header-only HTTP-сервер из third_party/) и Boost.Asio.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(gateway LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

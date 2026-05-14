@@ -6,7 +6,7 @@
 # Источники: топик marketdata.raw в Kafka (туда пишет сервис venues).
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(market_data LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
