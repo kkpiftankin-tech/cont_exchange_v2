@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include <rdkafkacpp.h>
+#include <librdkafka/rdkafkacpp.h>
 
 namespace cex::common {
 
