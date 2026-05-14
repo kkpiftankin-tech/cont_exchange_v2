@@ -518,46 +518,29 @@ jobs:
 
 ### 6.3. `.github/workflows/deploy-staging.yml`
 
-```yaml
-name: deploy-staging
+Реальный файл — [../../.github/workflows/deploy-staging.yml](../../.github/workflows/deploy-staging.yml). Триггерится автоматически после успешного `docker-publish` на main, либо вручную через `workflow_dispatch` (с опциональным переопределением `image_tag`).
 
-on:
-  workflow_run:
-    workflows: ["docker-publish"]
-    branches: [main]
-    types: [completed]
-  workflow_dispatch:
+Steps:
 
-jobs:
-  deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-22.04
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
+1. Resolve image tag (из `workflow_dispatch` inputs или `latest` для auto-trigger).
+2. `webfactory/ssh-agent@v0.9.0` поднимает SSH-агент из секрета `STAGING_SSH_KEY`.
+3. `ssh-keyscan` добавляет сервер в `known_hosts`.
+4. SCP: `docker-compose.staging.yml`, `kafka/create_topics.sh`, и (только если на сервере нет `.env`) `env/.env-staging.example`.
+5. SSH: обновляет `IMAGE_TAG=` в `.env`, `docker login ghcr.io`, `docker compose pull --quiet`, `docker compose up -d --remove-orphans`.
+6. Smoke-check: `curl /healthz` с ретраями (18 × 5 сек = 90 сек таймаут), пропускается при `inputs.skip_smoke=true`.
+7. On failure — печатает `docker compose ps` + последние 100 строк логов всех сервисов.
 
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+Concurrency-группа `deploy-staging` гарантирует, что параллельные деплои не наслаиваются.
 
-      - name: Copy compose to server
-        run: |
-          scp -o StrictHostKeyChecking=no \
-              infra/docker-compose.staging.yml \
-              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:~/cont_exchange/docker-compose.yml
+Перед первым запуском в GitHub Repo → Settings → Environments создать `staging` environment с secrets:
 
-      - name: Pull & restart
-        run: |
-          ssh -o StrictHostKeyChecking=no \
-              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
-              "cd ~/cont_exchange && docker compose pull && docker compose up -d --remove-orphans"
-
-      - name: Smoke check
-        run: |
-          sleep 30
-          curl -fsS http://${{ secrets.STAGING_HOST }}:8088/healthz
-```
+| Secret | Назначение |
+| --- | --- |
+| `STAGING_SSH_KEY` | приватный SSH-ключ (OpenSSH формат) |
+| `STAGING_HOST` | IP или hostname сервера |
+| `STAGING_USER` | SSH-user (член группы `docker`) |
+| `STAGING_SSH_PORT` | (опц.) кастомный порт, default `22` |
+| `STAGING_GHCR_TOKEN` | GitHub PAT с `read:packages` (для `docker login`; для public-образов сойдёт любой) |
 
 ### 6.4. `infra/docker-compose.staging.yml`
 
