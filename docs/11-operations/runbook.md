@@ -58,7 +58,7 @@ make dev-down
 
 ## Деплой
 
-> Прод-деплой не реализован. Цель: `infra/k8s/` манифесты + GitHub Actions.
+См. [deployment-guide.md](deployment-guide.md) — подробный план для local / staging / prod, включая шаблоны CI/CD workflows.
 
 ## Связанные документы
 
