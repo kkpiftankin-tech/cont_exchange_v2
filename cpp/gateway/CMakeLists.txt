@@ -34,4 +34,9 @@ target_link_libraries(gateway PRIVATE
   Boost::thread
 )
 
+# Crow поддерживает два бэкенда (standalone Asio и Boost.Asio); выбираем Boost,
+# т.к. он линкуется выше и уже доступен на CI (libboost-all-dev). Без этой
+# definition Crow #include'ит <asio.hpp>, которого в Ubuntu apt нет.
+target_compile_definitions(gateway PRIVATE CROW_USE_BOOST)
+
 target_compile_options(gateway PRIVATE -Wall -Wextra -Wpedantic)
