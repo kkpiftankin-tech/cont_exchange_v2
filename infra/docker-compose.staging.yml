@@ -1,0 +1,199 @@
+# =============================================================================
+# Staging compose-stack для Continuous Exchange / FOB.
+#
+# Отличия от docker-compose.dev.yml:
+#   * Все сервисы используют image: ghcr.io/.../fob-<svc>:latest (pull, не build).
+#   * restart: unless-stopped на каждом сервисе.
+#   * Healthcheck на gateway (HTTP /healthz).
+#   * Named volume redpanda-data для persistence брокера.
+#   * Log rotation (json-file: 10MB × 5 файлов).
+#   * Redpanda с 2 SMP и 2 GB памяти (vs 1/1G в dev).
+#   * topics-init использует P=6 партиций (vs 3 в dev).
+#   * redpanda-console забинден на 127.0.0.1 — доступ только через SSH-tunnel.
+#
+# Подготовка на сервере:
+#   1. mkdir -p ~/cont_exchange && cd ~/cont_exchange
+#   2. scp infra/docker-compose.staging.yml user@host:~/cont_exchange/docker-compose.yml
+#   3. scp infra/env/.env-staging.example  user@host:~/cont_exchange/.env
+#   4. echo $GHCR_TOKEN | docker login ghcr.io -u <github-user> --password-stdin
+#   5. docker compose pull && docker compose up -d
+#
+# Доступ к console:
+#   ssh -L 8080:127.0.0.1:8080 user@host
+#   → открыть http://localhost:8080 в браузере хоста
+# =============================================================================
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-image-prefix: &image-prefix ghcr.io/kkpiftankin-tech/fob
+
+services:
+  # ---------------------------------------------------------------------------
+  # Брокер сообщений
+  # ---------------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
+    container_name: redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "2"
+      - --memory
+      - "2G"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - redpanda:8082
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--brokers", "redpanda:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    logging: *default-logging
+
+  topics-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./kafka/create_topics.sh:/create_topics.sh:ro
+    entrypoint: ["/bin/bash", "/create_topics.sh"]
+    environment:
+      BROKER: redpanda:9092
+      P: "6"
+    restart: "no"
+    logging: *default-logging
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    # 127.0.0.1 — наружу не выставляется; доступ через SSH-tunnel
+    ports:
+      - "127.0.0.1:8080:8080"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "kafka:
+          brokers: [\"redpanda:9092\"]
+        " > /tmp/config.yaml
+        /app/console --config.filepath=/tmp/config.yaml
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # C++ сервисы (8) — все из ghcr.io
+  # ---------------------------------------------------------------------------
+  risk:
+    image: ghcr.io/kkpiftankin-tech/fob-risk:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  ledger:
+    image: ghcr.io/kkpiftankin-tech/fob-ledger:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  order_flow:
+    image: ghcr.io/kkpiftankin-tech/fob-order_flow:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      risk:
+        condition: service_started
+      ledger:
+        condition: service_started
+    logging: *default-logging
+
+  matching:
+    image: ghcr.io/kkpiftankin-tech/fob-matching:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  venues:
+    image: ghcr.io/kkpiftankin-tech/fob-venues:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  market_data:
+    image: ghcr.io/kkpiftankin-tech/fob-market_data:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  observability:
+    image: ghcr.io/kkpiftankin-tech/fob-observability:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  gateway:
+    image: ghcr.io/kkpiftankin-tech/fob-gateway:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: [./.env]
+    depends_on:
+      order_flow:
+        condition: service_started
+    ports:
+      - "8088:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+volumes:
+  redpanda-data:
+    driver: local
