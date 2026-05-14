@@ -278,11 +278,14 @@ sudo ufw enable
 
 #### 4.1.2. Деплой первый раз
 
+Сжатая шпаргалка для прямого применения — [../../infra/docker-compose.staging.README.md](../../infra/docker-compose.staging.README.md). Кратко:
+
 ```bash
-mkdir -p ~/cont_exchange && cd ~/cont_exchange
+mkdir -p ~/cont_exchange/kafka && cd ~/cont_exchange
 # Скопировать compose-файл и env (через scp или git pull без сборки)
-scp infra/docker-compose.staging.yml user@server:~/cont_exchange/docker-compose.yml
-scp infra/env/.env.staging         user@server:~/cont_exchange/.env
+scp infra/docker-compose.staging.yml  user@server:~/cont_exchange/docker-compose.yml
+scp infra/env/.env-staging.example    user@server:~/cont_exchange/.env
+scp infra/kafka/create_topics.sh      user@server:~/cont_exchange/kafka/create_topics.sh
 
 # Залогиниться в ghcr
 echo $GHCR_TOKEN | docker login ghcr.io -u <github-user> --password-stdin
@@ -295,8 +298,8 @@ docker compose ps
 
 В `docker-compose.staging.yml` — отличия от dev-варианта:
 
-- сервисы используют `image: ghcr.io/<org>/<svc>:latest` вместо `build:`;
-- production-уровни healthcheck для всех сервисов;
+- сервисы используют `image: ghcr.io/kkpiftankin-tech/fob-<svc>:${IMAGE_TAG:-latest}` вместо `build:`;
+- gateway имеет HTTP healthcheck на `/healthz`;
 - restart policy `unless-stopped`;
 - log driver `json-file` с rotation `max-size: 10m, max-file: 5`.
 
@@ -558,47 +561,20 @@ jobs:
 
 ### 6.4. `infra/docker-compose.staging.yml`
 
-```yaml
-services:
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
-    restart: unless-stopped
-    command: [redpanda, start, --overprovisioned, --smp, "2", --memory, "2G",
-              --node-id, "0", --check=false,
-              --kafka-addr, "PLAINTEXT://0.0.0.0:9092",
-              --advertise-kafka-addr, "PLAINTEXT://redpanda:9092"]
-    volumes: [redpanda-data:/var/lib/redpanda/data]
-    healthcheck:
-      test: ["CMD","rpk","cluster","health","--brokers","redpanda:9092"]
-      interval: 10s
-      retries: 30
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
+Реальный файл — [../../infra/docker-compose.staging.yml](../../infra/docker-compose.staging.yml). Сопровождающие документы:
 
-  topics-init:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
-    depends_on: { redpanda: { condition: service_healthy } }
-    volumes: ["./create_topics.sh:/create_topics.sh:ro"]
-    entrypoint: ["/bin/bash", "/create_topics.sh"]
-    environment: { BROKER: redpanda:9092, P: "6" }
+- [../../infra/env/.env-staging.example](../../infra/env/.env-staging.example) — шаблон env, копируется в `.env` на сервере.
+- [../../infra/docker-compose.staging.README.md](../../infra/docker-compose.staging.README.md) — сжатая шпаргалка по развёртыванию, smoke-тесту и SSH-tunnel для console.
 
-  gateway:
-    image: ghcr.io/<org>/fob-gateway:latest
-    restart: unless-stopped
-    env_file: [./.env]
-    depends_on:
-      order_flow: { condition: service_started }
-    ports: ["8088:8080"]
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+Ключевые отличия от dev-стенда:
 
-  # Аналогично для остальных 7 сервисов:
-  # order_flow, matching, risk, ledger, market_data, venues, observability
-  # — все используют image: ghcr.io/<org>/fob-<svc>:latest
-
-volumes:
-  redpanda-data: {}
-```
+- `image: ghcr.io/kkpiftankin-tech/fob-<svc>:${IMAGE_TAG:-latest}` вместо `build:` — pull из GHCR (`docker-publish` workflow туда пушит на каждый push в main).
+- `restart: unless-stopped` на всех сервисах.
+- `redpanda-data` named volume для persistence брокера.
+- Log rotation `json-file 10MB × 5` через top-level `x-default-logging` anchor.
+- Redpanda 2 SMP + 2 GB памяти (vs 1/1G в dev); topics-init с `P=6` партиций (vs 3).
+- `redpanda-console` забинжен на `127.0.0.1:8080` — доступ только через SSH-tunnel.
+- Gateway имеет healthcheck `wget /healthz` каждые 15 секунд.
 
 ## 7. Verification checklist
 
