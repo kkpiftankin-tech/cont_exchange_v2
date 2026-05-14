@@ -34,7 +34,7 @@ static fob::common::v1::Decimal dec_from_double(double x, int32_t scale) {
 // чтобы не падать на неполных запросах (UI часто не присылает что-то).
 
 static bool has(const crow::json::rvalue& v, const char* key) {
-  return v.has(key) && !v[key].is_null();
+  return v.has(key) && v[key].t() != crow::json::type::Null;
 }
 
 // Достаёт строку. Если поле — число, конвертирует в строку (помогает с id).
