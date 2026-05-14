@@ -1,0 +1,169 @@
+# =============================================================================
+# Deploy-staging workflow.
+#
+# Auto-deploy на staging-сервер после успешной публикации образов в ghcr.io
+# (docker-publish run on main) ИЛИ вручную через workflow_dispatch.
+#
+# Что делает:
+#   1. SCP свежие infra/docker-compose.staging.yml + infra/env/.env-staging.example
+#      + infra/kafka/create_topics.sh на сервер.
+#   2. SSH → docker login ghcr.io → docker compose pull → docker compose up -d.
+#   3. Smoke-check: curl /healthz с ретраями.
+#   4. On failure — печатает docker compose logs для последних 100 строк.
+#
+# Требуемые secrets (Settings → Secrets and variables → Actions → Environment staging):
+#   - STAGING_SSH_KEY        — приватный ключ (openssh format)
+#   - STAGING_HOST           — IP/hostname сервера
+#   - STAGING_USER           — SSH user (в группе docker)
+#   - STAGING_SSH_PORT       — порт SSH (опционально, default 22)
+#   - STAGING_GHCR_TOKEN     — GitHub PAT с read:packages (для docker login;
+#                              если образы public — token может быть любым)
+#
+# Первый запуск: создайте Environment "staging" в repo Settings → Environments,
+# добавьте secrets, потом запустите workflow вручную через UI или gh CLI:
+#   gh workflow run deploy-staging.yml --ref main
+# =============================================================================
+
+name: deploy-staging
+
+on:
+  # Авто-деплой после успешного docker-publish на main.
+  workflow_run:
+    workflows: ["docker-publish"]
+    branches: [main]
+    types: [completed]
+
+  # Ручной запуск с опциями.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+        type: string
+      skip_smoke:
+        description: "Skip /healthz smoke check after deploy"
+        required: false
+        default: false
+        type: boolean
+
+# Один деплой одновременно. Если новый push в main пришёл, пока идёт деплой —
+# дождаться предыдущего (не cancel-in-progress, чтобы не оставить полу-применённое состояние).
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # workflow_run триггерится в т.ч. при неудачном docker-publish — фильтруем явно.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-22.04
+    environment: staging
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            # workflow_run — берём latest, который docker-publish только что обновил.
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Deploying tag: $(cat $GITHUB_OUTPUT | grep tag= | cut -d= -f2)"
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-auth-sock: /tmp/ssh-agent.sock
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          PORT: ${{ secrets.STAGING_SSH_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${PORT}" -H "${HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Copy staging files to server
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+          PORT: ${{ secrets.STAGING_SSH_PORT || '22' }}
+        run: |
+          # Создать структуру каталогов на сервере (idempotent).
+          ssh -p "${PORT}" "${USER}@${HOST}" "mkdir -p ~/cont_exchange/kafka"
+
+          # Compose-файл (переименовать в docker-compose.yml для удобства).
+          scp -P "${PORT}" infra/docker-compose.staging.yml \
+              "${USER}@${HOST}:~/cont_exchange/docker-compose.yml"
+
+          # Скрипт инициализации Kafka-топиков.
+          scp -P "${PORT}" infra/kafka/create_topics.sh \
+              "${USER}@${HOST}:~/cont_exchange/kafka/create_topics.sh"
+
+          # Env — только если файла .env ещё нет на сервере (не перезаписываем
+          # production-секреты при каждом деплое).
+          ssh -p "${PORT}" "${USER}@${HOST}" \
+              "test -f ~/cont_exchange/.env || true" || \
+            scp -P "${PORT}" infra/env/.env-staging.example \
+                "${USER}@${HOST}:~/cont_exchange/.env"
+
+      - name: Pull images + restart stack
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+          PORT: ${{ secrets.STAGING_SSH_PORT || '22' }}
+          GHCR_TOKEN: ${{ secrets.STAGING_GHCR_TOKEN }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          ssh -p "${PORT}" "${USER}@${HOST}" bash -s <<EOF
+            set -e
+            cd ~/cont_exchange
+
+            # Зафиксировать IMAGE_TAG в .env (override через docker-compose interpolation).
+            if grep -q '^IMAGE_TAG=' .env 2>/dev/null; then
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_TAG}|" .env
+            else
+              echo "IMAGE_TAG=${IMAGE_TAG}" >> .env
+            fi
+
+            # Auth (для public images — необязательно, для private — обязательно).
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u ${USER} --password-stdin
+
+            docker compose pull --quiet
+            docker compose up -d --remove-orphans
+            docker compose ps
+          EOF
+
+      - name: Smoke check
+        if: ${{ inputs.skip_smoke != true }}
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+        run: |
+          echo "Waiting up to 90s for gateway /healthz..."
+          for i in {1..18}; do
+            if curl -fsS -m 5 "http://${HOST}:8088/healthz" 2>/dev/null | grep -q ok; then
+              echo "/healthz OK after ${i} × 5s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "/healthz did not become OK in 90s"
+          exit 1
+
+      - name: Dump logs on failure
+        if: failure()
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+          PORT: ${{ secrets.STAGING_SSH_PORT || '22' }}
+        run: |
+          ssh -p "${PORT}" "${USER}@${HOST}" \
+            "cd ~/cont_exchange && docker compose ps && docker compose logs --tail=100"
