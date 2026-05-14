@@ -2,9 +2,7 @@ name: docker-publish
 
 on:
   push:
-    # ci/docker-publish — временно для верификации workflow до merge.
-    # Перед merge revert-коммит вернёт `branches: [main]`.
-    branches: [main, ci/docker-publish]
+    branches: [main]
     tags: ["v*.*.*"]
     paths:
       - "cpp/**"
