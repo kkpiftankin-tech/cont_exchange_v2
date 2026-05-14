@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Put all binaries into build/bin for easy Docker COPY.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Custom CMake modules (e.g. FindgRPC.cmake for pkg-config-based gRPC lookup).
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
 add_subdirectory(contracts)
 add_subdirectory(cpp/common)
 
