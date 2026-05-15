@@ -1,5 +1,20 @@
 # Implementation Tasks: F-04 Batch Clearing
 
+## Progress (current series, 2026-05)
+
+F-04 имплементируется серией PR из ветки `origin/dev`:
+
+| PR                                                                                            | Что сделано                                                                                                                                          | Покрывает задачи         |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| [#6 build fixes](https://github.com/kkpiftankin-tech/cont_exchange_v2/pull/6) merged          | Dockerfile.service: slim Boost, fixed ENTRYPOINT; rpk healthcheck; idempotent topics-init.                                                           | prerequisite             |
+| [#7 proto contracts](https://github.com/kkpiftankin-tech/cont_exchange_v2/pull/7) merged      | `batch.proto` LiquidityProvenance, `fill_event.proto`, `batch_outputs.proto`, `solver.proto`.                                                        | T-F04-001 (контракт)     |
+| [#8 cpp/common update](https://github.com/kkpiftankin-tech/cont_exchange_v2/pull/8) merged    | `Decimal::zero()`, `Defer`, `replay_kafka`, new `ConsumerConfig` fields. Foundation.                                                                  | prerequisite             |
+| #N feat/f04-matching (current)                                                                | Eigen3 Sparse Cholesky solver, `RunBatchUseCase`, `PostgresFlowOrderRepository`, `PostgresSolverConfigRepository`, `MarketDataClient`, `BatchOutputsProducer`, U1-U10 tests, full-cycle+SLA integration tests. | T-F04-001, T-F04-002 (код), T-F04-005, T-F04-006 |
+| `feat/f04-postgres` (next, step 3)                                                            | DDL `flow_orders`, `solver_config` в init.sql; postgres сервис в docker-compose.dev.yml.                                                             | T-F04-002 (БД), T-F04-007 |
+| `feat/f04-clickhouse` (next, step 4)                                                          | clickhouse сервис; ingestion `batchresults`, `fills`.                                                                                                | T-F04-003                |
+
+Подробности по статусу AC-1..AC-15 и unit-тестам U1-U10 — в [acceptance-criteria.md](../02-system/features/F-04-batch-clearing/acceptance-criteria.md).
+
 ## Source Artifacts
 
 - Feature: [F-04 Batch Clearing](../02-system/features/F-04-batch-clearing/)

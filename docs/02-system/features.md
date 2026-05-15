@@ -17,7 +17,7 @@ related:
 | F-01 | Registration & Authentication | not-implemented | [features/F-01-auth-and-identity/](features/F-01-auth-and-identity/) |
 | F-02 | Create FlowOrder | in-progress-mvp | [features/F-02-create-floworder/](features/F-02-create-floworder/) |
 | F-03 | FlowOrder Lifecycle (Amend/Cancel) | in-progress-mvp | [features/F-03-order-lifecycle/](features/F-03-order-lifecycle/) |
-| F-04 | Batch Clearing | in-progress-mvp-simulator | [features/F-04-batch-clearing/](features/F-04-batch-clearing/) |
+| F-04 | Batch Clearing | in-progress-mvp | [features/F-04-batch-clearing/](features/F-04-batch-clearing/) |
 | F-05 | Live Market Data | in-progress-mvp | [features/F-05-live-market-data/](features/F-05-live-market-data/) |
 | F-06 | Positions / PnL / Margin | in-progress-mvp | [features/F-06-positions-pnl-margin/](features/F-06-positions-pnl-margin/) |
 | F-07 | Pre-trade Risk Control | in-progress-mvp | [features/F-07-pretrade-risk/](features/F-07-pretrade-risk/) |

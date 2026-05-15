@@ -1,14 +1,19 @@
 feature:
   id: F-04
   name: Batch Clearing Cycle
-  status: in-progress-mvp-simulator
+  status: in-progress-mvp
   owner: core-team
 
 description: >
-  Периодический батч-клиринг FlowOrder. Solver решает систему спроса/предложения
-  на каждый интервал batchIntervalMs, формирует BatchResult с clearPrices,
-  executedRates, residualNorm, solveTimeMs и набором FillEvent. Текущая
-  реализация — наивный per-order симулятор, не настоящий многомерный солвер.
+  Периодический батч-клиринг FlowOrder. ContinuousClearingSolver (Eigen3
+  Sparse Cholesky) решает систему спроса/предложения D(p)=0 на каждый
+  интервал batchIntervalMs из solver_config (PostgreSQL), формирует
+  BatchResult с clearPrices, executedRates, residualNorm, solveTimeMs
+  и набором FillEvent. FillEvent публикуются в отдельный Kafka топик
+  "fills"; BatchResult — в "batch.outputs". Reference prices берутся
+  у Market Data Service по gRPC. Активные FlowOrder читаются из
+  PostgreSQL таблицы flow_orders (когда выставлен MATCHING_POSTGRES_DSN;
+  иначе fallback в in-memory).
 
 primaryComponents:
   - matching
@@ -20,40 +25,64 @@ primaryComponents:
 protoContracts:
   - contracts/proto/fob/orders/v1/orders.proto
   - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/matching/v1/batch_outputs.proto
+  - contracts/proto/fob/matching/v1/fill_event.proto
+  - contracts/proto/fob/matching/v1/solver.proto
   - contracts/proto/fob/ledger/v1/ledger.proto
   - contracts/proto/fob/observability/v1/observability.proto
 
 storageDependencies:
   postgresql:
-    - flow_orders        # источник активных заявок
-    - solver_config      # параметры solver (batchIntervalMs, maxIterations, epsilonLiquidity, tolerance, feeModel)
+    - flow_orders        # источник активных заявок, читается PostgresFlowOrderRepository
+    - solver_config      # batchIntervalMs, maxIterations, epsilonLiquidity, tolerance, feeModel; читается PostgresSolverConfigRepository
   clickhouse:
-    - batch_results
-    - fills
+    - batchresults       # планируется (PR feat/f04-clickhouse, шаг 4)
+    - fills              # планируется (PR feat/f04-clickhouse, шаг 4)
 
 codePaths:
   - cpp/matching/src/main.cpp
   - cpp/matching/src/app/matching_loop.cpp
   - cpp/matching/src/app/matching_loop.hpp
+  - cpp/matching/src/app/run_batch_uc.cpp
+  - cpp/matching/src/app/run_batch_uc.hpp
+  - cpp/matching/src/app/solver_metrics.cpp
+  - cpp/matching/src/app/solver_metrics.hpp
   - cpp/matching/src/domain/solver.hpp
+  - cpp/matching/src/domain/solver_impl.cpp
+  - cpp/matching/src/domain/solver_impl.hpp
+  - cpp/matching/src/domain/batch_result_to_fill_events.cpp
+  - cpp/matching/src/domain/batch_result_to_fill_events.hpp
+  - cpp/matching/src/infra/kafka/batch_outputs_producer.cpp
+  - cpp/matching/src/infra/kafka/batch_outputs_producer.hpp
+  - cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp
+  - cpp/matching/src/infra/postgres/postgres_flow_order_repository.hpp
+  - cpp/matching/src/infra/postgres/postgres_solver_config_repository.cpp
+  - cpp/matching/src/infra/postgres/postgres_solver_config_repository.hpp
+  - cpp/matching/src/infra/market_data/market_data_client.cpp
+  - cpp/matching/src/infra/market_data/market_data_client.hpp
+  - cpp/matching/src/transport/grpc_isolation_matching_service.cpp
+  - cpp/matching/src/transport/grpc_isolation_matching_service.hpp
   - cpp/ledger/src/infra/kafka_consumers.cpp
   - cpp/ledger/src/app/ledger_uc.cpp
 
 kafkaTopics:
   produces:
-    - batch.outputs
-  consumes:
-    - orders.normalized
+    - batch.outputs      # BatchResult wrapper
+    - fills              # FillEvent stream (отдельный топик)
+    - execution.intents  # hedge intents (F-12, dormant в F-04 scope)
+  consumes: []           # FlowOrders читаются из PostgreSQL, не Kafka
 
 grpcServices:
-  exposes: []
+  exposes:
+    - fob.matching.v1.Solver  # standalone Solver.Solve(BatchRequest) для replay/backtest
   calls:
-    - fob.ledger.v1.LedgerService.ApplyBatchResult  # планируется
-    - fob.risk.v1.RiskService.OnBatchResult         # планируется
+    - fob.marketdata.v1.MarketDataService.GetReferencePrices  # gRPC к Market Data
+    - fob.ledger.v1.LedgerService.ApplyBatchResult            # планируется (обрабатывается на стороне Ledger через Kafka batch.outputs consumer)
+    - fob.risk.v1.RiskService.OnBatchResult                   # планируется
 
 acceptanceCriteria:
-  - "Для каждого батча формируется BatchResult с валидными clearPrices и executedRates."
-  - "FillEvent корректно отражают исполненные объёмы и цены по всем FlowOrder."
+  - "Для каждого батча формируется BatchResult с валидными clearPrices и executedRates (real Eigen Sparse Cholesky solver)."
+  - "FillEvent корректно отражают исполненные объёмы и цены по всем FlowOrder, включая liquidity_source, fees, fill_id."
   - "Median solveTimeMs <= 500 ms, p95 <= 1000 ms на N=1000 активных FlowOrder."
   - "residualNorm <= tolerance из solverconfig."
   - "Детерминированность: одинаковые входы -> одинаковый BatchResult."
@@ -61,47 +90,18 @@ acceptanceCriteria:
   - "При solveTimeMs > SLA генерируется alert; опционально kill-switch (F-16)."
 
 knownIssues:
-  - id: no-real-solver
+  - id: postgres-ddl-pending
     severity: feature-gap
-    description: Per-order симулятор; не решает D(p)=0
-    location: cpp/matching/src/app/matching_loop.cpp#L148-L203
-  - id: per-order-pricing
-    severity: critical
-    description: Каждый ордер исполняется по своему midpoint, а не единой клиринговой цене
-    location: cpp/matching/src/app/matching_loop.cpp#L172-L185
-  - id: hardcoded-residual
-    severity: bug
-    description: residualNorm = 0.0 захардкожен
-    location: cpp/matching/src/app/matching_loop.cpp#L120
-  - id: hardcoded-solve-time
-    severity: bug
-    description: solveTimeMs = 1 захардкожен; не измеряется реальное время
-    location: cpp/matching/src/app/matching_loop.cpp#L121
-  - id: executed-rates-wrong
-    severity: bug
-    description: executed_rates показывает max_speed вместо фактической dq/dt
-    location: cpp/matching/src/app/matching_loop.cpp#L188
-  - id: no-postgresql-input
+    description: >
+      Matching умеет читать flow_orders и solver_config из PostgreSQL,
+      но сам DDL для этих таблиц ещё не добавлен в init.sql. До PR
+      feat/f04-postgres (шаг 3) сервис стартует без MATCHING_POSTGRES_DSN
+      и работает в in-memory режиме.
+  - id: clickhouse-storage-pending
     severity: feature-gap
-    description: F-04 требует чтения floworders из PostgreSQL; код использует Kafka
-  - id: no-market-data
-    severity: feature-gap
-    description: Нет gRPC вызова Market Data Service для reference prices
-  - id: no-fills-topic
-    severity: feature-gap
-    description: F-04 требует отдельный Kafka топик "fills"; код кладёт fills в batch.outputs
-  - id: missing-fill-fields
-    severity: feature-gap
-    description: В Fill отсутствуют liquidity_source, fees, fill_id
-  - id: no-fallback
-    severity: feature-gap
-    description: Нет fallback при residualNorm > tolerance или maxIterations exhaustion
-  - id: no-sla-alert
-    severity: feature-gap
-    description: Нет измерения solveTimeMs и алертов при превышении SLA
-  - id: no-multileg
-    severity: feature-gap
-    description: Multi-leg / portfolio orders не поддерживаются
+    description: >
+      ClickHouse-таблицы batchresults и fills и ingestion-слой
+      импортируются отдельным PR feat/f04-clickhouse (шаг 4).
   - id: buy-reserve-leak
     severity: critical
     description: При FILLED BUY не освобождается разница (price_high - midpoint) * qty в ledger
@@ -112,6 +112,17 @@ knownIssues:
     location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    - cpp/matching/tests/domain/f04_solver_u1_u10_test.cpp
+    - cpp/matching/tests/domain/fill_math_test.cpp
+    - cpp/matching/tests/domain/br_to_fe_test.cpp
+    - cpp/matching/tests/app/run_batch_uc_test.cpp
+    - cpp/matching/tests/app/hedge_trigger_policy_test.cpp
+    - cpp/matching/tests/app/position_snapshot_calculator_test.cpp
+    - cpp/matching/tests/app/external_venue_filter_test.cpp
+    - cpp/matching/tests/app/planner_inputs_cache_test.cpp
+    - cpp/matching/tests/app/execution_intent_builder_test.cpp
+  integration:
+    - cpp/matching/tests/domain/f04_full_cycle_test.cpp
+    - cpp/matching/tests/domain/f04_sla_test.cpp
   contract: []
