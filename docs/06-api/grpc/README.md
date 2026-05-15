@@ -15,7 +15,7 @@
 | [ledger/v1/ledger.proto](../../../contracts/proto/fob/ledger/v1/ledger.proto) | gRPC `LedgerService` |
 | [risk/v1/risk.proto](../../../contracts/proto/fob/risk/v1/risk.proto) | gRPC `RiskService`, `RiskAlert` |
 | [marketdata/v1/marketdata_raw.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_raw.proto) | `MarketDataRaw`, `Ticker`, `Trade`, `OrderBookL2Update` |
-| [marketdata/v1/marketdata_service.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_service.proto) | gRPC `MarketDataService` |
+| [marketdata/v1/marketdata_raw.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_raw.proto) | gRPC `MarketDataService` |
 | [execution/v1/execution.proto](../../../contracts/proto/fob/execution/v1/execution.proto) | `ExecutionIntent`, `ExecutionReport` |
 | [observability/v1/observability.proto](../../../contracts/proto/fob/observability/v1/observability.proto) | Метрики, алерты |
 | [agent/v1/agent.proto](../../../contracts/proto/fob/agent/v1/agent.proto) | Контракты для агентов/backtest |

@@ -33,4 +33,42 @@ grpc::Status GrpcMarketDataService::GetLastTicker(
   return grpc::Status::OK;
 }
 
+// Below: UNIMPLEMENTED stubs for the four RPCs added in marketdata_raw.proto
+// when it absorbed MarketDataService (origin/dev). Surface preserved so the
+// service class is concrete; full bodies will land alongside cpp/market_data
+// updates in a follow-up PR. matching service from origin/dev only calls
+// GetLastTicker, so these stubs are sufficient for F-04.
+
+grpc::Status GrpcMarketDataService::GetLiveMarketSnapshots(
+    grpc::ServerContext*,
+    const google::protobuf::Empty*,
+    grpc::ServerWriter<fob::marketdata::v1::OrderBookSnapshot>*) {
+  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                      "GetLiveMarketSnapshots not yet implemented in main");
+}
+
+grpc::Status GrpcMarketDataService::GetLiquidityCurve(
+    grpc::ServerContext*,
+    const fob::marketdata::v1::GetLiquidityCurveRequest*,
+    fob::marketdata::v1::GetLiquidityCurveResponse*) {
+  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                      "GetLiquidityCurve not yet implemented in main");
+}
+
+grpc::Status GrpcMarketDataService::SubscribeBBO(
+    grpc::ServerContext*,
+    const google::protobuf::Empty*,
+    grpc::ServerWriter<fob::marketdata::v1::BBOUpdate>*) {
+  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                      "SubscribeBBO not yet implemented in main");
+}
+
+grpc::Status GrpcMarketDataService::GetHedgePnL(
+    grpc::ServerContext*,
+    const fob::marketdata::v1::GetHedgePnLRequest*,
+    fob::marketdata::v1::GetHedgePnLResponse*) {
+  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                      "GetHedgePnL not yet implemented in main");
+}
+
 }  // namespace cex::market_data::transport

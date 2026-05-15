@@ -4,12 +4,15 @@ FROM ubuntu:${UBUNTU_VERSION} AS builder
 
 ARG TARGET
 
-# Base build tools + deps for gRPC/protobuf + Kafka + Boost
+# Base build tools + deps for gRPC/protobuf + Kafka + Boost + Eigen + PostgreSQL
+# (eigen + pqxx are matching-only; left enabled for all services to keep one image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake pkg-config git \
     libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
     librdkafka-dev \
     libboost-system-dev libboost-thread-dev \
+    libeigen3-dev \
+    libpqxx-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -22,12 +25,14 @@ RUN cmake --build build --target ${TARGET} -j
 FROM ubuntu:${UBUNTU_VERSION} AS runtime
 ARG TARGET
 
-# Runtime deps (keep simple for MVP: install same packages).
+# Runtime deps. Includes libpqxx for matching's Postgres flow_orders/solver_config
+# access. Eigen3 is header-only and consumed at build time; no runtime entry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgrpc++-dev libprotobuf-dev \
     librdkafka-dev \
     libboost-system-dev libboost-thread-dev \
+    libpqxx-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/bin/${TARGET} /usr/local/bin/service

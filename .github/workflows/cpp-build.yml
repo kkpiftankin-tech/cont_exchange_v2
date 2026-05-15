@@ -38,7 +38,10 @@ jobs:
             protobuf-compiler-grpc \
             libprotobuf-dev \
             librdkafka-dev \
-            libboost-all-dev
+            libboost-all-dev \
+            libeigen3-dev \
+            libpqxx-dev \
+            libpq-dev
 
       - name: Show toolchain versions
         run: |

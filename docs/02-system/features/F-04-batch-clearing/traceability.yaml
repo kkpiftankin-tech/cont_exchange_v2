@@ -13,7 +13,7 @@ components:
   - id: market-data
     role: reference-prices-provider
     codePath: cpp/market_data
-    status: not-integrated
+    status: integrated  # MarketDataClient gRPC в cpp/matching/src/infra/market_data/
   - id: observability
     role: telemetry-consumer
     codePath: cpp/observability
@@ -21,6 +21,12 @@ components:
 protoContracts:
   - file: contracts/proto/fob/matching/v1/batch.proto
     role: source-of-truth-for-BatchResult
+  - file: contracts/proto/fob/matching/v1/batch_outputs.proto
+    role: kafka-envelope-for-batch.outputs
+  - file: contracts/proto/fob/matching/v1/fill_event.proto
+    role: kafka-payload-for-fills-topic
+  - file: contracts/proto/fob/matching/v1/solver.proto
+    role: standalone-solver-grpc-for-replay
   - file: contracts/proto/fob/orders/v1/orders.proto
     role: FlowOrder-and-OrdersNormalized
   - file: contracts/proto/fob/ledger/v1/ledger.proto
@@ -33,29 +39,77 @@ kafkaTopics:
     direction: in
     producer: order-flow
     consumer: matching
+    status: legacy  # сохраняется для совместимости; F-04 предпочитает PostgreSQL источник
   - name: batch.outputs
     direction: out
     producer: matching
     consumer:
       - ledger
       - observability
+  - name: fills
+    direction: out
+    producer: matching
+    consumer:
+      - ledger
+      - observability
+      - market-data
+  - name: execution.intents
+    direction: out
+    producer: matching
+    consumer: venues
+    status: hedge-flow  # используется F-12, но публикуется matching'ом по hedge_trigger_policy
+
+postgresqlTables:
+  - name: flow_orders
+    role: active-orders-source
+    accessedBy: cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp
+    ddlStatus: pending  # DDL добавляется в PR feat/f04-postgres (шаг 3)
+  - name: solver_config
+    role: solver-parameters
+    accessedBy: cpp/matching/src/infra/postgres/postgres_solver_config_repository.cpp
+    ddlStatus: pending  # DDL добавляется в PR feat/f04-postgres (шаг 3)
 
 codeMap:
   entry: cpp/matching/src/main.cpp
   loop: cpp/matching/src/app/matching_loop.cpp
-  solverInterface: cpp/matching/src/domain/solver.hpp
-  consumer: cpp/ledger/src/infra/kafka_consumers.cpp
+  runBatch: cpp/matching/src/app/run_batch_uc.cpp
+  solver: cpp/matching/src/domain/solver_impl.cpp
+  fillEventBuilder: cpp/matching/src/domain/batch_result_to_fill_events.cpp
+  metrics: cpp/matching/src/app/solver_metrics.cpp
+  postgresFlowOrders: cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp
+  postgresSolverConfig: cpp/matching/src/infra/postgres/postgres_solver_config_repository.cpp
+  marketDataClient: cpp/matching/src/infra/market_data/market_data_client.cpp
+  batchOutputsProducer: cpp/matching/src/infra/kafka/batch_outputs_producer.cpp
+  standaloneSolverGrpc: cpp/matching/src/transport/grpc_isolation_matching_service.cpp
+  ledgerConsumer: cpp/ledger/src/infra/kafka_consumers.cpp
   ledgerApply: cpp/ledger/src/app/ledger_uc.cpp
 
 tests:
   unit:
     expected:
-      - tests/unit/matching/solve_batch_symmetric
-      - tests/unit/matching/solve_batch_portfolio
-      - tests/unit/matching/residual_norm_convergence
-    actual: []
+      - matching_f04_solver_u1_u10
+      - matching_f04_fill_math
+      - matching_f04_br_to_fe
+      - matching_run_batch_uc
+      - matching_hedge_trigger_policy
+      - matching_position_snapshot
+      - matching_external_venue_filter
+      - matching_planner_inputs_cache
+      - matching_execution_intents
+    actual:
+      - cpp/matching/tests/domain/f04_solver_u1_u10_test.cpp
+      - cpp/matching/tests/domain/fill_math_test.cpp
+      - cpp/matching/tests/domain/br_to_fe_test.cpp
+      - cpp/matching/tests/app/run_batch_uc_test.cpp
+      - cpp/matching/tests/app/hedge_trigger_policy_test.cpp
+      - cpp/matching/tests/app/position_snapshot_calculator_test.cpp
+      - cpp/matching/tests/app/external_venue_filter_test.cpp
+      - cpp/matching/tests/app/planner_inputs_cache_test.cpp
+      - cpp/matching/tests/app/execution_intent_builder_test.cpp
   integration:
     expected:
-      - tests/integration/f04-full-cycle
-      - tests/integration/f04-sla-load
-    actual: []
+      - f04-full-cycle
+      - f04-sla-load
+    actual:
+      - cpp/matching/tests/domain/f04_full_cycle_test.cpp
+      - cpp/matching/tests/domain/f04_sla_test.cpp

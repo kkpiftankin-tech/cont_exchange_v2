@@ -1,11 +1,12 @@
 #pragma once
-// =============================================================================
-// gRPC-сервис MarketData. В MVP единственный метод — GetLastTicker.
-// При расширении (история, OHLCV, стрим-подписки) сюда добавляются
-// соответствующие RPC, бизнес-логика — в use-cases.
-// =============================================================================
+// gRPC MarketDataService. Implements GetLastTicker (real); the other four
+// RPCs (GetLiveMarketSnapshots, GetLiquidityCurve, SubscribeBBO, GetHedgePnL)
+// are present in the proto contract (consumed by the matching service from
+// origin/dev) but not yet wired here in main; they return UNIMPLEMENTED so
+// the service class is concrete and the binary links. Full implementations
+// land alongside cpp/market_data updates in a follow-up PR.
 
-#include "fob/marketdata/v1/marketdata_service.grpc.pb.h"
+#include "fob/marketdata/v1/marketdata_raw.grpc.pb.h"
 #include "app/market_data_uc.hpp"
 
 namespace cex::market_data::transport {
@@ -14,10 +15,32 @@ class GrpcMarketDataService final : public fob::marketdata::v1::MarketDataServic
  public:
   explicit GrpcMarketDataService(app::MarketDataUseCases* uc) : uc_(uc) {}
 
-  // RPC получения последнего тикера. См. .cpp для маппинга nullopt -> NOT_FOUND.
+  // Implemented: returns latest ticker for venue/symbol or NOT_FOUND.
   grpc::Status GetLastTicker(grpc::ServerContext* context,
                              const fob::marketdata::v1::GetLastTickerRequest* request,
                              fob::marketdata::v1::GetLastTickerResponse* response) override;
+
+  // Stubs (UNIMPLEMENTED). Surface kept to satisfy the new proto interface;
+  // bodies live in .cpp.
+  grpc::Status GetLiveMarketSnapshots(
+      grpc::ServerContext* context,
+      const google::protobuf::Empty* request,
+      grpc::ServerWriter<fob::marketdata::v1::OrderBookSnapshot>* writer) override;
+
+  grpc::Status GetLiquidityCurve(
+      grpc::ServerContext* context,
+      const fob::marketdata::v1::GetLiquidityCurveRequest* request,
+      fob::marketdata::v1::GetLiquidityCurveResponse* response) override;
+
+  grpc::Status SubscribeBBO(
+      grpc::ServerContext* context,
+      const google::protobuf::Empty* request,
+      grpc::ServerWriter<fob::marketdata::v1::BBOUpdate>* writer) override;
+
+  grpc::Status GetHedgePnL(
+      grpc::ServerContext* context,
+      const fob::marketdata::v1::GetHedgePnLRequest* request,
+      fob::marketdata::v1::GetHedgePnLResponse* response) override;
 
  private:
   app::MarketDataUseCases* uc_;

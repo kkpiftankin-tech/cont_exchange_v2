@@ -3,22 +3,21 @@ syntax = "proto3";
 package fob.marketdata.v1;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
 import "fob/common/v1/common.proto";
+import "fob/venue/v1/venue.proto";
+import "fob/marketdata/v1/bbo.proto";
 
 message PriceLevel {
   fob.common.v1.Decimal price = 1;
-  fob.common.v1.Decimal amount = 2; // base amount at this price
+  fob.common.v1.Decimal amount = 2;
 }
 
 message OrderBookSnapshot {
-  string venue = 1;  // "binance", "coinbase", ...
-
+  string venue = 1;
   fob.common.v1.Instrument instrument = 2;
-
-  // Similar to CCXT: timestamp/nonce
   google.protobuf.Timestamp timestamp = 3;
   uint64 nonce = 4;
-
   repeated PriceLevel bids = 5;
   repeated PriceLevel asks = 6;
 }
@@ -27,75 +26,113 @@ message Ticker {
   string venue = 1;
   fob.common.v1.Instrument instrument = 2;
   google.protobuf.Timestamp timestamp = 3;
-
   fob.common.v1.Decimal bid = 10;
   fob.common.v1.Decimal ask = 11;
   fob.common.v1.Decimal last = 12;
-
   fob.common.v1.Decimal high = 13;
   fob.common.v1.Decimal low = 14;
   fob.common.v1.Decimal open = 15;
   fob.common.v1.Decimal close = 16;
-
-  // 24h volumes if provided by venue
   fob.common.v1.Decimal base_volume = 20;
   fob.common.v1.Decimal quote_volume = 21;
-
-  // Optional computed metrics (can be empty if not computed)
   fob.common.v1.Decimal vwap = 30;
-  fob.common.v1.Decimal spread = 31; // ask - bid
+  fob.common.v1.Decimal spread = 31;
 }
 
 message Trade {
   string venue = 1;
   fob.common.v1.Instrument instrument = 2;
-
   string trade_id = 3;
   google.protobuf.Timestamp timestamp = 4;
-
   fob.common.v1.Side side = 5;
-
   fob.common.v1.Decimal price = 6;
-  fob.common.v1.Decimal amount = 7; // base amount
-  fob.common.v1.Decimal cost = 8;   // quote amount (price*amount)
-
+  fob.common.v1.Decimal amount = 7;
+  fob.common.v1.Decimal cost = 8;
   fob.common.v1.Fee fee = 9;
-
-  // maker/taker flag if available
   bool maker = 10;
-
-  // optional link to a venue order id
   string order_id = 11;
 }
 
 message VenueSymbolMeta {
   string venue = 1;
   fob.common.v1.Instrument instrument = 2;
-
-  // Fees
   fob.common.v1.Decimal maker_fee_rate = 10;
   fob.common.v1.Decimal taker_fee_rate = 11;
-
-  // Trading constraints
-  fob.common.v1.Decimal tick_size = 20;  // minimal price increment
-  fob.common.v1.Decimal lot_size = 21;   // minimal qty increment
-
+  fob.common.v1.Decimal tick_size = 20;
+  fob.common.v1.Decimal lot_size = 21;
   fob.common.v1.Decimal min_notional = 22;
   fob.common.v1.Decimal min_qty = 23;
   fob.common.v1.Decimal max_qty = 24;
-
-  // Optional venue-native symbol (e.g. "BTCUSDT")
   string venue_symbol = 30;
 }
 
 message MarketDataRaw {
-  // Kafka topic: marketdata.raw
   fob.common.v1.EventMeta meta = 1;
-
   oneof payload {
     OrderBookSnapshot orderbook = 10;
     Ticker ticker = 11;
     Trade trade = 12;
     VenueSymbolMeta symbol_meta = 13;
   }
+}
+
+message GetLastTickerRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;
+  string symbol = 3;
+}
+
+message GetLastTickerResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool found = 2;
+  Ticker ticker = 3;
+  fob.common.v1.Error error = 4;
+}
+
+message GetLiquidityCurveRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;
+  string symbol = 3;
+  fob.venue.v1.ExecutionSide side = 4;
+}
+
+message GetHedgePnLRequest {
+    string batch_id = 1;
+    string session_id = 2;
+    string user_id = 3;
+    string venue = 4;
+    google.protobuf.Timestamp from_time = 5;
+    google.protobuf.Timestamp to_time = 6;
+}
+
+message HedgePnLRecord {
+    string batch_id = 1;
+    string session_id = 2;
+    string user_id = 3;
+    string venue = 4;
+    string instrument = 5;
+    double total_hedge_pnl = 6;
+    double total_filled_qty = 7;
+    uint64 trade_count = 8;
+    google.protobuf.Timestamp batch_time = 9;
+}
+
+message GetHedgePnLResponse {
+    repeated HedgePnLRecord records = 1;
+    fob.common.v1.Error error = 2;
+}
+
+message GetLiquidityCurveResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool found = 2;
+  fob.venue.v1.SideLiquidityCurve curve = 3;
+  fob.common.v1.Error error = 4;
+}
+
+service MarketDataService {
+  rpc GetLastTicker(GetLastTickerRequest) returns (GetLastTickerResponse);
+  rpc GetLiveMarketSnapshots(google.protobuf.Empty) returns (stream OrderBookSnapshot);
+  rpc GetLiquidityCurve(GetLiquidityCurveRequest) returns (GetLiquidityCurveResponse);
+  rpc SubscribeBBO(google.protobuf.Empty) returns (stream BBOUpdate);
+  rpc GetHedgePnL(GetHedgePnLRequest) returns (GetHedgePnLResponse);
 }

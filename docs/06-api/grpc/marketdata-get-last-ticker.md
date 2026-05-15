@@ -34,7 +34,7 @@ rpc GetLastTicker(GetLastTickerRequest) returns (GetLastTickerResponse);
 
 ## Schema
 
-См. [contracts/proto/fob/marketdata/v1/marketdata_service.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_service.proto).
+См. [contracts/proto/fob/marketdata/v1/marketdata_raw.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_raw.proto).
 
 ```proto
 message GetLastTickerRequest {

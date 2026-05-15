@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package fob.venue.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// Versioning policy for v1:
+// - Keep Kafka payloads parseable as the original message type.
+// - Add only optional/new fields with new field numbers for backward-compatible changes.
+// - Never reuse or renumber fields; reserve removed fields.
+// - For breaking changes create a new package version, e.g. fob.venue.v2.
+
+// Normalized order book snapshot from an external venue.
+message VenueSnapshot {
+  fob.common.v1.EventMeta meta = 1;
+
+  string venue_id = 2;        // e.g. "binance", "coinbase", "uniswap_v3"
+  fob.common.v1.Instrument instrument = 3;
+  google.protobuf.Timestamp timestamp = 4;
+
+  // Best Bid/Offer
+  fob.common.v1.Decimal best_bid = 10;
+  fob.common.v1.Decimal best_ask = 11;
+  fob.common.v1.Decimal mid_price = 12;
+  fob.common.v1.Decimal spread = 13;
+
+  // Full depth
+  repeated fob.common.v1.Decimal bid_prices = 20;
+  repeated fob.common.v1.Decimal bid_quantities = 21;
+  repeated fob.common.v1.Decimal ask_prices = 22;
+  repeated fob.common.v1.Decimal ask_quantities = 23;
+
+  // Venue metadata
+  fob.common.v1.Decimal maker_fee = 30;
+  fob.common.v1.Decimal taker_fee = 31;
+  fob.common.v1.Decimal tick_size = 32;
+  fob.common.v1.Decimal lot_size = 33;
+
+  // Status: "connected", "stale", "disconnected", "empty"
+  string status = 40;
+
+  fob.common.v1.Decimal volume_24h = 50;
+}
+
+// One side (bid or ask) of the liquidity curve.
+message SideLiquidityCurve {
+  repeated double q_grid = 1;   // quantity grid points
+  repeated double p_of_q = 2;   // marginal price at each q
+  repeated double s_of_q = 3;   // cumulative cost at each q
+  repeated double v_grid = 4;   // velocity grid (q/tau)
+  repeated double l_of_v = 5;   // flow cost at each v
+  repeated double l_of_v_monotone = 6;  // monotone interpolation for engineering/simulation
+
+  // Fenchel/Legendre dual layer for solver/planner:
+  //   S*(p) = sup_q (p*q - S(q)),
+  //   q*(p) = argmax_q (p*q - S(q)).
+  repeated double p_star_grid = 7;  // price grid for dual tables
+  repeated double s_star_of_p = 8;  // S*(p) values on p_star_grid
+  repeated double q_star_of_p = 9;  // q*(p) values on p_star_grid
+}
+
+// Continuous liquidity curve built from LOB snapshot (LOB->FOB).
+message VenueLiquidityCurve {
+  fob.common.v1.EventMeta meta = 1;
+
+  string venue_id = 2;
+  fob.common.v1.Instrument instrument = 3;
+  google.protobuf.Timestamp timestamp = 4;
+
+  // Linked snapshot
+  string snapshot_id = 5;
+  string curve_id = 6;
+
+  SideLiquidityCurve bid_curve = 10;
+  SideLiquidityCurve ask_curve = 11;
+
+  // Quality metrics
+  double epsilon1 = 20;  // cost approximation error
+  double epsilon2 = 21;  // monotonicity / price error
+  double epsilon3 = 22;  // execution-based error
+
+  double confidence = 23; // overall confidence [0..1]
+
+  // "L1" (fast), "L2" (regularized), "L3" (calibrated)
+  string level = 24;
+
+  fob.common.v1.Decimal mid_price = 30;
+  double tau_ms = 31;  // batch interval used for v = q/tau
+
+  // Kafka venue.liquidity.fob payload versioning.
+  // These fields are additive and safe for older consumers to ignore.
+  uint32 schema_version = 40;
+  uint32 min_compatible_schema_version = 41;
+  string producer_version = 42;
+}
+
+// Execution side for liquidity curves
+enum ExecutionSide {
+  EXECUTION_SIDE_UNSPECIFIED = 0;
+  EXECUTION_SIDE_BUY = 1;
+  EXECUTION_SIDE_SELL = 2;
+}
+
+// -------------------------------
+// Kafka topic: venue.health
+// -------------------------------
+
+enum VenueHealthEventType {
+  VENUE_HEALTH_EVENT_TYPE_UNSPECIFIED = 0;
+  VENUE_HEALTH_EVENT_TYPE_RAW = 1;        // emitted by connector/normalizer
+  VENUE_HEALTH_EVENT_TYPE_AGGREGATED = 2; // emitted by health-router service
+}
+
+enum CircuitBreakerState {
+  CIRCUIT_BREAKER_STATE_UNSPECIFIED = 0;
+  CIRCUIT_BREAKER_STATE_CLOSED = 1;
+  CIRCUIT_BREAKER_STATE_OPEN = 2;
+  CIRCUIT_BREAKER_STATE_HALF_OPEN = 3;
+}
+
+enum VenueHealthStatus {
+  VENUE_HEALTH_STATUS_UNSPECIFIED = 0;
+  VENUE_HEALTH_STATUS_OK = 1;
+  VENUE_HEALTH_STATUS_STALE = 2;
+  VENUE_HEALTH_STATUS_DISCONNECTED = 3;
+  VENUE_HEALTH_STATUS_RATE_LIMIT = 4;
+  VENUE_HEALTH_STATUS_DEGRADED = 5;
+}
+
+enum RoutingRecommendation {
+  ROUTING_RECOMMENDATION_ALLOW = 0;
+  ROUTING_RECOMMENDATION_CAUTION = 1;
+  ROUTING_RECOMMENDATION_AVOID = 2;
+  ROUTING_RECOMMENDATION_BLOCK = 3;
+}
+
+message VenueHealth {
+  // Kafka envelope meta.
+  fob.common.v1.EventMeta meta = 1;
+
+  string venue = 2;
+
+  // Timestamp of the measurement.
+  google.protobuf.Timestamp timestamp = 3;
+
+  VenueHealthEventType event_type = 4;
+  CircuitBreakerState breaker_state = 5;
+  VenueHealthStatus status = 6;
+
+  // 0..1 health score (1 = perfect).
+  double health_score = 10;
+
+  // Simple metrics (extend as needed).
+  uint32 latency_ms = 11;
+  uint32 stale_ms = 12;
+
+  double error_rate = 13;
+  uint32 error_count = 14;
+
+  double snapshots_per_sec = 15;
+  double last_snapshot_age = 16;
+
+  RoutingRecommendation routing_recommendation = 17;
+
+  string reason = 20;
+}

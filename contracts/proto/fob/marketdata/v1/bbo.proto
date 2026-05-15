@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package fob.marketdata.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+message BBOUpdate {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  uint64 nonce = 4;
+  
+  // Best Bid/Offer
+  fob.common.v1.Decimal bid_price = 10;
+  fob.common.v1.Decimal bid_volume = 11;
+  fob.common.v1.Decimal ask_price = 12;
+  fob.common.v1.Decimal ask_volume = 13;
+  
+  // Derived metrics
+  fob.common.v1.Decimal mid_price = 20;
+  fob.common.v1.Decimal spread_absolute = 21;
+  double spread_relative_percent = 22;
+  fob.common.v1.Decimal microprice = 23;
+  
+  // Metadata
+  string source = 30;
+}
