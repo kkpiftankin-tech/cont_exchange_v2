@@ -73,20 +73,51 @@ protoContracts:
   marketdata:
     files:
       - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
-      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+      - contracts/proto/fob/marketdata/v1/bbo.proto
     features:
+      - F-04
       - F-05
+      - F-06
       - F-11
     components:
       - market-data
       - venues
+      - matching
     entities:
       - MarketDataRaw
       - Ticker
       - Trade
       - OrderBookL2Update
+      - OrderBookSnapshot
+      - BBOUpdate
+      - MarketDataService
       - GetLastTickerRequest
       - GetLastTickerResponse
+      - GetLiquidityCurveRequest
+      - GetLiquidityCurveResponse
+      - GetHedgePnLRequest
+      - GetHedgePnLResponse
+
+  venue:
+    files:
+      - contracts/proto/fob/venue/v1/venue.proto
+    features:
+      - F-04
+      - F-11
+      - F-12
+    components:
+      - venues
+      - matching
+      - venue-health
+    entities:
+      - VenueSnapshot
+      - VenueLiquidityCurve
+      - VenueHealth
+      - SideLiquidityCurve
+      - RoutingRecommendation
+      - CircuitBreakerState
+      - VenueHealthStatus
+      - VenueHealthEventType
 
   risk:
     files:
