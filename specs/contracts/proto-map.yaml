@@ -48,9 +48,13 @@ protoContracts:
   matching:
     files:
       - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/matching/v1/batch_outputs.proto
+      - contracts/proto/fob/matching/v1/fill_event.proto
+      - contracts/proto/fob/matching/v1/solver.proto
     features:
       - F-04
       - F-09
+      - F-15
     components:
       - matching
       - ledger
@@ -60,6 +64,11 @@ protoContracts:
       - Fill
       - OrderUpdate
       - BatchDiagnostics
+      - LiquidityProvenance
+      - FillEvent
+      - BatchOutputs
+      - BatchRequest
+      - Solver
 
   marketdata:
     files:
