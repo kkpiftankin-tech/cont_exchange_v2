@@ -119,7 +119,9 @@ void VenuesLoop::exec_consume_loop() {
       rep.set_venue_order_id("VENUE-" + intent.intent_id());
       rep.set_client_order_id(intent.client_order_id());
 
-      rep.set_status(fob::common::v1::ORDER_STATUS_FILLED);
+      // execution.proto in dev split status off into ExecutionReportStatus
+      // enum (was fob.common.v1.OrderStatus). Map old FILLED to new value.
+      rep.set_status(fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED);
       *rep.mutable_filled_qty() = intent.target_qty();
       // remaining = 0 в той же шкале, что и target_qty.
       rep.mutable_remaining_qty()->set_units(0);
