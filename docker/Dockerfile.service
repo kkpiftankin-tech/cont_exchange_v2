@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake pkg-config git \
     libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
     librdkafka-dev \
-    libboost-all-dev \
+    libboost-system-dev libboost-thread-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -27,10 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgrpc++-dev libprotobuf-dev \
     librdkafka-dev \
-    libboost-all-dev \
+    libboost-system-dev libboost-thread-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/build/bin/${TARGET} /usr/local/bin/${TARGET}
+COPY --from=builder /src/build/bin/${TARGET} /usr/local/bin/service
 
 ENV TZ=UTC
-ENTRYPOINT ["/usr/local/bin/${TARGET}"]
+ENTRYPOINT ["/usr/local/bin/service"]

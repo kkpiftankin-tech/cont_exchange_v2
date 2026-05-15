@@ -27,5 +27,10 @@ __pycache__/
 !.env-example
 !.env-staging.example
 
+# Local compose overrides (e.g. when host stack needs ad-hoc patches that
+# should NOT be committed). docker compose picks them up automatically when
+# referenced explicitly with -f.
+infra/docker-compose.*.override.local.yml
+
 # Generated reports
 llm/reports/latest-*.md
