@@ -11,7 +11,7 @@
 | AC-5 | Для каждого FlowOrder сформирован FillEvent с execQty, execPrice | ✅ `batch_result_to_fill_events.cpp` заполняет execQty, execPrice, liquidity_source, fees, fill_id |
 | AC-6 | BatchResult публикуется в Kafka `batch.outputs`                  | ✅ `BatchOutputsProducer`                                                               |
 | AC-7 | FillEvent публикуются в Kafka `fills` (отдельный топик)          | ✅ `batch_outputs_producer.cpp:42` produce("fills", ...)                                 |
-| AC-8 | BatchResult и FillEvent сохраняются в ClickHouse                 | ❌ Планируется (PR feat/f04-clickhouse, шаг 4)                                          |
+| AC-8 | BatchResult и FillEvent сохраняются в ClickHouse                 | ⚠️ Схема создана в [init.sql](../../../../infra/clickhouse/init.sql); ingestion из Kafka — follow-up PR с импортом cpp/market_data clickhouse_storage |
 | AC-9 | Web UI получает обновления по WebSocket                          | ❌ Frontend scope, отдельный трек                                                       |
 
 ## Нефункциональные

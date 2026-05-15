@@ -18,54 +18,70 @@ ClickHouse **не источник истины для оперативных б
 
 ## Таблица `fills`
 
-Все исполнения (FillEvent) — основная аналитическая таблица.
+Все исполнения (FillEvent) — основная аналитическая таблица. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля ниже соответствуют тому, что пишет [ClickHouseBatchStorage](../../cpp/market_data/src/infra/clickhouse_storage.cpp) (импорт в follow-up PR).
 
 | Поле | Тип | Описание |
 | --- | --- | --- |
-| `fill_id` | `UUID` | |
-| `batch_id` | `UUID` | К какому batch относится |
-| `order_id` | `UUID` | Заявка, по которой произошло |
-| `user_id` | `UUID` | Владелец заявки |
-| `symbol` | `String` | |
-| `side` | `Enum8('buy'=1,'sell'=2)` | |
-| `asset_legs` | `String` | JSON (для портфельных) |
-| `exec_qty` | `Float64` | |
-| `exec_price` | `Float64` | |
-| `liquidity_source` | `Enum8('internal'=1,'cex_hedge'=2,'dex_hedge'=3,'epsilon_mm'=4)` | Кто предоставил ликвидность |
-| `fees` | `Float64` | |
-| `timestamp` | `DateTime64(3)` | |
+| `batch_id` | `String` | К какому batch относится |
+| `event_time_ms` | `Int64` | UNIX мс из BatchResult.meta |
+| `order_id` | `String` | Заявка, по которой произошло |
+| `user_id` | `String` | Владелец заявки |
+| `symbol` | `String` | напр. `BTC/USDT` |
+| `base` | `String` | базовый актив (BTC) |
+| `quote` | `String` | котировочный актив (USDT) |
+| `side` | `LowCardinality(String)` | `buy` / `sell` |
+| `executed_qty` | `Float64` | |
+| `price` | `Float64` | clearing-цена |
+| `executed_notional` | `Float64` | `executed_qty * price` |
+| `fee_amount` | `Float64` | |
+| `fee_currency` | `String` | |
+| `liquidity_source` | `String` | `internal` / `cex_hedge` / `dex_hedge` / `epsilon_mm` |
+| `venue_id` | `String` | для hedge fill |
+| `snapshot_id` | `String` | привязка к venue snapshot (audit) |
+| `curve_id` | `String` | привязка к LiquidityCurve (audit) |
+| `ingested_at` | `DateTime DEFAULT now()` | |
 
-`PARTITION BY toYYYYMMDD(timestamp)`, `ORDER BY (symbol, timestamp, fill_id)`.
+`ENGINE = MergeTree`, `ORDER BY (event_time_ms, batch_id, order_id)`.
+
+**Conflict Note (C-FILLS-V2).** Ранняя doc-версия упоминала колонки `fill_id`, `asset_legs` (JSON), Enum-типы для side/liquidity_source и партиционирование `toYYYYMMDD(timestamp)`. Импортированная в этом PR схема (mirrors origin/dev's clickhouse_storage) использует развёрнутые поля per-leg (symbol/base/quote вместо asset_legs JSON), LowCardinality(String) вместо Enum8 (для гибкости при добавлении liquidity_source), и не имеет fill_id (composite key `(batch_id, order_id)` + multi-leg fills получают разные строки).
 
 **Сервисы-потребители:**
 
 - **Observability & Reporting** (R) — VWAP, IS, fill rate, PnL агрегаты.
 - **Backtest & Replay** (R) — replay для сравнения политик.
-- **Market Data Service** (R) — агрегация объёмов для витрины.
+- **Market Data Service** (R/W) — пишет данные из Kafka `fills`; читает для агрегации.
 
-## Таблица `batch_results`
+## Таблица `batchresults`
 
-Диагностика каждого clearing-цикла.
+Диагностика каждого clearing-цикла. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля соответствуют [ClickHouseBatchStorage](../../cpp/market_data/src/infra/clickhouse_storage.cpp) (импорт в follow-up PR).
 
 | Поле | Тип | Описание |
 | --- | --- | --- |
-| `batch_id` | `UUID` | |
-| `timestamp` | `DateTime64(3)` | |
-| `clear_prices` | `String` | JSON: { symbol → clear_price } |
-| `executed_rates` | `String` | JSON: { order_id → executed_rate } |
+| `batch_id` | `String` | |
+| `event_time_ms` | `Int64` | |
+| `source` | `String` | `matching` |
+| `correlation_id` | `String` | trace |
+| `partition_key` | `String` | |
 | `residual_norm` | `Float64` | Норма остатка солвера |
 | `solve_time_ms` | `UInt32` | |
 | `num_active_orders` | `UInt32` | |
-| `solver_diagnostics` | `String` | JSON: дополнительные метрики |
 | `config_version` | `UInt32` | Версия solver_config |
+| `solver_diagnostics_json` | `String` | JSON: дополнительные метрики |
+| `clear_prices_json` | `String` | JSON: { symbol → clear_price } |
+| `executed_rates_json` | `String` | JSON: { order_id → executed_rate } |
+| `used_liquidity_json` | `String` | JSON: { liquidity_source → executed_qty } |
+| `fills_count` | `UInt32` | |
+| `ingested_at` | `DateTime DEFAULT now()` | |
 
-`PARTITION BY toYYYYMMDD(timestamp)`, `ORDER BY (timestamp, batch_id)`.
+`ENGINE = MergeTree`, `ORDER BY (event_time_ms, batch_id)`.
+
+**Conflict Note (C-BR-NAMING).** Ранняя doc-версия использовала snake_case (`batch_results`, `timestamp`, `solver_diagnostics`). Импортированная схема использует `batchresults` (один-слитное), `event_time_ms` (UNIX мс вместо DateTime64), и `*_json` суффиксы для JSON-полей. Doc выровнен под код.
 
 **Сервисы-потребители:**
 
-- **Observability & Reporting** (R) — мониторинг SLA solver (solve time, residual).
+- **Observability & Reporting** (R) — мониторинг SLA solver (solve_time_ms, residual_norm).
 - **Backtest & Replay** (R) — сравнение batch-метрик при разных конфигурациях.
-- **Market Data Service** (R) — исторические графики clear_prices.
+- **Market Data Service** (R/W) — пишет данные из Kafka `batch.outputs`; читает для исторических графиков.
 
 ## Таблица `marketdata`
 

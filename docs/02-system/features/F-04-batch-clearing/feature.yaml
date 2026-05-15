@@ -36,8 +36,8 @@ storageDependencies:
     - flow_orders        # источник активных заявок, читается PostgresFlowOrderRepository
     - solver_config      # batchIntervalMs, maxIterations, epsilonLiquidity, tolerance, feeModel; читается PostgresSolverConfigRepository
   clickhouse:
-    - batchresults       # планируется (PR feat/f04-clickhouse, шаг 4)
-    - fills              # планируется (PR feat/f04-clickhouse, шаг 4)
+    - batchresults       # schema в infra/clickhouse/init.sql; ingestion в follow-up PR (cpp/market_data clickhouse_storage)
+    - fills              # schema в infra/clickhouse/init.sql; ingestion в follow-up PR
 
 codePaths:
   - cpp/matching/src/main.cpp
@@ -98,11 +98,16 @@ knownIssues:
       пишет принимаемые FlowOrder в эту таблицу — записи появятся
       только когда подключится postgres-writer в order_flow (отдельная
       задача T-F04-002).
-  - id: clickhouse-storage-pending
+  - id: clickhouse-ingestion-pending
     severity: feature-gap
     description: >
-      ClickHouse-таблицы batchresults и fills и ingestion-слой
-      импортируются отдельным PR feat/f04-clickhouse (шаг 4).
+      ClickHouse-схема batchresults и fills создана в
+      infra/clickhouse/init.sql и поднимается сервисом clickhouse
+      в docker-compose.dev.yml. Сам ingestion-слой (Kafka consumer,
+      пишущий в эти таблицы) приходит вместе с обновлением
+      cpp/market_data clickhouse_storage из origin/dev — отдельный
+      follow-up PR. До этого batchresults/fills остаются пустыми,
+      matching пишет только в Kafka.
   - id: buy-reserve-leak
     severity: critical
     description: При FILLED BUY не освобождается разница (price_high - midpoint) * qty в ledger
