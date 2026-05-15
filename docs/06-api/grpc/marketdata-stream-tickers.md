@@ -2,7 +2,7 @@
 
 ## Status
 
-TODO / planned (в текущем `marketdata_service.proto` есть только `GetLastTicker`)
+TODO / planned (в текущем `marketdata_raw.proto` есть только `GetLastTicker`)
 
 ## Purpose
 

@@ -32,7 +32,7 @@ features:
 
 protoContracts:
   - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
-  - contracts/proto/fob/marketdata/v1/marketdata_service.proto
+  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
   - contracts/proto/fob/common/v1/common.proto
 
 entities:

@@ -12,7 +12,7 @@ In-memory кэш последних тикеров по парам (venue, symbo
 
 ## gRPC API
 
-`fob.marketdata.v1.MarketDataService` (см. [marketdata_service.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_service.proto)):
+`fob.marketdata.v1.MarketDataService` (см. [marketdata_raw.proto](../../../contracts/proto/fob/marketdata/v1/marketdata_raw.proto)):
 
 | RPC | Что делает |
 |---|---|
