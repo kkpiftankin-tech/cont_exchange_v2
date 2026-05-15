@@ -1,19 +1,10 @@
 #pragma once
-// =============================================================================
-// Простейший генератор UUID v4.
-//
-// Используется для correlation_id в логах, идентификаторов событий и т.п.
-// ВАЖНО: реализация не криптографически стойкая (mt19937 + random_device).
-// Для сценариев, где UUID — секрет (токены, идемпотентность с защитой от
-// перебора), нужно использовать криптографический ГПСЧ или OpenTelemetry
-// trace_id. Для обычного трейсинга и логирования этого достаточно.
-// =============================================================================
-
 #include <string>
 
 namespace cex::common {
 
-// Возвращает строку вида "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx" (RFC4122 v4).
+// Not cryptographically secure UUID, but good enough for correlation ids in dev.
+// In production, replace with a proper UUID library (or use OpenTelemetry trace ids).
 std::string uuid_v4();
 
 }  // namespace cex::common
