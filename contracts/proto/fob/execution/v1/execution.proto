@@ -7,9 +7,9 @@ import "fob/common/v1/common.proto";
 
 enum ExecutionStrategy {
   EXEC_STRATEGY_UNSPECIFIED = 0;
-  EXEC_STRATEGY_MARKET = 1;   // aggressive, immediate
-  EXEC_STRATEGY_LIMIT = 2;    // passive/limit
-  EXEC_STRATEGY_TWAP = 3;     // slice over time (optional later)
+  EXEC_STRATEGY_MARKET = 1;
+  EXEC_STRATEGY_LIMIT = 2;
+  EXEC_STRATEGY_TWAP = 3;
 }
 
 enum ExecutionUrgency {
@@ -19,77 +19,96 @@ enum ExecutionUrgency {
   URGENCY_HIGH = 3;
 }
 
+enum HedgeSource {
+  HEDGE_SOURCE_UNSPECIFIED = 0;
+  HEDGE_SOURCE_AUTO_BATCH = 1;
+  HEDGE_SOURCE_MANUAL_OVERRIDE = 2;
+  HEDGE_SOURCE_BACKTEST = 3;
+}
+
+enum ExecutionReportStatus {
+  EXECUTION_REPORT_STATUS_UNSPECIFIED      = 0;
+  EXECUTION_REPORT_STATUS_NEW              = 1;
+  EXECUTION_REPORT_STATUS_PARTIALLY_FILLED = 2;
+  EXECUTION_REPORT_STATUS_FILLED           = 3;
+  EXECUTION_REPORT_STATUS_CANCELLED        = 4;
+  EXECUTION_REPORT_STATUS_REJECTED         = 5;
+  EXECUTION_REPORT_STATUS_EXPIRED          = 6;
+  EXECUTION_REPORT_STATUS_OVERFILL_GUARD   = 7;
+  EXECUTION_REPORT_STATUS_UNDERFILLED      = 8;
+}
+
 message ExecutionIntent {
   // Kafka topic: execution.intents
   fob.common.v1.EventMeta meta = 1;
-
   string intent_id = 2;
+  string batch_id = 3;
+  string internal_order_id = 4;
+  string reason = 5;
+  string hedge_flow_id = 6;
+  string provider_id = 7;
+  HedgeSource source = 8;
 
-  // Link to internal context
-  string batch_id = 3;           // if triggered by a clearing batch
-  string internal_order_id = 4;  // internal flow order that caused hedge
-  string reason = 5;             // "hedge", "arbitrage", "risk_reduction", ...
-
-  // Where and what to trade
-  string venue = 10;             // "binance", ...
+  string venue = 10;
   fob.common.v1.Instrument instrument = 11;
-  string venue_symbol = 12;      // "BTCUSDT" if needed
+  string venue_symbol = 12;
+  repeated string allowed_venues = 13;
 
-  // Direction and size
   fob.common.v1.Side side = 20;
-  fob.common.v1.Decimal target_qty = 21;  // base qty
+  fob.common.v1.Decimal target_qty = 21;
+  fob.common.v1.Decimal target_notional = 22;
 
-  // Constraints
-  fob.common.v1.Decimal limit_price = 30;   // optional (0 if not used)
-  int32 max_slippage_bps = 31;              // optional; 0 means "not set"
+  fob.common.v1.Decimal limit_price = 30;
+  int32 max_slippage_bps = 31;
+  fob.common.v1.Decimal reference_mid = 32;
 
   ExecutionStrategy strategy = 40;
   ExecutionUrgency urgency = 41;
   fob.common.v1.TimeInForce tif = 42;
+  int64 timeout_ms = 43;
 
-  // Idempotency / venue linkage
   string client_order_id = 50;
 }
 
 message ExecutionTrade {
   string trade_id = 1;
   google.protobuf.Timestamp timestamp = 2;
-
   fob.common.v1.Decimal price = 3;
-  fob.common.v1.Decimal amount = 4; // base
-  fob.common.v1.Decimal cost = 5;   // quote
-
+  fob.common.v1.Decimal amount = 4;
+  fob.common.v1.Decimal cost = 5;
   fob.common.v1.Fee fee = 6;
-
   bool maker = 7;
 }
 
 message ExecutionReport {
-  // Kafka topic: execution.reports
+  // Kafka topic: execution.venue
   fob.common.v1.EventMeta meta = 1;
-
   string report_id = 2;
   string intent_id = 3;
+  string hedge_flow_id = 4;
+  string child_order_id = 5;
+  string batch_id = 6;
+  string provider_id = 7;
 
   string venue = 10;
   fob.common.v1.Instrument instrument = 11;
   string venue_symbol = 12;
+  fob.common.v1.Side side = 13;
 
-  // CCXT-like order fields
   string venue_order_id = 20;
   string client_order_id = 21;
 
-  fob.common.v1.OrderStatus status = 30;
-
-  fob.common.v1.Decimal filled_qty = 31;      // base
-  fob.common.v1.Decimal remaining_qty = 32;   // base
-  fob.common.v1.Decimal average_price = 33;   // quote/base
+  ExecutionReportStatus status = 30;
+  fob.common.v1.Decimal filled_qty = 31;
+  fob.common.v1.Decimal remaining_qty = 32;
+  fob.common.v1.Decimal average_price = 33;
+  int32 slippage_bps = 34;
+  fob.common.v1.Money hedge_pnl = 35;
+  fob.common.v1.Decimal reference_mid = 36;
 
   repeated ExecutionTrade trades = 40;
 
-  // Total fee (optional rollup; can be 0 if trades have per-fill fees)
   fob.common.v1.Fee fee_total = 50;
 
-  // Error if rejected/failed
   fob.common.v1.Error error = 60;
 }
