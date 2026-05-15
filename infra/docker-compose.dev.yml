@@ -48,6 +48,26 @@ services:
       BROKER: redpanda:9092
       P: 3
 
+  # F-04 OLTP: stores flow_orders, flow_order_legs, solver_config.
+  # Schema lives in infra/postgres/init.sql; the alpine image runs all
+  # *.sql in /docker-entrypoint-initdb.d/ on first start of an empty
+  # volume.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cex
+      POSTGRES_USER: cex
+      POSTGRES_PASSWORD: cex
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001_cex_init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cex -d cex >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:v2.7.2
     container_name: redpanda-console
@@ -106,9 +126,16 @@ services:
       dockerfile: docker/Dockerfile.service
       args: { TARGET: matching }
     env_file: [ ./env/.env-example ]
+    environment:
+      # Enables PostgresFlowOrderRepository and PostgresSolverConfigRepository.
+      # Without this, matching falls back to in-memory active orders (env
+      # batch interval) — useful for tests, not for the F-04 end-to-end path.
+      MATCHING_POSTGRES_DSN: "host=postgres port=5432 dbname=cex user=cex password=cex"
     depends_on:
       topics-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
   venues:
     build:

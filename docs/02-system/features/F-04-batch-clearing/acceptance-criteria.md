@@ -5,7 +5,7 @@
 | #    | Критерий                                                         | Статус                                                                                  |
 | ---- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | AC-1 | Solver запускается каждые `batchIntervalMs` (из `solverconfig`)  | ✅ `PostgresSolverConfigRepository` читает из БД; fallback на env                       |
-| AC-2 | На каждый батч собран список активных FlowOrder                  | ⚠️ Код готов (`PostgresFlowOrderRepository`); ждёт DDL `flow_orders` в шаге 3            |
+| AC-2 | На каждый батч собран список активных FlowOrder                  | ✅ DDL в [init.sql](../../../../infra/postgres/init.sql), `PostgresFlowOrderRepository` подключён; writer (order_flow→postgres) — отдельная задача |
 | AC-3 | Запрошены reference prices у Market Data Service                 | ✅ `MarketDataClient` gRPC                                                              |
 | AC-4 | Вычислены clearPrices и executedRates для всех инструментов      | ✅ `ContinuousClearingSolver` (Eigen3 Sparse Cholesky) в [solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp) |
 | AC-5 | Для каждого FlowOrder сформирован FillEvent с execQty, execPrice | ✅ `batch_result_to_fill_events.cpp` заполняет execQty, execPrice, liquidity_source, fees, fill_id |

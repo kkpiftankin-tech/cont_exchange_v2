@@ -63,11 +63,11 @@ postgresqlTables:
   - name: flow_orders
     role: active-orders-source
     accessedBy: cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp
-    ddlStatus: pending  # DDL добавляется в PR feat/f04-postgres (шаг 3)
+    ddlStatus: ready  # infra/postgres/init.sql (PR feat/f04-postgres, шаг 3)
   - name: solver_config
     role: solver-parameters
     accessedBy: cpp/matching/src/infra/postgres/postgres_solver_config_repository.cpp
-    ddlStatus: pending  # DDL добавляется в PR feat/f04-postgres (шаг 3)
+    ddlStatus: ready  # infra/postgres/init.sql (PR feat/f04-postgres, шаг 3)
 
 codeMap:
   entry: cpp/matching/src/main.cpp

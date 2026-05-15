@@ -90,13 +90,14 @@ acceptanceCriteria:
   - "При solveTimeMs > SLA генерируется alert; опционально kill-switch (F-16)."
 
 knownIssues:
-  - id: postgres-ddl-pending
+  - id: order-flow-postgres-write-pending
     severity: feature-gap
     description: >
-      Matching умеет читать flow_orders и solver_config из PostgreSQL,
-      но сам DDL для этих таблиц ещё не добавлен в init.sql. До PR
-      feat/f04-postgres (шаг 3) сервис стартует без MATCHING_POSTGRES_DSN
-      и работает в in-memory режиме.
+      Postgres схема для flow_orders/solver_config готова (init.sql),
+      matching читает её на старте. Однако order_flow сервис ещё не
+      пишет принимаемые FlowOrder в эту таблицу — записи появятся
+      только когда подключится postgres-writer в order_flow (отдельная
+      задача T-F04-002).
   - id: clickhouse-storage-pending
     severity: feature-gap
     description: >
