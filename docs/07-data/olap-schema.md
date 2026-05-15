@@ -18,7 +18,7 @@ ClickHouse **не источник истины для оперативных б
 
 ## Таблица `fills`
 
-Все исполнения (FillEvent) — основная аналитическая таблица. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля ниже соответствуют тому, что пишет [ClickHouseBatchStorage](../../cpp/market_data/src/infra/clickhouse_storage.cpp) (импорт в follow-up PR).
+Все исполнения (FillEvent) — основная аналитическая таблица. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля ниже соответствуют тому, что пишет `ClickHouseBatchStorage` (приходит из origin/dev `cpp/market_data/src/infra/clickhouse_storage.cpp` в follow-up PR).
 
 | Поле | Тип | Описание |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ ClickHouse **не источник истины для оперативных б
 
 ## Таблица `batchresults`
 
-Диагностика каждого clearing-цикла. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля соответствуют [ClickHouseBatchStorage](../../cpp/market_data/src/infra/clickhouse_storage.cpp) (импорт в follow-up PR).
+Диагностика каждого clearing-цикла. Канонический DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); поля соответствуют `ClickHouseBatchStorage` (приходит из origin/dev `cpp/market_data/src/infra/clickhouse_storage.cpp` в follow-up PR).
 
 | Поле | Тип | Описание |
 | --- | --- | --- |
