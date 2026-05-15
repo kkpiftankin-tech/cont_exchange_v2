@@ -48,6 +48,26 @@ services:
       BROKER: redpanda:9092
       P: 3
 
+  # F-04 OLAP: stores batchresults, fills. Schema lives in
+  # infra/clickhouse/init.sql; clickhouse-server runs all *.sql files
+  # from /docker-entrypoint-initdb.d/ on first start of an empty volume.
+  # Ingestion (Kafka batch.outputs / fills -> these tables) will be added
+  # in a follow-up cpp/market_data update.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    volumes:
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/001_f04_init.sql:ro
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # F-04 OLTP: stores flow_orders, flow_order_legs, solver_config.
   # Schema lives in infra/postgres/init.sql; the alpine image runs all
   # *.sql in /docker-entrypoint-initdb.d/ on first start of an empty

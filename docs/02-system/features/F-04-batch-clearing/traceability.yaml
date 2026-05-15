@@ -59,6 +59,16 @@ kafkaTopics:
     consumer: venues
     status: hedge-flow  # используется F-12, но публикуется matching'ом по hedge_trigger_policy
 
+clickhouseTables:
+  - name: batchresults
+    role: batch-clearing-history
+    schemaSource: infra/clickhouse/init.sql
+    ingestionStatus: pending  # follow-up PR with cpp/market_data clickhouse_storage import
+  - name: fills
+    role: fill-event-history
+    schemaSource: infra/clickhouse/init.sql
+    ingestionStatus: pending  # follow-up PR with cpp/market_data clickhouse_storage import
+
 postgresqlTables:
   - name: flow_orders
     role: active-orders-source
