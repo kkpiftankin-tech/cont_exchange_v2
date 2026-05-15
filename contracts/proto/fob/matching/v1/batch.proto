@@ -5,6 +5,16 @@ package fob.matching.v1;
 import "google/protobuf/timestamp.proto";
 import "fob/common/v1/common.proto";
 
+message LiquidityProvenance {
+  // internal / cex_hedge / dex_hedge / epsilon_mm
+  string liquidity_source = 1;
+
+  // External venue identifiers used for audit/replay.
+  string venue_id = 2;
+  string snapshot_id = 3;
+  string curve_id = 4;
+}
+
 // Per-order fill inside an internal clearing batch.
 message FlowFill {
   // Which order got filled
@@ -25,6 +35,12 @@ message FlowFill {
 
   // Optional fee charged on internal execution (if any)
   fob.common.v1.Fee fee = 8;
+
+  // internal / cex_hedge / dex_hedge / epsilon_mm
+  string liquidity_source = 9;
+
+  // Canonical provenance for reporting and clearing investigations.
+  LiquidityProvenance provenance = 10;
 }
 
 message OrderStateUpdate {
@@ -55,6 +71,9 @@ message BatchSolverDiagnostics {
 
   // Versioning of solver config
   uint32 config_version = 5;
+
+  // External liquidity selected for the batch.
+  repeated LiquidityProvenance used_liquidity = 6;
 }
 
 // Main Kafka event for topic batch.outputs.
