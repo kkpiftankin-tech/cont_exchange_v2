@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package fob.matching.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/matching/v1/batch.proto";
+
+// FillEvent for external use
+// also see FlowFill
+message FillEvent {
+  string fill_id = 1;
+
+  string order_id = 2;
+  string batch_id = 3;
+
+  repeated fob.common.v1.Instrument asset_legs = 4;
+
+  fob.common.v1.Decimal exec_qty = 5;
+  fob.common.v1.Decimal exec_price = 6;
+
+  string liquidity_source = 7;
+
+  repeated fob.common.v1.Fee fees = 8;
+
+  google.protobuf.Timestamp timestamp = 9;
+
+  LiquidityProvenance provenance = 10;
+}

@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package fob.matching.v1;
+
+import "fob/matching/v1/fill_event.proto";
+import "fob/matching/v1/batch.proto";
+
+message BatchOutputs { 
+  BatchResult result = 1;
+  repeated FillEvent fills = 2;
+}
