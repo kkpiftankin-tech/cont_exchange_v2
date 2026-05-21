@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package fob.hedge.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/execution/v1/execution.proto";
+
+enum HedgeFlowStatus {
+  HEDGE_FLOW_STATUS_UNSPECIFIED = 0;
+  HEDGE_FLOW_STATUS_OPEN = 1;
+  HEDGE_FLOW_STATUS_COMPLETED = 2;
+  HEDGE_FLOW_STATUS_UNDERFILLED = 3;
+  HEDGE_FLOW_STATUS_REJECTED = 4;
+  HEDGE_FLOW_STATUS_RISK_REJECTED = 5;
+  HEDGE_FLOW_STATUS_CANCELLED = 6;
+}
+
+enum ChildOrderStatus {
+  CHILD_ORDER_STATUS_UNSPECIFIED = 0;
+  CHILD_ORDER_STATUS_PENDING = 1;
+  CHILD_ORDER_STATUS_FILLED = 2;
+  CHILD_ORDER_STATUS_PARTIALLY_FILLED = 3;
+  CHILD_ORDER_STATUS_CANCELLED = 4;
+  CHILD_ORDER_STATUS_REJECTED = 5;
+}
+
+message HedgeFlow {
+  fob.common.v1.EventMeta meta = 1;
+
+  string hedge_flow_id = 2;
+  string intent_id = 3;
+  string batch_id = 4;
+  string provider_id = 5;
+
+  fob.common.v1.Instrument instrument = 10;
+  fob.common.v1.Side side = 11;
+
+  fob.common.v1.Decimal target_qty = 20;
+  fob.common.v1.Decimal filled_qty = 21;
+  fob.common.v1.Decimal target_notional = 22;
+  fob.common.v1.Decimal reference_mid = 23;
+  fob.common.v1.Decimal avg_fill_price = 24;
+  fob.common.v1.Money tot_fee = 25;
+  fob.common.v1.Money hedge_pnl = 26;
+
+  int64 timeout_ms = 30;
+
+  HedgeFlowStatus status = 40;
+
+  google.protobuf.Timestamp created_at = 50;
+  google.protobuf.Timestamp updated_at = 51;
+  google.protobuf.Timestamp completed_at = 52;
+
+  fob.common.v1.Error error = 60;
+}
+
+message ChildOrder {
+  fob.common.v1.EventMeta meta = 1;
+
+  string child_order_id = 2;
+  string hedge_flow_id = 3;
+
+  string venue_id = 10;
+  fob.common.v1.Instrument instrument = 11;
+  string venue_symbol = 12;
+
+  fob.common.v1.Side side = 20;
+  fob.execution.v1.ExecutionStrategy order_type = 21;
+  fob.common.v1.Decimal qty = 22;
+  fob.common.v1.Decimal price = 23;
+  fob.common.v1.TimeInForce tif = 24;
+
+  string client_order_id = 30;
+
+  ChildOrderStatus status = 40;
+
+  fob.common.v1.Decimal filled_qty = 50;
+  fob.common.v1.Decimal avg_price = 51;
+  fob.common.v1.Fee fee = 52;
+
+  google.protobuf.Timestamp created_at = 60;
+  google.protobuf.Timestamp updated_at = 61;
+
+  fob.common.v1.Error error = 70;
+}

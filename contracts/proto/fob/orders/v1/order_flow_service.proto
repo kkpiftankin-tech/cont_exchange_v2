@@ -42,9 +42,20 @@ message GetFlowOrderResponse {
   FlowOrderView view = 2;
 }
 
+message ListFlowOrdersRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+}
+
+message ListFlowOrdersResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated FlowOrderView views = 2;
+}
+
 service OrderFlowService {
   // Main synchronous entrypoint for Gateway.
   rpc CreateFlowOrder(CreateFlowOrderRequest) returns (CreateFlowOrderResponse);
   rpc CancelFlowOrder(CancelFlowOrderRequest) returns (CancelFlowOrderResponse);
   rpc GetFlowOrder(GetFlowOrderRequest) returns (GetFlowOrderResponse);
+  rpc ListFlowOrders(ListFlowOrdersRequest) returns (ListFlowOrdersResponse);
 }

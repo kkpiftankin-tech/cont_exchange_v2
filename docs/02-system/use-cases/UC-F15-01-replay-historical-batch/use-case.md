@@ -1,51 +1,22 @@
-# UC-F15-01. Replay исторического batch
+# UC-F15-01. (Historical / Superseded) — Replay исторического batch
+
+> **Статус:** superseded. Этот UC был placeholder и теперь разбит на 6 более
+> конкретных use case'ов после ингеста IN-006.
+
+## Преемники
+
+- [UC-F15-01 Create Replay Session](../UC-F15-01-create-replay-session/use-case.md) — создание сессии и запуск replay-цикла.
+- [UC-F15-02 Cancel Replay Session](../UC-F15-02-cancel-replay-session/use-case.md) — отмена выполняющейся / pending сессии.
+- [UC-F15-03 A/B Compare Sessions](../UC-F15-03-ab-compare-sessions/use-case.md) — сравнение двух completed сессий.
+- [UC-F15-04 Audit Mode Replay](../UC-F15-04-audit-mode-replay/use-case.md) — replay одного `batch_id` + diff vs production (≈ original UC).
+- [UC-F15-05 Retry Failed Session](../UC-F15-05-retry-failed-session/use-case.md) — повторный запуск failed / cancelled.
+- [UC-F15-06 Determinism Check](../UC-F15-06-replay-determinism-check/use-case.md) — проверка детерминизма повторных прогонов.
 
 ## Feature
 
 - [F-15. Backtest / Replay](../../features/F-15-backtest-replay/)
 
-## Primary Actor
+## Note
 
-Researcher / Operator
-
-## Preconditions
-
-- Имеется исторические `orders.normalized` и `batch.outputs` в Kafka long-retention или archive.
-- Backtest engine сконфигурирован.
-
-## Trigger
-
-Researcher запускает replay по периоду.
-
-## Main Flow
-
-1. Researcher выбирает временной диапазон и параметры solver.
-2. Backtest engine читает `orders.normalized` из архива.
-3. Engine прогоняет matching deterministic-mode.
-4. Engine публикует результаты в отдельный topic (`batch.outputs.replay`).
-5. Observability сравнивает с историческим `batch.outputs`.
-
-## Postconditions
-
-- Получены метрики сравнения (residual_norm, fill rate, VWAP delta).
-
-## Related Sequence Diagrams
-
-- [System sequence](sequences/SEQ-UC-F15-01-system.md)
-- [Service sequence](../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md)
-
-## Related Contracts
-
-- [orders.normalized](../../../06-api/messaging/orders-normalized.md)
-- [batch.outputs](../../../06-api/messaging/batch-outputs.md)
-- (планируется) `fob.agent.v1` для backtest replay
-
-## Related Components
-
-- (планируется) [backtest-replay](../../../05-components/backtest-replay/overview.md)
-- [matching-fob-core](../../../05-components/matching-fob-core/overview.md)
-- [observability-reporting](../../../05-components/observability-reporting/overview.md)
-
-## Related Data
-
-- архив Kafka, (планируется) `agent_logs` в ClickHouse
+Старая `sequences/SEQ-UC-F15-01-system.md` оставлена как historical artifact;
+актуальные system-sequence — в каждом из 6 новых UC.

@@ -11,11 +11,11 @@ This repository is a **ready-to-run MVP skeleton** of a *continuous-time exchang
 | `gateway` | REST edge gateway (HTTP JSON → gRPC). Auth/rate-limit can be added here. | HTTP `POST /v1/flow-orders` → gRPC `OrderFlowService` |
 | `order_flow` | Core order lifecycle + orchestration: Risk + Ledger + publish normalized order events | gRPC `OrderFlowService`; produces `orders.normalized` |
 | `risk` | Pre-trade checks + kill-switch; emits alerts | gRPC `RiskService`; produces `risk.alerts` |
-| `ledger` | Balances + reservations + applying fills; consumes events | gRPC `LedgerService`; consumes `batch.outputs`, `execution.reports` |
+| `ledger` | Balances + reservations + applying fills; consumes events | gRPC `LedgerService`; consumes `batch.outputs`, `execution.venue` (and legacy `execution.reports`) |
 | `matching` | Periodic *batch clearing simulator* (placeholder for a real solver) | consumes `orders.normalized`; produces `batch.outputs` |
-| `market_data` | Stores last ticker for (venue,symbol) | consumes `marketdata.raw`; gRPC `MarketDataService` |
-| `venues` | Venue adapters (here: simulator) | produces `marketdata.raw`; consumes `execution.intents`; produces `execution.reports` |
-| `observability` | Reads important topics and prints structured summaries | consumes `risk.alerts`, `batch.outputs`, `execution.reports` |
+| `market_data` | Stores last ticker and writes batch analytics to ClickHouse | consumes `marketdata.raw`, `batch.outputs`; gRPC `MarketDataService` |
+| `venues` | Venue adapters (simulated + CEX/DEX connectors) | produces `marketdata.raw`, `venue.health`, `logs`, `metrics`; consumes `execution.intents`; produces `execution.venue` (and legacy `execution.reports`) |
+| `observability` | Reads important topics and prints structured summaries | consumes `risk.alerts`, `batch.outputs`, `execution.venue`, `venue.health`, `logs`, `metrics` |
 
 ## 2) Kafka topics
 
@@ -25,8 +25,12 @@ Created automatically by `infra/kafka/create_topics.sh`:
 - `orders.normalized`
 - `batch.outputs`
 - `execution.intents`
-- `execution.reports`
+- `execution.venue`
+- `execution.reports` (legacy mirror)
 - `risk.alerts`
+- `venue.health`
+- `logs`
+- `metrics`
 
 In production you will tune:
 - partition keys (`user_id`, `symbol`, `intent_id`, ...)
@@ -74,10 +78,17 @@ curl -X POST "http://localhost:8088/v1/flow-orders" \
 Then watch logs:
 - `matching` will emit `batch.outputs` every `BATCH_INTERVAL_MS`
 - `ledger` will consume `batch.outputs` and update balances
+- `market_data` will persist `batch.outputs` into ClickHouse tables `batchresults` and `fills`
+
+ClickHouse smoke check:
+```bash
+curl -s "http://localhost:8123/?query=SELECT%20count()%20FROM%20default.batchresults"
+curl -s "http://localhost:8123/?query=SELECT%20count()%20FROM%20default.fills"
+```
 
 ## 5) Build locally (without Docker)
 
-Requires system packages: gRPC, protobuf, librdkafka, boost.
+Requires system packages: gRPC, protobuf, librdkafka, boost, libcurl.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -86,6 +97,24 @@ cmake --build build -j
 
 Binaries appear in `build/bin/`.
 
-## 6) Legacy MVP reference
+## 6) Run Tests (CI-friendly)
+
+Preferred (runs tests in Docker builder + isolated ClickHouse):
+```bash
+make test-ci
+```
+
+Equivalent direct command:
+```bash
+./scripts/test_ci.sh
+```
+
+Notes:
+- script starts isolated `clickhouse` container in a dedicated Docker network
+- builds `docker/Dockerfile.service` (`builder` target)
+- runs full `ctest --test-dir /tmp/build --output-on-failure`
+- writes JUnit XML to `artifacts/test-results/ctest-junit.xml`
+
+## 7) Legacy MVP reference
 
 The original MVP from `repo.zip` is copied into `legacy_mvp/` **for code reuse/reference**.

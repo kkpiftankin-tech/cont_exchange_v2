@@ -1,0 +1,110 @@
+component:
+  id: venue-liquidity-curve-builder
+  name: Venue Liquidity Curve Builder
+  layer: core-domain
+  status: active-mvp
+  codePath: cpp/venues/src/app/liquidity_curve_producer.cpp
+  runtime: cpp/venues
+  owner: core-team
+
+responsibility:
+  summary: >
+    Преобразование LOB (или virtual LOB для AMM) в непрерывное FOB-представление
+    VenueLiquidityCurve. Поддерживает три режима: L1 (fast monotone),
+    L2 (regularized convex with Moreau/Tikhonov, eps1+eps2), L3 (calibrated
+    by execution reports, eps3). Заполняет дуальный слой S*(p), q*(p) для
+    matching/Execution Planning. Опционально материализует SyntheticFlowOrder
+    для совместимости с matching v1.
+
+sourceTreeEvidence:
+  app:
+    - cpp/venues/src/app/liquidity_curve_producer.cpp
+    - cpp/venues/src/app/liquidity_curve_producer.hpp
+  domain:
+    - cpp/venues/src/domain/depth_curve_builder.cpp
+    - cpp/venues/src/domain/depth_curve_builder.hpp
+    - cpp/venues/src/domain/amm_pool_extractor.cpp
+    - cpp/venues/src/domain/amm_virtual_lob.cpp
+    - cpp/venues/src/domain/amm_direct_fob.cpp
+  infra:
+    - cpp/venues/src/infra/postgres_synthetic_order_repository.cpp
+    - cpp/venues/src/infra/postgres_synthetic_order_repository.hpp
+
+features:
+  - F-11
+  - F-04   # consumer (matching)
+  - F-09   # consumer (combo orders, SyntheticFlowOrder material)
+  - F-15   # backtest parity
+
+protoContracts:
+  - contracts/proto/fob/venue/v1/venue.proto
+  - contracts/proto/fob/orders/v1/orders.proto    # SyntheticFlowOrder
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - VenueLiquidityCurve
+  - SideLiquidityCurve (q_grid, p_of_q, s_of_q, v_grid, l_of_v, p_star_grid, s_star_of_p, q_star_of_p)
+  - SyntheticFlowOrder
+  - CurveLevel (L1 / L2 / L3)
+
+dependencies:
+  upstream:
+    - venue-market-data-normalizer
+  downstream:
+    - matching      # consumer venue.liquidity.fob
+    - cpp/matching (Execution Planning)
+
+kafkaProduces:
+  - topic: venue.liquidity.fob
+    messageType: fob.venue.v1.VenueLiquidityCurve
+    partitionKey: "{venue_id}|{instrument_symbol}"
+  - topic: venue.synthetic
+    messageType: fob.orders.v1.SyntheticFlowOrder
+    partitionKey: "{venue_id}|{instrument_symbol}"
+    condition: synthetic_enabled == true
+
+kafkaConsumes: []
+
+env:
+  - name: VENUE_LIQUIDITY_TOPIC
+    default: venue.liquidity.fob
+  - name: VENUE_SYNTHETIC_TOPIC
+    default: venue.synthetic
+  - name: LOB_TO_FOB_TAU_SEC
+    default: "5"
+  - name: LOB_TO_FOB_DEFAULT_LEVEL
+    default: L2
+  - name: CURVE_LEVEL
+    default: L3
+    note: per-venue override через venue_config.curve_level
+
+knownIssues:
+  - id: l3-calibration-source-undefined
+    severity: feature-gap
+    description: >
+      Источник execution reports для калибровки L3 (execution.venue vs
+      execution.reports), окно ретроспективы, политика самоисключения —
+      не зафиксированы. См. open-questions.md §1, §2.
+  - id: synthetic-orders-shape
+    severity: doc-drift
+    description: >
+      Поля synthetic_orders в DDL (IN-004) vs repository — частичный mismatch.
+      См. open-questions.md §5.
+  - id: clickhouse-curves-ingestion-pending
+    severity: feature-gap
+    description: >
+      ClickHouse-таблица venue_liquidity_curves и ingestion слой ещё не
+      созданы; задача T-F11-110.
+
+tests:
+  unit:
+    - cpp/venues/tests/depth_curve_builder_test.cpp
+    - cpp/venues/tests/depth_curve_regularization_test.cpp
+    - cpp/venues/tests/depth_curve_dual_test.cpp
+    - cpp/venues/tests/amm_pool_extractor_test.cpp
+    - cpp/venues/tests/amm_virtual_lob_test.cpp
+    - cpp/venues/tests/liquidity_curve_producer_test.cpp
+  integration:
+    - cpp/venues/tests/backtest_parity_check_test.cpp
+    - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
+  contract: []

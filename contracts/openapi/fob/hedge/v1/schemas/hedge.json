@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/hedge.json",
+  "title": "F-12 Execution Hedge DTOs",
+  "description": "JSON-схемы для HedgeFlow, ChildOrder, ExecutionReport и запросов HedgeFlow Monitor API",
+  "definitions": {
+
+    "HedgeFlowStatus": {
+      "type": "string",
+      "enum": ["OPEN", "COMPLETED", "UNDERFILLED", "REJECTED", "RISK_REJECTED", "CANCELLED"]
+    },
+
+    "ChildOrderStatus": {
+      "type": "string",
+      "enum": ["PENDING", "FILLED", "PARTIALLY_FILLED", "CANCELLED", "REJECTED"]
+    },
+
+    "ExecutionReportStatus": {
+      "type": "string",
+      "enum": ["NEW", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "REJECTED", "EXPIRED", "OVERFILL_GUARD", "UNDERFILLED"]
+    },
+
+    "ExecutionUrgency": {
+      "type": "string",
+      "enum": ["LOW", "MEDIUM", "HIGH"],
+      "description": "LOW — POST_ONLY/LIMIT; MEDIUM — LIMIT/IOC mix; HIGH — MARKET/IOC"
+    },
+
+    "OrderType": {
+      "type": "string",
+      "enum": ["LIMIT", "MARKET", "IOC", "POST_ONLY", "TWAP"],
+      "description": "Тип child-ордера на venue"
+    },
+
+    "Side": {
+      "type": "string",
+      "enum": ["BUY", "SELL"]
+    },
+
+    "TimeInForce": {
+      "type": "string",
+      "enum": ["GTC", "IOC", "FOK"]
+    },
+
+    "HedgeSource": {
+      "type": "string",
+      "enum": ["AUTO_BATCH", "MANUAL_OVERRIDE", "BACKTEST"]
+    },
+
+    "HedgeFlow": {
+      "type": "object",
+      "required": [
+        "hedge_flow_id", "intent_id", "provider_id", "symbol", "side",
+        "target_qty", "filled_qty", "reconciliation_gap",
+        "status", "timeout_ms", "created_at"
+      ],
+      "properties": {
+        "hedge_flow_id":       { "type": "string", "format": "uuid" },
+        "intent_id":           { "type": "string", "format": "uuid" },
+        "batch_id":            { "type": "string", "description": "ID батча Matching Backend, породившего Intent" },
+        "provider_id":         { "type": "string", "description": "Идентификатор провайдера" },
+        "symbol":              { "type": "string", "examples": ["BTCUSDT"] },
+        "side":                { "$ref": "#/definitions/Side" },
+        "target_qty":          { "type": "number", "exclusiveMinimum": 0, "description": "Целевой объём хеджа" },
+        "filled_qty":          { "type": "number", "minimum": 0, "description": "Фактически исполненный объём" },
+        "avg_fill_price":      { "type": ["number", "null"], "description": "Средневзвешенная цена исполнения" },
+        "tot_fee":             { "type": ["number", "null"], "description": "Суммарные комиссии по всем child-ордерам" },
+        "reference_mid":       { "type": ["number", "null"], "description": "Эталонная цена из ExecutionIntent (clearing price батча)" },
+        "hedge_pnl":           { "type": ["number", "null"], "description": "PnL хеджа: (referenceMid - avgFillPrice) × filledQty − totFee" },
+        "reconciliation_gap":  { "type": "number", "minimum": 0, "description": "targetQty − filledQty; вычисляемое поле" },
+        "status":              { "$ref": "#/definitions/HedgeFlowStatus" },
+        "timeout_ms":          { "type": "integer", "description": "Таймаут исполнения в миллисекундах" },
+        "created_at":          { "type": "string", "format": "date-time" },
+        "completed_at":        { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+
+    "ChildOrder": {
+      "type": "object",
+      "required": [
+        "child_order_id", "hedge_flow_id", "venue_id", "symbol", "side",
+        "order_type", "qty", "filled_qty", "status", "client_order_id", "created_at"
+      ],
+      "properties": {
+        "child_order_id":  { "type": "string", "format": "uuid" },
+        "hedge_flow_id":   { "type": "string", "format": "uuid" },
+        "venue_id":        { "type": "string", "description": "Идентификатор venue: binance, coinbase, uniswapv3 и т.п." },
+        "symbol":          { "type": "string", "description": "Торговый символ на venue (после venue-маппинга)" },
+        "side":            { "$ref": "#/definitions/Side" },
+        "order_type":      { "$ref": "#/definitions/OrderType" },
+        "qty":             { "type": "number", "exclusiveMinimum": 0, "description": "Запрошенный объём" },
+        "price":           { "type": ["number", "null"], "description": "Лимитная цена; null для MARKET/IOC" },
+        "filled_qty":      { "type": "number", "minimum": 0, "description": "Фактически исполненный объём" },
+        "avg_price":       { "type": ["number", "null"], "description": "Средневзвешенная цена исполнения" },
+        "fee":             { "type": ["number", "null"], "description": "Комиссия venue по этому ордеру" },
+        "status":          { "$ref": "#/definitions/ChildOrderStatus" },
+        "client_order_id": { "type": "string", "description": "Сквозной ID на venue (hedgeFlowId_seq)" },
+        "created_at":      { "type": "string", "format": "date-time" },
+        "updated_at":      { "type": ["string", "null"], "format": "date-time" },
+        "latency_ms":      { "type": ["integer", "null"], "description": "Время от создания ордера до первого fill, мс" }
+      }
+    },
+
+    "ExecutionReport": {
+      "type": "object",
+      "required": [
+        "execution_id", "hedge_flow_id", "child_order_id", "venue_id",
+        "symbol", "side", "filled_qty", "avg_price", "fee", "fee_currency",
+        "status", "timestamp", "slippage_bps", "reference_mid"
+      ],
+      "properties": {
+        "execution_id":    { "type": "string", "description": "Уникальный ID события исполнения" },
+        "hedge_flow_id":   { "type": "string", "format": "uuid" },
+        "child_order_id":  { "type": "string", "format": "uuid" },
+        "venue_id":        { "type": "string" },
+        "symbol":          { "type": "string" },
+        "side":            { "$ref": "#/definitions/Side" },
+        "filled_qty":      { "type": "number", "minimum": 0 },
+        "avg_price":       { "type": "number" },
+        "fee":             { "type": "number", "minimum": 0 },
+        "fee_currency":    { "type": "string", "description": "Валюта комиссии: USDT, BTC и т.п." },
+        "status":          { "$ref": "#/definitions/ExecutionReportStatus" },
+        "timestamp":       { "type": "string", "format": "date-time", "description": "Время события на venue" },
+        "slippage_bps":    { "type": "number", "description": "Отклонение avgPrice от referenceMid в bps" },
+        "reference_mid":   { "type": "number", "description": "Эталонная цена на момент хеджа" },
+        "hedge_pnl":       { "type": ["number", "null"], "description": "PnL по этому событию (опционально)" },
+        "batch_id":        { "type": ["string", "null"], "description": "ID батча (присутствует при наличии данных)" },
+        "provider_id":     { "type": ["string", "null"] }
+      }
+    }
+
+  }
+}

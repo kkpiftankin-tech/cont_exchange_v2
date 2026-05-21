@@ -54,6 +54,9 @@ struct ReplayResultMessage {
   // round-tripping to PostgreSQL.
   double std_pnl{0.0};
   double avg_vwap{0.0};
+  std::string avgis_rule{"volume_weighted"};
+  std::string decision_price_source{"marketdata_mid_with_clearprice_fallback"};
+  bool no_requested_volume{false};
   std::string error_details;
   std::string error_code;
 };

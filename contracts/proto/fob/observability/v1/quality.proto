@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package fob.observability.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+import "fob/observability/v1/observability.proto";
+
+service LobFobQualityService {
+  rpc SubscribeAlerts(google.protobuf.Empty) returns (stream Alert);
+  rpc GetQualityMetrics(GetQualityMetricsRequest) returns (GetQualityMetricsResponse);
+}
+
+message GetQualityMetricsRequest {
+  string venue_id = 1;
+  string symbol = 2;
+  string side = 3; // "buy" or "sell"
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+}
+
+message GetQualityMetricsResponse {
+  repeated TimeSeriesPoint epsilon1 = 1;
+  repeated TimeSeriesPoint epsilon2 = 2;
+  repeated TimeSeriesPoint epsilon3 = 3;
+  repeated TimeSeriesPoint confidence = 4;
+  repeated LevelState level_states = 5;
+  repeated CurveSnapshot curve_snapshots = 6;
+  DirectVsSyntheticComparison comparison = 7;
+}
+
+message TimeSeriesPoint {
+  google.protobuf.Timestamp timestamp = 1;
+  double value = 2;
+}
+
+message LevelState {
+  google.protobuf.Timestamp timestamp = 1;
+  string level = 2; // L1, L2, L3, OFF
+}
+
+message CurveSnapshot {
+  google.protobuf.Timestamp timestamp = 1;
+  repeated double q_grid = 2;
+  repeated double p_of_q_l1 = 3;
+  repeated double p_of_q_l2 = 4;
+  repeated double p_of_q_l3 = 5;
+}
+
+message DirectVsSyntheticComparison {
+  repeated double test_q = 1; // e.g., [0.1, 1, 5, 10]
+  repeated double lob_vwap = 2;
+  repeated double fob_l2_vwap = 3;
+  repeated double fob_l3_vwap = 4;
+  repeated double error_bps = 5;
+}

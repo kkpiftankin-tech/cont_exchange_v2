@@ -1,36 +1,16 @@
-# Build artifacts
-/build/
-build/*
-*.o
-*.a
-
-# IDE / editor
-.idea/
 .vscode
-.obsidian/
+.DS_Store
+build/*
+build_*/
+build-ninja/
+build_ninja/
+node_modules/
+.cache/
+artifacts/
+logs/
 
-# Claude Code local settings (skills and command files are tracked separately)
+# Local-only editor/agent state
+.obsidian/
+.claude/scheduled_tasks.lock
 .claude/settings.local.json
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Python tool caches
-__pycache__/
-*.pyc
-
-# Local env overrides + production secrets
-.env
-.env.local
-*.env.local
-!.env-example
-!.env-staging.example
-
-# Local compose overrides (e.g. when host stack needs ad-hoc patches that
-# should NOT be committed). docker compose picks them up automatically when
-# referenced explicitly with -f.
-infra/docker-compose.*.override.local.yml
-
-# Generated reports
-llm/reports/latest-*.md

@@ -52,11 +52,11 @@ Pre-trade и post-trade рисковая логика. Управляет kill s
 
 ## Participates In Use Cases
 
-- [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F06-01](../../02-system/use-cases/UC-F06-01-show-positions/use-case.md), [UC-F07-01](../../02-system/use-cases/UC-F07-01-pretrade-risk-check/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md), [UC-F17-01](../../02-system/use-cases/UC-F17-01-fire-alert/use-case.md)
+- [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F06-01](../../02-system/use-cases/UC-F06-01-show-positions/use-case.md), [UC-F07-01](../../02-system/use-cases/UC-F07-01-pretrade-risk-check/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md), [UC-F17-01](../../02-system/use-cases/UC-F17-01-fire-alert/use-case.md)
 
 ## Participates In Sequence Diagrams
 
-- [SEQ-F02-UC-F02-01-services](../sequences/SEQ-F02-UC-F02-01-services.md), [SEQ-F04-UC-F04-01-services](../sequences/SEQ-F04-UC-F04-01-services.md), [SEQ-F06-UC-F06-01-services](../sequences/SEQ-F06-UC-F06-01-services.md), [SEQ-F07-UC-F07-01-services](../sequences/SEQ-F07-UC-F07-01-services.md), [SEQ-F08-UC-F08-01-services](../sequences/SEQ-F08-UC-F08-01-services.md), [SEQ-F12-UC-F12-01-services](../sequences/SEQ-F12-UC-F12-01-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md), [SEQ-F17-UC-F17-01-services](../sequences/SEQ-F17-UC-F17-01-services.md)
+- [SEQ-F02-UC-F02-01-services](../sequences/SEQ-F02-UC-F02-01-services.md), [SEQ-F04-UC-F04-01-services](../sequences/SEQ-F04-UC-F04-01-services.md), [SEQ-F06-UC-F06-01-services](../sequences/SEQ-F06-UC-F06-01-services.md), [SEQ-F07-UC-F07-01-services](../sequences/SEQ-F07-UC-F07-01-services.md), [SEQ-F08-UC-F08-01-services](../sequences/SEQ-F08-UC-F08-01-services.md), [SEQ-F12-01-auto-hedge-services](../sequences/SEQ-F12-01-auto-hedge-services.md), [SEQ-F12-03-error-scenarios-services](../sequences/SEQ-F12-03-error-scenarios-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md), [SEQ-F17-UC-F17-01-services](../sequences/SEQ-F17-UC-F17-01-services.md)
 
 ## Owned Contracts
 

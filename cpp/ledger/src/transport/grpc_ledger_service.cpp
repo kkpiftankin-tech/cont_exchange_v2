@@ -1,8 +1,3 @@
-// =============================================================================
-// Реализация gRPC-обёртки. Все методы тривиально делегируют в use-cases —
-// статус OK всегда, потому что use-case сам формирует success/error в payload'е.
-// =============================================================================
-
 #include "transport/grpc_ledger_service.hpp"
 
 namespace cex::ledger::transport {
@@ -27,7 +22,6 @@ grpc::Status GrpcLedgerService::ReleaseFunds(
     grpc::ServerContext*,
     const fob::ledger::v1::ReleaseFundsRequest* request,
     google::protobuf::Empty*) {
-  // ReleaseFunds void-функция — здесь нечего возвращать клиенту.
   uc_->ReleaseFunds(*request);
   return grpc::Status::OK;
 }
@@ -45,6 +39,58 @@ grpc::Status GrpcLedgerService::ApplyExecutionReport(
     const fob::ledger::v1::ApplyExecutionReportRequest* request,
     google::protobuf::Empty*) {
   uc_->ApplyExecutionReport(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetUnrealisedPnL(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetUnrealisedPnLRequest* request,
+    fob::ledger::v1::GetUnrealisedPnLResponse* response) {
+  // For MVP, pass empty current_prices map (will fallback to avg_entry_price)
+  // In production, you would fetch current prices from market data service
+  std::unordered_map<std::string, cex::common::Decimal> current_prices;
+  
+  *response = uc_->GetUnrealisedPnL(*request, current_prices);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetRealisedPnL(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetRealisedPnLRequest* request,
+    fob::ledger::v1::GetRealisedPnLResponse* response) {
+  *response = uc_->GetRealisedPnL(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetVenueBalances(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetVenueBalancesRequest* request,
+    fob::ledger::v1::GetVenueBalancesResponse* response) {
+  *response = uc_->GetVenueBalances(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::UpdateVenueBalance(
+    grpc::ServerContext*,
+    const fob::ledger::v1::UpdateVenueBalanceRequest* request,
+    fob::ledger::v1::UpdateVenueBalanceResponse* response) {
+  *response = uc_->UpdateVenueBalance(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::RecordHedgeExecution(
+    grpc::ServerContext*,
+    const fob::ledger::v1::RecordHedgeExecutionRequest* request,
+    fob::ledger::v1::RecordHedgeExecutionResponse* response) {
+  *response = uc_->RecordHedgeExecution(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetHedgePnL(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetHedgePnLRequest* request,
+    fob::ledger::v1::GetHedgePnLResponse* response) {
+  *response = uc_->GetHedgePnL(*request);
   return grpc::Status::OK;
 }
 

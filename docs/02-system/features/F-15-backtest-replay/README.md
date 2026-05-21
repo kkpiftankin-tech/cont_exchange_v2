@@ -1,30 +1,125 @@
-# F-15 — Backtest and Replay
+# F-15 — Backtest / Replay
 
-> **Статус:** Not implemented.
+> **Статус:** in-progress, MVP-сервис реализован, UI отсутствует. Самая
+> зрелая фича из тройки F-11/F-12/F-15 по покрытию кода.
 
-## Описание
+## Бизнес-смысл
 
-Воспроизведение исторических торговых данных через solver для регрессионных тестов и отладки инцидентов.
+Backtest/Replay даёт три ключевых возможности:
 
-## Требования к коду
+1. **Тестирование стратегий и solver-конфигов.** Аналитик может загрузить
+   историческое окно, прогнать его через ту же логику что и production
+   (Matching + Risk + Ledger), и получить ReplaySummary с PnL, Sharpe,
+   FillRate, IS, VWAP, MaxDrawdown.
+2. **Audit / Forensic mode.** При спорной сделке оператор может реплееть
+   единственный `batch_id` и сравнить с production BatchResult (diff
+   `clear_prices`, `executed_rates`, `residual_norm`, `fills`).
+3. **RL training / agent log.** Каждый шаг записывается как
+   `state-action-reward` в ClickHouse (`replay_agentlogs`), что готовит
+   данные для обучения policy.
 
-- **Детерминизм матчинга.** Сейчас `std::unordered_map` итерируется в произвольном порядке — это блокер для F-15.
-- **Чтение orders.normalized с произвольного offset'а.**
-- **Изоляция от продакшен-Kafka.**
+A/B compare двух сессий с одинаковым date range сравнивает изменения в
+solver_config или risk_limits через delta-матрицу
+(`avg_is`, `total_pnl`, `sharpe`, `fill_rate`, `max_drawdown`).
 
-См. [feature.yaml](feature.yaml).
+## Ключевые сущности
 
-## Acceptance Criteria (IN-001)
+- **ReplaySession** — single replay run (id, user, name, strategy JSON,
+  date range, snapshot конфигов, status pending→running→completed/failed/cancelled).
+  Хранится в PostgreSQL `replay_sessions`.
+- **AgentLog** — per-batch state/action/reward + diagnostics (PnL, IS,
+  FillRate, fills, batch_result_json, solver_error_flag, error_code,
+  failure_component). Хранится в ClickHouse `replay_agentlogs`.
+- **ReplaySummary** — агрегаты по сессии (total_pnl, avg_pnl, std_pnl,
+  sharpe, fill_rate, avg_vwap, avg_solve_time, max_drawdown). Хранится в
+  PostgreSQL `replay_summaries`.
+- **ShadowNamespace** — изолированный namespace ledger'а для replay
+  (`shadow:<session_id>` prefix), не задевает production баланс.
+- **ConfigSnapshot** — замороженный snapshot solver_config, risk_limits,
+  fee_model, reward_config и random_seed, обеспечивающий детерминизм.
+- **AuditRun** — single-batch replay в audit mode + diff vs production.
+- **Reward mode** — `pnl` (incremental PnL), `-is` (отрицательный IS) или
+  `hybrid` (взвешенная сумма).
 
-Система должна позволять воспроизводить исторические периоды с реальными или синтетическими заявками для сравнения настроек механизма и стратегий.
+## Архитектура
 
-- Replay использует те же бизнес-контракты, что и live.
-- Поддерживается shadow-режим (новый `solver_config.version` без влияния на live).
-- Результаты в `agent_logs` доступны для сравнения политик.
-- Backtest даёт IS, PnL, fill rate, solve time распределения.
+```text
+                  ┌────────────────────────────────────────────────┐
+                  │            cpp/backtest (port 8087)             │
+   REST/Kafka     │  ┌──────────────┐   ┌─────────────────────┐    │
+   ──────────▶   │  │ CreateReplay │   │  RunReplaySession   │    │
+                  │  │ /Cancel/Retry│──▶│  (orchestrator)     │    │
+                  │  └──────────────┘   └──────────┬──────────┘    │
+                  │                                │               │
+                  │            ┌───────────────────┼─────────────┐ │
+                  │            ▼                   ▼             ▼ │
+                  │   HistoricalBatchLoader   ShadowNamespace  GrpcBatchExecutor
+                  │       (ClickHouse)            +Ledger      (Matching, Risk)
+                  │            │                   │             │ │
+                  │            └─────┬─────────────┴─────┬───────┘ │
+                  │                  ▼                   ▼         │
+                  │         ReplayStepJournal      AgentLogWriter  │
+                  │         (PG summaries)         (ClickHouse)    │
+                  │                  │                             │
+                  │                  ▼                             │
+                  │           ReplayEventPublisher                 │
+                  │           (Kafka replay.results)               │
+                  └────────────────────────────────────────────────┘
+```
 
-Источник: IN-001 §6 FR-CLEAR-002 + §5.3 сценарии.
+Детальные диаграммы:
+
+- System sequence: [UC-F15-01](../../use-cases/UC-F15-01-create-replay-session/sequences/SEQ-UC-F15-01-system.md), [UC-F15-04 audit](../../use-cases/UC-F15-04-audit-mode-replay/sequences/SEQ-UC-F15-04-system.md)
+- Service sequences: [SEQ-F15-01 create](../../../05-components/sequences/SEQ-F15-01-create-session-services.md), [SEQ-F15-02 cycle](../../../05-components/sequences/SEQ-F15-02-replay-cycle-services.md), [SEQ-F15-03 cancel](../../../05-components/sequences/SEQ-F15-03-cancel-services.md), [SEQ-F15-04 audit](../../../05-components/sequences/SEQ-F15-04-audit-mode-services.md)
+- Internal: [backtest-service overview](../../../05-components/backtest-service/overview.md)
+
+## Реализация
+
+- Service entry: [cpp/backtest/src/main.cpp](../../../../cpp/backtest/src/main.cpp)
+- App layer (use cases): [cpp/backtest/src/app/](../../../../cpp/backtest/src/app/) — 19 use cases + ports
+- Infra: [cpp/backtest/src/infra/](../../../../cpp/backtest/src/infra/) (ClickHouse, PostgreSQL, Kafka, gRPC, HTTP)
+- Migrations: [cpp/backtest/migrations/postgres/](../../../../cpp/backtest/migrations/postgres/) (001 schema, 002 RBAC, 003 retry_parent_id)
+- Docker dev: [infra/docker-compose.dev.yml](../../../../infra/docker-compose.dev.yml) service `backtest` (port 8087)
+
+## Acceptance criteria
+
+См. [acceptance-criteria.md](acceptance-criteria.md): функциональные F15-1..F15-47, нефункциональные AC-N1..AC-N9, DoD соответствие.
+
+## Контракты
+
+- REST: [docs/06-api/rest/replay.md](../../../06-api/rest/replay.md) (генерируется из [contracts/openapi/fob/replay/v1/api/replay.yaml](../../../../contracts/openapi/fob/replay/v1/api/replay.yaml))
+- Kafka: [docs/06-api/messaging/replay-topics.md](../../../06-api/messaging/replay-topics.md) (`replay.commands`, `replay.results`)
+- Proto: [contracts/proto/fob/replay/v1/replay.proto](../../../../contracts/proto/fob/replay/v1/replay.proto)
+- gRPC calls: `fob.matching.v1.Solver/Solve`, `fob.risk.v1.RiskService/CheckPostTrade`, `fob.ledger.v1.LedgerService/ApplyFills` (shadow)
+
+## Данные
+
+- PostgreSQL: [replay-sessions](../../../07-data/replay-sessions.md), [replay-summaries](../../../07-data/replay-summaries.md), [replay-rbac](../../../07-data/replay-rbac.md)
+- ClickHouse: [replay-agentlogs](../../../07-data/replay-agentlogs.md)
+
+## Доменные формулы и инварианты
+
+См. [04-domain/business-rules.md §F-15](../../../04-domain/business-rules.md#f-15--backtest--replay) — Sharpe, IS, VWAP, FillRate, MaxDD, AgentState и ShadowPositions.
+
+## Связанные фичи
+
+- **F-04 Batch Clearing** — solver вызывается в isolation mode (`fob.matching.v1.Solver/Solve`) тем же кодом, что и production scheduler. F-15 проверяет parity F-04.
+- **F-11 External Venues LOB→FOB** — historical venue snapshots/curves используются [VenueReplayUC](../../../../cpp/backtest/src/app/venue_replay_uc.cpp) для парити-проверок и [LobFobReplayUC](../../../../cpp/backtest/src/app/lob_fob_replay_uc.cpp) для quality replay.
+- **F-12 Execution Hedge** — VenueSim (часть backtest) воспроизводит ExecutionIntent → ExecutionReport flow без EVC. Это обязательное parity-требование F12-9 (backtest parity).
+- **F-06 Positions/PnL** — формулы PnL и MaxDD согласованы с post-trade модулем.
+- **F-13 Post-trade reports** — те же IS и VWAP формулы.
+- **F-16 Operator panel** — будущая интеграция: запуск audit-mode replay из operator UI.
+
+## Definition of Done (IN-006)
+
+См. [acceptance-criteria.md §4](acceptance-criteria.md#4-definition-of-done--соответствие-in-006-22-пункта). Покрытие 19/22 ✅, 2/22 ⚠, 1/22 ❌ (Web UI).
+
+## Open Questions
+
+См. [open-questions.md](open-questions.md).
 
 ## Source Fragments
 
-- IN-001-FR-027, IN-001-FR-028
+- IN-006 (детальная спецификация F-15, 47 функциональных + DoD)
+- IN-001-FR-027, IN-001-FR-028 (общие требования к backtest/replay из vision)
+- Cross-link: IN-003 (F-04 solver parity), IN-004 (F-11 venue parity), IN-005 (F-12 hedge parity)

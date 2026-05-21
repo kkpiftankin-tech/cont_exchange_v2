@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package fob.orders.v1;
+
+import "google/protobuf/empty.proto";
+import "fob/common/v1/common.proto";
+import "fob/orders/v1/orders.proto";
+
+message CreateFlowOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+  FlowOrder order = 2;
+}
+
+message CreateFlowOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool accepted = 2;
+  string order_id = 3;
+  fob.common.v1.Error error = 4;
+}
+
+message CancelFlowOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  string order_id = 3;
+  string reason = 4;
+}
+
+message CancelFlowOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+}
+
+message GetFlowOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  string order_id = 3;
+}
+
+message GetFlowOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  FlowOrderView view = 2;
+}
+
+service OrderFlowService {
+  // Main synchronous entrypoint for Gateway.
+  rpc CreateFlowOrder(CreateFlowOrderRequest) returns (CreateFlowOrderResponse);
+  rpc CancelFlowOrder(CancelFlowOrderRequest) returns (CancelFlowOrderResponse);
+  rpc GetFlowOrder(GetFlowOrderRequest) returns (GetFlowOrderResponse);
+}

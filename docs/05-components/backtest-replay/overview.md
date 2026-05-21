@@ -1,13 +1,19 @@
 ---
 id: CMP-BACKTEST-REPLAY
 phase: 05-components
-status: not-implemented
+status: superseded-by-backtest-service
 component: backtest-replay
 related:
   - docs/02-system/features/F-15-backtest-replay/
+  - docs/05-components/backtest-service/overview.md
 ---
 
 # Component: Backtest & Replay Engine
+
+> **Superseded** by [backtest-service](../backtest-service/overview.md) after
+> IN-006 ingest (2026-05-20). Этот документ оставлен для traceability входящих
+> ссылок (например, из [SEQ-F15-UC-F15-01-services.md](../sequences/SEQ-F15-UC-F15-01-services.md)).
+> Актуальный компонент — `cpp/backtest`, его doc — см. ссылку выше.
 
 ## Назначение
 

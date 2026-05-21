@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 BROKER="${BROKER:-redpanda:9092}"
 
@@ -8,31 +8,68 @@ echo "Creating topics on broker: ${BROKER}"
 # Partitions: dev default 3 (one-broker cluster). Increase in prod.
 P="${P:-3}"
 
-# Helper: create topic; if it already exists, log and continue (idempotent).
-# Without this, re-running the init container fails with TOPIC_ALREADY_EXISTS.
+# Idempotent topic creation:
+# - treat TOPIC_ALREADY_EXISTS as success
+# - fail fast on any other broker / auth / config errors
 create_topic() {
-  local name=$1; shift
-  local out
-  out=$(rpk topic create "${name}" "$@" 2>&1) || true
-  if echo "${out}" | grep -q "TOPIC_ALREADY_EXISTS"; then
-    echo "${name} already exists — skipping"
-  elif echo "${out}" | grep -q "OK"; then
-    echo "${name} created"
-  else
-    echo "${name} FAILED: ${out}" >&2
-    return 1
+  local topic="$1"
+  local retention_ms="$2"
+  local output=""
+
+  if output="$(rpk topic create "${topic}" -p "${P}" -r 1 --brokers "${BROKER}" --config "retention.ms=${retention_ms}" 2>&1)"; then
+    printf '%s\n' "${output}"
+    return 0
   fi
+
+  printf '%s\n' "${output}"
+  if grep -q "TOPIC_ALREADY_EXISTS" <<<"${output}" || grep -q "topic_already_exists" <<<"${output}"; then
+    echo "Topic '${topic}' already exists, continuing."
+    return 0
+  fi
+
+  echo "Failed to create topic '${topic}'." >&2
+  return 1
+}
+
+retention_for_topic() {
+  local topic="$1"
+  local default_ms="$2"
+  local key
+  key="$(tr '[:lower:].-' '[:upper:]__' <<<"${topic}")"
+  local var_name="RETENTION_MS_${key}"
+  local configured="${!var_name:-}"
+  if [[ -n "${configured}" ]]; then
+    echo "${configured}"
+    return
+  fi
+  echo "${default_ms}"
 }
 
 # Retention examples:
 # - marketdata.raw: high volume => short retention
 # - orders.normalized: keep for debugging/replay
 # - batch.outputs: keep longer for audit
-create_topic marketdata.raw       -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=3600000
-create_topic orders.normalized    -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=604800000
-create_topic batch.outputs        -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=604800000
-create_topic execution.intents    -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=86400000
-create_topic execution.reports    -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=604800000
-create_topic risk.alerts          -p "${P}" -r 1 --brokers "${BROKER}" --config retention.ms=2592000000
+# - fills: per-fill external events for downstream consumers
+# - venue.liquidity.fob: liquidity curves, keep moderate retention
+# - venue.synthetic: compatibility SyntheticFlowOrder stream for matching
+create_topic marketdata.raw "$(retention_for_topic marketdata.raw 3600000)"
+create_topic orders.normalized "$(retention_for_topic orders.normalized 604800000)"
+create_topic batch.outputs "$(retention_for_topic batch.outputs 604800000)"
+create_topic fills "$(retention_for_topic fills 604800000)"
+create_topic execution.intents "$(retention_for_topic execution.intents 604800000)" # key = hedge_flow_id
+create_topic execution.venue "$(retention_for_topic execution.venue 604800000)" # key = hedge_flow_id
+create_topic execution.reports "$(retention_for_topic execution.reports 604800000)"
+create_topic risk.alerts "$(retention_for_topic risk.alerts 2592000000)"
+
+create_topic venue.liquidity.fob "$(retention_for_topic venue.liquidity.fob 86400000)" # key = {venue_id}|{instrument_symbol}
+create_topic venue.health "$(retention_for_topic venue.health 604800000)" # key = {venue_id}
+create_topic venue.synthetic "$(retention_for_topic venue.synthetic 86400000)" # key = {venue_id}|{instrument_symbol}
+create_topic venue.snapshots "$(retention_for_topic venue.snapshots 3600000)" # key = {venue_id}|{instrument_symbol}
+
+create_topic replay.commands "$(retention_for_topic replay.commands 604800000)"
+create_topic replay.results "$(retention_for_topic replay.results 604800000)"
+
+create_topic logs "$(retention_for_topic logs 604800000)"
+create_topic metrics "$(retention_for_topic metrics 604800000)"
 
 echo "Done."

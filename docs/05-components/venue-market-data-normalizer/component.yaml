@@ -1,0 +1,89 @@
+component:
+  id: venue-market-data-normalizer
+  name: Venue Market Data Normalizer
+  layer: core-domain
+  status: active-mvp
+  codePath: cpp/venues/src/domain
+  runtime: cpp/venues
+  owner: core-team
+
+responsibility:
+  summary: >
+    Преобразование сырых сообщений от External Venues Connector в нормализованную
+    форму fob.venue.v1.VenueSnapshot. Канонизация depth (фильтрация пыли,
+    агрегация по tick_size/lot_size), расчёт bestBid/bestAsk/midPrice/spread,
+    определение status (connected/stale/empty/disconnected), заполнение fees
+    и volume_24h. Публикует VenueSnapshot в Kafka venue.snapshots и пишет
+    в ClickHouse venue_snapshots.
+
+sourceTreeEvidence:
+  app:
+    - cpp/venues/src/app/snapshot_producer.cpp
+    - cpp/venues/src/app/snapshot_producer.hpp
+  domain:
+    - cpp/venues/src/domain/normalize_snapshot.cpp
+    - cpp/venues/src/domain/normalize_snapshot.hpp
+    - cpp/venues/src/domain/snapshot_status.cpp
+    - cpp/venues/src/domain/snapshot_status.hpp
+    - cpp/venues/src/domain/depth_canonicalizer.cpp
+    - cpp/venues/src/domain/depth_canonicalizer.hpp
+  infra:
+    - cpp/venues/src/infra/snapshot_clickhouse_writer.cpp
+    - cpp/venues/src/infra/snapshot_clickhouse_writer.hpp
+    - cpp/venues/src/infra/kafka_message_publisher.hpp
+
+features:
+  - F-11
+
+protoContracts:
+  - contracts/proto/fob/venue/v1/venue.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - VenueSnapshot
+  - SnapshotStatus (connected / stale / empty / disconnected)
+
+dependencies:
+  upstream:
+    - external-venues-connector
+  downstream:
+    - venue-liquidity-curve-builder
+    - market-data
+    - cpp/venue_health (heartbeat-параллельный канал)
+
+kafkaProduces:
+  - topic: venue.snapshots
+    messageType: fob.venue.v1.VenueSnapshot
+    partitionKey: "{venue_id}|{instrument_symbol}"
+
+kafkaConsumes: []
+
+env:
+  - name: VENUES_CLICKHOUSE_URL
+    default: "http://clickhouse:8123"
+  - name: VENUES_CLICKHOUSE_DB
+    default: backtest
+  - name: VENUES_CLICKHOUSE_SNAPSHOTS_TABLE
+    default: venue_snapshots
+  - name: VENUES_CLICKHOUSE_RETENTION_DAYS
+    default: "90"
+  - name: VENUES_SNAPSHOT_LOG_LATENCY
+    default: "false"
+  - name: STALE_THRESHOLD_MS
+    default: "15000"
+
+knownIssues:
+  - id: clickhouse-ddl-missing
+    severity: feature-gap
+    description: >
+      DDL для venue_snapshots отсутствует в infra/clickhouse/init.sql.
+      Writer полагается на EnsureSchema(); требуется явная DDL — T-F11-110.
+
+tests:
+  unit:
+    - cpp/venues/tests/normalize_snapshot_test.cpp
+    - cpp/venues/tests/snapshot_status_test.cpp
+    - cpp/venues/tests/depth_canonicalizer_test.cpp
+    - cpp/venues/tests/snapshot_producer_test.cpp
+  integration: []
+  contract: []

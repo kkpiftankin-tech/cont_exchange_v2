@@ -1,0 +1,111 @@
+component:
+  id: venue-health-routing
+  name: Venue Health & Routing Service
+  layer: core
+  status: active-mvp
+  codePath: cpp/venue_health
+  runtime: cpp/venue_health
+  owner: core-team
+
+responsibility:
+  summary: >
+    Отдельный сервис: потребляет RAW VenueHealth heartbeat'ы от cpp/venues и
+    публикует AGGREGATED VenueHealth с health-score, circuit-breaker state и
+    routing_recommendation. Содержит FSM circuit breaker (CLOSED → OPEN →
+    HALF_OPEN → CLOSED) per-venue. Не имеет состояния в БД: VenueState
+    держится in-memory; restart перестраивает состояние из текущего потока
+    venue.health.
+
+sourceTreeEvidence:
+  main:
+    - cpp/venue_health/src/main.cpp
+  app:
+    - cpp/venue_health/src/app/service.cpp
+    - cpp/venue_health/src/app/service.hpp
+  domain:
+    - cpp/venue_health/src/domain/entities/venue_state.cpp
+    - cpp/venue_health/src/domain/entities/venue_state.hpp
+    - cpp/venue_health/src/domain/entities/circuit_breaker.cpp
+    - cpp/venue_health/src/domain/entities/circuit_breaker.hpp
+    - cpp/venue_health/src/domain/entities/config.hpp
+    - cpp/venue_health/src/domain/entities/raw_report.hpp
+    - cpp/venue_health/src/domain/ports/i_health_state_publisher.hpp
+  infra:
+    - cpp/venue_health/src/infra/kafka/kafka_consumer.cpp
+    - cpp/venue_health/src/infra/kafka/kafka_producer.cpp
+    - cpp/venue_health/src/infra/mappers/raw_report.cpp
+    - cpp/venue_health/src/infra/mappers/venue_state.cpp
+  build:
+    - cpp/venue_health/CMakeLists.txt
+
+features:
+  - F-11
+  - F-12  # consumer routing decisions
+  - F-08  # potential consumer for kill-switch
+
+protoContracts:
+  - contracts/proto/fob/venue/v1/venue.proto
+
+entities:
+  - VenueState (per-venue aggregated state)
+  - CircuitBreaker (FSM: CLOSED, OPEN, HALF_OPEN)
+  - RawReport (input DTO)
+  - VenueHealth (output aggregated)
+  - RoutingRecommendation (ALLOW, CAUTION, AVOID, BLOCK)
+
+dependencies:
+  upstream:
+    - external-venues-connector
+  downstream:
+    - matching      # Execution Planning
+    - risk          # pending
+    - observability
+
+kafkaProduces:
+  - topic: venue.health
+    messageType: fob.venue.v1.VenueHealth
+    eventType: AGGREGATED
+    partitionKey: venue_id
+
+kafkaConsumes:
+  - topic: venue.health
+    messageType: fob.venue.v1.VenueHealth
+    consumerGroup: venue_health
+    filter: event_type == RAW
+
+env:
+  - name: KAFKA_BROKERS
+    default: redpanda:9092
+  - name: CIRCUIT_BREAKER_WINDOW_S
+    default: "60"
+  - name: CIRCUIT_BREAKER_COOLDOWN_S
+    default: "300"
+    note: dev compose default 10s через .env-example
+  - name: CIRCUIT_BREAKER_ERRORS
+    default: "3"
+  - name: STALE_THRESHOLD_MS
+    default: "15000"
+
+knownIssues:
+  - id: aggregated-routing-policy-shared
+    severity: feature-gap
+    description: >
+      routing_recommendation матрица дублируется в cpp/venues (in-process
+      cache) и в cpp/venue_health (FSM). См. open-questions.md §3.
+  - id: risk-consumer-pending
+    severity: feature-gap
+    description: >
+      Risk Manager не консьюмит venue.health (AC-13 ❌). Задача T-F11-200.
+  - id: no-persistence-on-restart
+    severity: by-design
+    description: >
+      State не персистится. После рестарта сервис перестраивает VenueState
+      из текущего потока RAW. Допустимо (raw heartbeat'ы идут ≥ 1/s).
+
+tests:
+  unit:
+    - cpp/venue_health/tests/domain/venue_state_test.cpp
+    - cpp/venue_health/tests/domain/circuit_breaker_test.cpp
+    - cpp/venue_health/tests/app/service_test.cpp
+  integration: []
+  contract: []

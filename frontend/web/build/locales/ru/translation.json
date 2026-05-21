@@ -1,0 +1,866 @@
+{
+  "navbar": {
+    "logo": "CONT",
+    "trade": "торговля",
+    "profile": "профиль",
+    "venues": "venues",
+    "hedgeflows": "hedge",
+    "hedgePnl": "pnl",
+    "executionLive": "live",
+    "replay": "replay",
+    "logout": "Выйти",
+    "about": "О нас",
+    "login": "Вход",
+    "register": "Регистрация"
+  },
+  "auth": {
+    "signIn": "Вход",
+    "signUp": "Регистрация",
+    "email": "email",
+    "password": "пароль",
+    "loading": "Загрузка...",
+    "signInBtn": "Войти!",
+    "signUpBtn": "Зарегистрироваться!",
+    "errors": {
+      "emailRequired": "Email обязателен",
+      "invalidEmail": "Неверный формат email",
+      "passwordRequired": "Пароль обязателен",
+      "minPassword": "Минимум 8 символов",
+      "incorrectCredentials": "Неверный email или пароль",
+      "serverUnavailable": "Сервер недоступен, попробуйте позже",
+      "networkError": "Ошибка сети, попробуйте позже",
+      "emailRegistered": "Этот email уже зарегистрирован"
+    }
+  },
+  "about": {
+    "title": "CONT - первая платформа для торговли с непрерывными ордерами",
+    "description": "Наслаждайтесь бесперебойной и высокоскоростной торговлей благодаря нашему непрерывному дизайну заказов. Высокая ликвидность, сверхнизкая задержка и повышенная безопасность - все, что вам нужно для разумной торговли. Присоединяйтесь прямо сейчас и будьте впереди на крипторынке.",
+    "register": "регистрация",
+    "signIn": "войти"
+  },
+  "main": {
+    "type_buy": "покупки",
+    "type_sell": "продажи",
+    "priceUndefined": "не определена",
+    "tradingPair": "USDT/BTC",
+    "high": "максимум за день:",
+    "change": "за день",
+    "buy": "купить",
+    "sell": "продать",
+    "minPrice": "мин. цена",
+    "maxPrice": "макс. цена",
+    "amount": "количество BTC для {{action}}",
+    "speed": "скорость покупки (акций/час)",
+    "proceed": "продолжить",
+    "withdraw": "вывести",
+    "deposit": "пополнить",
+    "withdrawModal": {
+      "title": "Вывод {{currency}}",
+      "amount": "Сумма ({{currency}})",
+      "wallet": "Адрес вашего кошелька",
+      "confirm": "Подтвердить вывод",
+      "errors": {
+        "amountRequired": "Укажите сумму",
+        "mustBeNumber": "Должно быть числом",
+        "mustBePositive": "Должно быть положительным",
+        "insufficientBalance": "Недостаточно средств",
+        "walletRequired": "Укажите адрес кошелька"
+      }
+    },
+    "depositModal": {
+      "title": "Пополнение",
+      "instructions": "Отправьте средства на следующий адрес:",
+      "note": "Убедитесь, что вы отправляете правильную валюту на этот адрес. Пополнение будет зачислено после 3 подтверждений сети.",
+      "copy": "Копировать",
+      "copied": "Скопировано!"
+    },
+    "chart" : {
+      "volume_hour": "объём в час",
+      "volume": "Объём",
+      "clearing": "Цена Клиринга",
+      "price": "Цена",
+      "supply": "Предложение",
+      "demand": "Спрос"
+    },
+    "success": "Ордер успешно создан!",
+    "error": "Ошибка создания ордера",
+    "invalidData": "Неверные данные",
+    "insufficientBalance": "Недостаточно средств"
+  },
+  "profile": {
+    "tabs": {
+      "trades": "Сделки",
+      "transactions": "Транзакции"
+    },
+    "withdraw": "вывод",
+    "deposit": "пополнение",
+    "filters": {
+      "time": "Время:",
+      "allTime": "Все время",
+      "lastHour": "Последний час",
+      "lastDay": "Последние 24 часа",
+      "lastWeek": "Последняя неделя",
+      "lastMonth": "Последний месяц",
+      "lastYear": "Последний год",
+      "type": "Тип:",
+      "allTypes": "Все типы",
+      "deposits": "Пополнения",
+      "withdrawals": "Выводы",
+      "status": "Статус:",
+      "allStatuses": "Все статусы",
+      "statuses": {
+        "completed": "Завершено",
+        "pending": "В ожидании",
+        "partial": "Частично",
+        "cancelled": "Отменено"
+      },
+      "clear": "Сбросить фильтры"
+    },
+    "table": {
+      "minPrice": "Минимальная цена",
+      "maxPrice": "Максимальная цена",
+      "buySpeed": "Скорость покупки",
+      "spentAmount": "Полная стоимость",
+      "date": "Дата",
+      "type": "Тип",
+      "currency": "Валюта",
+      "amount": "Количество",
+      "fee": "Комиссия",
+      "status": "Статус",
+      "actions": "Действия",
+      "pair": "Пара",
+      "completed": "Завершено",
+      "details": "Подробности",
+      "hide": "Скрыть",
+      "cancel": "Отменить",
+      "wallet": "Кошелек:",
+      "sell": "Продажа:",
+      "buy": "Покупка:",
+      "progress": "Прогресс:",
+      "completedDate": "Дата завершения:",
+      "noData": "Записи не найдены",
+      "loading": "Загрузка..."
+    },
+    "batches": {
+      "title": "Батчи",
+      "id": "Batch ID",
+      "time": "Время",
+      "status": "Статус",
+      "solveTimeMs": "Время решения, мс",
+      "residualNorm": "Residual Norm",
+      "sla": "SLA",
+      "diagnosticsTitle": "Диагностика",
+      "slaStates": {
+        "ok": "OK",
+        "at-risk": "Риск",
+        "breached": "Нарушен"
+      },
+      "diagnostics": {
+        "ok": "Отклонений нет",
+        "solverFailed": "Ошибка solver",
+        "solveTimeRisk": "Время решения выше {{threshold}} мс",
+        "solveTimeBreached": "Превышен SLA по времени (>{{threshold}} мс)",
+        "residualRisk": "Residual norm выше {{threshold}}",
+        "residualBreached": "Превышен SLA по residual norm (>{{threshold}})"
+      },
+      "loading": "Загрузка батчей...",
+      "noData": "Батчи не найдены",
+      "error": "Не удалось загрузить список батчей."
+    },
+    "modals": {
+      "cancelTitle": "Подтверждение отмены",
+      "cancelMessage": "Вы уверены, что хотите отменить эту {{type}}?",
+      "cancelConfirm": "Да, отменить",
+      "cancelKeep": "Нет, оставить",
+      "errorTitle": "Ошибка",
+      "errorLoading": "Не удалось загрузить историю. Пожалуйста, попробуйте позже.",
+      "errorCancel": "Не удалось отменить сделку. Пожалуйста, попробуйте снова."
+    }
+  },
+  "venues": {
+    "kicker": "Provider Exchange",
+    "title": "External Venues",
+    "subtitle": "Операторский экран для мониторинга внешних CEX/DEX/AMM-площадок, их рыночной картины, health-score и готовности к routing.",
+    "live": "Live updates every 4s",
+    "lastUpdated": "Последнее обновление: {{time}}",
+    "searchLabel": "Поиск",
+    "searchPlaceholder": "venue id, display name, symbol",
+    "filters": {
+      "all": "Все",
+      "connected": "Connected",
+      "stale": "Stale",
+      "empty": "Empty",
+      "disconnected": "Disconnected"
+    },
+    "summary": {
+      "total": "Всего venues",
+      "healthy": "Здоровые",
+      "stale": "Stale now",
+      "disabled": "Disable recommended"
+    },
+    "states": {
+      "loading": "Загрузка площадок...",
+      "error": "Не удалось загрузить external venues.",
+      "empty": "Под текущие фильтры площадки не найдены.",
+      "select": "Выберите площадку, чтобы посмотреть детали.",
+      "notFound": "Площадка не найдена или сейчас недоступна."
+    },
+    "table": {
+      "venue": "Venue",
+      "market": "Market",
+      "status": "Status",
+      "health": "Health",
+      "executionQuality": "Execution quality",
+      "latency": "Latency",
+    "spread": "Исполнимый спред",
+    "volume": "24h Volume",
+    "action": "Routing",
+    "controls": "Управление",
+    "details": "Детали"
+  },
+    "actions": {
+      "openDetails": "Открыть",
+      "backToList": "К списку"
+    },
+    "curves": {
+      "title": "Кривые ликвидности",
+      "subtitle": "Текущий preview FOB-кривых внешней ликвидности по каждой стороне.",
+      "confidence": "Confidence",
+      "empty": "Для этой площадки кривые пока недоступны.",
+      "side": {
+        "buy": "Кривая покупки",
+        "sell": "Кривая продажи"
+      }
+    },
+    "snapshots": {
+      "title": "VenueSnapshot",
+      "subtitle": "История нормализованных снапшотов с глубиной стакана и контролем свежести.",
+      "empty": "Для этой площадки пока нет данных VenueSnapshot.",
+      "latestStatus": "Последний статус",
+      "freshness": "Свежесть",
+      "depth": "Глубина bid / ask",
+      "volume24hBase": "24h объём в базе",
+      "bidDepth": "Глубина bid",
+      "askDepth": "Глубина ask",
+      "table": {
+        "time": "Время",
+        "status": "Статус",
+        "bidAsk": "Bid / ask",
+        "mid": "Mid",
+        "volume": "24h объём"
+      }
+    },
+    "synthetics": {
+      "title": "SyntheticFlowOrder",
+      "subtitle": "Совместимый с FOB слой synthetic-ордера, построенный из venue-кривых.",
+      "empty": "Для этой площадки SyntheticFlowOrder сейчас не генерируются.",
+      "total": "Всего строк",
+      "active": "Активные",
+      "latestRate": "Последний q_rate",
+      "latestMaxQty": "Последний q_max",
+      "table": {
+        "time": "Создан / TTL",
+        "side": "Сторона",
+        "band": "Ценовой диапазон",
+        "speed": "q_rate / q_max",
+        "status": "Статус",
+        "links": "Curve / snapshot"
+      }
+    },
+    "status": {
+      "connected": "Connected",
+      "stale": "Stale",
+      "empty": "Empty",
+      "disconnected": "Disconnected"
+    },
+    "recommendation": {
+      "route": "Route",
+      "watch": "Watch",
+      "deprioritize": "Deprioritize",
+      "disable": "Disable"
+    },
+    "recommendationText": {
+      "route": "Площадка выглядит пригодной для исполнения: данные свежие, latency в норме, health-score высокий.",
+      "watch": "Площадка ещё доступна, но требует внимания: latency или stale-rate уже ухудшают качество маршрутизации.",
+      "deprioritize": "Ликвидность или глубина площадки ухудшились, поэтому её лучше оставить запасным вариантом.",
+      "disable": "Площадка сейчас не подходит для routing: соединение нестабильно или недоступно."
+    },
+    "detail": {
+      "midPrice": "Mid price",
+      "bookBidAsk": "Лучшие bid / ask",
+      "executionBidAsk": "Исполнимые bid / ask",
+      "fillRate": "Fill rate",
+      "errorRate": "Error rate",
+      "volume24h": "24h volume",
+      "latency": "Latency",
+      "executionQuality": "Execution quality",
+      "routingTitle": "Routing insight",
+      "lastUpdate": "Last venue update",
+      "fees": "Fees",
+      "bookSpread": "Биржевой спред",
+      "executionSpread": "Исполнимый спред",
+      "staleRate": "Stale rate",
+      "freshness": "Свежесть",
+      "tickLot": "Tick / lot size",
+      "circuitBreaker": "Circuit breaker",
+      "region": "Region",
+      "healthScore": "Health score",
+      "snapshotDepth": "Глубина снапшота",
+      "curveConfidence": "Уверенность кривой",
+      "curveLevel": "Уровень кривой",
+      "curveLatency": "Задержка сборки кривой",
+      "curveAction": "Действие по качеству",
+      "hedgePnl": "Hedge PnL",
+      "hedgeCount": "Hedge count"
+    },
+    "detailPage": {
+      "title": "Venue details",
+      "subtitle": "Детальная карточка площадки {{venueId}} по инструменту {{symbol}}.",
+      "fallbackSubtitle": "Детальная карточка выбранной внешней площадки."
+    },
+    "operator": {
+      "title": "Operator actions",
+      "subtitle": "Ручные действия оператора: reconnect, disable/enable и override режима маршрутизации.",
+      "createTitle": "Создать площадку",
+      "adminState": "Admin state",
+      "routingMode": "Routing mode",
+      "reconnectCount": "Reconnect count",
+      "lastAction": "Последнее действие",
+      "error": "Не удалось выполнить operator action.",
+      "createRequired": "Нужно указать venue id.",
+      "successReconnect": "Команда reconnect отправлена.",
+      "successDisable": "Площадка отключена для routing.",
+      "successEnable": "Площадка снова активирована.",
+      "successRouting": "Режим маршрутизации обновлён.",
+      "successConfig": "Конфигурация площадки обновлена.",
+      "successDeleteConfig": "Конфигурация площадки удалена.",
+      "state": {
+        "active": "Active",
+        "disabled": "Disabled"
+      },
+      "mode": {
+        "auto": "Auto",
+        "watch": "Watch"
+      },
+      "configTitle": "Update venue config",
+      "configSubtitle": "Эти параметры теперь применяются именно к выбранной площадке. `Adapter mode` только показывает тип запущенного адаптера и не переключается из UI.",
+      "fields": {
+        "venueId": "Venue id",
+        "adapterMode": "Режим адаптера",
+        "wsUrl": "WS URL",
+        "restBaseUrl": "REST base URL",
+        "rpcUrl": "RPC URL",
+        "chainId": "Chain id",
+        "poolAddress": "Pool address",
+        "venueSymbol": "Символ площадки",
+        "curveLevel": "Уровень кривой",
+        "routingMode": "Режим маршрутизации",
+        "depthLevels": "Глубина (уровней)",
+        "staleThresholdMs": "Порог stale (мс)",
+        "circuitBreakerErrors": "Ошибок до CB",
+        "circuitBreakerWindowMs": "Окно CB (мс)",
+        "circuitBreakerCooldownMs": "Cooldown CB (мс)",
+        "syntheticEnabled": "Synthetic включен",
+        "circuitBreakerEnabled": "CB включен",
+        "isActive": "Активен для routing"
+      },
+      "help": {
+        "venueId": "Стабильный идентификатор площадки в admin API и во внутреннем routing metadata.",
+        "adapterMode": "Показывает, какой тип адаптера обслуживает площадку. Выбирается режимом запуска сервиса и здесь не редактируется.",
+        "wsUrl": "WebSocket endpoint для live market data этой площадки. После сохранения адаптер переподключается к новому стриму.",
+        "restBaseUrl": "HTTP base URL для CEX snapshot, ticker и order endpoints этой площадки.",
+        "rpcUrl": "RPC endpoint для DEX или AMM, из которого берутся снапшоты и куда отправляется исполнение по этой площадке.",
+        "chainId": "Идентификатор сети, который DEX-адаптер отправляет в RPC-вызовы и subscription headers.",
+        "poolAddress": "Адрес AMM-пула, из которого берётся состояние ликвидности для этой площадки.",
+        "venueSymbol": "Нативный символ рынка на площадке, используемый в подписках, снапшотах и child orders.",
+        "curveLevel": "Запрашиваемый уровень FOB-кривой для этой площадки: L1 самый простой, L3 включает impact calibration, OFF отключает публикацию кривой.",
+        "routingMode": "Auto разрешает routing на площадку. Watch оставляет её видимой, но исключает из исполнения.",
+        "depthLevels": "Запрашиваемая глубина стакана на сторону для этой площадки. Значения больше 20 теперь не режутся backend на нормализации.",
+        "staleThresholdMs": "Через сколько миллисекунд снапшот этой площадки считается stale для статуса и деградации curve builder.",
+        "circuitBreakerErrors": "Сколько ошибок внешних вызовов допускается в окне breaker, прежде чем площадка будет открыта circuit breaker.",
+        "circuitBreakerWindowMs": "Скользящее окно, внутри которого считаются ошибки внешних вызовов для circuit breaker.",
+        "circuitBreakerCooldownMs": "Пауза после открытия breaker перед следующей попыткой обратиться к площадке.",
+        "syntheticEnabled": "Публиковать ли SyntheticFlowOrder-совместимые строки из FOB-кривой именно этой площадки.",
+        "circuitBreakerEnabled": "Включает или выключает circuit breaker для внешних вызовов этого адаптера.",
+        "isActive": "Если выключено, площадка исключается из routing и показывается как отключённая оператором."
+      },
+      "actions": {
+        "reconnect": "Force reconnect",
+        "disable": "Disable venue",
+        "enable": "Enable venue",
+        "routeNormally": "Route normally",
+        "watchMode": "Watch mode",
+        "saveConfig": "Сохранить конфиг",
+        "deleteConfig": "Удалить конфиг",
+        "createVenue": "Создать площадку"
+      }
+    }
+  },
+  "replay": {
+    "kicker": "Replay console",
+    "title": "Backtest / Replay",
+    "form": {
+      "name": "Название сессии",
+      "nameError": "Укажите название сессии.",
+      "instrument": "Инструмент",
+      "dateFrom": "Дата с",
+      "dateTo": "Дата по",
+      "dateError": "Укажите дату.",
+      "dateRangeError": "Дата окончания должна быть позже даты начала.",
+      "strategy": "Strategy JSON",
+      "strategyError": "Strategy должна быть валидным JSON.",
+      "instrumentError": "Выберите хотя бы один инструмент.",
+      "priceRangeError": "pL должен быть меньше или равен pH.",
+      "qrateError": "qrate должен быть больше нуля.",
+      "qmaxError": "qmax должен быть больше нуля.",
+      "executionWindowError": "executionwindow должен быть больше нуля.",
+      "jsonObjectError": "Override должен быть JSON-объектом.",
+      "jsonError": "JSON невалиден.",
+      "requiredFieldError": "В override отсутствуют обязательные поля.",
+      "solver": "Solver config",
+      "productionConfig": "Production config",
+      "overrideConfig": "Inline override",
+      "risk": "Risk limits",
+      "productionRisk": "Production risk limits",
+      "overrideRisk": "Inline risk limits",
+      "fee": "Fee model",
+      "productionFee": "Production fee model",
+      "overrideFee": "Inline fee model",
+      "feeError": "Fee model должен содержать makerfeerate и takerfeerate.",
+      "reward": "Reward",
+      "randomSeed": "Random seed",
+      "tolerance": "Tolerance",
+      "numberError": "Укажите число.",
+      "run": "Запустить replay",
+      "creating": "Создание...",
+      "refresh": "Обновить"
+    },
+    "sessions": {
+      "caption": "Live queue",
+      "title": "Replay sessions",
+      "status": "Статус",
+      "search": "Поиск",
+      "sessionid": "Сессия",
+      "progress": "Прогресс",
+      "created": "Создана",
+      "liveConnected": "live: {{transport}}",
+      "liveDisconnected": "live: reconnecting",
+      "liveUpdated": "Последнее событие: {{time}}",
+      "liveWaiting": "Ожидание live-событий",
+      "prev": "Назад",
+      "next": "Вперёд"
+    },
+    "status": {
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "statusFilter": {
+      "all": "Все",
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "summary": {
+      "avgIs": "avgIS",
+      "totalPnl": "Total PnL",
+      "sharpe": "Sharpe",
+      "fillRate": "Fill rate",
+      "avgVwap": "Avg VWAP",
+      "maxDrawdown": "Max drawdown",
+      "avgSolveTime": "Avg solve time",
+      "totalBatches": "Total batches",
+      "totalFillEvents": "Total fill events",
+      "processedBatches": "Processed batches",
+      "failedBatches": "Failed batches",
+      "partial": "Partial"
+    },
+    "tabs": {
+      "summary": "Сводка",
+      "equity": "Equity curve",
+      "batches": "По батчам",
+      "compare": "Сравнение A/B",
+      "audit": "Audit mode"
+    },
+    "equity": {
+      "title": "Equity curve",
+      "copy": "PnL меняется по батчам, а shadow ledger держит балансы и позиции отдельно от production."
+    },
+    "batches": {
+      "title": "By batches",
+      "subtitle": "AgentLog по батчам: PnL, IS, fill rate, solve time и risk status.",
+      "batch": "Batch",
+      "pnl": "PnL",
+      "is": "IS",
+      "fillRate": "Fill rate",
+      "solve": "Solve time",
+      "residual": "Residual norm",
+      "risk": "Risk",
+      "solverError": "solver_error",
+      "filterBatch": "batchseq",
+      "filterPnl": "pnl",
+      "filterIs": "isvalue",
+      "filterFillRate": "fillrate",
+      "filterSolverAll": "solver_error: все",
+      "filterSolverError": "solver_error: true",
+      "filterSolverOk": "solver_error: false",
+      "details": "AgentLog details",
+      "closeDetails": "Закрыть details"
+    },
+    "compare": {
+      "title": "A/B compare",
+      "subtitle": "Сравнение двух replay-сессий по ключевым метрикам качества.",
+      "sessionA": "Сессия A",
+      "sessionB": "Сессия B",
+      "run": "Сравнить",
+      "running": "Сравнение...",
+      "loaded": "Сравнение загружено.",
+      "table": {
+        "metric": "Метрика",
+        "delta": "Delta (B - A)",
+        "verdict": "Лучше"
+      },
+      "verdict": {
+        "aBetter": "A",
+        "bBetter": "B",
+        "equal": "Равно"
+      },
+      "metrics": {
+        "avgis": "avgIS",
+        "totalpnl": "Total PnL",
+        "sharpe": "Sharpe",
+        "fillrate": "Fill rate",
+        "maxdrawdown": "Max drawdown",
+        "avgsolvetime": "Avg solve time"
+      },
+      "errors": {
+        "selectSessions": "Сначала выберите обе сессии.",
+        "sameSession": "Сессии A и B должны отличаться.",
+        "incompatible": "Сессии нельзя сравнить между собой.",
+        "loadFailed": "Не удалось загрузить сравнение."
+      }
+    },
+    "audit": {
+      "title": "Audit mode",
+      "subtitle": "Воспроизведение одного батча и сравнение diff с production.",
+      "batchId": "Batch ID",
+      "batchIdPlaceholder": "batch-2026-04-05-1203",
+      "run": "Запустить audit",
+      "running": "Выполняется...",
+      "loaded": "Загружено diff-батчей: {{count}}.",
+      "equivalent": "Эквивалентно",
+      "different": "Отличается",
+      "table": {
+        "batch": "Batch",
+        "equivalent": "Эквивалентность",
+        "residualDelta": "Delta residual"
+      },
+      "detail": {
+        "residual": "Residual norm",
+        "riskStatus": "Risk status",
+        "equivalent": "Результат",
+        "batch": "Batch",
+        "production": "Production",
+        "clearPrices": "Clear prices",
+        "fills": "Fills",
+        "symbol": "Symbol",
+        "fill": "Fill",
+        "replay": "Replay",
+        "delta": "Delta",
+        "openProduction": "Открыть production запись"
+      },
+      "errors": {
+        "selectSession": "Сначала выберите replay-сессию.",
+        "batchIdRequired": "Укажите Batch ID.",
+        "notFound": "Для этого батча diff не найден.",
+        "loadFailed": "Не удалось загрузить audit diff."
+      }
+    },
+    "results": {
+      "emptyTitle": "Replay results",
+      "refresh": "Обновить",
+      "cancel": "Отменить сессию",
+      "cancelling": "Отмена...",
+      "retry": "Retry",
+      "retrying": "Повторный запуск...",
+      "tabs": "Вкладки результатов replay",
+      "snapshotUsed": "Использован config snapshot"
+    },
+    "states": {
+      "loading": "Загрузка сессий...",
+      "sessionsError": "Не удалось загрузить replay sessions.",
+      "resultsLoading": "Загрузка результатов...",
+      "resultsError": "Не удалось загрузить replay results.",
+      "created": "Replay session создана.",
+      "createError": "Не удалось создать replay session.",
+      "cancelled": "Сессия отменена.",
+      "cancelError": "Не удалось отменить replay session.",
+      "retryStarted": "Retry запущен.",
+      "retryError": "Не удалось запустить retry.",
+      "permissionDenied": "Недостаточно прав для этого replay-действия.",
+      "solverError": "Replay остановлен из-за ошибки solver.",
+      "validationError": "Параметры replay не прошли валидацию.",
+      "noData": "Для выбранного диапазона нет пригодных данных replay.",
+      "partialSummary": "Доступны частичные результаты replay.",
+      "cancelledPartial": "Сессия отменена, частичные результаты сохранены.",
+      "pending": "Сессия в очереди и ждёт запуска.",
+      "liveRunning": "Replay выполняется, прогресс и метрики обновляются в реальном времени.",
+      "waitingForLogs": "Replay уже запущен, AgentLog появится после первых батчей.",
+      "noAgentLogs": "AgentLog пока пуст."
+    }
+  },
+  "hedgeFlow": {
+    "kicker": "F-12 Execution Hedge",
+    "title": "HedgeFlow Monitor",
+    "subtitle": "Операторский экран F-12: список HedgeFlow, статус reconciliation, hedge PnL, slippage и полный drilldown до child orders и ExecutionReport.",
+    "live": "Live updates every {{seconds}}s",
+    "lastUpdated": "Последнее обновление: {{time}}",
+    "actions": {
+      "refresh": "Обновить"
+    },
+    "summary": {
+      "open": "Открытые",
+      "openMeta": "Активные HedgeFlow в исполнении",
+      "completion": "Completion",
+      "completionMeta": "filledQty / targetQty по фильтру",
+      "pnl": "Hedge PnL",
+      "pnlMeta": "Суммарный PnL по выбранным flow",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Среднее отклонение от referenceMid",
+      "alerts": "Alerts",
+      "alertsMeta": "UNDERFILLED и rejected flow"
+    },
+    "filters": {
+      "status": "Статус",
+      "all": "Все",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "search": "Поиск",
+      "searchPlaceholder": "hedgeFlowId, batchId, provider, symbol"
+    },
+    "status": {
+      "OPEN": "OPEN",
+      "COMPLETED": "COMPLETED",
+      "UNDERFILLED": "UNDERFILLED",
+      "RISK_REJECTED": "RISK_REJECTED",
+      "REJECTED": "REJECTED"
+    },
+    "orderStatus": {
+      "FILLED": "FILLED",
+      "PARTIALLY_FILLED": "PARTIAL",
+      "CANCELLED": "CANCELLED",
+      "REJECTED": "REJECTED",
+      "PENDING": "PENDING"
+    },
+    "states": {
+      "loading": "Загрузка HedgeFlow...",
+      "error": "Не удалось загрузить список HedgeFlow.",
+      "empty": "Под текущие фильтры HedgeFlow не найдены.",
+      "select": "Выберите HedgeFlow, чтобы увидеть child orders и execution reports.",
+      "detailLoading": "Загрузка drilldown...",
+      "detailError": "Не удалось загрузить drilldown HedgeFlow."
+    },
+    "list": {
+      "title": "HedgeFlow list",
+      "subtitle": "Найдено flow: {{count}}"
+    },
+    "table": {
+      "aria": "HedgeFlow list",
+      "flow": "Flow",
+      "context": "Context",
+      "execution": "Execution",
+      "progress": "Target / Filled",
+      "quality": "Quality",
+      "pnl": "PnL",
+      "status": "Status",
+      "intent": "Intent",
+      "childOrders": "Child orders: {{count}}",
+      "gap": "Gap",
+      "reference": "Ref",
+      "fees": "Fees"
+    },
+    "detail": {
+      "kicker": "Drilldown",
+      "filled": "Filled",
+      "reconciliationGap": "Reconciliation gap",
+      "nextAction": "Next",
+      "pnl": "Hedge PnL",
+      "fees": "Fees",
+      "slippage": "Slippage",
+      "reference": "ReferenceMid",
+      "intentTitle": "ExecutionIntent",
+      "batch": "Batch",
+      "provider": "Provider",
+      "mode": "Mode",
+      "timeout": "Timeout",
+      "allowedVenues": "Allowed venues",
+      "risk": "Risk",
+      "limitUsage": "limit"
+    },
+    "childOrders": {
+      "title": "Child orders",
+      "count": "{{count}} orders",
+      "empty": "Child orders не создавались.",
+      "venue": "Venue",
+      "type": "Type",
+      "qty": "Qty",
+      "price": "Price",
+      "latency": "Latency",
+      "status": "Status",
+      "of": "of"
+    },
+    "reports": {
+      "title": "ExecutionReport feed",
+      "count": "{{count}} reports",
+      "empty": "ExecutionReport пока нет.",
+      "fee": "Fee"
+    },
+    "timeline": {
+      "title": "Audit trail",
+      "auditTrail": "PostgreSQL / ClickHouse trail"
+    }
+  },
+  "hedgePnl": {
+    "kicker": "F-12 Analytics",
+    "title": "Hedge PnL Dashboard",
+    "subtitle": "Сводная аналитика по hedge PnL: PnL/fees/slippage по времени, symbol и venue, плюс контроль `referenceMid` против `avgFillPrice`.",
+    "live": "Live updates every {{seconds}}s",
+    "lastUpdated": "Последнее обновление: {{time}}",
+    "actions": {
+      "refresh": "Обновить"
+    },
+    "filters": {
+      "all": "Все",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider"
+    },
+    "summary": {
+      "netPnl": "Net PnL",
+      "netPnlMeta": "Итоговый hedge PnL после fees",
+      "grossPnl": "Gross PnL",
+      "grossPnlMeta": "PnL до списания venue fees",
+      "fees": "Fees",
+      "feesMeta": "Суммарные комиссии venues",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Среднее отклонение от referenceMid",
+      "winRate": "Win rate",
+      "winRateMeta": "Положительные execution rows из {{count}}"
+    },
+    "charts": {
+      "pnlTitle": "PnL over time",
+      "pnlSubtitle": "Execution-level PnL и накопленный результат по выбранному срезу.",
+      "cumulativePnl": "Cumulative PnL",
+      "executionPnl": "Execution PnL",
+      "priceTitle": "Clearing vs hedge price",
+      "priceSubtitle": "Проверка `referenceMid / clearingPrice` против фактического `avgFillPrice`.",
+      "clearingPrice": "Clearing/reference",
+      "avgFillPrice": "Avg fill"
+    },
+    "breakdown": {
+      "symbolTitle": "PnL by symbol",
+      "venueTitle": "PnL by venue"
+    },
+    "table": {
+      "title": "Latest execution rows",
+      "subtitle": "Последние ExecutionReport строки, из которых собран dashboard.",
+      "time": "Time",
+      "context": "Context",
+      "prices": "Clearing / fill",
+      "pnl": "PnL",
+      "slippage": "Slippage",
+      "fee": "Fee",
+      "clearingVsFill": "referenceMid vs avgFillPrice"
+    },
+    "states": {
+      "loading": "Загрузка Hedge PnL...",
+      "error": "Не удалось загрузить Hedge PnL Dashboard.",
+      "empty": "Для текущих фильтров нет execution rows."
+    }
+  },
+  "executionLive": {
+    "kicker": "F-12 WebSocket",
+    "title": "Execution Live Feed",
+    "subtitle": "Real-time поток ExecutionReport из `execution.venue`: venue, side, filledQty, avgPrice, slippage, fee, status и связь с HedgeFlow.",
+    "lastEvent": "Последнее событие: {{time}}",
+    "actions": {
+      "refresh": "Обновить snapshot",
+      "pause": "Пауза",
+      "resume": "Продолжить"
+    },
+    "connection": {
+      "idle": "idle",
+      "connecting": "connecting",
+      "connected": "WebSocket connected",
+      "reconnecting": "reconnecting",
+      "paused": "paused",
+      "error": "connection error"
+    },
+    "filters": {
+      "all": "Все",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "status": "Status",
+      "side": "Side",
+      "search": "Поиск",
+      "searchPlaceholder": "executionId, hedgeFlowId, childOrderId"
+    },
+    "summary": {
+      "reports": "Reports",
+      "reportsMeta": "ExecutionReport под текущими фильтрами",
+      "notional": "Notional",
+      "notionalMeta": "Суммарный venue notional",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Средний drift от referenceMid",
+      "latency": "p95 latency",
+      "latencyMeta": "Venue adapter report latency",
+      "alerts": "Alerts",
+      "alertsMeta": "Rejected или slippage > 15 bps"
+    },
+    "feed": {
+      "title": "Live execution tape",
+      "subtitle": "В ленте событий: {{count}}",
+      "topic": "Kafka execution.venue",
+      "live": "live"
+    },
+    "table": {
+      "time": "Time",
+      "execution": "Execution",
+      "route": "Route",
+      "fill": "Fill",
+      "quality": "Quality",
+      "status": "Status"
+    },
+    "inspector": {
+      "kicker": "ExecutionReport",
+      "notional": "Notional",
+      "pnl": "Hedge PnL",
+      "reference": "ReferenceMid",
+      "received": "Received",
+      "batch": "Batch",
+      "provider": "Provider",
+      "childOrder": "Child order",
+      "clientOrder": "Client order",
+      "routeType": "Route type",
+      "urgency": "Urgency"
+    },
+    "states": {
+      "loading": "Загрузка Execution Live Feed...",
+      "error": "Не удалось загрузить Execution Live Feed.",
+      "badMessage": "Получено некорректное WebSocket-сообщение.",
+      "empty": "Для текущих фильтров нет ExecutionReport.",
+      "select": "Выберите событие в ленте, чтобы увидеть детали."
+    }
+  },
+  "common": {
+    "ok": "OK",
+    "error": "Ошибка",
+    "success": "Успех"
+  }
+}

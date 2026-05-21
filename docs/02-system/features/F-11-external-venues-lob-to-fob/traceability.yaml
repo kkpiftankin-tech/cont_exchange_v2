@@ -1,0 +1,346 @@
+featureId: F-11
+
+components:
+  - id: external-venues-connector
+    role: primary
+    codePath: cpp/venues/src/infra
+    runtime: cpp/venues
+    docPath: docs/05-components/external-venues-connector/
+  - id: venue-market-data-normalizer
+    role: primary
+    codePath: cpp/venues/src/domain
+    runtime: cpp/venues
+    docPath: docs/05-components/venue-market-data-normalizer/
+  - id: venue-liquidity-curve-builder
+    role: primary
+    codePath: cpp/venues/src/app
+    runtime: cpp/venues
+    docPath: docs/05-components/venue-liquidity-curve-builder/
+  - id: venue-health-routing
+    role: primary
+    codePath: cpp/venue_health
+    runtime: cpp/venue_health
+    docPath: docs/05-components/venue-health-routing/
+  - id: venue-execution-adapter
+    role: secondary
+    codePath: cpp/venues/src/app/execute_on_venue.cpp
+    runtime: cpp/venues
+    docPath: docs/05-components/venue-execution-adapter/
+    note: бизнес-логика принадлежит F-12; F-11 владеет adapter-уровнем
+  - id: matching
+    role: consumer
+    codePath: cpp/matching
+    note: использует venue.liquidity.fob и venue.synthetic через external_venue_filter, planner_inputs_cache
+  - id: risk
+    role: consumer
+    codePath: cpp/risk
+    status: pending
+    note: должен учитывать venue.health (AC-13)
+  - id: ledger
+    role: consumer
+    codePath: cpp/ledger
+    note: применяет execution.venue / execution.reports
+
+protoContracts:
+  - file: contracts/proto/fob/venue/v1/venue.proto
+    role: source-of-truth-for-VenueSnapshot-VenueLiquidityCurve-VenueHealth
+  - file: contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+    role: legacy-marketdata-feed
+  - file: contracts/proto/fob/execution/v1/execution.proto
+    role: ExecutionIntent-ExecutionReport
+  - file: contracts/proto/fob/orders/v1/orders.proto
+    role: SyntheticFlowOrder-message
+  - file: contracts/proto/fob/common/v1/common.proto
+    role: EventMeta-Decimal-Instrument-Side
+
+kafkaTopics:
+  - name: venue.snapshots
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - market-data
+      - cpp/venue_health
+      - observability
+    partitionKey: "{venue_id}|{instrument_symbol}"
+    retentionMs: 3600000
+  - name: venue.liquidity.fob
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - matching
+      - cpp/matching (Execution Planning)
+    partitionKey: "{venue_id}|{instrument_symbol}"
+    retentionMs: 86400000
+  - name: venue.synthetic
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - matching
+    partitionKey: "{venue_id}|{instrument_symbol}"
+    retentionMs: 86400000
+    note: опционально, по флагу synthetic_enabled
+  - name: venue.health
+    direction: bidirectional
+    producer:
+      - cpp/venues          # RAW event_type
+      - cpp/venue_health    # AGGREGATED event_type
+    consumer:
+      - cpp/venue_health
+      - risk
+      - cpp/matching (Execution Planning)
+      - observability
+    partitionKey: "{venue_id}"
+    retentionMs: 604800000
+  - name: execution.intents
+    direction: in
+    producer: matching / risk
+    consumer: cpp/venues
+    partitionKey: "{intent_id}"
+  - name: execution.venue
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - ledger
+      - observability
+    partitionKey: "{hedge_flow_id}"
+    retentionMs: 604800000
+    note: F-12 owns the contract semantics
+  - name: execution.reports
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - ledger
+      - observability
+    status: legacy
+  - name: marketdata.raw
+    direction: out
+    producer: cpp/venues
+    consumer:
+      - market-data
+    status: legacy-overlap-with-venue.snapshots
+    note: см. Conflict Note C-2 в venue-topics.md
+  - name: backtest.execution.venue
+    direction: out
+    producer: cpp/venues
+    consumer: backtest
+    note: только для backtest-режима
+
+restApi:
+  - method: GET
+    path: /api/v1/venues
+    handler: cpp/venues/src/main.cpp (Crow)
+  - method: GET
+    path: /api/v1/venues/{venueId}
+  - method: POST
+    path: /api/v1/venues
+  - method: PUT
+    path: /api/v1/venues/{venueId}
+  - method: DELETE
+    path: /api/v1/venues/{venueId}
+  - method: POST
+    path: /api/v1/venues/{venueId}/reconnect
+  - method: POST
+    path: /api/v1/venues/{venueId}/enable
+  - method: POST
+    path: /api/v1/venues/{venueId}/disable
+  - method: POST
+    path: /api/v1/venues/{venueId}/routing-mode
+  - method: GET
+    path: /api/v1/venues/{venueId}/snapshots
+  - method: GET
+    path: /api/v1/venues/{venueId}/curves
+  - method: GET
+    path: /api/v1/venues/{venueId}/synthetics
+  - method: GET
+    path: /api/v1/venues/health
+
+clickhouseTables:
+  - name: venue_snapshots
+    role: venue-snapshot-history
+    schemaSource: docs/07-data/venue-snapshots.md
+    ingestionStatus: writer-ready-ddl-pending  # writer есть, DDL отсутствует в infra/clickhouse/init.sql
+    accessedBy: cpp/venues/src/infra/snapshot_clickhouse_writer.cpp
+  - name: venue_liquidity_curves
+    role: venue-liquidity-curve-history
+    schemaSource: docs/07-data/venue-liquidity-curves.md
+    ingestionStatus: pending
+    accessedBy: planned
+
+postgresqlTables:
+  - name: venue_config
+    role: venue-runtime-config
+    accessedBy: cpp/venues/src/infra/postgres_venue_config_repository.cpp
+    ddlStatus: pending  # отсутствует в infra/postgres/init.sql; см. T-F11-100
+    docPath: docs/07-data/venue-config.md
+  - name: synthetic_orders
+    role: synthetic-flow-order-lifecycle
+    accessedBy: cpp/venues/src/infra/postgres_synthetic_order_repository.cpp
+    ddlStatus: pending  # см. T-F11-100 + open-questions.md §5 (shape mismatch)
+    docPath: docs/07-data/synthetic-orders.md
+
+codeMap:
+  entry:
+    venues: cpp/venues/src/main.cpp
+    health: cpp/venue_health/src/main.cpp
+  app:
+    venuesLoop: cpp/venues/src/app/venues_loop.cpp
+    snapshotProducer: cpp/venues/src/app/snapshot_producer.cpp
+    liquidityCurveProducer: cpp/venues/src/app/liquidity_curve_producer.cpp
+    executeOnVenue: cpp/venues/src/app/execute_on_venue.cpp
+    backtestParity: cpp/venues/src/app/backtest_parity_check.cpp
+    healthService: cpp/venue_health/src/app/service.cpp
+  domain:
+    normalizeSnapshot: cpp/venues/src/domain/normalize_snapshot.cpp
+    snapshotStatus: cpp/venues/src/domain/snapshot_status.cpp
+    depthCanonicalizer: cpp/venues/src/domain/depth_canonicalizer.cpp
+    depthCurveBuilder: cpp/venues/src/domain/depth_curve_builder.cpp
+    ammPoolExtractor: cpp/venues/src/domain/amm_pool_extractor.cpp
+    ammVirtualLob: cpp/venues/src/domain/amm_virtual_lob.cpp
+    ammDirectFob: cpp/venues/src/domain/amm_direct_fob.cpp
+    venueState: cpp/venue_health/src/domain/entities/venue_state.cpp
+    circuitBreaker: cpp/venue_health/src/domain/entities/circuit_breaker.cpp
+  infra:
+    cexAdapter: cpp/venues/src/infra/cex_ws_rest_adapter.cpp
+    cexLocalLobAssembler: cpp/venues/src/infra/cex_local_lob_assembler.cpp
+    dexAdapter: cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+    simAdapter: cpp/venues/src/infra/simulated_venue_adapter.cpp
+    venueSimAdapter: cpp/venues/src/infra/venue_sim_adapter.cpp
+    snapshotClickhouseWriter: cpp/venues/src/infra/snapshot_clickhouse_writer.cpp
+    venueConfigRepo: cpp/venues/src/infra/postgres_venue_config_repository.cpp
+    syntheticOrderRepo: cpp/venues/src/infra/postgres_synthetic_order_repository.cpp
+    executionIntentsConsumer: cpp/venues/src/infra/execution_intents_consumer.cpp
+    executionReportProducer: cpp/venues/src/infra/execution_report_producer.cpp
+    healthKafkaConsumer: cpp/venue_health/src/infra/kafka/kafka_consumer.cpp
+    healthKafkaProducer: cpp/venue_health/src/infra/kafka/kafka_producer.cpp
+
+useCases:
+  - id: UC-F11-01
+    docPath: docs/02-system/use-cases/UC-F11-01-onboard-venue/use-case.md
+    title: Подключить площадку (operator onboarding)
+  - id: UC-F11-02
+    docPath: docs/02-system/use-cases/UC-F11-02-publish-snapshot/use-case.md
+    title: Опубликовать VenueSnapshot (raw → normalized)
+  - id: UC-F11-03
+    docPath: docs/02-system/use-cases/UC-F11-03-build-liquidity-curve/use-case.md
+    title: Построить VenueLiquidityCurve (LOB → FOB)
+  - id: UC-F11-04
+    docPath: docs/02-system/use-cases/UC-F11-04-venue-health-degradation/use-case.md
+    title: Деградация площадки (stale / circuit breaker)
+  - id: UC-F11-05
+    docPath: docs/02-system/use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md
+    title: Исполнить child-ордер на площадке (cross-link F-12)
+  - id: UC-F11-01-deprecated
+    docPath: docs/02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md
+    title: (legacy) Принять external market data
+    note: оставлен для совместимости старых ссылок; рекомендуется использовать UC-F11-02
+
+systemSequences:
+  - id: SEQ-UC-F11-01-system
+    docPath: docs/02-system/use-cases/UC-F11-01-onboard-venue/sequences/SEQ-UC-F11-01-system.md
+  - id: SEQ-UC-F11-02-system
+    docPath: docs/02-system/use-cases/UC-F11-02-publish-snapshot/sequences/SEQ-UC-F11-02-system.md
+  - id: SEQ-UC-F11-03-system
+    docPath: docs/02-system/use-cases/UC-F11-03-build-liquidity-curve/sequences/SEQ-UC-F11-03-system.md
+  - id: SEQ-UC-F11-04-system
+    docPath: docs/02-system/use-cases/UC-F11-04-venue-health-degradation/sequences/SEQ-UC-F11-04-system.md
+  - id: SEQ-UC-F11-05-system
+    docPath: docs/02-system/use-cases/UC-F11-05-execute-hedge-on-venue/sequences/SEQ-UC-F11-05-system.md
+
+serviceSequences:
+  - id: SEQ-F11-01-onboard-venue-services
+    docPath: docs/05-components/sequences/SEQ-F11-01-onboard-venue-services.md
+  - id: SEQ-F11-02-publish-snapshot-services
+    docPath: docs/05-components/sequences/SEQ-F11-02-publish-snapshot-services.md
+  - id: SEQ-F11-03-build-curve-services
+    docPath: docs/05-components/sequences/SEQ-F11-03-build-curve-services.md
+  - id: SEQ-F11-04-health-routing-services
+    docPath: docs/05-components/sequences/SEQ-F11-04-health-routing-services.md
+  - id: SEQ-F11-05-execute-on-venue-services
+    docPath: docs/05-components/sequences/SEQ-F11-05-execute-on-venue-services.md
+
+tests:
+  unit:
+    expected:
+      - venues_normalize_snapshot
+      - venues_depth_canonicalizer
+      - venues_depth_curve_builder
+      - venues_depth_curve_regularization
+      - venues_depth_curve_dual
+      - venues_amm_pool_extractor
+      - venues_amm_virtual_lob
+      - venues_snapshot_status
+      - venues_snapshot_producer
+      - venues_liquidity_curve_producer
+      - venues_venue_adapter_contract
+      - venues_cex_ws_rest_adapter
+      - venues_cex_local_lob_assembler
+      - venues_dex_amm_rpc_adapter
+      - venues_simulated_venue_adapter
+      - venues_venue_sim_adapter
+      - venues_venue_observability_producer
+      - venues_execute_on_venue
+      - venues_execution_report_producer
+      - venue_health_venue_state
+      - venue_health_circuit_breaker
+      - venue_health_service
+    actual:
+      - cpp/venues/tests/normalize_snapshot_test.cpp
+      - cpp/venues/tests/depth_canonicalizer_test.cpp
+      - cpp/venues/tests/depth_curve_builder_test.cpp
+      - cpp/venues/tests/depth_curve_regularization_test.cpp
+      - cpp/venues/tests/depth_curve_dual_test.cpp
+      - cpp/venues/tests/amm_pool_extractor_test.cpp
+      - cpp/venues/tests/amm_virtual_lob_test.cpp
+      - cpp/venues/tests/snapshot_status_test.cpp
+      - cpp/venues/tests/snapshot_producer_test.cpp
+      - cpp/venues/tests/liquidity_curve_producer_test.cpp
+      - cpp/venues/tests/venue_adapter_contract_test.cpp
+      - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+      - cpp/venues/tests/cex_local_lob_assembler_test.cpp
+      - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+      - cpp/venues/tests/simulated_venue_adapter_test.cpp
+      - cpp/venues/tests/venue_sim_adapter_test.cpp
+      - cpp/venues/tests/venue_observability_producer_test.cpp
+      - cpp/venues/tests/execute_on_venue_test.cpp
+      - cpp/venues/tests/execution_report_producer_test.cpp
+      - cpp/venue_health/tests/domain/venue_state_test.cpp
+      - cpp/venue_health/tests/domain/circuit_breaker_test.cpp
+      - cpp/venue_health/tests/app/service_test.cpp
+  integration:
+    expected:
+      - f11-cex-full-cycle
+      - f11-dex-full-cycle
+      - f11-hedge-execution
+      - f11-disconnect-reconnect
+      - f11-circuit-breaker-fsm
+      - f11-hot-reload-config
+      - f11-multi-venue-single-symbol
+    actual:
+      - cpp/venues/tests/backtest_parity_check_test.cpp
+      - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
+      - Testing/f11_test2_e2e.sh
+      - Testing/f11_test4_quality.sh
+      - Testing/f11_dex_mock.py
+  load:
+    expected:
+      - f11-200-snapshots-sec
+      - f11-p95-curve-build-50ms
+    actual:
+      - Testing/f11_test3_load.sh
+
+crossFeatureLinks:
+  - feature: F-04
+    relationship: upstream-consumer
+    note: F-04 Batch Clearing использует venue.liquidity.fob через external_venue_filter
+  - feature: F-05
+    relationship: legacy-overlap
+    note: marketdata.raw публикуется venues для F-05; постепенно мигрирует на venue.snapshots
+  - feature: F-09
+    relationship: matching-consumer
+    note: F-09 (combo orders) использует синтез SyntheticFlowOrder
+  - feature: F-12
+    relationship: downstream-owner
+    note: F-12 (Execution Hedge) — основной consumer execution.venue; F-11 предоставляет adapter
+  - feature: F-15
+    relationship: replay-source
+    note: F-15 Backtest/Replay использует backtest.execution.venue + schema/producer versioning из VenueLiquidityCurve

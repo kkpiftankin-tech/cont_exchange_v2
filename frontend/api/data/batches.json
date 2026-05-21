@@ -1,0 +1,87 @@
+[
+  {
+    "batchId": "batch-2026-03-24-0001",
+    "time": "2026-03-24T15:45:12Z",
+    "status": "SUCCESS",
+    "solveTimeMs": 82,
+    "residualNorm": 0.00094,
+    "clearPrices": {
+      "BTC/USDT": "68250.10",
+      "ETH/USDT": "3599.25"
+    },
+    "executedRates": {
+      "ord-1001": "0.0024",
+      "ord-1002": "0.0018",
+      "ord-1007": "0.0041"
+    },
+    "fills": [
+      {
+        "orderId": "ord-1001",
+        "userId": "u-01",
+        "instrument": "BTC/USDT",
+        "side": "BUY",
+        "executedQty": "0.0042",
+        "price": "68250.10",
+        "executedNotional": "286.65",
+        "fee": "0.12"
+      },
+      {
+        "orderId": "ord-1002",
+        "userId": "u-03",
+        "instrument": "ETH/USDT",
+        "side": "SELL",
+        "executedQty": "0.2000",
+        "price": "3599.25",
+        "executedNotional": "719.85",
+        "fee": "0.29"
+      }
+    ]
+  },
+  {
+    "batchId": "batch-2026-03-24-0002",
+    "time": "2026-03-24T15:45:17Z",
+    "status": "PARTIAL",
+    "solveTimeMs": 107,
+    "residualNorm": 0.00411,
+    "clearPrices": {
+      "BTC/USDT": "68244.80",
+      "SOL/USDT": "154.37"
+    },
+    "executedRates": {
+      "ord-1010": "0.0012",
+      "ord-1012": "0.0030"
+    },
+    "fills": [
+      {
+        "orderId": "ord-1010",
+        "userId": "u-05",
+        "instrument": "BTC/USDT",
+        "side": "SELL",
+        "executedQty": "0.0012",
+        "price": "68244.80",
+        "executedNotional": "81.89",
+        "fee": "0.03"
+      },
+      {
+        "orderId": "ord-1012",
+        "userId": "u-02",
+        "instrument": "SOL/USDT",
+        "side": "BUY",
+        "executedQty": "2.5000",
+        "price": "154.37",
+        "executedNotional": "385.93"
+      }
+    ]
+  },
+  {
+    "batchId": "batch-2026-03-24-0003",
+    "time": "2026-03-24T15:45:22Z",
+    "status": "FAILED",
+    "solveTimeMs": 641,
+    "residualNorm": 0.7342,
+    "clearPrices": {},
+    "executedRates": {},
+    "fills": []
+  }
+]
+

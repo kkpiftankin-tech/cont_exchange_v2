@@ -1,0 +1,96 @@
+component:
+  id: execution-planning
+  name: Execution Planning
+  layer: core
+  status: not-implemented
+  codePath: cpp/matching/src/app  # IExecutionPlanningUseCases stub
+  owner: core-team
+
+responsibility:
+  summary: >
+    Принимает ExecutionIntent из Kafka execution.intents, объединяет с
+    venue.liquidity.fob (F-11) и venue.health, формирует routing plan
+    (split объёма между venues), вызывает Risk Manager PreHedgeCheck,
+    передаёт ExecutionIntent + RoutingPlan в Venue Execution Adapter.
+
+  conflictNote: >
+    В коде есть только абстрактный интерфейс IExecutionPlanningUseCases
+    (cpp/matching/src/app/execution_planning_uc.hpp). Конкретной
+    реализации (routing-алгоритм, подписка на venue.liquidity.fob)
+    нет. Кандидат на отдельный сервис — ADR-013.
+
+sourceTreeEvidence:
+  app:
+    - cpp/matching/src/app/execution_planning_uc.hpp
+    - cpp/matching/src/app/external_venue_filter.hpp  # вспомогательный filter
+    - cpp/matching/src/app/external_venue_filter.cpp
+    - cpp/matching/src/app/planner_inputs_cache.hpp
+    - cpp/matching/src/app/planner_inputs_cache.cpp
+
+features:
+  - F-12
+
+protoContracts:
+  - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/venue/v1/venue.proto    # SideLiquidityCurve, VenueSnapshot from F-11
+  - contracts/proto/fob/risk/v1/risk.proto
+
+entities:
+  - ExecutionIntent
+  - RoutingPlan (internal value object — не в proto)
+  - VenueLiquidityCurve (cross-link к F-11)
+
+dependencies:
+  upstream:
+    - matching-fob-core   # эмитент ExecutionIntent
+    - external-venues     # F-11 publishes venue.liquidity.fob
+  downstream:
+    - risk-manager        # PreHedgeCheck gRPC
+    - venue-execution-adapter  # internal handoff
+
+kafkaConsumes:
+  - topic: execution.intents
+    messageType: fob.execution.v1.ExecutionIntent
+    consumerGroup: execution-planning
+  - topic: venue.liquidity.fob
+    messageType: fob.venue.v1.SideLiquidityCurve
+    consumerGroup: execution-planning
+    note: input для routing plan; обновляется F-11
+  - topic: venue.health
+    messageType: fob.venue.v1.VenueSnapshot  # status / latency_ms
+    consumerGroup: execution-planning
+
+kafkaProduces:
+  - topic: execution.intents
+    messageType: fob.execution.v1.ExecutionIntent
+    partitionKey: hedge_flow_id
+    note: retry intents (urgency upgrade) при reconciliation/fallback
+
+grpcServices:
+  exposes: []
+  calls:
+    - fob.risk.v1.RiskService.PreHedgeCheck
+
+storageAccess:
+  postgresql: []        # stateless; кэш routing plans в памяти
+  clickhouse: []
+
+knownIssues:
+  - id: no-implementation
+    severity: blocker
+    description: >
+      Конкретной реализации Execution Planning нет. Routing plan,
+      подписка на venue.liquidity.fob и venue.health, fallback-роутинг
+      и retry-механизм требуют новой кодовой базы.
+    location: cpp/matching/src/app/execution_planning_uc.hpp
+  - id: no-pre-hedge-rpc
+    severity: feature-gap
+    description: RiskService.PreHedgeCheck RPC ещё не добавлен в risk.proto.
+    location: contracts/proto/fob/risk/v1/risk.proto
+
+tests:
+  unit:
+    - cpp/matching/tests/app/external_venue_filter_test.cpp
+    - cpp/matching/tests/app/planner_inputs_cache_test.cpp
+  integration: []
+  contract: []

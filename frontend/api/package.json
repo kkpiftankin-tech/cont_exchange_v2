@@ -1,0 +1,14 @@
+{
+  "name": "frontend-api",
+  "version": "1.0.0",
+  "description": "Frontend API gateway for continuous exchange",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.0"
+  }
+}

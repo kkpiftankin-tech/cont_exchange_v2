@@ -1,49 +1,59 @@
 #pragma once
-// =============================================================================
-// RiskUseCases — application-логика risk-сервиса.
-//
-// Хранит лёгкое in-memory состояние kill-switch'а (глобального и по инструменту).
-// Все остальные проверки сейчас вычисляются на каждый запрос (stateless),
-// что в будущем можно расширять (PnL пользователя, открытые позиции, лимиты).
-// =============================================================================
-
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 #include "fob/risk/v1/risk.pb.h"
+#include "fob/execution/v1/execution.pb.h"
+#include "fob/venue/v1/venue.pb.h"
 #include "infra/risk_alerts_publisher.hpp"
+#include "cex/common/decimal.hpp"
 
 namespace cex::risk::app {
 
+// Application logic for Risk service (stateless-ish + kill switch state).
 class RiskUseCases {
- public:
-  // publisher двигается внутрь — use-case владеет паблишером алертов.
+public:
   explicit RiskUseCases(infra::RiskAlertsPublisher publisher);
 
-  // Pre-trade проверка ордера. Решения: ACCEPT / REJECT / HALT (kill-switch).
-  fob::risk::v1::PreTradeCheckResponse CheckNewOrder(
-      const fob::risk::v1::PreTradeCheckRequest& req);
+  fob::risk::v1::PreTradeCheckResponse
+  CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
 
-  // Установить/снять kill switch. Если instrument_symbol пустой — глобальный halt.
-  // Любая мутация дополнительно эмиттит RiskAlert в Kafka.
-  fob::risk::v1::KillSwitchResponse SetKillSwitch(
-      const fob::risk::v1::KillSwitchRequest& req);
+  fob::risk::v1::KillSwitchResponse
+  SetKillSwitch(const fob::risk::v1::KillSwitchRequest &req);
 
-  // Post-trade обновление от matching'а (через gRPC или future Kafka). Сейчас
-  // только логирует диагностику; в будущем — апдейт PnL/exposure пользователей.
-  void OnBatchResult(const fob::risk::v1::PostTradeUpdateRequest& req);
+  void OnBatchResult(const fob::risk::v1::PostTradeUpdateRequest &req);
 
- private:
-  // Должен вызываться под захваченным mu_ — отсюда суффикс _locked.
-  bool is_halted_locked(const std::string& symbol) const;
+  void CurveChecks(const fob::venue::v1::VenueLiquidityCurve &curve);
+  void HealthChecks(const fob::venue::v1::VenueHealth &health);
+  void OnExecutionReport(const fob::execution::v1::ExecutionReport &report);
+  void OnSyntheticOrder(const fob::orders::v1::SyntheticFlowOrder &order);
 
-  // mutable — для const-геттеров.
+private:
+  enum class VenueHealthDecision {
+    kAccept,
+    kResize,
+    kReject,
+  };
+
+  struct VenueHealthGateState {
+    fob::venue::v1::VenueHealthStatus status{fob::venue::v1::VENUE_HEALTH_STATUS_UNSPECIFIED};
+    fob::venue::v1::RoutingRecommendation routing{fob::venue::v1::ROUTING_RECOMMENDATION_ALLOW};
+    fob::venue::v1::CircuitBreakerState breaker{fob::venue::v1::CIRCUIT_BREAKER_STATE_UNSPECIFIED};
+    double health_score{0.0};
+  };
+
+  bool is_halted_locked(const std::string &symbol) const;
+  VenueHealthDecision EvaluateVenueHealthGateLocked() const;
+
   mutable std::mutex mu_;
-  bool global_halt_{false};                                  // глобальный halt
-  std::unordered_map<std::string, bool> instrument_halt_;    // halt по symbol
+  bool global_halt_{false};
+  std::unordered_map<std::string, bool> instrument_halt_; // symbol->halt
+
+  std::unordered_map<std::string, cex::common::Decimal> exposures_; // symbol->halt
+  std::unordered_map<std::string, VenueHealthGateState> venue_health_gate_;
 
   infra::RiskAlertsPublisher publisher_;
 };
 
-}  // namespace cex::risk::app
+} // namespace cex::risk::app

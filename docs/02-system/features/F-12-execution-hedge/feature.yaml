@@ -1,53 +1,194 @@
 feature:
   id: F-12
   name: Execution Hedge
-  status: not-implemented
+  status: doc-complete-impl-partial
   owner: core-team
 
 description: >
-  Хедж необработанной внутренним клирингом части FlowOrder на внешних venues.
-  matching формирует ExecutionIntent, venues исполняет, отдаёт ExecutionReport,
-  ledger применяет хедж-учёт.
+  Автоматическое хеджирование нетто-позиций провайдера на внешних площадках
+  (CEX/DEX/AMM) после внутреннего матчинга. Цепочка:
+  netPosition -> ExecutionIntent (Kafka execution.intents) -> Execution Planning
+  (routing plan по VenueLiquidityCurve + venue.health) -> Risk Manager
+  pre-hedge check -> Venue Execution Adapter (HedgeFlow + child_orders) ->
+  External Venues Connector -> ExecutionReport (Kafka execution.venue) ->
+  Settlement Ledger обновляет позиции и HedgePnL, ClickHouse сохраняет
+  историю исполнения.
+
+  Источник истины: IN-005 (`incoming-docs/2026-05-20-F-12-execution-hedge-v1.md`).
 
 primaryComponents:
-  - venues
-  - risk
-  - ledger
-  - matching
+  - venue-execution-adapter
+  - execution-planning
+  - matching-fob-core      # эмитент ExecutionIntent (auto-hedge after batch)
+  - risk-manager           # pre-hedge check + post-hedge exposure
+  - external-venues        # EVC: реальные REST/WS/RPC к CEX/DEX/AMM
+  - ledger                 # потребитель execution.venue
+  - observability-reporting
+  - market-data            # источник venue.health, venue.liquidity.fob (через F-11)
 
 protoContracts:
-  - contracts/proto/fob/execution/v1/execution.proto
-  - contracts/proto/fob/risk/v1/risk.proto
-  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/execution/v1/execution.proto       # ExecutionIntent, ExecutionReport, ExecutionStrategy, ExecutionUrgency, HedgeSource
+  - contracts/proto/fob/hedge/v1/hedge.proto               # HedgeFlow, ChildOrder, HedgeFlowStatus, ChildOrderStatus
+  - contracts/proto/fob/risk/v1/risk.proto                 # PreHedgeCheck RPC (планируется как extension)
+  - contracts/proto/fob/ledger/v1/ledger.proto             # ApplyExecutionReport
+  - contracts/proto/fob/venue/v1/venue.proto               # cross-link к F-11: SideLiquidityCurve, VenueSnapshot, venue.health
+  - contracts/proto/fob/common/v1/common.proto             # Decimal, Money, Fee, EventMeta, Instrument, Side, TimeInForce
+  - contracts/openapi/fob/hedge/v1/api/hedge.yaml          # REST API HedgeFlow Monitor (operator UI)
+
+storageDependencies:
+  postgresql:
+    - hedgeflows      # сессия хеджа: targetQty, filledQty, avgFillPrice, hedgePnL, status; источник истины при OPEN
+    - child_orders    # дочерние ордера на конкретных venues: venueId, price, qty, status, clientOrderId
+  clickhouse:
+    - execution_reports  # история исполнения: report by venue, slippageBps, hedgePnL, latency; retention >= 90 дней
 
 codePaths:
+  # matching publishes ExecutionIntent после batch clearing (F-12 эмитент)
+  - cpp/matching/src/app/hedge_trigger_policy.cpp
+  - cpp/matching/src/app/hedge_trigger_policy.hpp
+  - cpp/matching/src/app/execution_intent_builder.cpp
+  - cpp/matching/src/app/execution_intent_builder.hpp
+  - cpp/matching/src/app/hedge_execution_intents_publisher.cpp
+  - cpp/matching/src/app/hedge_execution_intents_publisher.hpp
+  - cpp/matching/src/app/external_venue_filter.cpp
+  - cpp/matching/src/app/external_venue_filter.hpp
+  - cpp/matching/src/app/position_snapshot_calculator.cpp
+  - cpp/matching/src/app/position_snapshot_calculator.hpp
+  - cpp/matching/src/app/execution_planning_uc.hpp          # interface stub
+  # venues currently hosts Venue Execution Adapter + EVC concerns (Conflict Note C-1)
+  - cpp/venues/src/app/execute_on_venue.cpp
+  - cpp/venues/src/app/execute_on_venue.hpp
   - cpp/venues/src/app/venues_loop.cpp
+  - cpp/venues/src/infra/execution_intents_consumer.cpp
+  - cpp/venues/src/infra/execution_intents_consumer.hpp
+  - cpp/venues/src/infra/execution_report_producer.cpp
+  - cpp/venues/src/infra/execution_report_producer.hpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.cpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.hpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.hpp
+  - cpp/venues/src/infra/venue_sim_adapter.cpp
+  - cpp/venues/src/infra/venue_sim_adapter.hpp
+  - cpp/venues/src/infra/simulated_venue_adapter.cpp
+  - cpp/venues/src/domain/venue_adapter.hpp
+  # ledger applies ExecutionReport (хедж-учёт)
+  - cpp/ledger/src/app/ledger_uc.cpp
+  - cpp/ledger/src/infra/kafka_consumers.cpp
 
 kafkaTopics:
   produces:
-    - execution.intents
-    - execution.reports
-  consumes: []
+    - execution.intents   # producer: matching (auto-batch), planning (retry), gateway (manual override); key = hedge_flow_id
+    - execution.venue     # producer: venue-execution-adapter (через venues); key = hedge_flow_id; ExecutionReport
+    - risk.alerts         # producer: risk; alerts типа HEDGE_REJECTED, HEDGE_UNDERFILL
+  consumes:
+    - venue.liquidity.fob # из F-11: SideLiquidityCurve по venue/symbol; вход для routing plan
+    - venue.health        # из F-11: статус venue (CONNECTED/STALE/DISCONNECTED), latencyMs
+    - execution.intents   # consumed by execution-planning (multi-venue routing)
+    - execution.venue     # consumed by ledger (apply hedge), risk (post-hedge), clickhouse, observability
 
 grpcServices:
-  exposes: []
-  calls: []
+  exposes:
+    - fob.risk.v1.RiskService.PreHedgeCheck    # планируется: pre-hedge gate (3 проверки)
+  calls:
+    - fob.ledger.v1.LedgerService.ApplyExecutionReport  # alternative path к Kafka execution.venue
+    - fob.marketdata.v1.MarketDataService.GetReferencePrices  # на reference mid; cross-link к F-04
 
 acceptanceCriteria:
-  - "matching формирует ExecutionIntent на остаток непокрытой позиции"
-  - "venues отправляет реальный ордер на внешнюю площадку"
-  - "ExecutionReport возвращается с ID venue и заполнениями"
-  - "ledger корректно учитывает хедж: списания на venue + balance adjust"
+  - "F12-1: ExecutionIntent генерируется автоматически при |netQty| >= hedgeTriggerThreshold (cpp/matching/src/app/hedge_trigger_policy.cpp)."
+  - "F12-2: Поддержка urgency LOW/MEDIUM/HIGH с маппингом на ExecutionStrategy и TimeInForce согласно политике."
+  - "F12-3: Мульти-venue routing по VenueLiquidityCurve (доля Lv / SumLv) и venue.health (исключение venue со статусом != CONNECTED)."
+  - "F12-4: Overfill guard: при accumulatedFilledQty > targetQty + overfillThreshold publish ExecutionReport(OVERFILL_GUARD) и cancel остальных child orders."
+  - "F12-5: Reconciliation по истечении hedgeTimeoutMs; при gap > reconciliationGapThreshold создаётся retry ExecutionIntent с urgency=HIGH или risk.alert(HEDGE_UNDERFILL)."
+  - "F12-6: Все ExecutionReport публикуются в Kafka execution.venue с partitionKey = hedge_flow_id."
+  - "F12-7: HedgeFlow, child_orders сохраняются в PostgreSQL; execution_reports в ClickHouse."
+  - "F12-8: Pre-hedge risk check через Risk Manager (PreHedgeCheck RPC) с тремя проверками: maxNotionalPerHedge, hedgeExposureLimit, expectedSlippage <= maxSlippage[urgency]."
+  - "F12-9: Backtest-режим через VenueSim (VenueSimAdapter в cpp/venues/src/infra/venue_sim_adapter.cpp) даёт идентичную execution logic без изменения кода Adapter."
+  - "F12-10: p95 latency от ExecutionIntent до first child order <= 100 ms для CEX (p95 <= 1000 ms для DEX/AMM)."
+  - "F12-11: HedgePnL рассчитывается Settlement Ledger по формуле (avgFillPrice vs referenceMid) и доступен в UI через REST GET /api/v1/hedge/flows/{id}."
+  - "F12-12: Rejection fallback: при ExecutionReport(REJECTED) Execution Planning исключает venue и формирует новый routing plan на оставшиеся."
 
 knownIssues:
-  - id: no-intent-generation
-    severity: blocker
-    description: matching не генерирует ExecutionIntent
-  - id: no-hedge-accounting
-    severity: blocker
-    description: ledger ApplyExecutionReport только логирует, не обновляет балансы
+  - id: no-venue-execution-adapter-service
+    severity: feature-gap
+    description: >
+      В коде нет отдельного сервиса `cpp/venue_execution_adapter/`. Реализация
+      сосредоточена в `cpp/venues/src/` (ExecuteOnVenue, VenueAdapter implementations,
+      ExecutionIntentsConsumer, ExecutionReportProducer). Архитектурно это
+      допустимо для MVP, но требует ADR-решения о финальной декомпозиции
+      (см. ADR-012 в docs/03-architecture/adr/).
+    location: cpp/venues/src/
+  - id: no-execution-planning-service
+    severity: feature-gap
+    description: >
+      Multi-venue routing plan (F12-PLAN-1..4) реализован частично:
+      ExecutionIntent эмитируется matching-сервисом (через
+      HedgeExecutionIntentsPublisher), но логика routing по venue.liquidity.fob
+      + venue.health (формула qty[v] = L(v)/Sum L(v') * targetQty) ещё
+      не имплементирована. Интерфейс `IExecutionPlanningUseCases` присутствует,
+      но без полной реализации.
+    location: cpp/matching/src/app/execution_planning_uc.hpp
+  - id: no-hedgeflows-postgres-schema
+    severity: feature-gap
+    description: >
+      `hedgeflows` и `child_orders` отсутствуют в infra/postgres/init.sql.
+      Без них Venue Execution Adapter не может сохранить состояние HedgeFlow
+      (F12-7) и pre-hedge idempotency через clientOrderId.
+    location: infra/postgres/init.sql
+  - id: no-execution-reports-clickhouse
+    severity: feature-gap
+    description: >
+      Таблица `execution_reports` отсутствует в infra/clickhouse/init.sql.
+      ClickHouse-схема batchresults/fills уже создана для F-04, но F-12
+      execution_reports требует отдельной DDL (90+ дней retention).
+    location: infra/clickhouse/init.sql
+  - id: no-pre-hedge-rpc
+    severity: feature-gap
+    description: >
+      В fob.risk.v1.RiskService нет метода PreHedgeCheck. Текущий
+      RiskService::CheckNewOrder покрывает client-side pre-trade, но
+      pre-hedge check (3 проверки notional/exposure/slippage) требуется
+      F12-8 и пока не определён в proto.
+    location: contracts/proto/fob/risk/v1/risk.proto
+  - id: hedge-pnl-not-computed
+    severity: feature-gap
+    description: >
+      LedgerService::ApplyExecutionReport не вычисляет HedgePnL по формуле
+      из IN-005 ((avgFillPrice - referenceMid) * filledQty - feesTotal для
+      SELL и зеркальная для BUY); сейчас выполняется только логирование.
+    location: cpp/ledger/src/app/ledger_uc.cpp
+  - id: execution-reports-topic-name-mismatch
+    severity: conflict
+    description: >
+      IN-005 спецификация использует имя топика `execution.venue` (producer:
+      Venue Execution Adapter; consumer: Ledger/Risk/CH). В создании топиков
+      infra/kafka/create_topics.sh заведены и `execution.venue`, и `execution.reports`.
+      Существующая документация docs/06-api/messaging/execution-reports.md
+      опирается на старое имя `execution.reports`. Источник истины IN-005:
+      `execution.venue`. Старый топик остаётся для обратной совместимости
+      на период миграции.
+    location: infra/kafka/create_topics.sh#L60-L61
+  - id: venue-id-vs-venue-symbol-mapping
+    severity: feature-gap
+    description: >
+      Маппинг internal symbol -> venue_symbol реализован простой override-таблицей
+      в ExecuteOnVenue (SetVenueSymbolOverride). Полноценный per-venue mapping
+      (tick_size, lot_size, fee_bps) приходит из VenueSnapshot, но не
+      используется при формировании child orders.
+    location: cpp/venues/src/app/execute_on_venue.cpp
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    - cpp/matching/tests/app/hedge_trigger_policy_test.cpp
+    - cpp/matching/tests/app/execution_intent_builder_test.cpp
+    - cpp/matching/tests/app/external_venue_filter_test.cpp
+    - cpp/matching/tests/app/position_snapshot_calculator_test.cpp
+    - cpp/venues/tests/execute_on_venue_test.cpp
+    - cpp/venues/tests/execution_report_producer_test.cpp
+    - cpp/venues/tests/venue_sim_adapter_test.cpp
+    - cpp/venues/tests/simulated_venue_adapter_test.cpp
+    - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+    - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+  integration:
+    - cpp/venues/tests/backtest_parity_check_test.cpp
+    - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
   contract: []

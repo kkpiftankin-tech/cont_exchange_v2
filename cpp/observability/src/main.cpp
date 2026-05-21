@@ -1,28 +1,34 @@
-// =============================================================================
-// Entrypoint сервиса observability. Простой long-running процесс, который
-// поднимает один консьюмер на несколько важных топиков и пишет логи.
-// =============================================================================
+#include <grpcpp/server_builder.h>
 
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
-#include "app/obs_loop.hpp"
+#include "infra/channel/alert_channel.hpp"
+#include "infra/kafka/kafka_consumer.hpp"
+#include "transport/grpc/observability_service.hpp"
 
-#include <chrono>
-#include <thread>
+using cex::common::Env;
+using cex::common::log_json;
+using namespace cex::observability;
 
 int main() {
-  const std::string brokers =
-      cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
+  std::string brokers = Env::get_string("KAFKA_BROKERS", "redpanda:9092");
+  std::string clickhouse_url = Env::get_string("CLICKHOUSE_URL", "clickhouse:8123");
+  std::string grpc_url = Env::get_string("OBSERVABILITY_GRPC_URL", "observability:50051");
 
-  cex::common::log_json("INFO", "Observability starting", {{"brokers", brokers}});
+  log_json("INFO", "Observability starting",
+           {{"brokers", brokers}, {"clickhouse", clickhouse_url}, {"grpc", grpc_url}});
 
-  cex::observability::app::ObsLoop loop(brokers);
-  loop.start();
+  infra::AlertChannel channel;
+  app::Service service{channel};
+  infra::KafkaConsumer consumer{brokers, service};
 
-  // Главный поток просто спит — реальная работа в фоновом потоке ObsLoop.
-  while (true) {
-    std::this_thread::sleep_for(std::chrono::seconds(60));
-  }
-  return 0;
+  transport::ObservabilityService grpc_service{channel, clickhouse_url};
+
+  grpc::ServerBuilder builder;
+  builder.AddListeningPort(grpc_url, grpc::InsecureServerCredentials());
+  builder.RegisterService(&grpc_service);
+
+  std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+  server->Wait();
 }

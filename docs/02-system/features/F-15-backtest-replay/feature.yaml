@@ -1,46 +1,283 @@
 feature:
   id: F-15
-  name: Backtest and Replay
-  status: not-implemented
+  name: Backtest / Replay
+  status: in-progress-impl
   owner: core-team
 
 description: >
-  Возможность переиграть исторические Kafka события через тот же solver и
-  получить идентичный BatchResult. Используется для тестирования изменений
-  solver'а, отладки инцидентов и регрессионных тестов.
+  Backtest и shadow-replay исторических батчей через тот же solver, risk
+  manager и ledger, что и production. Сервис cpp/backtest оркестрирует
+  пайплайн: загружает batchresults/fills/marketdata_snapshots из ClickHouse,
+  получает snapshot конфигов (solver_config, risk_limits, fee_model) из
+  PostgreSQL, инициализирует shadow namespace, итеративно вызывает Matching
+  Backend (SolveBatch в isolation mode), Risk Manager (CheckPostTrade) и
+  Shadow Collateral Ledger (ApplyFills), пишет AgentLog в ClickHouse
+  (replay_agentlogs), агрегирует ReplaySummary в PostgreSQL (replay_summaries).
+  Поддерживает audit-mode (single batch + diff vs production), A/B compare,
+  retry, cancel и RBAC. Используется для тестирования стратегий, тюнинга
+  solver, RL training, регрессионных проверок parity (F-04, F-11, F-12) и
+  пост-инцидент анализа.
 
 primaryComponents:
-  - matching
-  - risk
-  - ledger
-  - observability
+  - backtest-service              # cpp/backtest — оркестратор
+  - matching-fob-core             # shadow-вызов SolveBatch
+  - risk-manager                  # shadow-вызов CheckPostTrade
+  - settlement-ledger             # shadow namespace (in-memory изоляция)
+  - market-data                   # historical batchresults/marketdata через ClickHouse
 
 protoContracts:
-  - contracts/proto/fob/agent/v1/agent.proto
-  - contracts/proto/fob/matching/v1/batch.proto
-  - contracts/proto/fob/observability/v1/observability.proto
+  - contracts/proto/fob/replay/v1/replay.proto             # ReplaySession, Commands, Events
+  - contracts/proto/fob/matching/v1/solver.proto           # SolveBatch (isolation gRPC)
+  - contracts/proto/fob/matching/v1/batch.proto            # BatchResult
+  - contracts/proto/fob/matching/v1/fill_event.proto       # FillEvent
+  - contracts/proto/fob/orders/v1/orders.proto             # FlowOrder
+  - contracts/proto/fob/risk/v1/risk.proto                 # CheckPostTrade
+  - contracts/proto/fob/ledger/v1/ledger.proto             # ApplyFills (shadow)
+  - contracts/proto/fob/common/v1/common.proto             # Decimal, EventMeta
 
-codePaths: []
+openapiContracts:
+  - contracts/openapi/fob/replay/v1/api/replay.yaml        # REST API for replay sessions
+  - contracts/openapi/fob/replay/v1/schemas/replay.json    # DTO schemas
+
+storageDependencies:
+  postgresql:
+    # F15-DATA-1 — replay session lifecycle and summaries.
+    - replay_sessions               # session lifecycle (pending|running|completed|failed|cancelled)
+    - replay_summaries              # aggregated metrics per session
+    - replay_compare_cache          # cached A/B comparison results
+    - replay_audit_runs             # single-batch audit replay + diff vs production
+    # F15-RBAC — roles, permissions, audit.
+    - roles                         # role definitions (admin/analyst/viewer)
+    - permissions                   # permission catalog (replay:create, replay:read, ...)
+    - role_permissions              # M:N role <-> permission
+    - users_roles                   # user role assignments
+    - audit_log                     # comprehensive audit trail of replay operations
+  clickhouse:
+    - replay_agentlogs              # F15-BACKTEST-6: per-batch state/action/reward log (ReplacingMergeTree, TTL 90d)
+    - batchresults                  # SOURCE: historical batches (read-only)
+    - fills                         # SOURCE: historical fills (read-only)
+    - marketdata_snapshots          # SOURCE: historical venue snapshots / curves (F-11)
+    - venue_snapshots               # SOURCE: external venue depth (F-11 parity)
+
+codePaths:
+  service:
+    - cpp/backtest/CMakeLists.txt
+    - cpp/backtest/src/main.cpp
+  app:
+    - cpp/backtest/src/app/audit_types.hpp
+    - cpp/backtest/src/app/backtest_uc.cpp
+    - cpp/backtest/src/app/backtest_uc.hpp
+    - cpp/backtest/src/app/batch_storage_port.hpp
+    - cpp/backtest/src/app/cancel_replay_session_uc.cpp
+    - cpp/backtest/src/app/cancel_replay_session_uc.hpp
+    - cpp/backtest/src/app/check_replay_determinism_uc.cpp
+    - cpp/backtest/src/app/check_replay_determinism_uc.hpp
+    - cpp/backtest/src/app/compare_replay_sessions_uc.cpp
+    - cpp/backtest/src/app/compare_replay_sessions_uc.hpp
+    - cpp/backtest/src/app/create_replay_session_uc.cpp
+    - cpp/backtest/src/app/create_replay_session_uc.hpp
+    - cpp/backtest/src/app/historical_batch_loader_port.hpp
+    - cpp/backtest/src/app/historical_batch_loader_uc.cpp
+    - cpp/backtest/src/app/historical_batch_loader_uc.hpp
+    - cpp/backtest/src/app/lob_fob_replay_uc.cpp
+    - cpp/backtest/src/app/lob_fob_replay_uc.hpp
+    - cpp/backtest/src/app/metrics.cpp
+    - cpp/backtest/src/app/metrics.hpp
+    - cpp/backtest/src/app/metrics_storage_port.hpp
+    - cpp/backtest/src/app/quality_metrics.cpp
+    - cpp/backtest/src/app/quality_metrics.hpp
+    - cpp/backtest/src/app/quality_metrics_port.hpp
+    - cpp/backtest/src/app/quality_metrics_uc.cpp
+    - cpp/backtest/src/app/quality_metrics_uc.hpp
+    - cpp/backtest/src/app/rbac_engine.hpp
+    - cpp/backtest/src/app/read_replay_sessions_uc.cpp
+    - cpp/backtest/src/app/read_replay_sessions_uc.hpp
+    - cpp/backtest/src/app/replay_batch_input.cpp
+    - cpp/backtest/src/app/replay_batch_input.hpp
+    - cpp/backtest/src/app/replay_compare_ports.hpp
+    - cpp/backtest/src/app/replay_config_repository_port.hpp
+    - cpp/backtest/src/app/replay_config_snapshot.cpp
+    - cpp/backtest/src/app/replay_config_snapshot.hpp
+    - cpp/backtest/src/app/replay_metrics.cpp
+    - cpp/backtest/src/app/replay_metrics.hpp
+    - cpp/backtest/src/app/replay_orchestration_ports.hpp
+    - cpp/backtest/src/app/replay_reader_port.hpp
+    - cpp/backtest/src/app/replay_runtime_metrics.cpp
+    - cpp/backtest/src/app/replay_runtime_metrics.hpp
+    - cpp/backtest/src/app/replay_session.hpp
+    - cpp/backtest/src/app/replay_session_repository_port.hpp
+    - cpp/backtest/src/app/replay_step_journal.cpp
+    - cpp/backtest/src/app/replay_step_journal.hpp
+    - cpp/backtest/src/app/restore_state_uc.cpp
+    - cpp/backtest/src/app/restore_state_uc.hpp
+    - cpp/backtest/src/app/retry_replay_session_uc.cpp
+    - cpp/backtest/src/app/retry_replay_session_uc.hpp
+    - cpp/backtest/src/app/run_replay_audit_batch_uc.cpp
+    - cpp/backtest/src/app/run_replay_audit_batch_uc.hpp
+    - cpp/backtest/src/app/run_replay_session_uc.cpp
+    - cpp/backtest/src/app/run_replay_session_uc.hpp
+    - cpp/backtest/src/app/shadow_ledger_port.hpp
+    - cpp/backtest/src/app/shadow_namespace_uc.cpp
+    - cpp/backtest/src/app/shadow_namespace_uc.hpp
+    - cpp/backtest/src/app/venue_replay_uc.cpp
+    - cpp/backtest/src/app/venue_replay_uc.hpp
+    - cpp/backtest/src/app/venue_storage_port.hpp
+  infra:
+    - cpp/backtest/src/infra/clickhouse_historical_queries.cpp
+    - cpp/backtest/src/infra/clickhouse_historical_queries.hpp
+    - cpp/backtest/src/infra/clickhouse_storage.cpp
+    - cpp/backtest/src/infra/clickhouse_storage.hpp
+    - cpp/backtest/src/infra/grpc_replay_batch_executor.cpp
+    - cpp/backtest/src/infra/grpc_replay_batch_executor.hpp
+    - cpp/backtest/src/infra/http/retry_session_handler.cpp
+    - cpp/backtest/src/infra/http/retry_session_handler.hpp
+    - cpp/backtest/src/infra/in_memory_shadow_ledger.cpp
+    - cpp/backtest/src/infra/in_memory_shadow_ledger.hpp
+    - cpp/backtest/src/infra/kafka_consumer.cpp
+    - cpp/backtest/src/infra/kafka_consumer.hpp
+    - cpp/backtest/src/infra/kafka_replay_event_publisher.cpp
+    - cpp/backtest/src/infra/kafka_replay_event_publisher.hpp
+    - cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    - cpp/backtest/src/infra/postgres/postgres_rbac_repository.hpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_config_repository.cpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_config_repository.hpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_session_repository.cpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_session_repository.hpp
+    - cpp/backtest/src/infra/replay_commands_kafka_consumer.cpp
+    - cpp/backtest/src/infra/replay_commands_kafka_consumer.hpp
+    - cpp/backtest/src/infra/venue_kafka_consumer.cpp
+    - cpp/backtest/src/infra/venue_kafka_consumer.hpp
+  migrations:
+    - cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+    - cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+    - cpp/backtest/migrations/postgres/003_f15_retry_parent_id.sql
 
 kafkaTopics:
-  produces: []
-  consumes: []
+  produces:
+    - replay.results               # ReplayProgressEvent, ReplayCompletedEvent, ReplayFailedEvent, ReplayCancelledEvent
+  consumes:
+    - replay.commands              # CreateReplayCommand, CancelReplayCommand, RetryReplayCommand (опционально, REST альтернатива)
+    - batch.outputs                # для backtest_uc parity-checks с production
+    - venue.snapshots              # F-11 historical venue ingest для VenueSim (F-12 parity)
 
 grpcServices:
-  exposes: []
-  calls: []
+  exposes: []                       # backtest принимает REST + Kafka, не выставляет gRPC
+  calls:
+    - fob.matching.v1.Solver/Solve             # standalone solver isolation mode (cpp/matching/src/transport/grpc_isolation_matching_service.cpp)
+    - fob.risk.v1.RiskService/CheckPostTrade   # shadow post-trade проверки
+    - fob.ledger.v1.LedgerService/ApplyFills   # эквивалент ledger_uc вызывается inline через cpp/ledger/src/app/ledger_uc.cpp в shadow namespace
+
+restEndpoints:
+  - POST /api/v1/replay/sessions                       # CreateReplaySession
+  - GET  /api/v1/replay/sessions                       # ReadReplaySessions (filters: user_id, status, date range, page)
+  - GET  /api/v1/replay/sessions/{id}                  # GetReplaySession
+  - GET  /api/v1/replay/sessions/{id}/summary          # GetReplaySummary
+  - GET  /api/v1/replay/sessions/{id}/agentlogs        # GetAgentLogs (paginated, filtered)
+  - POST /api/v1/replay/sessions/{id}/retry            # RetryReplaySession (strict / override)
+  - DELETE /api/v1/replay/sessions/{id}                # CancelReplaySession
+  - GET  /api/v1/replay/compare?sessionA&sessionB      # CompareReplaySessions (A/B delta matrix)
 
 acceptanceCriteria:
-  - "Можно запустить matching в replay-режиме на исторических orders.normalized"
-  - "Полученный BatchResult байт-в-байт совпадает с продакшен-результатом"
-  - "Поддерживается изоляция от продакшен-Kafka (отдельный replay-кластер)"
+  # Полный список F15-1..F15-47 см. в acceptance-criteria.md. Здесь — ключевые
+  # высокоуровневые формулировки.
+  - "REST API: создание, чтение, фильтрация, отмена, retry и compare ReplaySession через /api/v1/replay/* (F15-1..F15-21)."
+  - "Replay-цикл использует тот же Matching Backend (Solver), Risk Manager и Ledger что и production, но в shadow namespace (F15-5..F15-7)."
+  - "AgentLog (state/action/reward + diagnostics) записывается в ClickHouse replay_agentlogs для каждого batch (F15-8)."
+  - "ReplaySummary с метриками PnL, IS, VWAP, FillRate, Sharpe, MaxDD, avgSolveTime пишется в PostgreSQL replay_summaries (F15-9..F15-11, F15-26..F15-34)."
+  - "Детерминизм: повторный прогон с теми же snapshot конфигов даёт идентичные AgentLog и ReplaySummary (F15-16, F15-40..F15-43)."
+  - "Audit-mode: replay одного batch_id даёт diff vs production BatchResult в пределах equivalent tolerance (F15-13, F15-44..F15-47)."
+  - "A/B compare: GET /api/v1/replay/compare возвращает delta-матрицу по avg_is, total_pnl, sharpe, fill_rate, max_drawdown."
+  - "Cancel: DELETE сессии сохраняет partial AgentLog и переводит status в cancelled (F15-12, F15-37)."
+  - "Soft failure (батч): residual_norm > tolerance — AgentLog с solver_error_flag, replay продолжается (F15-35..F15-38)."
+  - "Hard failure (сессия): отсутствие исторических данных / crash — status=failed с error_details (F15-39)."
+  - "Shadow isolation: production Collateral Ledger не задет операциями replay (NFR)."
+  - "RBAC: проверка ролей admin/analyst/viewer на каждом endpoint; audit_log на каждое действие (F15-RBAC-*)."
+
+nonFunctionalRequirements:
+  - "Replay 1 000 батчей завершается за < 60 сек wall clock (single session)."
+  - "Replay 10 000 батчей завершается за < 10 мин."
+  - "Запись AgentLog в ClickHouse: latency p95 < 50 ms на батч."
+  - "До 5 одновременных replay-сессий без деградации production (solve time degradation < 20%)."
+  - "20 параллельных stress: solve time p95 ≤ 2× single-session."
+  - "ClickHouse retention для replay_agentlogs: 90 дней (настраиваемый через BACKTEST_CLICKHOUSE_REPLAY_AGENTLOGS_RETENTION_DAYS)."
+  - "Throughput записи AgentLog ≥ 200 запис/сек (F15-load-5)."
 
 knownIssues:
-  - id: nondeterminism-in-matching
-    severity: blocker
-    description: std::unordered_map итерация не гарантирует определённый порядок; для replay нужно фиксировать порядок
+  - id: lob-fob-replay-beyond-spec
+    severity: feature-extension
+    description: >
+      cpp/backtest/src/app/lob_fob_replay_uc.{cpp,hpp} реализует quality-replay
+      LOB→FOB curve reconstruction (F-11 parity). Этот use case в исходной
+      спецификации IN-006 не описан — это extension feature, добавленный
+      одновременно с F-15. Описан здесь для полноты.
+  - id: clickhouse-init-replay-agentlogs-not-in-init-sql
+    severity: doc-drift
+    description: >
+      Таблица replay_agentlogs создаётся динамически из
+      cpp/backtest/src/infra/clickhouse_storage.cpp (EnsureSchema), а не
+      статически из infra/clickhouse/init.sql. Conflict Note CN-IN006-04
+      зафиксирована — источник истины DDL: clickhouse_storage.cpp.
+  - id: replay-agentlogs-table-key-divergence
+    severity: doc-drift
+    description: >
+      Источник IN-006 описывает replay_agentlogs ORDER BY (sessionid,
+      batchseq) и поле batchresult/state/action как обычные String. Код
+      использует ReplacingMergeTree ORDER BY (session_id, original_batch_id)
+      с расширенным набором полей (log_id, fills_applied, solver_error_flag,
+      risk_status, error_code, failure_component, snapshot_version). См.
+      Conflict Note CN-IN006-01.
+  - id: replay-sessions-extra-columns
+    severity: doc-drift
+    description: >
+      В коде Postgres replay_sessions имеет дополнительные поля относительно
+      IN-006: session_config_snapshot, retry_parent_id. См. Conflict Note
+      CN-IN006-02.
+  - id: replay-summaries-extra-columns
+    severity: doc-drift
+    description: >
+      В коде Postgres replay_summaries содержит processed_batches,
+      failed_batches, partial, avgis_rule, decision_price_source,
+      no_requested_volume, metrics (JSONB) — это шире спецификации IN-006.
+      См. Conflict Note CN-IN006-03.
+  - id: web-ui-not-implemented
+    severity: feature-gap
+    description: >
+      UI экраны (Backtest / Replay form, Results, A/B compare, Audit-mode
+      diff, Equity curve) ещё не реализованы — только REST API готов.
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    # Полный список — см. 10-testing/features/F-15-test-plan.md.
+    - cpp/backtest/tests/backtest_uc_test.cpp
+    - cpp/backtest/tests/metrics_test.cpp
+    - cpp/backtest/tests/quality_metrics_test.cpp
+    - cpp/backtest/tests/historical_batch_loader_test.cpp
+    - cpp/backtest/tests/replay_config_snapshot_test.cpp
+    - cpp/backtest/tests/create_replay_session_test.cpp
+    - cpp/backtest/tests/read_replay_sessions_test.cpp
+    - cpp/backtest/tests/cancel_replay_session_test.cpp
+    - cpp/backtest/tests/check_replay_determinism_test.cpp
+    - cpp/backtest/tests/compare_replay_sessions_test.cpp
+    - cpp/backtest/tests/shadow_namespace_test.cpp
+    - cpp/backtest/tests/shadow_ledger_apply_test.cpp
+    - cpp/backtest/tests/restore_state_test.cpp
+    - cpp/backtest/tests/replay_step_journal_test.cpp
+    - cpp/backtest/tests/replay_summary_aggregation_test.cpp
+    - cpp/backtest/tests/replay_runtime_metrics_test.cpp
+    - cpp/backtest/tests/agent_log_writer_test.cpp
+    - cpp/backtest/tests/run_replay_audit_batch_test.cpp
+    - cpp/backtest/tests/run_replay_session_test.cpp
+    - cpp/backtest/tests/lob_fob_replay_test.cpp
+    - cpp/backtest/tests/venue_replay_uc_test.cpp
+    - cpp/backtest/tests/grpc_replay_batch_executor_test.cpp
+    - cpp/backtest/tests/kafka_replay_event_publisher_test.cpp
+    - cpp/backtest/tests/clickhouse_storage_test.cpp
+    - cpp/backtest/tests/clickhouse_historical_queries_test.cpp
+    - cpp/backtest/tests/app/retry_replay_session_uc_test.cpp
+  integration:
+    - cpp/backtest/tests/infra/postgres_replay_session_repository_test.cpp
+    - Testing/f15_test2_e2e.sh                                       # docker-compose E2E
+  load:
+    - cpp/backtest/tests/f15_load_harness.cpp                        # 1K/10K batches harness
+    - Testing/f15_perf_slo.py                                        # SLO probe (staging)
   contract: []

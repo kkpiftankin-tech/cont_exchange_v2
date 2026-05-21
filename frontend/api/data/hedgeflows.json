@@ -1,0 +1,586 @@
+[
+  {
+    "hedgeFlowId": "hgf-2026-05-04-btc-001",
+    "intentId": "int-2026-05-04-btc-001",
+    "batchId": "batch-2026-05-04-0915",
+    "providerId": "provider-alpha",
+    "symbol": "BTC/USDT",
+    "side": "SELL",
+    "targetQty": 1.2,
+    "targetNotional": 81720,
+    "filledQty": 0.74,
+    "avgFillPrice": 68128.42,
+    "totalFee": 31.8,
+    "feeCurrency": "USDT",
+    "referenceMid": 68105.25,
+    "hedgePnl": -59.01,
+    "slippageBps": 3.4,
+    "status": "OPEN",
+    "urgency": "HIGH",
+    "priceConstraint": 68020,
+    "timeoutMs": 90000,
+    "strategy": "IOC ladder",
+    "hedgeMode": "auto_after_batch",
+    "allowedVenues": ["binance", "coinbase"],
+    "createdAt": "2026-05-04T06:15:12.000Z",
+    "updatedAt": "2026-05-04T06:15:58.000Z",
+    "completedAt": null,
+    "statusReason": "Waiting for residual tranche on coinbase.",
+    "riskCheck": {
+      "decision": "ALLOW",
+      "maxSlippageBps": 18,
+      "limitUsagePct": 62
+    },
+    "overfillGuard": {
+      "status": "ARMED",
+      "targetQty": 1.2,
+      "cumulativeFilledQty": 0.74,
+      "remainingQty": 0.46
+    },
+    "reconciliation": {
+      "status": "PENDING",
+      "targetQty": 1.2,
+      "filledQty": 0.74,
+      "gapQty": 0.46,
+      "gapPct": 38.33,
+      "nextAction": "Send residual IOC tranche before timeout."
+    },
+    "childOrders": [
+      {
+        "childOrderId": "chd-btc-001-a",
+        "venueId": "binance",
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "orderType": "IOC",
+        "qty": 0.72,
+        "price": 68080,
+        "filledQty": 0.72,
+        "avgPrice": 68131.5,
+        "fee": 29.44,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "clientOrderId": "hgf-btc-001-01",
+        "latencyMs": 36,
+        "createdAt": "2026-05-04T06:15:13.000Z",
+        "updatedAt": "2026-05-04T06:15:17.000Z"
+      },
+      {
+        "childOrderId": "chd-btc-001-b",
+        "venueId": "coinbase",
+        "symbol": "BTC-USD",
+        "side": "SELL",
+        "orderType": "LIMIT",
+        "qty": 0.48,
+        "price": 68110,
+        "filledQty": 0.02,
+        "avgPrice": 68017.4,
+        "fee": 2.36,
+        "feeCurrency": "USDT",
+        "status": "PARTIALLY_FILLED",
+        "clientOrderId": "hgf-btc-001-02",
+        "latencyMs": 84,
+        "createdAt": "2026-05-04T06:15:15.000Z",
+        "updatedAt": "2026-05-04T06:15:58.000Z"
+      }
+    ],
+    "executionReports": [
+      {
+        "executionId": "exec-btc-001-01",
+        "fillId": "fill-btc-001-01",
+        "hedgeFlowId": "hgf-2026-05-04-btc-001",
+        "childOrderId": "chd-btc-001-a",
+        "venueId": "binance",
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "filledQty": 0.72,
+        "avgPrice": 68131.5,
+        "fee": 29.44,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "timestamp": "2026-05-04T06:15:17.000Z",
+        "slippageBps": 3.85,
+        "referenceMid": 68105.25,
+        "batchId": "batch-2026-05-04-0915",
+        "providerId": "provider-alpha",
+        "hedgePnl": -48.34
+      },
+      {
+        "executionId": "exec-btc-001-02",
+        "fillId": "fill-btc-001-02",
+        "hedgeFlowId": "hgf-2026-05-04-btc-001",
+        "childOrderId": "chd-btc-001-b",
+        "venueId": "coinbase",
+        "symbol": "BTC-USD",
+        "side": "SELL",
+        "filledQty": 0.02,
+        "avgPrice": 68017.4,
+        "fee": 2.36,
+        "feeCurrency": "USDT",
+        "status": "PARTIALLY_FILLED",
+        "timestamp": "2026-05-04T06:15:58.000Z",
+        "slippageBps": -12.9,
+        "referenceMid": 68105.25,
+        "batchId": "batch-2026-05-04-0915",
+        "providerId": "provider-alpha",
+        "hedgePnl": -10.67
+      }
+    ],
+    "timeline": [
+      {
+        "time": "2026-05-04T06:15:12.000Z",
+        "title": "ExecutionIntent accepted",
+        "description": "Risk allowed HIGH urgency hedge for provider-alpha."
+      },
+      {
+        "time": "2026-05-04T06:15:13.000Z",
+        "title": "Child orders routed",
+        "description": "Binance IOC and Coinbase LIMIT tranches created."
+      },
+      {
+        "time": "2026-05-04T06:15:58.000Z",
+        "title": "Partial residual",
+        "description": "0.46 BTC remains before reconciliation timeout."
+      }
+    ]
+  },
+  {
+    "hedgeFlowId": "hgf-2026-05-04-btc-002",
+    "intentId": "int-2026-05-04-btc-002",
+    "batchId": "batch-2026-05-04-0905",
+    "providerId": "provider-beta",
+    "symbol": "BTC/USDT",
+    "side": "BUY",
+    "targetQty": 0.8,
+    "targetNotional": 54420,
+    "filledQty": 0.8,
+    "avgFillPrice": 68002.6,
+    "totalFee": 18.1,
+    "feeCurrency": "USDT",
+    "referenceMid": 68028.75,
+    "hedgePnl": 2.82,
+    "slippageBps": -3.84,
+    "status": "COMPLETED",
+    "urgency": "MEDIUM",
+    "priceConstraint": 68120,
+    "timeoutMs": 120000,
+    "strategy": "TWAP two-slice",
+    "hedgeMode": "auto_after_batch",
+    "allowedVenues": ["binance", "coinbase"],
+    "createdAt": "2026-05-04T06:05:08.000Z",
+    "updatedAt": "2026-05-04T06:06:24.000Z",
+    "completedAt": "2026-05-04T06:06:24.000Z",
+    "statusReason": "Target quantity fully reconciled.",
+    "riskCheck": {
+      "decision": "ALLOW",
+      "maxSlippageBps": 12,
+      "limitUsagePct": 44
+    },
+    "overfillGuard": {
+      "status": "CLOSED",
+      "targetQty": 0.8,
+      "cumulativeFilledQty": 0.8,
+      "remainingQty": 0
+    },
+    "reconciliation": {
+      "status": "MATCHED",
+      "targetQty": 0.8,
+      "filledQty": 0.8,
+      "gapQty": 0,
+      "gapPct": 0,
+      "nextAction": "Archive audit trail."
+    },
+    "childOrders": [
+      {
+        "childOrderId": "chd-btc-002-a",
+        "venueId": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 0.48,
+        "price": 68040,
+        "filledQty": 0.48,
+        "avgPrice": 68001.4,
+        "fee": 10.88,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "clientOrderId": "hgf-btc-002-01",
+        "latencyMs": 41,
+        "createdAt": "2026-05-04T06:05:09.000Z",
+        "updatedAt": "2026-05-04T06:05:44.000Z"
+      },
+      {
+        "childOrderId": "chd-btc-002-b",
+        "venueId": "coinbase",
+        "symbol": "BTC-USD",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 0.32,
+        "price": 68055,
+        "filledQty": 0.32,
+        "avgPrice": 68004.4,
+        "fee": 7.22,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "clientOrderId": "hgf-btc-002-02",
+        "latencyMs": 58,
+        "createdAt": "2026-05-04T06:05:15.000Z",
+        "updatedAt": "2026-05-04T06:06:24.000Z"
+      }
+    ],
+    "executionReports": [
+      {
+        "executionId": "exec-btc-002-01",
+        "fillId": "fill-btc-002-01",
+        "hedgeFlowId": "hgf-2026-05-04-btc-002",
+        "childOrderId": "chd-btc-002-a",
+        "venueId": "binance",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "filledQty": 0.48,
+        "avgPrice": 68001.4,
+        "fee": 10.88,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "timestamp": "2026-05-04T06:05:44.000Z",
+        "slippageBps": -4.02,
+        "referenceMid": 68028.75,
+        "batchId": "batch-2026-05-04-0905",
+        "providerId": "provider-beta",
+        "hedgePnl": 2.25
+      },
+      {
+        "executionId": "exec-btc-002-02",
+        "fillId": "fill-btc-002-02",
+        "hedgeFlowId": "hgf-2026-05-04-btc-002",
+        "childOrderId": "chd-btc-002-b",
+        "venueId": "coinbase",
+        "symbol": "BTC-USD",
+        "side": "BUY",
+        "filledQty": 0.32,
+        "avgPrice": 68004.4,
+        "fee": 7.22,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "timestamp": "2026-05-04T06:06:24.000Z",
+        "slippageBps": -3.58,
+        "referenceMid": 68028.75,
+        "batchId": "batch-2026-05-04-0905",
+        "providerId": "provider-beta",
+        "hedgePnl": 0.57
+      }
+    ],
+    "timeline": [
+      {
+        "time": "2026-05-04T06:05:08.000Z",
+        "title": "Intent planned",
+        "description": "Execution Planning split volume 60/40 across CEX venues."
+      },
+      {
+        "time": "2026-05-04T06:06:24.000Z",
+        "title": "Reconciliation matched",
+        "description": "filledQty equals targetQty; flow marked COMPLETED."
+      }
+    ]
+  },
+  {
+    "hedgeFlowId": "hgf-2026-05-04-eth-003",
+    "intentId": "int-2026-05-04-eth-003",
+    "batchId": "batch-2026-05-04-0845",
+    "providerId": "provider-alpha",
+    "symbol": "ETH/USDT",
+    "side": "SELL",
+    "targetQty": 18,
+    "targetNotional": 56880,
+    "filledQty": 14.2,
+    "avgFillPrice": 3154.4,
+    "totalFee": 42.7,
+    "feeCurrency": "USDT",
+    "referenceMid": 3160.1,
+    "hedgePnl": 38.24,
+    "slippageBps": -18.04,
+    "status": "UNDERFILLED",
+    "urgency": "MEDIUM",
+    "priceConstraint": 3148,
+    "timeoutMs": 120000,
+    "strategy": "VWAP guarded",
+    "hedgeMode": "auto_after_batch",
+    "allowedVenues": ["coinbase", "uniswap_v3"],
+    "createdAt": "2026-05-04T05:45:16.000Z",
+    "updatedAt": "2026-05-04T05:47:30.000Z",
+    "completedAt": "2026-05-04T05:47:30.000Z",
+    "statusReason": "CEX_A depth vanished; DEX fallback capped by slippage guard.",
+    "riskCheck": {
+      "decision": "ALLOW",
+      "maxSlippageBps": 20,
+      "limitUsagePct": 79
+    },
+    "overfillGuard": {
+      "status": "CLOSED",
+      "targetQty": 18,
+      "cumulativeFilledQty": 14.2,
+      "remainingQty": 3.8
+    },
+    "reconciliation": {
+      "status": "UNDERFILLED",
+      "targetQty": 18,
+      "filledQty": 14.2,
+      "gapQty": 3.8,
+      "gapPct": 21.11,
+      "nextAction": "Raise HEDGE_UNDERFILLED and wait for operator override."
+    },
+    "childOrders": [
+      {
+        "childOrderId": "chd-eth-003-a",
+        "venueId": "coinbase",
+        "symbol": "ETH-USD",
+        "side": "SELL",
+        "orderType": "LIMIT",
+        "qty": 10.8,
+        "price": 3154,
+        "filledQty": 10.8,
+        "avgPrice": 3155.2,
+        "fee": 31.4,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "clientOrderId": "hgf-eth-003-01",
+        "latencyMs": 73,
+        "createdAt": "2026-05-04T05:45:17.000Z",
+        "updatedAt": "2026-05-04T05:46:07.000Z"
+      },
+      {
+        "childOrderId": "chd-eth-003-b",
+        "venueId": "uniswap_v3",
+        "symbol": "WETH/USDC",
+        "side": "SELL",
+        "orderType": "MARKET",
+        "qty": 7.2,
+        "price": null,
+        "filledQty": 3.4,
+        "avgPrice": 3151.85,
+        "fee": 11.3,
+        "feeCurrency": "USDT",
+        "status": "CANCELLED",
+        "clientOrderId": "hgf-eth-003-02",
+        "latencyMs": 410,
+        "createdAt": "2026-05-04T05:45:28.000Z",
+        "updatedAt": "2026-05-04T05:47:30.000Z"
+      }
+    ],
+    "executionReports": [
+      {
+        "executionId": "exec-eth-003-01",
+        "fillId": "fill-eth-003-01",
+        "hedgeFlowId": "hgf-2026-05-04-eth-003",
+        "childOrderId": "chd-eth-003-a",
+        "venueId": "coinbase",
+        "symbol": "ETH-USD",
+        "side": "SELL",
+        "filledQty": 10.8,
+        "avgPrice": 3155.2,
+        "fee": 31.4,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "timestamp": "2026-05-04T05:46:07.000Z",
+        "slippageBps": -15.51,
+        "referenceMid": 3160.1,
+        "batchId": "batch-2026-05-04-0845",
+        "providerId": "provider-alpha",
+        "hedgePnl": 21.52
+      },
+      {
+        "executionId": "exec-eth-003-02",
+        "fillId": "fill-eth-003-02",
+        "hedgeFlowId": "hgf-2026-05-04-eth-003",
+        "childOrderId": "chd-eth-003-b",
+        "venueId": "uniswap_v3",
+        "symbol": "WETH/USDC",
+        "side": "SELL",
+        "filledQty": 3.4,
+        "avgPrice": 3151.85,
+        "fee": 11.3,
+        "feeCurrency": "USDT",
+        "status": "CANCELLED",
+        "timestamp": "2026-05-04T05:47:30.000Z",
+        "slippageBps": -26.11,
+        "referenceMid": 3160.1,
+        "batchId": "batch-2026-05-04-0845",
+        "providerId": "provider-alpha",
+        "hedgePnl": 16.72
+      }
+    ],
+    "timeline": [
+      {
+        "time": "2026-05-04T05:45:16.000Z",
+        "title": "HedgeFlow opened",
+        "description": "ETH exposure emitted from batch output."
+      },
+      {
+        "time": "2026-05-04T05:47:30.000Z",
+        "title": "Reconciliation alert",
+        "description": "HEDGE_UNDERFILLED: 3.8 ETH gap after timeout."
+      }
+    ]
+  },
+  {
+    "hedgeFlowId": "hgf-2026-05-04-sol-004",
+    "intentId": "int-2026-05-04-sol-004",
+    "batchId": "batch-2026-05-04-0830",
+    "providerId": "provider-gamma",
+    "symbol": "SOL/USDT",
+    "side": "BUY",
+    "targetQty": 320,
+    "targetNotional": 46400,
+    "filledQty": 0,
+    "avgFillPrice": null,
+    "totalFee": 0,
+    "feeCurrency": "USDT",
+    "referenceMid": 145,
+    "hedgePnl": null,
+    "slippageBps": null,
+    "status": "RISK_REJECTED",
+    "urgency": "LOW",
+    "priceConstraint": 146.2,
+    "timeoutMs": 180000,
+    "strategy": "POST_ONLY passive",
+    "hedgeMode": "operator_override",
+    "allowedVenues": ["binance"],
+    "createdAt": "2026-05-04T05:30:11.000Z",
+    "updatedAt": "2026-05-04T05:30:12.000Z",
+    "completedAt": "2026-05-04T05:30:12.000Z",
+    "statusReason": "Risk blocked venue exposure: limit usage would exceed 100%.",
+    "riskCheck": {
+      "decision": "REJECT",
+      "maxSlippageBps": 8,
+      "limitUsagePct": 119
+    },
+    "overfillGuard": {
+      "status": "NOT_STARTED",
+      "targetQty": 320,
+      "cumulativeFilledQty": 0,
+      "remainingQty": 320
+    },
+    "reconciliation": {
+      "status": "REJECTED",
+      "targetQty": 320,
+      "filledQty": 0,
+      "gapQty": 320,
+      "gapPct": 100,
+      "nextAction": "Review risk limit or submit smaller override."
+    },
+    "childOrders": [],
+    "executionReports": [],
+    "timeline": [
+      {
+        "time": "2026-05-04T05:30:11.000Z",
+        "title": "Manual intent received",
+        "description": "Operator requested SOL hedge on binance."
+      },
+      {
+        "time": "2026-05-04T05:30:12.000Z",
+        "title": "Risk rejected",
+        "description": "No child_orders were created."
+      }
+    ]
+  },
+  {
+    "hedgeFlowId": "hgf-2026-05-04-eth-005",
+    "intentId": "int-2026-05-04-eth-005",
+    "batchId": "batch-2026-05-04-0815",
+    "providerId": "provider-delta",
+    "symbol": "ETH/USDT",
+    "side": "BUY",
+    "targetQty": 6.5,
+    "targetNotional": 20540,
+    "filledQty": 6.5,
+    "avgFillPrice": 3157.8,
+    "totalFee": 26.2,
+    "feeCurrency": "USDT",
+    "referenceMid": 3162.2,
+    "hedgePnl": 2.4,
+    "slippageBps": -13.91,
+    "status": "COMPLETED",
+    "urgency": "HIGH",
+    "priceConstraint": 3170,
+    "timeoutMs": 60000,
+    "strategy": "AMM immediate",
+    "hedgeMode": "auto_after_batch",
+    "allowedVenues": ["uniswap_v3"],
+    "createdAt": "2026-05-04T05:15:03.000Z",
+    "updatedAt": "2026-05-04T05:15:21.000Z",
+    "completedAt": "2026-05-04T05:15:21.000Z",
+    "statusReason": "AMM swap confirmed on-chain.",
+    "riskCheck": {
+      "decision": "ALLOW",
+      "maxSlippageBps": 25,
+      "limitUsagePct": 36
+    },
+    "overfillGuard": {
+      "status": "CLOSED",
+      "targetQty": 6.5,
+      "cumulativeFilledQty": 6.5,
+      "remainingQty": 0
+    },
+    "reconciliation": {
+      "status": "MATCHED",
+      "targetQty": 6.5,
+      "filledQty": 6.5,
+      "gapQty": 0,
+      "gapPct": 0,
+      "nextAction": "Persist analytics row in ClickHouse."
+    },
+    "childOrders": [
+      {
+        "childOrderId": "chd-eth-005-a",
+        "venueId": "uniswap_v3",
+        "symbol": "WETH/USDC",
+        "side": "BUY",
+        "orderType": "MARKET",
+        "qty": 6.5,
+        "price": null,
+        "filledQty": 6.5,
+        "avgPrice": 3157.8,
+        "fee": 26.2,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "clientOrderId": "hgf-eth-005-01",
+        "latencyMs": 1120,
+        "createdAt": "2026-05-04T05:15:04.000Z",
+        "updatedAt": "2026-05-04T05:15:21.000Z"
+      }
+    ],
+    "executionReports": [
+      {
+        "executionId": "exec-eth-005-01",
+        "fillId": "fill-eth-005-01",
+        "hedgeFlowId": "hgf-2026-05-04-eth-005",
+        "childOrderId": "chd-eth-005-a",
+        "venueId": "uniswap_v3",
+        "symbol": "WETH/USDC",
+        "side": "BUY",
+        "filledQty": 6.5,
+        "avgPrice": 3157.8,
+        "fee": 26.2,
+        "feeCurrency": "USDT",
+        "status": "FILLED",
+        "timestamp": "2026-05-04T05:15:21.000Z",
+        "slippageBps": -13.91,
+        "referenceMid": 3162.2,
+        "batchId": "batch-2026-05-04-0815",
+        "providerId": "provider-delta",
+        "hedgePnl": 2.4
+      }
+    ],
+    "timeline": [
+      {
+        "time": "2026-05-04T05:15:03.000Z",
+        "title": "Intent accepted",
+        "description": "HIGH urgency hedge sent directly to AMM adapter."
+      },
+      {
+        "time": "2026-05-04T05:15:21.000Z",
+        "title": "Swap confirmed",
+        "description": "On-chain execution report normalized and stored."
+      }
+    ]
+  }
+]

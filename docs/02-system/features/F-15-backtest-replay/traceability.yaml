@@ -1,0 +1,243 @@
+featureId: F-15
+
+components:
+  - id: backtest-service
+    role: primary-orchestrator
+    codePath: cpp/backtest
+    status: implemented
+  - id: matching-fob-core
+    role: solver-isolation-mode
+    codePath: cpp/matching
+    status: integrated  # SolveBatch via grpc_isolation_matching_service
+  - id: risk-manager
+    role: shadow-post-trade
+    codePath: cpp/risk
+    status: integrated
+  - id: settlement-ledger
+    role: shadow-namespace
+    codePath: cpp/ledger
+    status: integrated  # cpp/ledger/src/app/ledger_uc.cpp reused via cmake source
+  - id: market-data
+    role: historical-source
+    codePath: cpp/market_data
+    status: read-only  # batchresults, marketdata_snapshots
+  - id: gateway
+    role: rest-edge
+    codePath: cpp/gateway
+    status: planned   # /api/v1/replay/* proxy to backtest service (port 8087)
+
+protoContracts:
+  - file: contracts/proto/fob/replay/v1/replay.proto
+    role: source-of-truth-for-replay-domain
+  - file: contracts/proto/fob/matching/v1/solver.proto
+    role: SolveBatch-isolation-API
+  - file: contracts/proto/fob/matching/v1/batch.proto
+    role: BatchResult-payload
+  - file: contracts/proto/fob/matching/v1/fill_event.proto
+    role: FillEvent-payload
+  - file: contracts/proto/fob/risk/v1/risk.proto
+    role: CheckPostTrade-API
+  - file: contracts/proto/fob/ledger/v1/ledger.proto
+    role: ApplyFills-API
+  - file: contracts/proto/fob/orders/v1/orders.proto
+    role: FlowOrder-strategy-DTO
+  - file: contracts/proto/fob/common/v1/common.proto
+    role: Decimal-EventMeta
+
+openapiContracts:
+  - file: contracts/openapi/fob/replay/v1/api/replay.yaml
+    role: rest-replay-api
+  - file: contracts/openapi/fob/replay/v1/schemas/replay.json
+    role: rest-replay-dtos
+
+kafkaTopics:
+  - name: replay.commands
+    direction: in
+    producer: gateway / external systems
+    consumer: backtest
+    status: optional-alternative-to-rest
+  - name: replay.results
+    direction: out
+    producer: backtest
+    consumer:
+      - gateway   # WebSocket bridge to UI
+      - observability-reporting
+  - name: batch.outputs
+    direction: in
+    producer: matching
+    consumer: backtest  # для parity-checks с production
+    status: read-only-archive
+  - name: venue.snapshots
+    direction: in
+    producer: external-venues
+    consumer: backtest  # F-11 ingest для VenueSim parity (F-12)
+    status: read-only-archive
+
+postgresqlTables:
+  - name: replay_sessions
+    role: session-lifecycle
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_replay_session_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+  - name: replay_summaries
+    role: aggregated-metrics
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_replay_session_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+  - name: replay_compare_cache
+    role: ab-compare-cache
+    accessedBy: cpp/backtest/src/app/compare_replay_sessions_uc.cpp
+    ddlSource: cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+  - name: replay_audit_runs
+    role: single-batch-audit-storage
+    accessedBy: cpp/backtest/src/app/run_replay_audit_batch_uc.cpp
+    ddlSource: cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+  - name: roles
+    role: rbac-roles
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+  - name: permissions
+    role: rbac-permissions
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+  - name: role_permissions
+    role: rbac-rbac-junction
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+  - name: users_roles
+    role: rbac-user-assignments
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+  - name: audit_log
+    role: rbac-audit-trail
+    accessedBy: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    ddlSource: cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+
+clickhouseTables:
+  - name: replay_agentlogs
+    role: per-batch-state-action-reward
+    accessedBy: cpp/backtest/src/infra/clickhouse_storage.cpp
+    ddlSource: cpp/backtest/src/infra/clickhouse_storage.cpp (EnsureSchema)
+    note: |
+      ВНИМАНИЕ: DDL не лежит в infra/clickhouse/init.sql — таблица создаётся
+      динамически из кода сервиса при старте. Conflict Note CN-IN006-04.
+    engine: ReplacingMergeTree
+    orderBy: (session_id, original_batch_id)
+    ttl: 90 days (configurable)
+  - name: batchresults
+    role: source-historical-batches
+    schemaSource: infra/clickhouse/init.sql
+    status: read-only
+  - name: fills
+    role: source-historical-fills
+    schemaSource: infra/clickhouse/init.sql
+    status: read-only
+  - name: marketdata_snapshots
+    role: source-historical-marketdata
+    schemaSource: cpp/backtest/src/infra/clickhouse_storage.cpp (venue_snapshots)
+    status: read-only
+  - name: venue_snapshots
+    role: source-historical-venue-depth
+    schemaSource: cpp/backtest/src/infra/clickhouse_storage.cpp
+    status: read-only
+
+codeMap:
+  entry: cpp/backtest/src/main.cpp
+  useCases:
+    createReplaySession: cpp/backtest/src/app/create_replay_session_uc.cpp
+    runReplaySession: cpp/backtest/src/app/run_replay_session_uc.cpp
+    cancelReplaySession: cpp/backtest/src/app/cancel_replay_session_uc.cpp
+    retryReplaySession: cpp/backtest/src/app/retry_replay_session_uc.cpp
+    readReplaySessions: cpp/backtest/src/app/read_replay_sessions_uc.cpp
+    compareReplaySessions: cpp/backtest/src/app/compare_replay_sessions_uc.cpp
+    checkReplayDeterminism: cpp/backtest/src/app/check_replay_determinism_uc.cpp
+    runReplayAuditBatch: cpp/backtest/src/app/run_replay_audit_batch_uc.cpp
+    historicalBatchLoader: cpp/backtest/src/app/historical_batch_loader_uc.cpp
+    shadowNamespace: cpp/backtest/src/app/shadow_namespace_uc.cpp
+    restoreState: cpp/backtest/src/app/restore_state_uc.cpp
+    backtestParityCheck: cpp/backtest/src/app/backtest_uc.cpp
+    lobFobReplay: cpp/backtest/src/app/lob_fob_replay_uc.cpp
+    venueReplay: cpp/backtest/src/app/venue_replay_uc.cpp
+    qualityMetrics: cpp/backtest/src/app/quality_metrics_uc.cpp
+  ports:
+    historicalLoader: cpp/backtest/src/app/historical_batch_loader_port.hpp
+    replaySessionRepo: cpp/backtest/src/app/replay_session_repository_port.hpp
+    replayConfigRepo: cpp/backtest/src/app/replay_config_repository_port.hpp
+    shadowLedger: cpp/backtest/src/app/shadow_ledger_port.hpp
+    metricsStorage: cpp/backtest/src/app/metrics_storage_port.hpp
+    qualityMetricsPort: cpp/backtest/src/app/quality_metrics_port.hpp
+    replayReader: cpp/backtest/src/app/replay_reader_port.hpp
+    replayOrchestration: cpp/backtest/src/app/replay_orchestration_ports.hpp
+    replayCompare: cpp/backtest/src/app/replay_compare_ports.hpp
+    batchStorage: cpp/backtest/src/app/batch_storage_port.hpp
+    venueStorage: cpp/backtest/src/app/venue_storage_port.hpp
+  infra:
+    clickhouseStorage: cpp/backtest/src/infra/clickhouse_storage.cpp
+    clickhouseHistorical: cpp/backtest/src/infra/clickhouse_historical_queries.cpp
+    postgresSessionRepo: cpp/backtest/src/infra/postgres/postgres_replay_session_repository.cpp
+    postgresConfigRepo: cpp/backtest/src/infra/postgres/postgres_replay_config_repository.cpp
+    postgresRbacRepo: cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+    grpcBatchExecutor: cpp/backtest/src/infra/grpc_replay_batch_executor.cpp
+    kafkaConsumer: cpp/backtest/src/infra/kafka_consumer.cpp
+    kafkaCommandsConsumer: cpp/backtest/src/infra/replay_commands_kafka_consumer.cpp
+    kafkaEventPublisher: cpp/backtest/src/infra/kafka_replay_event_publisher.cpp
+    venueKafkaConsumer: cpp/backtest/src/infra/venue_kafka_consumer.cpp
+    inMemoryShadowLedger: cpp/backtest/src/infra/in_memory_shadow_ledger.cpp
+    retrySessionHandler: cpp/backtest/src/infra/http/retry_session_handler.cpp
+
+tests:
+  unit:
+    actual:
+      - cpp/backtest/tests/backtest_uc_test.cpp
+      - cpp/backtest/tests/metrics_test.cpp
+      - cpp/backtest/tests/quality_metrics_test.cpp
+      - cpp/backtest/tests/historical_batch_loader_test.cpp
+      - cpp/backtest/tests/replay_config_snapshot_test.cpp
+      - cpp/backtest/tests/create_replay_session_test.cpp
+      - cpp/backtest/tests/read_replay_sessions_test.cpp
+      - cpp/backtest/tests/cancel_replay_session_test.cpp
+      - cpp/backtest/tests/check_replay_determinism_test.cpp
+      - cpp/backtest/tests/compare_replay_sessions_test.cpp
+      - cpp/backtest/tests/shadow_namespace_test.cpp
+      - cpp/backtest/tests/shadow_ledger_apply_test.cpp
+      - cpp/backtest/tests/restore_state_test.cpp
+      - cpp/backtest/tests/replay_step_journal_test.cpp
+      - cpp/backtest/tests/replay_summary_aggregation_test.cpp
+      - cpp/backtest/tests/replay_runtime_metrics_test.cpp
+      - cpp/backtest/tests/agent_log_writer_test.cpp
+      - cpp/backtest/tests/run_replay_audit_batch_test.cpp
+      - cpp/backtest/tests/run_replay_session_test.cpp
+      - cpp/backtest/tests/lob_fob_replay_test.cpp
+      - cpp/backtest/tests/venue_replay_uc_test.cpp
+      - cpp/backtest/tests/grpc_replay_batch_executor_test.cpp
+      - cpp/backtest/tests/kafka_replay_event_publisher_test.cpp
+      - cpp/backtest/tests/clickhouse_storage_test.cpp
+      - cpp/backtest/tests/clickhouse_historical_queries_test.cpp
+      - cpp/backtest/tests/app/retry_replay_session_uc_test.cpp
+  integration:
+    actual:
+      - cpp/backtest/tests/infra/postgres_replay_session_repository_test.cpp
+      - Testing/f15_test2_e2e.sh
+  load:
+    actual:
+      - cpp/backtest/tests/f15_load_harness.cpp
+      - Testing/f15_perf_slo.py
+  contract: []
+
+useCases:
+  - id: UC-F15-01-create-replay-session
+    primaryActor: Analyst / Admin
+    codeEntryPoint: create_replay_session_uc.cpp
+  - id: UC-F15-02-cancel-replay-session
+    primaryActor: Analyst / Admin
+    codeEntryPoint: cancel_replay_session_uc.cpp
+  - id: UC-F15-03-ab-compare-sessions
+    primaryActor: Analyst
+    codeEntryPoint: compare_replay_sessions_uc.cpp
+  - id: UC-F15-04-audit-mode-replay
+    primaryActor: Admin / Auditor
+    codeEntryPoint: run_replay_audit_batch_uc.cpp
+  - id: UC-F15-05-retry-failed-session
+    primaryActor: Analyst / Admin
+    codeEntryPoint: retry_replay_session_uc.cpp
+  - id: UC-F15-06-replay-determinism-check
+    primaryActor: QA / Admin
+    codeEntryPoint: check_replay_determinism_uc.cpp

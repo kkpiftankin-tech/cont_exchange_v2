@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package fob.connector.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/execution/v1/execution.proto";
+
+// gRPC interface between Venue Execution Adapter and External Venues Connector.
+
+enum VenueOrderType {
+  VENUE_ORDER_TYPE_UNSPECIFIED = 0;
+  VENUE_ORDER_TYPE_LIMIT = 1;
+  VENUE_ORDER_TYPE_MARKET = 2;
+  VENUE_ORDER_TYPE_POST_ONLY = 3;
+  VENUE_ORDER_TYPE_STOP_LIMIT = 4;
+}
+
+// Normalized by EVC; set on RawExecutionEvent when status = REJECTED.
+enum VenueErrorCode {
+  VENUE_ERROR_CODE_UNSPECIFIED = 0;
+  VENUE_ERROR_CODE_INSUFFICIENT_LIQUIDITY = 1;
+  VENUE_ERROR_CODE_RATE_LIMIT = 2;
+  VENUE_ERROR_CODE_INVALID_PRICE = 3;
+  VENUE_ERROR_CODE_INVALID_LOT_SIZE = 4;
+  VENUE_ERROR_CODE_VENUE_UNAVAILABLE = 5;
+  VENUE_ERROR_CODE_TX_FAILED = 6;
+  VENUE_ERROR_CODE_TIMEOUT = 7;
+}
+
+enum RawExecutionStatus {
+  RAW_EXECUTION_STATUS_UNSPECIFIED = 0;
+  RAW_EXECUTION_STATUS_NEW = 1;
+  RAW_EXECUTION_STATUS_PARTIALLY_FILLED = 2;
+  RAW_EXECUTION_STATUS_FILLED = 3;
+  RAW_EXECUTION_STATUS_CANCELLED = 4;
+  RAW_EXECUTION_STATUS_REJECTED = 5;
+  RAW_EXECUTION_STATUS_EXPIRED = 6;
+}
+
+message CexOrderParams {
+  VenueOrderType order_type = 1;
+  fob.common.v1.Decimal price = 2;  // unset for MARKET
+  fob.common.v1.TimeInForce tif = 3;
+}
+
+message DexOrderParams {
+  string token_in = 1;
+  string token_out = 2;
+  fob.common.v1.Decimal amount_in = 3;          // base units of token_in
+  fob.common.v1.Decimal amount_out_min = 4;     // qty * (1 - slippage_tolerance)
+  int64 deadline = 5;                           // unix seconds
+  fob.common.v1.Decimal slippage_tolerance = 6; // decimal fraction: 0.005 = 0.5%
+}
+
+message PlaceChildOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string child_order_id = 2;
+  string hedge_flow_id = 3;
+  string client_order_id = 4;  // hedgeFlowId_seq; used for venue-side idempotency
+
+  string venue_id = 10;
+  fob.common.v1.Instrument instrument = 11;
+  string venue_symbol = 12;  // venue-mapped symbol
+
+  fob.common.v1.Side side = 20;
+  fob.common.v1.Decimal quantity = 21;
+  fob.execution.v1.ExecutionUrgency urgency = 22;
+
+  oneof venue_params {
+    CexOrderParams cex = 30;
+    DexOrderParams dex = 31;
+  }
+}
+
+// Immediate RPC acknowledgement; fill results arrive via SubscribeExecutionEvents.
+message PlaceChildOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+
+  string child_order_id = 2;
+  string client_order_id = 3;
+  bool accepted = 4;
+  string venue_order_id = 5;  // set synchronously by CEX REST; empty otherwise
+  fob.common.v1.Error error = 6;
+}
+
+message CexFillDetails {
+  string exec_id = 1;  // per-fill event id, distinct from venue_order_id
+  string venue_order_id = 2;
+  fob.common.v1.Decimal fill_qty = 3;
+  fob.common.v1.Decimal fill_price = 4;
+  fob.common.v1.Fee fee = 5;
+  bool maker = 6;
+}
+
+message DexFillDetails {
+  string tx_hash = 1;
+  fob.common.v1.Decimal amount_out = 2;  // actual tokens received
+  uint64 gas_used = 3;
+  fob.common.v1.Money gas_fee = 4;
+  google.protobuf.Timestamp block_timestamp = 5;
+  uint64 block_number = 6;
+}
+
+// Normalized execution event pushed by EVC to Venue Execution Adapter.
+// venue_error_code and reject_reason are populated when status = REJECTED.
+message RawExecutionEvent {
+  fob.common.v1.EventMeta meta = 1;
+
+  string child_order_id = 2;
+  string client_order_id = 3;
+  string venue_id = 4;
+
+  fob.common.v1.Instrument instrument = 10;
+  string venue_symbol = 11;
+  fob.common.v1.Side side = 12;
+
+  RawExecutionStatus status = 20;
+  fob.common.v1.Decimal filled_qty = 21;
+  fob.common.v1.Decimal remaining_qty = 22;
+  fob.common.v1.Decimal avg_price = 23;
+
+  google.protobuf.Timestamp venue_ts = 30;
+  google.protobuf.Timestamp received_ts = 31;
+
+  VenueErrorCode venue_error_code = 40;
+  string reject_reason = 41;  // raw string from venue for audit/debug
+
+  oneof fill_details {
+    CexFillDetails cex = 50;
+    DexFillDetails dex = 51;
+  }
+}
+
+message CancelChildOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string child_order_id = 2;
+  string client_order_id = 3;
+  string venue_id = 4;
+  string venue_symbol = 5;
+  string hedge_flow_id = 6;
+}
+
+message CancelChildOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool accepted = 2;
+  fob.common.v1.Error error = 3;
+}
+
+// Cancels all open child orders for a hedge flow (overfill guard / timeout).
+message CancelAllChildOrdersRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string hedge_flow_id = 2;
+  string venue_id = 3;  // if empty, cancel across all venues for this flow
+}
+
+message CancelAllChildOrdersResponse {
+  fob.common.v1.EventMeta meta = 1;
+  int32 cancelled_count = 2;
+  fob.common.v1.Error error = 3;
+}
+
+message SubscribeExecutionEventsRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  repeated string hedge_flow_ids = 2;  // empty = all flows
+  repeated string venue_ids = 3;       // empty = all venues
+}
+
+service VenueConnectorService {
+  rpc PlaceChildOrder(PlaceChildOrderRequest)
+      returns (PlaceChildOrderResponse);
+
+  rpc CancelChildOrder(CancelChildOrderRequest)
+      returns (CancelChildOrderResponse);
+
+  rpc CancelAllChildOrders(CancelAllChildOrdersRequest)
+      returns (CancelAllChildOrdersResponse);
+
+  // EVC pushes events as venue callbacks arrive.
+  rpc SubscribeExecutionEvents(SubscribeExecutionEventsRequest)
+      returns (stream RawExecutionEvent);
+}

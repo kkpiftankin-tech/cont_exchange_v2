@@ -1,0 +1,245 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/replay-dtos.json",
+  "title": "F-15 Backtest Replay DTOs",
+  "description": "JSON-схемы для ReplaySession, AgentLog, ReplaySummary и событий",
+  "definitions": {
+    "ReplayStatus": {
+      "type": "string",
+      "enum": ["pending", "running", "completed", "failed", "cancelled"]
+    },
+    "FlowOrder": {
+      "type": "object",
+      "required": ["symbol", "side", "pL", "pH", "qrate", "qmax", "executionwindow"],
+      "properties": {
+        "symbol": { "type": "string", "examples": ["BTCUSDT"] },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "pL": { "type": "number", "description": "Нижняя граница цены" },
+        "pH": { "type": "number", "description": "Верхняя граница цены" },
+        "qrate": { "type": "number", "exclusiveMinimum": 0, "description": "Скорость исполнения (объём/сек)" },
+        "qmax": { "type": "number", "exclusiveMinimum": 0, "description": "Максимальный запрашиваемый объём" },
+        "executionwindow": { "type": "number", "exclusiveMinimum": 0, "description": "Окно исполнения в секундах" }
+      }
+    },
+    "FeeModel": {
+      "type": "object",
+      "required": ["maker_fee_rate", "taker_fee_rate"],
+      "properties": {
+        "maker_fee_rate": { "type": "number", "description": "Ставка мейкера, напр. 0.0002" },
+        "taker_fee_rate": { "type": "number", "description": "Ставка тейкера, напр. 0.0005" },
+        "instrument_rates": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Ставки по отдельным инструментам"
+        }
+      }
+    },
+    "FillEvent": {
+      "type": "object",
+      "required": ["fill_id", "order_id", "exec_qty", "exec_price", "fees"],
+      "properties": {
+        "fill_id": { "type": "string" },
+        "order_id": { "type": "string" },
+        "exec_qty": { "type": "number" },
+        "exec_price": { "type": "number" },
+        "fees": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "BatchResult": {
+      "type": "object",
+      "required": ["clearprices", "executedrates", "residualnorm", "solvetimems"],
+      "properties": {
+        "clearprices": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "clearing-цены по инструментам"
+        },
+        "executedrates": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Объёмы/скорости исполнения"
+        },
+        "residualnorm": { "type": "number", "description": "Норма остатка" },
+        "solvetimems": { "type": "number", "description": "Время решения в мс" }
+      }
+    },
+    "AgentState": {
+      "type": "object",
+      "required": ["positions", "balances", "mid", "spread", "cumPnL"],
+      "properties": {
+        "positions": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Позиции по инструментам"
+        },
+        "balances": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Балансы по валютам"
+        },
+        "mid": { "type": "number", "description": "Mid-price" },
+        "spread": { "type": "number", "description": "Спред" },
+        "cumPnL": { "type": "number", "description": "Кумулятивный PnL" }
+      }
+    },
+    "AgentLog": {
+      "type": "object",
+      "required": [
+        "log_id", "session_id", "batch_seq", "original_batch_id",
+        "state", "action", "reward", "pnl", "is_value",
+        "fillrate", "fills", "batch_result", "timestamp"
+      ],
+      "properties": {
+        "log_id": { "type": "string", "format": "uuid" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "batch_seq": { "type": "integer", "minimum": 1 },
+        "original_batch_id": { "type": "string" },
+        "state": { "$ref": "#/definitions/AgentState" },
+        "action": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FlowOrder" }
+        },
+        "reward": { "type": "number" },
+        "pnl": { "type": "number" },
+        "is_value": { "type": "number" },
+        "fillrate": { "type": "number", "minimum": 0, "maximum": 100 },
+        "fills": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FillEvent" }
+        },
+        "batch_result": { "$ref": "#/definitions/BatchResult" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "solve_time_ms": { "type": "number" },
+        "residual_norm": { "type": "number" },
+        "risk_status": { "type": "string", "enum": ["ok", "alert", "limit_hit"] },
+        "solver_error_flag": { "type": "boolean" },
+        "error_code": { "type": "string" },
+        "session_config_snapshot_version": { "type": "string" }
+      }
+    },
+    "ReplaySession": {
+      "type": "object",
+      "required": [
+        "session_id", "user_id", "name", "strategy",
+        "date_range_from", "date_range_to",
+        "solver_config_id", "risk_limits_id",
+        "fee_model", "status", "created_at"
+      ],
+      "properties": {
+        "session_id": { "type": "string", "format": "uuid" },
+        "user_id": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "maxLength": 255 },
+        "strategy": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FlowOrder" }
+        },
+        "date_range_from": { "type": "string", "format": "date-time" },
+        "date_range_to": { "type": "string", "format": "date-time" },
+        "solver_config_id": { "type": "string", "format": "uuid" },
+        "risk_limits_id": { "type": "string", "format": "uuid" },
+        "fee_model": { "$ref": "#/definitions/FeeModel" },
+        "session_config_snapshot_json": {
+          "type": "object",
+          "description": "Снимок конфигурации (замороженный)"
+        },
+        "status": { "$ref": "#/definitions/ReplayStatus" },
+        "total_batches": { "type": "integer", "minimum": 0 },
+        "progress_batches": { "type": "integer", "minimum": 0 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "completed_at": { "type": ["string", "null"], "format": "date-time" },
+        "error_details": { "type": "string" }
+      }
+    },
+    "ReplaySummary": {
+      "type": "object",
+      "required": [
+        "summary_id", "session_id", "avg_is", "total_pnl",
+        "avg_pnl", "std_pnl", "sharpe", "fill_rate",
+        "avg_vwap", "avg_solve_time_ms", "max_drawdown",
+        "total_batches", "total_fill_events", "created_at"
+      ],
+      "properties": {
+        "summary_id": { "type": "string", "format": "uuid" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "avg_is": { "type": "number" },
+        "total_pnl": { "type": "number" },
+        "avg_pnl": { "type": "number" },
+        "std_pnl": { "type": "number" },
+        "sharpe": { "type": "number" },
+        "fill_rate": { "type": "number" },
+        "avg_vwap": { "type": "number" },
+        "avg_solve_time_ms": { "type": "number" },
+        "max_drawdown": { "type": "number" },
+        "total_batches": { "type": "integer" },
+        "total_fill_events": { "type": "integer" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "processed_batches": { "type": "integer" },
+        "failed_batches": { "type": "integer" },
+        "partial": { "type": "boolean" },
+        "avgis_rule": { "type": "string" },
+        "decision_price_source": { "type": "string" },
+        "no_requested_volume": { "type": "boolean" }
+      }
+    },
+    "EventMeta": {
+      "type": "object",
+      "properties": {
+        "correlation_id": { "type": "string", "format": "uuid" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayProgressEvent": {
+      "type": "object",
+      "required": ["session_id", "status", "batch_seq", "total_batches", "timestamp"],
+      "properties": {
+        "meta": { "$ref": "#/definitions/EventMeta" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "status": { "$ref": "#/definitions/ReplayStatus" },
+        "batch_seq": { "type": "integer" },
+        "total_batches": { "type": "integer" },
+        "partial_summary": { "$ref": "#/definitions/ReplaySummary" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayFailureEvent": {
+      "type": "object",
+      "required": ["session_id", "status", "error_details", "failed_at"],
+      "properties": {
+        "meta": { "$ref": "#/definitions/EventMeta" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "status": { "const": "failed" },
+        "error_details": { "type": "string" },
+        "failed_at_batch_seq": { "type": "integer" },
+        "partial_summary": { "$ref": "#/definitions/ReplaySummary" },
+        "failed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayCompletedEvent": {
+      "type": "object",
+      "required": ["session_id", "status", "total_batches", "final_summary", "completed_at"],
+      "properties": {
+        "meta": { "$ref": "#/definitions/EventMeta" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "status": { "const": "completed" },
+        "total_batches": { "type": "integer" },
+        "final_summary": { "$ref": "#/definitions/ReplaySummary" },
+        "completed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayCancelledEvent": {
+      "type": "object",
+      "required": ["session_id", "status", "reason", "cancelled_at"],
+      "properties": {
+        "meta": { "$ref": "#/definitions/EventMeta" },
+        "session_id": { "type": "string", "format": "uuid" },
+        "status": { "const": "cancelled" },
+        "reason": { "type": "string" },
+        "cancelled_at_batch_seq": { "type": "integer" },
+        "partial_summary": { "$ref": "#/definitions/ReplaySummary" },
+        "cancelled_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

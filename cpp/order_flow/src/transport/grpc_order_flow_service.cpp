@@ -1,7 +1,3 @@
-// =============================================================================
-// Реализация gRPC-обёртки. Все методы тривиально делегируют в use-case.
-// =============================================================================
-
 #include "transport/grpc_order_flow_service.hpp"
 
 namespace cex::order_flow::transport {
@@ -27,6 +23,14 @@ grpc::Status GrpcOrderFlowService::GetFlowOrder(
     const fob::orders::v1::GetFlowOrderRequest* request,
     fob::orders::v1::GetFlowOrderResponse* response) {
   *response = uc_->GetFlowOrder(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcOrderFlowService::ListFlowOrders(
+    grpc::ServerContext*,
+    const fob::orders::v1::ListFlowOrdersRequest* request,
+    fob::orders::v1::ListFlowOrdersResponse* response) {
+  *response = uc_->ListFlowOrders(*request);
   return grpc::Status::OK;
 }
 

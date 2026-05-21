@@ -1,4 +1,13 @@
-# Компонент: venues
+# Компонент: venues (runtime контейнер)
+
+> **Status:** `partial-superseded`. Этот документ описывает runtime-бинарь `cpp/venues` (исторически собирал в себе MVP-симулятор + первые версии venue-adapter'ов). В рамках ingest IN-004 (F-11) и IN-005 (F-12) логика декомпозирована на отдельные docs-компоненты:
+>
+> - [external-venues-connector](../external-venues-connector/) — низкоуровневый транспорт
+> - [venue-market-data-normalizer](../venue-market-data-normalizer/) — нормализация в `VenueSnapshot`
+> - [venue-liquidity-curve-builder](../venue-liquidity-curve-builder/) — LOB→FOB кривая
+> - [venue-execution-adapter](../venue-execution-adapter/) — execution Hedge (F-12)
+>
+> Все четыре компонента живут в одном runtime-бинаре `cpp/venues` — обоснование в [ADR-014](../../03-architecture/adr/ADR-014-venues-binary-vs-components.md). Этот overview сохранён как MVP-снимок симулятора и ссылка на runtime.
 
 Адаптеры к внешним торговым площадкам. В MVP — симулятор: генерирует синтетические тикеры в `marketdata.raw` и отвечает на `execution.intents` мгновенным "filled" в `execution.reports`.
 
@@ -37,11 +46,11 @@
 
 ## Participates In Use Cases
 
-- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md)
+- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)
 
 ## Participates In Sequence Diagrams
 
-- [SEQ-F05-UC-F05-01-services](../sequences/SEQ-F05-UC-F05-01-services.md), [SEQ-F11-UC-F11-01-services](../sequences/SEQ-F11-UC-F11-01-services.md), [SEQ-F12-UC-F12-01-services](../sequences/SEQ-F12-UC-F12-01-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md)
+- [SEQ-F05-UC-F05-01-services](../sequences/SEQ-F05-UC-F05-01-services.md), [SEQ-F11-UC-F11-01-services](../sequences/SEQ-F11-UC-F11-01-services.md), [SEQ-F12-01-auto-hedge-services](../sequences/SEQ-F12-01-auto-hedge-services.md), [SEQ-F12-02-rejection-fallback-services](../sequences/SEQ-F12-02-rejection-fallback-services.md), [SEQ-F12-03-error-scenarios-services](../sequences/SEQ-F12-03-error-scenarios-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md)
 
 ## Owned Contracts
 

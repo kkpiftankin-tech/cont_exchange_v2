@@ -1,11 +1,15 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 project(cex_contracts LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Protobuf REQUIRED)
-find_package(gRPC REQUIRED)
+find_package(Protobuf CONFIG QUIET)
+if (NOT Protobuf_FOUND)
+  find_package(Protobuf REQUIRED)
+endif()
+find_package(gRPC CONFIG QUIET)
+find_package(PkgConfig REQUIRED)
 
 set(PROTO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/proto)
 file(GLOB_RECURSE PROTO_FILES
@@ -15,8 +19,34 @@ file(GLOB_RECURSE PROTO_FILES
 set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
 file(MAKE_DIRECTORY ${GEN_DIR})
 
-set(PROTOC $<TARGET_FILE:protobuf::protoc>)
-set(GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+if (TARGET protobuf::protoc)
+  set(PROTOC $<TARGET_FILE:protobuf::protoc>)
+elseif (DEFINED Protobuf_PROTOC_EXECUTABLE)
+  set(PROTOC ${Protobuf_PROTOC_EXECUTABLE})
+else()
+  message(FATAL_ERROR "protoc executable was not found")
+endif()
+
+if (TARGET gRPC::grpc_cpp_plugin)
+  set(GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+else()
+  find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+endif()
+
+if (TARGET protobuf::libprotobuf)
+  set(PROTOBUF_LIB_TARGET protobuf::libprotobuf)
+elseif (TARGET protobuf::protobuf)
+  set(PROTOBUF_LIB_TARGET protobuf::protobuf)
+else()
+  message(FATAL_ERROR "Protobuf CMake target was not found")
+endif()
+
+if (TARGET gRPC::grpc++)
+  set(GRPC_LIB_TARGET gRPC::grpc++)
+else()
+  pkg_check_modules(GRPCPP REQUIRED IMPORTED_TARGET grpc++)
+  set(GRPC_LIB_TARGET PkgConfig::GRPCPP)
+endif()
 
 set(GENERATED_SRCS "")
 set(GENERATED_HDRS "")
@@ -61,6 +91,6 @@ target_include_directories(contracts_proto PUBLIC
 )
 
 target_link_libraries(contracts_proto PUBLIC
-  protobuf::libprotobuf
-  gRPC::grpc++
+  ${PROTOBUF_LIB_TARGET}
+  ${GRPC_LIB_TARGET}
 )

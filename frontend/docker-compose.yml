@@ -1,0 +1,39 @@
+services:
+  frontend-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: cex-frontend-api
+    environment:
+      PORT: 8090
+      BATCHES_SIMULATE: ${BATCHES_SIMULATE:-0}
+      BATCHES_SIM_WINDOW_MS: ${BATCHES_SIM_WINDOW_MS:-60000}
+      BATCHES_SIM_STEP_MS: ${BATCHES_SIM_STEP_MS:-5000}
+      MATCHING_VIEW_CACHE_TTL_MS: ${MATCHING_VIEW_CACHE_TTL_MS:-5000}
+      LEDGER_GRPC_ADDR: ${LEDGER_GRPC_ADDR:-ledger:50053}
+      VENUES_HTTP_ADDR: ${VENUES_HTTP_ADDR:-http://venues:8087}
+    ports:
+      - "8090:8090"
+    networks: [default, cex_net]
+
+  frontend-web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: cex-frontend-web
+    environment:
+      REACT_APP_API_BASE_URL: /api
+      REACT_APP_MARKET_API_BASE_URL: /api
+      REACT_APP_MATCHING_ENGINE_API_BASE_URL: /api
+      REACT_APP_API_TIMEOUT: 10000
+    depends_on:
+      frontend-api:
+        condition: service_started
+    ports:
+      - "8091:3000"
+    networks: [default]
+
+networks:
+  cex_net:
+    external: true
+    name: cex_net

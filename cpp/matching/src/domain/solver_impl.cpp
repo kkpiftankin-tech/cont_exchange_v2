@@ -163,6 +163,45 @@ double MaxPriceImprovingExternalQtyForOrder(
     return max_qty;
 }
 
+double PriceBandMaxQtyForSingleLegOrder(const FlowOrder& order,
+                                        const fob::common::v1::Side side,
+                                        const double price,
+                                        const std::chrono::milliseconds batch_interval) {
+    if (order.legs.size() != 1 || !std::isfinite(price)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double low = (double)order.p_low;
+    double high = (double)order.p_high;
+    if (!std::isfinite(low) || !std::isfinite(high)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    if (low < 0.0 && high < 0.0) {
+        low = -(double)order.p_high;
+        high = -(double)order.p_low;
+    }
+    if (low > high) {
+        std::swap(low, high);
+    }
+
+    const double width = high - low;
+    if (width <= kQtyEps) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double ratio = 1.0;
+    if (side == fob::common::v1::SIDE_BUY) {
+        ratio = (high - price) / width;
+    } else if (side == fob::common::v1::SIDE_SELL) {
+        ratio = (price - low) / width;
+    }
+    ratio = std::clamp(ratio, 0.0, 1.0);
+
+    const double max_rate = (double)order.q_rate;
+    return max_rate * ratio * batch_interval.count() / 1000.0;
+}
+
 std::string ExternalConsumedKey(const std::string& symbol,
                                 const fob::common::v1::Side side) {
     return symbol + "|" + std::to_string(static_cast<int>(side));
@@ -401,7 +440,11 @@ ContinuousClearingSolver::Init(
         d(order) = (double)cex::common::Decimal::sub(orders[order].p_high, orders[order].p_low) / (double)orders[order].q_rate;
 
         pH(order) = (double)orders[order].p_high;
-        qH(order) = std::min((double)orders[order].q_rate, (double)orders[order].remaining_qty());
+        const double interval_seconds = std::max(1e-9, cfg_.batch_interval.count() / 1000.0);
+        qH(order) = std::min(
+            (double)orders[order].q_rate,
+            (double)orders[order].remaining_qty() / interval_seconds
+        );
     }
 
     Eigen::VectorXd exchange_qH = Eigen::VectorXd::Ones(pi.size());
@@ -619,9 +662,24 @@ fob::matching::v1::BatchResult ContinuousClearingSolver::Solve(
                     break;
                 }
 
+                const double qty_for_price = consumed + std::min(
+                    remaining_target,
+                    std::max(0.0, fill->max_leg_qty - fill->actual_leg_qty)
+                );
+                const double price_for_band = ExternalPriceAtQty(
+                    curve_it->second,
+                    side,
+                    qty_for_price
+                ).value_or(fill->clear_price);
+                const double price_band_max_qty = PriceBandMaxQtyForSingleLegOrder(
+                    *fill->order,
+                    side,
+                    price_for_band,
+                    cfg_.batch_interval
+                ) * fill->weight_abs;
                 const double remaining_capacity = std::max(
                     0.0,
-                    fill->max_leg_qty - fill->actual_leg_qty
+                    std::min(fill->max_leg_qty, price_band_max_qty) - fill->actual_leg_qty
                 );
                 if (remaining_capacity <= kQtyEps) {
                     continue;

@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package fob.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+enum AgentMode {
+  AGENT_MODE_UNSPECIFIED = 0;
+  AGENT_MODE_LIVE = 1;
+  AGENT_MODE_PAPER = 2;
+  AGENT_MODE_REPLAY = 3;
+}
+
+message AgentLog {
+  // Kafka topic: agent.logs
+  fob.common.v1.EventMeta meta = 1;
+
+  string log_id = 2;
+  string agent_id = 3;
+
+  string policy_version = 4;
+  AgentMode mode = 5;
+
+  // Link to matching batch context
+  string batch_id = 10;
+
+  // Opaque blobs (json/proto bytes). For MVP keep as bytes.
+  bytes observation_blob = 20;
+  bytes action_blob = 21;
+
+  // Reward decomposition (key->value)
+  map<string, double> reward_components = 22;
+
+  bytes outcome_blob = 23;
+
+  google.protobuf.Timestamp timestamp = 30;
+}
