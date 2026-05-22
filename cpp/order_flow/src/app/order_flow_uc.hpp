@@ -1,7 +1,9 @@
 #pragma once
+#include <mutex>
 #include <unordered_map>
 
 #include "cex/common/decimal.hpp"
+#include "fob/matching/v1/batch.pb.h"
 #include "fob/orders/v1/order_flow_service.pb.h"
 
 #include "infra/risk_client.hpp"
@@ -30,13 +32,26 @@ class OrderFlowUseCases {
   fob::orders::v1::ListFlowOrdersResponse ListFlowOrders(
       const fob::orders::v1::ListFlowOrdersRequest& req);
 
+  // Consumes BatchResult events from matching service (Kafka topic
+  // `batch.outputs`) and updates the in-memory FlowOrder store so gRPC
+  // readers (gateway, UI via frontend-api) see fresh remaining_qty,
+  // filled_qty_total, and status. Idempotent: applies each (batch_id,
+  // order_id) pair at most once.
+  // Safe to call from a background Kafka consumer thread.
+  void ApplyBatchResult(const fob::matching::v1::BatchResult& batch);
+
  private:
   infra::RiskClient risk_;
   infra::LedgerClient ledger_;
   infra::OrdersKafkaPublisher publisher_;
 
   // Minimal in-memory order store for MVP/dev.
+  // orders_mu_ guards both maps; held across single-statement reads/writes only.
+  mutable std::mutex orders_mu_;
   std::unordered_map<std::string, fob::orders::v1::FlowOrder> orders_;
+
+  // Idempotency guard for ApplyBatchResult: composite key "batch_id|order_id".
+  std::unordered_map<std::string, bool> applied_fills_;
 };
 
 }  // namespace cex::order_flow::app

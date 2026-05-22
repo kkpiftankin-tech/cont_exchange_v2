@@ -4,6 +4,7 @@
 #include "cex/common/log.hpp"
 
 #include "app/order_flow_uc.hpp"
+#include "infra/batch_results_consumer.hpp"
 #include "infra/ledger_client.hpp"
 #include "infra/orders_kafka_publisher.hpp"
 #include "infra/risk_client.hpp"
@@ -31,6 +32,13 @@ int main() {
   cex::order_flow::app::OrderFlowUseCases uc(std::move(risk), std::move(ledger), std::move(publisher));
   cex::order_flow::transport::GrpcOrderFlowService svc(&uc);
 
+  // Subscribe to batch.outputs so fills from matching propagate to the
+  // in-memory FlowOrder store. Without this, gateway/UI would forever see
+  // status=new even after the order is filled in ClickHouse/ledger.
+  // See IN-007 BUG-1.
+  cex::order_flow::infra::BatchResultsConsumer batch_consumer(&uc, brokers);
+  batch_consumer.Start();
+
   grpc::ServerBuilder builder;
   builder.AddListeningPort(listen_addr, grpc::InsecureServerCredentials());
   builder.RegisterService(&svc);
@@ -38,5 +46,7 @@ int main() {
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   cex::common::log_json("INFO", "OrderFlow gRPC listening", {{"addr", listen_addr}});
   server->Wait();
+
+  batch_consumer.Stop();
   return 0;
 }

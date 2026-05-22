@@ -11,6 +11,7 @@ add_executable(order_flow
   src/infra/risk_client.cpp
   src/infra/ledger_client.cpp
   src/infra/orders_kafka_publisher.cpp
+  src/infra/batch_results_consumer.cpp
 )
 
 target_include_directories(order_flow PRIVATE

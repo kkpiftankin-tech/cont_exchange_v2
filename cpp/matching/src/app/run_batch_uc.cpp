@@ -5,11 +5,13 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
 
@@ -118,6 +120,76 @@ void BackfillFillProvenance(const domain::ExternalLiquidityBySymbol& external_li
   }
 }
 
+// Hard cap fills against per-order remaining_qty from the active orders
+// snapshot. If the solver emitted fills whose cumulative executed_qty
+// exceeds an order's remaining_qty (IN-007 BUG-2), this function truncates
+// the trailing fills so the invariant
+//     SUM(fills[order_id].executed_qty) <= snapshot.remaining_qty
+// holds. Without this guard the system effectively short-sells without
+// inventory and violates the ledger invariant from CLAUDE.md §17.
+//
+// Fills that get fully zeroed remain in the batch (executed_qty = 0) — this
+// preserves audit trail; downstream consumers should treat zero-qty fills
+// as no-ops. Notional is recomputed to match the capped quantity.
+void CapFillsAgainstRemaining(fob::matching::v1::BatchResult* batch,
+                              const std::vector<domain::FlowOrder>& snapshot) {
+  if (batch == nullptr) return;
+
+  std::unordered_map<std::string, cex::common::Decimal> remaining_by_order;
+  remaining_by_order.reserve(snapshot.size());
+  for (const auto& order : snapshot) {
+    remaining_by_order.emplace(order.order_id(),
+                               cex::common::Decimal::from_proto(order.remaining_qty()));
+  }
+
+  std::unordered_map<std::string, cex::common::Decimal> applied_by_order;
+  int capped_count = 0;
+  cex::common::Decimal total_excess = cex::common::Decimal::zero();
+
+  auto* fills = batch->mutable_fills();
+  for (int i = 0; i < fills->size(); ++i) {
+    auto& fill = (*fills)[i];
+    const auto rem_it = remaining_by_order.find(fill.order_id());
+    if (rem_it == remaining_by_order.end()) {
+      continue;
+    }
+    const auto& remaining = rem_it->second;
+    auto& applied = applied_by_order[fill.order_id()];
+    const auto qty = cex::common::Decimal::from_proto(fill.executed_qty());
+    const auto would_apply = cex::common::Decimal::add(applied, qty);
+
+    if (cex::common::Decimal::cmp(would_apply, remaining) <= 0) {
+      applied = would_apply;
+      continue;
+    }
+
+    // Excess: cap to (remaining - applied) >= 0.
+    cex::common::Decimal allowed = cex::common::Decimal::sub(remaining, applied);
+    if (allowed.units < 0) {
+      allowed = cex::common::Decimal::zero();
+    }
+    const cex::common::Decimal excess = cex::common::Decimal::sub(qty, allowed);
+    total_excess = cex::common::Decimal::add(total_excess, excess);
+
+    *fill.mutable_executed_qty() = allowed.to_proto();
+    if (fill.has_price()) {
+      const auto price = cex::common::Decimal::from_proto(fill.price());
+      const auto notional = cex::common::Decimal::mul(allowed, price);
+      *fill.mutable_executed_notional() = notional.to_proto();
+    }
+    applied = remaining;  // saturated
+    ++capped_count;
+  }
+
+  if (capped_count > 0) {
+    cex::common::log_json("WARN",
+                          "matching: capped fills to remaining_qty (BUG-2 defence)",
+                          {{"batch_id", batch->batch_id()},
+                           {"capped_fills", std::to_string(capped_count)},
+                           {"total_excess_units", std::to_string(total_excess.units)}});
+  }
+}
+
 }  // namespace
 
 RunBatchUseCase::RunBatchUseCase(domain::IContinuousClearingSolver& solver,
@@ -167,6 +239,11 @@ RunBatchResult RunBatchUseCase::Execute(
     result.status = RunBatchStatus::kFailedSolver;
     return result;
   }
+
+  // Hard cap fills before any downstream side-effects (BUG-2 / IN-007).
+  // Must run before publish_batch_, BackfillFillProvenance, and fill_delta
+  // accumulation so all consumers see the capped quantities.
+  CapFillsAgainstRemaining(&batch, snapshot);
 
   const auto solve_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - solve_started_at

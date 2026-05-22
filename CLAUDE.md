@@ -290,11 +290,23 @@ Dev topics создаются в `infra/kafka/create_topics.sh`:
 |---|---|---|---|
 | `marketdata.raw` | `venues` | `market_data`, потенциально `matching` | сырые внешние котировки / стаканы / trades |
 | `orders.normalized` | `order_flow` | `matching` | нормализованные FlowOrder commands |
-| `batch.outputs` | `matching` | `ledger`, `risk`, `observability`, UI stream | clearing result, fills, order updates |
-| `execution.intents` | `risk`/`matching`/future execution policy | `venues` | child order / hedge instruction |
-| `execution.reports` | `venues` | `ledger`, `observability` | результат внешнего исполнения |
+| `batch.outputs` | `matching` | `ledger`, `order_flow`, `market_data`, `backtest`, `risk`, `observability`, UI stream | clearing result, fills, order updates |
+| `fills` | `matching` | (no live consumer; reserved for downstream analytics) | per-fill events extracted from `batch.outputs` |
+| `venue.snapshots` | `venues` | `market_data`, `backtest` | normalized venue LOB snapshots |
+| `venue.liquidity.fob` | `venues` | `matching`, `market_data`, `backtest` | venue LOB→FOB liquidity curves (F-11) |
+| `venue.health` | `venues` | `matching`, `risk`, `observability` | venue health + routing recommendations (F-11) |
+| `execution.intents` | `risk`/`matching`/future execution policy | `venues`, `ledger` | child order / hedge instruction |
+| `execution.venue` | `venues` | `ledger`, `market_data`, `risk` | venue execution reports (canonical post-IN-005 name) |
+| `execution.reports` | `venues` (legacy mirror of `execution.venue`) | `ledger` | backwards-compatible alias kept during migration — IN-005 / ADR-pending |
+| `backtest.execution.venue` | `venues` (replay mode only) | `backtest` | F-12 backtest execution reports, isolated from live history |
 | `risk.alerts` | `risk` | `observability`, operator UI | alert stream |
 | `agent.logs` | будущие agent policies | `backtest`, `research`, `observability` | state–action–reward trail |
+
+Note on `execution.venue` vs `execution.reports`: `venues` publishes each
+ExecutionReport to BOTH topics (see `cpp/venues/src/infra/execution_report_producer.cpp`).
+`ledger` consumes both in one consumer group with idempotency on `report_id`,
+so the dual publish is safe and the legacy topic can be retired later without
+breaking running ledger instances.
 
 При добавлении нового топика обнови:
 

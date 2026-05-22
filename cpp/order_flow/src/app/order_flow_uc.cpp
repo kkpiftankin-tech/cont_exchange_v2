@@ -126,7 +126,10 @@ fob::orders::v1::CreateFlowOrderResponse OrderFlowUseCases::CreateFlowOrder(
   *stored.mutable_remaining_qty() = stored.total_qty();
   *stored.mutable_updated_at() = cex::common::now_ts();
 
-  orders_[stored.order_id()] = stored;
+  {
+    std::lock_guard<std::mutex> lock(orders_mu_);
+    orders_[stored.order_id()] = stored;
+  }
 
   // 5) Publish event to Kafka for matching engine
   fob::orders::v1::OrdersNormalized evt;
@@ -153,18 +156,25 @@ fob::orders::v1::CancelFlowOrderResponse OrderFlowUseCases::CancelFlowOrder(
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("order_flow");
 
-  auto it = orders_.find(req.order_id());
-  if (it == orders_.end()) {
-    resp.set_success(false);
-    auto* e = resp.mutable_error();
-    e->set_code("NOT_FOUND");
-    e->set_message("Order not found");
-    return resp;
-  }
+  std::string symbol_for_partition;
+  std::string user_id_for_cancel;
+  {
+    std::lock_guard<std::mutex> lock(orders_mu_);
+    auto it = orders_.find(req.order_id());
+    if (it == orders_.end()) {
+      resp.set_success(false);
+      auto* e = resp.mutable_error();
+      e->set_code("NOT_FOUND");
+      e->set_message("Order not found");
+      return resp;
+    }
 
-  // Update in-memory state
-  it->second.set_status(fob::common::v1::ORDER_STATUS_CANCELED);
-  *it->second.mutable_updated_at() = cex::common::now_ts();
+    // Update in-memory state
+    it->second.set_status(fob::common::v1::ORDER_STATUS_CANCELED);
+    *it->second.mutable_updated_at() = cex::common::now_ts();
+    symbol_for_partition = it->second.instrument().symbol();
+    user_id_for_cancel = it->second.user_id();
+  }
 
   // Publish cancel to Kafka so matching can stop it.
   fob::orders::v1::OrdersNormalized evt;
@@ -173,11 +183,11 @@ fob::orders::v1::CancelFlowOrderResponse OrderFlowUseCases::CancelFlowOrder(
   *meta->mutable_ts_event() = cex::common::now_ts();
   meta->set_source("order_flow");
   meta->set_correlation_id(req.meta().correlation_id());
-  meta->set_partition_key(it->second.instrument().symbol());
+  meta->set_partition_key(symbol_for_partition);
 
   auto* cancel = evt.mutable_cancel();
   cancel->set_order_id(req.order_id());
-  cancel->set_user_id(req.user_id().empty() ? it->second.user_id() : req.user_id());
+  cancel->set_user_id(req.user_id().empty() ? user_id_for_cancel : req.user_id());
   cancel->set_reason(req.reason());
 
   publisher_.publish(evt);
@@ -186,7 +196,7 @@ fob::orders::v1::CancelFlowOrderResponse OrderFlowUseCases::CancelFlowOrder(
   fob::ledger::v1::ReleaseFundsRequest rel;
   *rel.mutable_meta() = req.meta();
   rel.set_reservation_id(req.order_id());
-  rel.set_user_id(req.user_id().empty() ? it->second.user_id() : req.user_id());
+  rel.set_user_id(req.user_id().empty() ? user_id_for_cancel : req.user_id());
   rel.set_order_id(req.order_id());
   rel.set_reason(req.reason().empty() ? "cancel" : req.reason());
   ledger_.ReleaseFunds(rel);
@@ -201,6 +211,7 @@ fob::orders::v1::GetFlowOrderResponse OrderFlowUseCases::GetFlowOrder(
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("order_flow");
 
+  std::lock_guard<std::mutex> lock(orders_mu_);
   auto it = orders_.find(req.order_id());
   if (it == orders_.end()) {
     auto* v = resp.mutable_view();
@@ -220,27 +231,110 @@ fob::orders::v1::ListFlowOrdersResponse OrderFlowUseCases::ListFlowOrders(
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("order_flow");
 
-  std::vector<const fob::orders::v1::FlowOrder*> filtered_orders;
-  filtered_orders.reserve(orders_.size());
-  for (const auto& [order_id, order] : orders_) {
-    (void)order_id;
-    if (!req.user_id().empty() && order.user_id() != req.user_id()) {
-      continue;
+  // Snapshot copy under lock; sort/serialize without holding it.
+  std::vector<fob::orders::v1::FlowOrder> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(orders_mu_);
+    snapshot.reserve(orders_.size());
+    for (const auto& [order_id, order] : orders_) {
+      (void)order_id;
+      if (!req.user_id().empty() && order.user_id() != req.user_id()) {
+        continue;
+      }
+      snapshot.push_back(order);
     }
-    filtered_orders.push_back(&order);
   }
 
-  std::sort(filtered_orders.begin(), filtered_orders.end(),
-            [](const fob::orders::v1::FlowOrder* left,
-               const fob::orders::v1::FlowOrder* right) {
-              return timestamp_to_unix_ms(left->created_at()) >
-                     timestamp_to_unix_ms(right->created_at());
+  std::sort(snapshot.begin(), snapshot.end(),
+            [](const fob::orders::v1::FlowOrder& left,
+               const fob::orders::v1::FlowOrder& right) {
+              return timestamp_to_unix_ms(left.created_at()) >
+                     timestamp_to_unix_ms(right.created_at());
             });
 
-  for (const auto* order : filtered_orders) {
-    *resp.add_views()->mutable_order() = *order;
+  for (auto& order : snapshot) {
+    *resp.add_views()->mutable_order() = std::move(order);
   }
   return resp;
+}
+
+void OrderFlowUseCases::ApplyBatchResult(
+    const fob::matching::v1::BatchResult& batch) {
+  std::lock_guard<std::mutex> lock(orders_mu_);
+
+  int applied = 0;
+  int duplicates = 0;
+  int unknown = 0;
+
+  // 1) Apply per-order fills as decrements to remaining_qty.
+  for (const auto& fill : batch.fills()) {
+    const std::string idem_key = batch.batch_id() + "|" + fill.order_id();
+    if (applied_fills_.find(idem_key) != applied_fills_.end()) {
+      ++duplicates;
+      continue;  // already applied earlier
+    }
+
+    auto it = orders_.find(fill.order_id());
+    if (it == orders_.end()) {
+      ++unknown;
+      continue;
+    }
+
+    auto& order = it->second;
+    if (order.status() == fob::common::v1::ORDER_STATUS_CANCELED ||
+        order.status() == fob::common::v1::ORDER_STATUS_EXPIRED ||
+        order.status() == fob::common::v1::ORDER_STATUS_REJECTED) {
+      // Terminal status: don't reactivate. Still mark as applied so we don't
+      // count again on replay.
+      applied_fills_[idem_key] = true;
+      continue;
+    }
+
+    const Decimal remaining = Decimal::from_proto(order.remaining_qty());
+    const Decimal executed = Decimal::from_proto(fill.executed_qty());
+    Decimal new_remaining = Decimal::sub(remaining, executed);
+    if (new_remaining.units < 0) {
+      new_remaining.units = 0;  // hard floor — see BUG-2 (overfill defence)
+    }
+    *order.mutable_remaining_qty() = new_remaining.to_proto();
+
+    if (new_remaining.units == 0) {
+      order.set_status(fob::common::v1::ORDER_STATUS_FILLED);
+    } else {
+      order.set_status(fob::common::v1::ORDER_STATUS_PARTIALLY_FILLED);
+    }
+    *order.mutable_updated_at() = cex::common::now_ts();
+
+    applied_fills_[idem_key] = true;
+    ++applied;
+  }
+
+  // 2) Process explicit OrderStateUpdate entries: matching may send cumulative
+  // state which is authoritative. We only respect updates for orders we own
+  // and never overwrite a terminal cancellation by the user.
+  for (const auto& update : batch.order_updates()) {
+    auto it = orders_.find(update.order_id());
+    if (it == orders_.end()) continue;
+    auto& order = it->second;
+    if (order.status() == fob::common::v1::ORDER_STATUS_CANCELED) continue;
+    if (update.has_remaining_qty()) {
+      *order.mutable_remaining_qty() = update.remaining_qty();
+    }
+    if (update.status() != fob::common::v1::ORDER_STATUS_UNSPECIFIED) {
+      order.set_status(update.status());
+    }
+    *order.mutable_updated_at() = cex::common::now_ts();
+  }
+
+  if (applied > 0 || duplicates > 0 || unknown > 0) {
+    cex::common::log_json("INFO",
+                          "OrderFlow applied batch result",
+                          {{"batch_id", batch.batch_id()},
+                           {"fills_applied", std::to_string(applied)},
+                           {"fills_duplicate", std::to_string(duplicates)},
+                           {"fills_unknown_order", std::to_string(unknown)},
+                           {"order_updates", std::to_string(batch.order_updates_size())}});
+  }
 }
 
 }  // namespace cex::order_flow::app

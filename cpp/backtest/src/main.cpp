@@ -44,10 +44,15 @@ int main() {
   cex::backtest::infra::ClickHouseConfig ch_cfg;
   ch_cfg.url = cex::common::Env::get_string("BACKTEST_CLICKHOUSE_URL", "http://clickhouse:8123");
   ch_cfg.database = cex::common::Env::get_string("BACKTEST_CLICKHOUSE_DB", "default");
+  // IN-007 BUG-2 part 2: backtest must NOT write to live `batchresults` /
+  // `fills` tables. Previously default = "batchresults"/"fills" caused
+  // market_data + backtest to double-insert every live batch (2 rows in
+  // `fills` per batch). Backtest now writes to its own namespace; replay
+  // / quality-check consumers should read from these tables explicitly.
   ch_cfg.batchresults_table =
-      cex::common::Env::get_string("BACKTEST_CLICKHOUSE_BATCHRESULTS_TABLE", "batchresults");
+      cex::common::Env::get_string("BACKTEST_CLICKHOUSE_BATCHRESULTS_TABLE", "backtest_batchresults");
   ch_cfg.fills_table =
-      cex::common::Env::get_string("BACKTEST_CLICKHOUSE_FILLS_TABLE", "fills");
+      cex::common::Env::get_string("BACKTEST_CLICKHOUSE_FILLS_TABLE", "backtest_fills");
   ch_cfg.replay_agentlogs_table = cex::common::Env::get_string(
       "BACKTEST_CLICKHOUSE_REPLAY_AGENTLOGS_TABLE", "replay_agentlogs");
   ch_cfg.replay_agentlogs_retention_days = std::max(
