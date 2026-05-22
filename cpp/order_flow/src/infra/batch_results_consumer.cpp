@@ -3,6 +3,7 @@
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
 #include "fob/matching/v1/batch.pb.h"
+#include "fob/matching/v1/batch_outputs.pb.h"
 
 namespace cex::order_flow::infra {
 
@@ -61,10 +62,17 @@ void BatchResultsConsumer::Loop() {
                const std::string& payload) {
           (void)key;
           if (topic != kTopic) return;
+          // Matching publishes a BatchOutputs envelope to `batch.outputs`
+          // (cpp/matching/src/infra/kafka/batch_outputs_producer.cpp).
+          // Try the envelope first, fall back to a raw BatchResult for
+          // backward compatibility with older publishers.
           fob::matching::v1::BatchResult batch;
-          if (!cex::common::from_bytes(payload, batch)) {
+          fob::matching::v1::BatchOutputs envelope;
+          if (cex::common::from_bytes(payload, envelope)) {
+            batch = envelope.result();
+          } else if (!cex::common::from_bytes(payload, batch)) {
             cex::common::log_json("ERROR",
-                                  "OrderFlow failed to parse BatchResult");
+                                  "OrderFlow failed to parse batch.outputs payload");
             return;
           }
           if (uc_ != nullptr) {
