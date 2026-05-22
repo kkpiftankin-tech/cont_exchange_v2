@@ -138,8 +138,13 @@ void CapFillsAgainstRemaining(fob::matching::v1::BatchResult* batch,
   std::unordered_map<std::string, cex::common::Decimal> remaining_by_order;
   remaining_by_order.reserve(snapshot.size());
   for (const auto& order : snapshot) {
-    remaining_by_order.emplace(order.order_id(),
-                               cex::common::Decimal::from_proto(order.remaining_qty()));
+    // domain::FlowOrder is a plain C++ struct: fields, not methods.
+    // Remaining is computed as q_max - filled_cum (both already
+    // cex::common::Decimal — no from_proto conversion needed).
+    cex::common::Decimal remaining =
+        cex::common::Decimal::sub(order.q_max, order.filled_cum);
+    if (remaining.units < 0) remaining = cex::common::Decimal::zero();
+    remaining_by_order.emplace(order.order_id, remaining);
   }
 
   std::unordered_map<std::string, cex::common::Decimal> applied_by_order;
