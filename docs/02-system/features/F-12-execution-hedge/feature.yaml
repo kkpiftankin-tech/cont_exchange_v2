@@ -166,7 +166,33 @@ knownIssues:
       опирается на старое имя `execution.reports`. Источник истины IN-005:
       `execution.venue`. Старый топик остаётся для обратной совместимости
       на период миграции.
-    location: infra/kafka/create_topics.sh#L60-L61
+
+      Runtime confirmation (IN-007, 2026-05-22): cpp/venues публикует в
+      топик `execution.venue` (поле `topic` в JSON-логе "Produced
+      execution report"). CLAUDE.md §7.3 всё ещё перечисляет только
+      `execution.reports`. Требуется либо обновить CLAUDE.md, либо
+      ADR-015 «execution.venue заменяет execution.reports».
+    location: infra/kafka/create_topics.sh#L60-L61, CLAUDE.md §7.3
+    target_pr: PR-C (см. IN-007.meta.md)
+  - id: ledger-not-consuming-execution-venue-events
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      cpp/venues публикует 70 execution reports в `execution.venue` за
+      ~3 минуты теста (order 89b0a0aa-...), при этом в `docker logs
+      infra-ledger-1` за тот же период ноль строк о consumption этого
+      топика. Hedge balances в PostgreSQL не обновляются → любой
+      auto-hedge сценарий из F-12-01 / F-12-05 молчаливо ломается.
+
+      Возможные причины: (1) ledger подписан только на старый
+      `execution.reports` (без producer), (2) consumer для
+      `execution.venue` есть, но handler ApplyExecutionReport не
+      логирует. Нужно явно подтвердить и закрыть.
+
+      Связано с issue execution-reports-topic-name-mismatch
+      (топик-naming) и hedge-pnl-not-implemented (бизнес-логика).
+    location: cpp/ledger/src/main.cpp, cpp/ledger/src/app/ledger_uc.cpp
+    target_pr: PR-C+ (см. IN-007.meta.md)
   - id: venue-id-vs-venue-symbol-mapping
     severity: feature-gap
     description: >

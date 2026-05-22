@@ -116,6 +116,44 @@ knownIssues:
     severity: critical
     description: ReleaseFunds при cancel после partial fill снимает оригинальную сумму
     location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
+  - id: order-flow-not-subscribed-to-batch-outputs
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      Service order_flow не подписан на Kafka топик `batch.outputs` и не
+      получает уведомлений о fills. В результате `flow_orders.filled_cum`,
+      `flow_orders.remaining_qty` и `flow_orders.status` НИКОГДА не
+      обновляются после изначального INSERT. Gateway/UI бесконечно видят
+      исполненную заявку как `status: "new"`, progress 0%.
+
+      Воспроизведено: order 89b0a0aa-... (1 BTC) → ClickHouse `fills`
+      содержит 70 записей с SUM(executed_qty)=2.000002 → gateway
+      возвращает `remaining_qty: 1, status: "new"`.
+
+      Решение: подписать order_flow на batch.outputs и обновлять
+      flow_orders idempotently (recommended), либо ledger должен делать
+      обратный gRPC call в order_flow после успешного ApplyBatchResult.
+    location: cpp/order_flow/src/main.cpp (no Kafka consumer for batch.outputs)
+    target_pr: PR-A (см. IN-007.meta.md)
+  - id: matching-overfill-no-hard-cap
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      Solver продолжает генерировать fills после того, как
+      SUM(executed_qty per order) превысила `total_qty`. Воспроизведено:
+      order 1 BTC → SUM(executed_qty в ClickHouse) = 2.000002 BTC.
+      В проде это эквивалент short-sale без обеспечения.
+
+      Возможные источники: (1) RunBatchUseCase::Execute не проверяет
+      hard cap по remaining_qty перед publish_batch, (2) observability
+      consumer пишет дубликаты в `fills`. Соотношение 70 fills /
+      ~34 batch ticks (171 сек / 5 сек) намекает на оба компонента.
+
+      Нарушает Ledger invariant из CLAUDE.md §17 "не применять fill
+      дважды" и неявный domain invariant
+      `SUM(fills[order_id]) <= flow_orders.total_qty`.
+    location: cpp/matching/src/app/run_batch_uc.cpp, cpp/observability/
+    target_pr: PR-B (см. IN-007.meta.md)
 
 tests:
   unit:
