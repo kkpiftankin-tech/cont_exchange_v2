@@ -1,5 +1,6 @@
 services:
   frontend-api:
+    restart: unless-stopped
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -17,9 +18,11 @@ services:
     networks: [default, cex_net]
 
   frontend-web:
+    restart: unless-stopped
     build:
       context: ./web
       dockerfile: Dockerfile
+      network: host
     container_name: cex-frontend-web
     environment:
       REACT_APP_API_BASE_URL: /api

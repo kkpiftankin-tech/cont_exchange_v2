@@ -1,5 +1,6 @@
 services:
   clickhouse:
+    restart: unless-stopped
     image: clickhouse/clickhouse-server:24.8
     environment:
       CLICKHOUSE_SKIP_USER_SETUP: "1"
@@ -13,6 +14,7 @@ services:
       retries: 20
 
   postgres:
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: cex
@@ -27,6 +29,7 @@ services:
       retries: 20
 
   redpanda:
+    restart: unless-stopped
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
     command:
       - redpanda
@@ -75,6 +78,7 @@ services:
       P: 3
 
   redpanda-console:
+    restart: unless-stopped
     image: docker.redpanda.com/redpandadata/console:v2.7.2
     depends_on:
       redpanda:
@@ -94,6 +98,7 @@ services:
 
   # --- Core services ---
   risk:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -106,6 +111,7 @@ services:
         condition: service_completed_successfully
 
   ledger:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -120,6 +126,7 @@ services:
         condition: service_completed_successfully
 
   order_flow:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -134,6 +141,7 @@ services:
         condition: service_started
 
   matching:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -148,6 +156,7 @@ services:
         condition: service_completed_successfully
 
   venues:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -169,6 +178,7 @@ services:
         condition: service_completed_successfully
 
   venue_health:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -179,6 +189,7 @@ services:
         condition: service_completed_successfully
 
   market_data:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -195,6 +206,7 @@ services:
         condition: service_completed_successfully
 
   backtest:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -213,6 +225,7 @@ services:
       - "8087:8087"
 
   observability:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -225,6 +238,7 @@ services:
         condition: service_completed_successfully
 
   gateway:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
@@ -241,6 +255,7 @@ services:
       - "8088:8080"
 
   prometheus:
+    restart: unless-stopped
     image: prom/prometheus:v2.54.1
     depends_on:
       matching:
