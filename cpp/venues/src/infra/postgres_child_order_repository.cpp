@@ -154,12 +154,21 @@ bool PostgresChildOrderRepository::InsertPending(
   try {
     pqxx::connection connection(connection_string_);
     pqxx::work tx(connection);
+    // See hedgeflow_repository: pqxx version lacks std::optional helpers,
+    // use NULLIF($N, '')::NUMERIC for nullable Decimal.
+    const std::string price_str =
+        intent.has_limit_price() ? DecimalToString(intent.limit_price())
+                                 : std::string{};
     tx.exec_params(
         R"SQL(
 INSERT INTO child_orders (
   child_order_id, hedge_flow_id, venue_id, symbol, side, order_type,
   qty, price, tif, client_order_id, status
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING')
+) VALUES (
+  $1, $2, $3, $4, $5, $6,
+  $7::NUMERIC,
+  NULLIF($8, '')::NUMERIC,
+  $9, $10, 'PENDING')
 ON CONFLICT (child_order_id) DO NOTHING
 )SQL",
         DeriveChildOrderId(intent),
@@ -170,9 +179,7 @@ ON CONFLICT (child_order_id) DO NOTHING
         SideToText(intent.side()),
         StrategyToOrderType(intent.strategy()),
         DecimalToString(intent.target_qty()),
-        intent.has_limit_price()
-            ? std::optional<std::string>{DecimalToString(intent.limit_price())}
-            : std::optional<std::string>{},
+        price_str,
         TifToText(intent.tif()),
         intent.client_order_id());
     tx.commit();

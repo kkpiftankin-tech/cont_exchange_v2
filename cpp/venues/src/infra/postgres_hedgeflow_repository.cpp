@@ -148,29 +148,41 @@ bool PostgresHedgeflowRepository::InsertOpen(
   try {
     pqxx::connection connection(connection_string_);
     pqxx::work tx(connection);
+    // pqxx of this build does not link std::optional<string> conversion
+    // helpers (undefined ref to source_location ctor). Use empty-string →
+    // NULL via NULLIF($N, '') and NULLIF($N::numeric, 'NaN') tricks
+    // instead of nullable parameters.
+    const std::string target_notional_str =
+        intent.has_target_notional() ? DecimalToString(intent.target_notional())
+                                     : std::string{};
+    const std::string reference_mid_str =
+        intent.has_reference_mid() ? DecimalToString(intent.reference_mid())
+                                   : std::string{};
     tx.exec_params(
         R"SQL(
 INSERT INTO hedgeflows (
   hedge_flow_id, intent_id, batch_id, provider_id,
   symbol, side, target_qty, target_notional, reference_mid,
   urgency, timeout_ms, status
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'OPEN')
+) VALUES (
+  $1, $2,
+  NULLIF($3, ''),
+  $4, $5, $6,
+  $7::NUMERIC,
+  NULLIF($8, '')::NUMERIC,
+  NULLIF($9, '')::NUMERIC,
+  $10, $11, 'OPEN')
 ON CONFLICT (hedge_flow_id) DO NOTHING
 )SQL",
         intent.hedge_flow_id(),
         intent.intent_id(),
-        intent.batch_id().empty() ? std::optional<std::string>{}
-                                  : std::optional<std::string>{intent.batch_id()},
+        intent.batch_id(),
         intent.provider_id(),
         intent.instrument().symbol(),
         SideToText(intent.side()),
         DecimalToString(intent.target_qty()),
-        intent.has_target_notional()
-            ? std::optional<std::string>{DecimalToString(intent.target_notional())}
-            : std::optional<std::string>{},
-        intent.has_reference_mid()
-            ? std::optional<std::string>{DecimalToString(intent.reference_mid())}
-            : std::optional<std::string>{},
+        target_notional_str,
+        reference_mid_str,
         UrgencyToText(intent.urgency()),
         intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000);
     tx.commit();
