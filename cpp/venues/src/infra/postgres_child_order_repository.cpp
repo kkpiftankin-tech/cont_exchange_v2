@@ -38,12 +38,12 @@ std::string StrategyToOrderType(fob::execution::v1::ExecutionStrategy s) {
 
 std::string TifToText(fob::common::v1::TimeInForce tif) {
   switch (tif) {
-    case fob::common::v1::TIME_IN_FORCE_IOC:
+    case fob::common::v1::TIF_IOC:
       return "IOC";
-    case fob::common::v1::TIME_IN_FORCE_FOK:
+    case fob::common::v1::TIF_FOK:
       return "FOK";
-    case fob::common::v1::TIME_IN_FORCE_GTC:
-    case fob::common::v1::TIME_IN_FORCE_UNSPECIFIED:
+    case fob::common::v1::TIF_GTC:
+    case fob::common::v1::TIF_UNSPECIFIED:
     default:
       return "GTC";
   }
