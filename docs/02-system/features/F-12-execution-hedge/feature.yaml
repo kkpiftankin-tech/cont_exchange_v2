@@ -107,6 +107,223 @@ acceptanceCriteria:
   - "F12-11: HedgePnL рассчитывается Settlement Ledger по формуле (avgFillPrice vs referenceMid) и доступен в UI через REST GET /api/v1/hedge/flows/{id}."
   - "F12-12: Rejection fallback: при ExecutionReport(REJECTED) Execution Planning исключает venue и формирует новый routing plan на оставшиеся."
 
+# Definition of Done — 18-item checklist из IN-008 (v2 spec, §6).
+# Используется как Jira-чек-лист при закрытии feature F-12.
+# Каждый пункт ссылается на artifact / код / тест, демонстрирующий завершённость.
+definitionOfDone:
+  - id: DoD-1
+    status: partial
+    title: ExecutionIntent публикуется в Kafka execution.intents
+    description: >
+      Producer matching/risk/manual override; payload содержит все обязательные
+      поля (hedgeFlowId, batchId, providerId, symbol, side, targetQty,
+      referenceMid, urgency, timeoutMs, allowedVenues).
+    evidence: cpp/matching/src/app/hedge_execution_intents_publisher.cpp
+    blocked_by_ac: [F12-1, F12-2]
+  - id: DoD-2
+    status: partial
+    title: Execution Planning Forecast потребляет execution.intents + venue.liquidity.fob + venue.health
+    description: >
+      Строит routing-план (qty split по venues, urgency, fallback list),
+      передаёт в Venue Execution Adapter.
+    evidence: cpp/matching/src/app/execution_planning_uc.hpp (интерфейс есть, реализация partial)
+    blocked_by_ac: [F12-3]
+  - id: DoD-3
+    status: not-implemented
+    title: Pre-hedge risk check (RPC RiskService.PreHedgeCheck)
+    description: >
+      Проверки maxNotionalPerHedge, hedgeExposureLimit, expectedSlippage;
+      при fail publish risk.alerts{type=HEDGE_RISK_REJECT}.
+    evidence: contracts/proto/fob/risk/v1/risk.proto (no PreHedgeCheck method)
+    blocked_by_ac: [F12-8]
+    blocked_by_issue: no-pre-hedge-rpc
+  - id: DoD-4
+    status: partial
+    title: Venue Execution Adapter создаёт HedgeFlow + child_orders в PostgreSQL
+    description: >
+      INSERT в hedgeflows (status=OPEN), маппит routing-план в child_orders,
+      вызывает External Venues Connector с clientOrderId=hedgeFlowId_seq.
+    evidence: cpp/venues/src/app/execute_on_venue.cpp (logic есть, persistence отсутствует)
+    blocked_by_issue: no-hedgeflows-postgres-schema
+  - id: DoD-5
+    status: implemented
+    title: ExecutionReport публикуется в Kafka execution.venue
+    description: >
+      Producer ExecutionReportProducer (cpp/venues/src/infra/execution_report_producer.cpp);
+      зеркалирование в execution.reports для backward compatibility.
+    evidence: IN-007 runtime confirmation (2026-05-22, 70 reports за 3 мин)
+    blocked_by_ac: [F12-6]
+  - id: DoD-6
+    status: partial
+    title: Settlement Ledger потребляет execution.venue и обновляет positions/balances/HedgePnL
+    description: >
+      Consumer уже подписан на оба топика с идемпотентностью по report_id.
+      HedgePnL расчёт по формуле (avgFillPrice - referenceMid) * filledQty - fee
+      ещё не имплементирован.
+    evidence: cpp/ledger/src/infra/kafka_consumers.cpp (consume OK), cpp/ledger/src/app/ledger_uc.cpp (PnL = log only)
+    blocked_by_issue: hedge-pnl-not-computed
+  - id: DoD-7
+    status: not-implemented
+    title: ClickHouse table execution_reports с retention >= 90 дней
+    description: >
+      Поля для PnL/slippage/latency analytics, разрезы по venue/symbol/время.
+    evidence: infra/clickhouse/init.sql (table missing)
+    blocked_by_issue: no-execution-reports-clickhouse
+  - id: DoD-8
+    status: not-implemented
+    title: PostgreSQL OLTP tables hedgeflows / child_orders / execution_reports_raw с индексами
+    description: >
+      Индексы по hedgeFlowId, providerId, symbol, status для SLA UI/services.
+    evidence: infra/postgres/init.sql (tables missing)
+    blocked_by_issue: no-hedgeflows-postgres-schema
+  - id: DoD-9
+    status: not-implemented
+    title: Unit-тесты Venue Execution Adapter U1-U10
+    description: >
+      Happy path, partial+retry, overfill guard, rejection+fallback,
+      timeout→UNDERFILLED, urgency→orderType mapping, reconciliation gap,
+      clientOrderId idempotency, multi-venue split, pre-hedge risk reject.
+    evidence: cpp/venues/tests/execute_on_venue_test.cpp (только базовый smoke)
+  - id: DoD-10
+    status: not-implemented
+    title: Integration-тесты IT-1..IT-4 (E2E через docker compose)
+    description: >
+      Полный цикл ExecutionIntent → ExecutionReport → Ledger; partial fill+retry;
+      rejection+fallback; timeout+UNDERFILLED+risk alert.
+    evidence: cpp/venues/tests/integration/ (отсутствует)
+  - id: DoD-11
+    status: not-implemented
+    title: SLA-тест IT-5 latency p95 <= 100 ms (CEX)
+    description: >
+      50 ExecutionIntent burst, измеренная задержка от publish до первого
+      PlaceChildOrder; p50<=50ms, p95<=100ms, p99<=200ms, max<=500ms.
+    evidence: нет latency-test
+    blocked_by_ac: [F12-10]
+  - id: DoD-12
+    status: not-implemented
+    title: Нагрузочный тест IT-6 throughput >= 50 HedgeFlow/sec
+    description: >
+      60 сек × 50 intents/sec = 3000 hedges; assertion: fill rate >= 95%,
+      Kafka consumer lag 0, ClickHouse записей = 3000 ± δ.
+    evidence: нет load-test
+  - id: DoD-13
+    status: not-implemented
+    title: Backtest parity тест IT-7 (production vs Backtest Replay Engine)
+    description: >
+      Одинаковый input (100 intents + recorded VenueSim events) → identical
+      filledQty/avgPrice/status в обоих прогонах. Determinism check.
+    evidence: cpp/venues/tests/backtest_parity_check_test.cpp (smoke есть, full parity нет)
+    blocked_by_ac: [F12-9]
+  - id: DoD-14
+    status: not-implemented
+    title: Admin UI HedgeFlow Monitor
+    description: >
+      Список HedgeFlow с filter по symbol/batchId/provider/status/period,
+      drill-down (Overview + Child Orders + Execution Timeline tabs),
+      экспорт CSV. См. uxScreens.hedge_flow_monitor.
+    evidence: frontend/web/src/pages/ (страница отсутствует)
+  - id: DoD-15
+    status: not-implemented
+    title: Admin UI Execution Live Feed + Hedge PnL Dashboard + Reconciliation Alerts + Manual Override + Policy Config
+    description: >
+      Остальные 5 экранов из uxScreens. Manual Override создаёт ExecutionIntent
+      через POST /api/v1/execution-intents (origin=MANUAL).
+    evidence: frontend/web/src/pages/ (все 5 страниц отсутствуют)
+  - id: DoD-16
+    status: not-implemented
+    title: Observability — Prometheus metrics + Grafana dashboard
+    description: >
+      Метрики f12_hedge_intent_total, f12_hedge_latency_ms, f12_slippage_bps,
+      f12_underfill_total, f12_venue_circuit_state. Grafana dashboard
+      F-12-execution-hedge.json. Алерты HEDGE_UNDERFILLED, SLIPPAGE_EXCEEDED,
+      LATENCY_SLA_BREACH.
+    evidence: нет F-12-специфичных метрик
+  - id: DoD-17
+    status: not-implemented
+    title: Operations runbook docs/11-operations/runbooks/F-12-incidents.md
+    description: >
+      Диагностические сценарии: повышенный slippage, массовые UNDERFILLED,
+      падение venue (circuit breaker), SLA-нарушение latency. Decision tree
+      для on-call (change config, disable venue, manual override).
+    evidence: docs/11-operations/runbooks/ (нет F-12-incidents.md)
+  - id: DoD-18
+    status: partial
+    title: Архитектурная документация синхронна с реализацией
+    description: >
+      Sequence diagrams (SEQ-F12-01..03), контракты Kafka/REST/gRPC,
+      схемы PG/CH, cross-links к F-04/F-06/F-11/F-15 актуальны и согласованы
+      с фактическим кодом cpp/venues + cpp/matching + cpp/ledger + frontend.
+    evidence: docs/05-components/sequences/SEQ-F12-* (есть), docs/06-api/* (partial), docs/07-data/* (partial)
+
+# UX Screens из IN-008 (v2 spec, §2.5).
+# Каждый экран — отдельная React-страница, потребляющая один или несколько
+# REST endpoints. Layout mockups: см. §2.5.1..2.5.6 в чат-источнике.
+uxScreens:
+  - id: hedge_flow_monitor
+    title: HedgeFlow Monitor
+    route: /hedge/flows
+    purpose: >
+      Operations dashboard со списком HedgeFlow (target/filled/status/PnL),
+      filter по symbol/batchId/provider/status/period, drill-down в детали
+      одного HedgeFlow (3 tabs: Overview, Child Orders, Execution Timeline).
+    primary_data_source: PostgreSQL hedgeflows + child_orders + ClickHouse execution_reports
+    api_endpoints:
+      - GET /api/v1/hedge/flows (list, filter)
+      - GET /api/v1/hedge/flows/{id} (detail)
+      - GET /api/v1/hedge/flows/{id}/child-orders
+      - GET /api/v1/hedge/flows/{id}/execution-timeline
+  - id: execution_live_feed
+    title: Execution Live Feed
+    route: /execution/live
+    purpose: >
+      Real-time stream ExecutionReport (table + ticker view) с filter
+      по symbol/venue/side/status. Быстрые фильтры (slippage>10bps, fee<1.0).
+    primary_data_source: Kafka execution.venue (SSE) + ClickHouse history fallback
+    api_endpoints:
+      - GET /api/v1/execution/live (SSE stream)
+  - id: hedge_pnl_dashboard
+    title: Hedge PnL Dashboard
+    route: /hedge/pnl
+    purpose: >
+      Аналитика hedge PnL: KPI cards (total PnL, avg slippage bps, fill ratio,
+      underfilled share), графики (PnL over time, clearingPrice vs avgFillPrice
+      scatter, slippage histogram), таблица HedgeFlow с PnL по выбранному фильтру.
+    primary_data_source: ClickHouse execution_reports + batchresults (cross-join по batchId)
+    api_endpoints:
+      - GET /api/v1/hedge/pnl?from=&to=&symbol=&venue=&provider=
+  - id: reconciliation_alerts
+    title: Reconciliation Alerts
+    route: /hedge/reconciliation-alerts
+    purpose: >
+      Incident management: UNDERFILLED / REJECTED HedgeFlow с gap, decision tree
+      ("отметить обработанным", "create manual override", "export для ticket").
+    primary_data_source: PostgreSQL hedgeflows.status IN ('UNDERFILLED','REJECTED') + risk.alerts
+    api_endpoints:
+      - GET /api/v1/hedge/reconciliation-alerts
+      - POST /api/v1/hedge/reconciliation-alerts/{id}/acknowledge
+  - id: manual_override
+    title: Manual Override (create ExecutionIntent)
+    route: /hedge/manual-override
+    purpose: >
+      Operator form для создания ExecutionIntent вручную с валидацией лимитов
+      и preview ожидаемого slippage. origin=MANUAL для audit trail.
+    primary_data_source: solverconfig (limits preview) + Risk Manager (preview check)
+    api_endpoints:
+      - POST /api/v1/execution-intents (origin=MANUAL)
+      - GET /api/v1/risk/preview-limits?notional=&urgency=
+  - id: policy_config
+    title: Policy Config (solverconfig F-12 section)
+    route: /hedge/policy-config
+    purpose: >
+      Настройка Hedge Urgency Policy (LOW/MED/HIGH профили: orderTypes,
+      maxSlippageBps, defaultTimeoutMs), Hedge Trigger Threshold (per symbol +
+      notional), Venue-specific overrides, аудит изменений.
+    primary_data_source: PostgreSQL solver_config + audit log
+    api_endpoints:
+      - GET /api/v1/policy-config/f12
+      - PUT /api/v1/policy-config/f12 (требует подтверждения)
+      - GET /api/v1/policy-config/f12/audit
+
 knownIssues:
   - id: no-venue-execution-adapter-service
     severity: feature-gap

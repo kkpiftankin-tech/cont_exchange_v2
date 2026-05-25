@@ -12,7 +12,8 @@
 - Data: [hedgeflows](../07-data/hedgeflows.md), [child_orders](../07-data/child-orders.md), [execution_reports](../07-data/execution-reports.md)
 - Business rules: [04-domain/business-rules.md → F-12](../04-domain/business-rules.md#f-12-execution-hedge)
 - Test plan: [10-testing/features/F-12-test-plan.md](../10-testing/features/F-12-test-plan.md)
-- Source: IN-005 [`incoming-docs/2026-05-20-F-12-execution-hedge-v1.md`](../../incoming-docs/2026-05-20-F-12-execution-hedge-v1.md)
+- Source v1: IN-005 [`incoming-docs/2026-05-20-F-12-execution-hedge-v1.md`](../../incoming-docs/2026-05-20-F-12-execution-hedge-v1.md) (superseded by IN-008)
+- Source v2: IN-008 [`incoming-docs/IN-008.meta.md`](../../incoming-docs/IN-008.meta.md) — добавил 18-item Definition of Done и 6 UX экранов; см. `feature.yaml#definitionOfDone` + `feature.yaml#uxScreens`
 
 ## Preconditions (docs-as-code gate)
 
