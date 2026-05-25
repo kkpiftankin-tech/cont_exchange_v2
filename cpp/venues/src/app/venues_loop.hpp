@@ -18,6 +18,8 @@
 #include "domain/venue_adapter.hpp"
 #include "infra/execution_report_producer.hpp"
 #include "infra/kafka_message_publisher.hpp"
+#include "infra/postgres_child_order_repository.hpp"
+#include "infra/postgres_hedgeflow_repository.hpp"
 #include "infra/postgres_synthetic_order_repository.hpp"
 #include "infra/venue_observability_producer.hpp"
 
@@ -88,6 +90,17 @@ class VenuesLoop {
   std::vector<fob::orders::v1::SyntheticFlowOrder> GetVenueSynthetics(
       const std::string& venue_id, std::size_t limit) const;
 
+  // F-12 / IN-008 DoD-4 — externally owned PG repos for hedgeflows and
+  // child_orders. Pointers may be null (degrades to "no-persistence" path
+  // — VenuesLoop continues to publish to Kafka and PG simply doesn't
+  // reflect HedgeFlow state).
+  void SetHedgeflowRepository(infra::PostgresHedgeflowRepository* repo) {
+    hedgeflow_repo_ = repo;
+  }
+  void SetChildOrderRepository(infra::PostgresChildOrderRepository* repo) {
+    child_order_repo_ = repo;
+  }
+
  private:
   void md_publish_loop();
   void exec_consume_loop();
@@ -104,6 +117,9 @@ class VenuesLoop {
   std::unique_ptr<infra::ExecutionReportProducer> execution_report_producer_;
   std::unique_ptr<infra::KafkaMessagePublisher> kafka_publisher_;
   std::unique_ptr<infra::PostgresSyntheticOrderRepository> synthetic_order_repository_;
+  // F-12 / IN-008 DoD-4 — non-owning pointers (lifetime managed by main.cpp).
+  infra::PostgresHedgeflowRepository* hedgeflow_repo_{nullptr};
+  infra::PostgresChildOrderRepository* child_order_repo_{nullptr};
   std::vector<std::unique_ptr<domain::VenueAdapter>> adapters_;
   std::unique_ptr<SnapshotProducer> snapshot_producer_;
   std::unique_ptr<LiquidityCurveProducer> liquidity_curve_producer_;

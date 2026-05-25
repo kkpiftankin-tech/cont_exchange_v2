@@ -3,6 +3,8 @@
 #include "cex/common/decimal.hpp"
 
 #include "app/venues_loop.hpp"
+#include "infra/postgres_child_order_repository.hpp"
+#include "infra/postgres_hedgeflow_repository.hpp"
 #include "infra/postgres_venue_config_repository.hpp"
 #include "infra/snapshot_clickhouse_writer.hpp"
 #include "crow.h"
@@ -81,6 +83,35 @@ int main() {
       cex::common::log_json("INFO", "Loaded venue_config rows",
                             {{"count", std::to_string(rows.size())}});
     }
+  }
+
+  // F-12 / IN-008 DoD-4 (PR-F12-3a): wire HedgeFlow and ChildOrder PG
+  // repositories. Both share the VENUES_POSTGRES_DSN connection string —
+  // they own their own short-lived pqxx::connection per transaction so
+  // there's no shared mutable state. nullptr is a valid state (no PG
+  // configured) and the loop continues to publish to Kafka without DB
+  // side-effects.
+  std::unique_ptr<cex::venues::infra::PostgresHedgeflowRepository> hedgeflow_repo;
+  std::unique_ptr<cex::venues::infra::PostgresChildOrderRepository> child_order_repo;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    hedgeflow_repo =
+        std::make_unique<cex::venues::infra::PostgresHedgeflowRepository>(
+            *venues_postgres_dsn);
+    if (!hedgeflow_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure hedgeflows schema");
+    }
+    child_order_repo =
+        std::make_unique<cex::venues::infra::PostgresChildOrderRepository>(
+            *venues_postgres_dsn);
+    if (!child_order_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure child_orders schema");
+    }
+    loop.SetHedgeflowRepository(hedgeflow_repo.get());
+    loop.SetChildOrderRepository(child_order_repo.get());
+    cex::common::log_json("INFO",
+                          "F-12 PG repositories attached",
+                          {{"hedgeflow_repo", "ready"},
+                           {"child_order_repo", "ready"}});
   }
 
   const auto admin_port = static_cast<uint16_t>(

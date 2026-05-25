@@ -1573,6 +1573,16 @@ void VenuesLoop::exec_consume_loop() {
           "inbound",
           intent.intent_id());
 
+      // F-12 / IN-008 DoD-4 (PR-F12-3a): persist HedgeFlow + ChildOrder
+      // BEFORE execution starts so PG reflects what venues is about to do
+      // even if the adapter call hangs. Idempotent (ON CONFLICT DO NOTHING).
+      if (hedgeflow_repo_ != nullptr) {
+        (void)hedgeflow_repo_->InsertOpen(intent);
+      }
+      if (child_order_repo_ != nullptr) {
+        (void)child_order_repo_->InsertPending(intent);
+      }
+
       fob::execution::v1::ExecutionReport rep;
       try {
         rep = execute_on_venue_.Run(intent, find_adapter(intent.venue()));
@@ -1614,6 +1624,17 @@ void VenuesLoop::exec_consume_loop() {
         if (execution_report_producer_ != nullptr) {
           (void)execution_report_producer_->Publish(out);
         }
+
+        // F-12 / IN-008 DoD-4 (PR-F12-3a): apply terminal state to PG.
+        // Order matters: child_orders FIRST (per-row update), then
+        // hedgeflows (aggregate accumulator + status promotion).
+        if (child_order_repo_ != nullptr) {
+          (void)child_order_repo_->ApplyReport(out);
+        }
+        if (hedgeflow_repo_ != nullptr) {
+          (void)hedgeflow_repo_->ApplyReport(out);
+        }
+
         (void)observability_.PublishTraffic(
             out.venue(),
             "execution.venue",

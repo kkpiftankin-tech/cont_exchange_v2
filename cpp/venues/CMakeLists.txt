@@ -46,6 +46,8 @@ add_executable(venues
   src/infra/postgres_synthetic_order_repository.cpp
   src/infra/execution_intents_consumer.cpp
   src/infra/postgres_venue_config_repository.cpp
+  src/infra/postgres_hedgeflow_repository.cpp
+  src/infra/postgres_child_order_repository.cpp
   src/domain/depth_canonicalizer.cpp
   src/domain/depth_curve_builder.cpp
   src/domain/normalize_snapshot.cpp
