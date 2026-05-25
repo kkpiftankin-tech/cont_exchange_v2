@@ -74,18 +74,13 @@ std::string DecimalToString(const fob::common::v1::Decimal& d) {
   return cex::common::Decimal::from_proto(d).to_string();
 }
 
-// Generate a stable UUID for the child_order_id from the intent.
-// Prefers proto-provided UUIDs when present; falls back to v4 random.
+// Derive a stable identifier for child_order_id. Schema is TEXT (not
+// UUID) so we can pass any non-empty string including composite IDs
+// emitted by matching.
 std::string DeriveChildOrderId(
     const fob::execution::v1::ExecutionIntent& intent) {
   if (!intent.client_order_id().empty()) {
-    // client_order_id is sometimes a venue-friendly id (e.g.
-    // "<batch>|<order>|<venue>|external_fill_0") and not a UUID. Hash to
-    // a derived stable UUID-shaped string in those cases.
-    if (intent.client_order_id().size() == 36 &&
-        intent.client_order_id()[8] == '-') {
-      return intent.client_order_id();
-    }
+    return intent.client_order_id();
   }
   return cex::common::uuid_v4();
 }
@@ -105,8 +100,8 @@ bool PostgresChildOrderRepository::EnsureSchema() {
     pqxx::work tx(connection);
     tx.exec(R"SQL(
 CREATE TABLE IF NOT EXISTS child_orders (
-  child_order_id   UUID PRIMARY KEY,
-  hedge_flow_id    UUID NOT NULL,
+  child_order_id   TEXT PRIMARY KEY,
+  hedge_flow_id    TEXT NOT NULL,
   venue_id         TEXT NOT NULL,
   symbol           TEXT NOT NULL,
   side             TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
@@ -148,9 +143,14 @@ CREATE TABLE IF NOT EXISTS child_orders (
 bool PostgresChildOrderRepository::InsertPending(
     const fob::execution::v1::ExecutionIntent& intent) {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  if (intent.hedge_flow_id().empty() || !intent.has_target_qty()) {
+  if (intent.intent_id().empty() || !intent.has_target_qty()) {
     return false;
   }
+  // Same fallback as hedgeflow_repository: external_fill intents have no
+  // hedge_flow_id, use intent_id.
+  const std::string hedge_flow_id =
+      intent.hedge_flow_id().empty() ? intent.intent_id()
+                                     : intent.hedge_flow_id();
   try {
     pqxx::connection connection(connection_string_);
     pqxx::work tx(connection);
@@ -172,7 +172,7 @@ INSERT INTO child_orders (
 ON CONFLICT (child_order_id) DO NOTHING
 )SQL",
         DeriveChildOrderId(intent),
-        intent.hedge_flow_id(),
+        hedge_flow_id,
         intent.venue(),
         intent.venue_symbol().empty() ? intent.instrument().symbol()
                                       : intent.venue_symbol(),
@@ -200,7 +200,14 @@ ON CONFLICT (child_order_id) DO NOTHING
 bool PostgresChildOrderRepository::ApplyReport(
     const fob::execution::v1::ExecutionReport& report) {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  if (report.hedge_flow_id().empty() || report.client_order_id().empty()) {
+  if (report.client_order_id().empty()) {
+    return false;
+  }
+  // Same fallback as InsertPending.
+  const std::string hedge_flow_id =
+      report.hedge_flow_id().empty() ? report.intent_id()
+                                     : report.hedge_flow_id();
+  if (hedge_flow_id.empty()) {
     return false;
   }
   try {
@@ -221,7 +228,7 @@ UPDATE child_orders
  WHERE hedge_flow_id  = $1
    AND client_order_id = $2
 )SQL",
-        report.hedge_flow_id(),
+        hedge_flow_id,
         report.client_order_id(),
         report.has_filled_qty() ? DecimalToString(report.filled_qty())
                                 : std::string{"0"},

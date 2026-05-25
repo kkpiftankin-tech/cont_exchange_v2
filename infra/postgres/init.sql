@@ -124,8 +124,12 @@ ON CONFLICT (version) DO NOTHING;
 -- Authoritative source of state while status='OPEN'. UI HedgeFlow Monitor
 -- (DoD-14) reads from this table.
 CREATE TABLE IF NOT EXISTS hedgeflows (
-  hedge_flow_id    UUID PRIMARY KEY,
-  intent_id        UUID NOT NULL,
+  -- IDs are TEXT (not UUID) to accommodate matching's composite intent_id
+  -- format "<batch>|<order>|<symbol>|<venue>|external_fill_N" used by F-04
+  -- external fill intents. Real F-12 hedge intents (from
+  -- hedge_trigger_policy) carry a UUID — but both end up here.
+  hedge_flow_id    TEXT PRIMARY KEY,
+  intent_id        TEXT NOT NULL,
   batch_id         TEXT,                       -- nullable: manual override has no batch
   provider_id      TEXT NOT NULL,
   symbol           TEXT NOT NULL,
@@ -157,8 +161,8 @@ CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_underfilled ON hedgeflows (stat
 -- Multi-venue routing decomposes single HedgeFlow into N child_orders.
 -- clientOrderId is the idempotency key sent to the venue.
 CREATE TABLE IF NOT EXISTS child_orders (
-  child_order_id   UUID PRIMARY KEY,
-  hedge_flow_id    UUID NOT NULL REFERENCES hedgeflows(hedge_flow_id) ON DELETE CASCADE,
+  child_order_id   TEXT PRIMARY KEY,
+  hedge_flow_id    TEXT NOT NULL REFERENCES hedgeflows(hedge_flow_id) ON DELETE CASCADE,
   venue_id         TEXT NOT NULL,
   symbol           TEXT NOT NULL,               -- venue-mapped symbol (e.g. XBTUSD on Kraken)
   side             TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
@@ -196,9 +200,9 @@ CREATE INDEX IF NOT EXISTS idx_child_orders_venue_order_id
 -- Can be skipped if ledger applies events directly from Kafka with in-memory dedup.
 CREATE TABLE IF NOT EXISTS execution_reports_raw (
   report_id        TEXT PRIMARY KEY,             -- venue-provided execId or hash
-  intent_id        UUID NOT NULL,
-  hedge_flow_id    UUID NOT NULL,
-  child_order_id   UUID,
+  intent_id        TEXT NOT NULL,
+  hedge_flow_id    TEXT NOT NULL,
+  child_order_id   TEXT,
   venue_id         TEXT NOT NULL,
   symbol           TEXT NOT NULL,
   side             TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),

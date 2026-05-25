@@ -96,8 +96,8 @@ bool PostgresHedgeflowRepository::EnsureSchema() {
     // self-healing if init.sql wasn't applied.
     tx.exec(R"SQL(
 CREATE TABLE IF NOT EXISTS hedgeflows (
-  hedge_flow_id    UUID PRIMARY KEY,
-  intent_id        UUID NOT NULL,
+  hedge_flow_id    TEXT PRIMARY KEY,
+  intent_id        TEXT NOT NULL,
   batch_id         TEXT,
   provider_id      TEXT NOT NULL,
   symbol           TEXT NOT NULL,
@@ -137,14 +137,19 @@ CREATE TABLE IF NOT EXISTS hedgeflows (
 bool PostgresHedgeflowRepository::InsertOpen(
     const fob::execution::v1::ExecutionIntent& intent) {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  if (intent.hedge_flow_id().empty() || intent.intent_id().empty() ||
-      !intent.has_target_qty()) {
+  if (intent.intent_id().empty() || !intent.has_target_qty()) {
     cex::common::log_json("WARN",
-                          "Skipping hedgeflow insert: incomplete intent",
-                          {{"intent_id", intent.intent_id()},
-                           {"hedge_flow_id", intent.hedge_flow_id()}});
+                          "Skipping hedgeflow insert: missing intent_id or target_qty",
+                          {{"intent_id", intent.intent_id()}});
     return false;
   }
+  // Matching's external_fill path does not populate hedge_flow_id —
+  // fall back to intent_id (composite "<batch>|<order>|...|external_fill_N").
+  // Real F-12 hedge intents from hedge_trigger_policy carry a UUID.
+  // Schema accepts both (TEXT column).
+  const std::string hedge_flow_id =
+      intent.hedge_flow_id().empty() ? intent.intent_id()
+                                     : intent.hedge_flow_id();
   try {
     pqxx::connection connection(connection_string_);
     pqxx::work tx(connection);
@@ -174,7 +179,7 @@ INSERT INTO hedgeflows (
   $10, $11, 'OPEN')
 ON CONFLICT (hedge_flow_id) DO NOTHING
 )SQL",
-        intent.hedge_flow_id(),
+        hedge_flow_id,
         intent.intent_id(),
         intent.batch_id(),
         intent.provider_id(),
@@ -202,7 +207,12 @@ ON CONFLICT (hedge_flow_id) DO NOTHING
 bool PostgresHedgeflowRepository::ApplyReport(
     const fob::execution::v1::ExecutionReport& report) {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  if (report.hedge_flow_id().empty()) {
+  // Same fallback rule as InsertOpen — report.hedge_flow_id may be empty
+  // for external_fill reports; intent_id is the stable composite key.
+  const std::string hedge_flow_id =
+      report.hedge_flow_id().empty() ? report.intent_id()
+                                     : report.hedge_flow_id();
+  if (hedge_flow_id.empty()) {
     return false;
   }
   try {
@@ -240,7 +250,7 @@ UPDATE hedgeflows
        completed_at   = CASE WHEN $7 THEN now() ELSE completed_at END
  WHERE hedge_flow_id  = $1
 )SQL",
-        report.hedge_flow_id(),
+        hedge_flow_id,
         filled_qty_str,
         avg_price_str,
         new_status,
