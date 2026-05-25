@@ -346,26 +346,36 @@ knownIssues:
     location: cpp/matching/src/app/execution_planning_uc.hpp
   - id: no-hedgeflows-postgres-schema
     severity: feature-gap
+    status: schema-ready-impl-pending
     description: >
-      `hedgeflows` и `child_orders` отсутствуют в infra/postgres/init.sql.
-      Без них Venue Execution Adapter не может сохранить состояние HedgeFlow
-      (F12-7) и pre-hedge idempotency через clientOrderId.
+      `hedgeflows`, `child_orders`, `execution_reports_raw` добавлены в
+      infra/postgres/init.sql (PR-F12-2, 2026-05-23). Без репозиторий-кода
+      на C++ стороне (cpp/venues/src/infra/postgres/hedgeflow_repository*)
+      Venue Execution Adapter всё ещё не пишет в эти таблицы — таблицы
+      будут пустыми до PR-F12-3.
     location: infra/postgres/init.sql
+    resolved_in: PR-F12-2 (schema added; persistence code pending in PR-F12-3)
   - id: no-execution-reports-clickhouse
     severity: feature-gap
+    status: schema-ready-impl-pending
     description: >
-      Таблица `execution_reports` отсутствует в infra/clickhouse/init.sql.
-      ClickHouse-схема batchresults/fills уже создана для F-04, но F-12
-      execution_reports требует отдельной DDL (90+ дней retention).
+      Таблица `execution_reports` добавлена в infra/clickhouse/init.sql
+      (PR-F12-2, 2026-05-23) с 90-day TTL и projection по hedge_flow_id.
+      Ingestion-код (Kafka execution.venue -> ClickHouse) ещё не реализован
+      в cpp/market_data — будет добавлен в PR-F12-3.
     location: infra/clickhouse/init.sql
+    resolved_in: PR-F12-2 (schema added; ingestion code pending in PR-F12-3)
   - id: no-pre-hedge-rpc
     severity: feature-gap
+    status: contract-ready-impl-pending
     description: >
-      В fob.risk.v1.RiskService нет метода PreHedgeCheck. Текущий
-      RiskService::CheckNewOrder покрывает client-side pre-trade, но
-      pre-hedge check (3 проверки notional/exposure/slippage) требуется
-      F12-8 и пока не определён в proto.
+      В `fob.risk.v1.RiskService` добавлен RPC `PreHedgeCheck` с messages
+      `PreHedgeCheckRequest/Response/Details`, `PreHedgeVenueAllocation`,
+      `PreHedgeVenueHealth` (PR-F12-2, 2026-05-23). Реализация в C++
+      `cpp/risk/src/transport/grpc_risk_service.cpp` отсутствует — будет
+      добавлена в PR-F12-4.
     location: contracts/proto/fob/risk/v1/risk.proto
+    resolved_in: PR-F12-2 (contract added; server impl pending in PR-F12-4)
   - id: hedge-pnl-not-computed
     severity: feature-gap
     description: >

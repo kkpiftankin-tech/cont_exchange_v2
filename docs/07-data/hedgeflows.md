@@ -1,10 +1,11 @@
 ---
 id: DOC-DATA-HEDGEFLOWS
 phase: 07-data
-status: spec-only
+status: schema-ready-impl-pending
 owner: core-team
 source:
   - IN-005 §1 «HedgeFlow (PostgreSQL hedgeflows)»
+  - IN-008 v2 (PR-F12-2 schema applied 2026-05-23)
 related:
   - docs/07-data/child-orders.md
   - docs/07-data/execution-reports.md
@@ -14,7 +15,7 @@ related:
 
 # PostgreSQL Table: `hedgeflows`
 
-> **Status:** ❌ DDL отсутствует в [`infra/postgres/init.sql`](../../infra/postgres/init.sql). Создание — задача T-F12-201 в [implementation plan](../implementation-plan/F-12-execution-hedge.tasks.md#t-f12-201).
+> **Status:** ✅ DDL добавлена в [`infra/postgres/init.sql`](../../infra/postgres/init.sql) (PR-F12-2, 2026-05-23). Поддерживается на запуске PostgreSQL контейнера в dev/staging. C++ репозиторий-код (`cpp/venues/src/infra/postgres/hedgeflow_repository.*`) ещё не реализован — таблица будет пустой до PR-F12-3.
 
 ## Owner
 

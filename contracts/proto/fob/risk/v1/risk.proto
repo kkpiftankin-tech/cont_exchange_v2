@@ -7,6 +7,7 @@ import "google/protobuf/timestamp.proto";
 import "fob/common/v1/common.proto";
 import "fob/orders/v1/orders.proto";
 import "fob/matching/v1/batch.proto";
+import "fob/execution/v1/execution.proto";
 
 enum RiskDecision {
   RISK_DECISION_UNSPECIFIED = 0;
@@ -106,9 +107,86 @@ message RiskAlert {
   google.protobuf.Timestamp timestamp = 9;
 }
 
+// ============================================================================
+// F-12 Execution Hedge — pre-hedge risk check.
+// Sources: IN-005 v1 + IN-008 v2 (resolves DoD-3 + AC F12-8 in feature.yaml).
+// Called by Execution Planning before Venue Execution Adapter creates a
+// HedgeFlow. Three checks applied in fixed order: (1) notional, (2) exposure,
+// (3) expected slippage. Decision is ACCEPT or REJECT; partial accept
+// (RESIZE) is intentionally not supported for hedges — operator must reissue.
+// ============================================================================
+message PreHedgeCheckRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  // Source intent (provider_id, symbol, target_qty, urgency, reference_mid,
+  // allowed_venues are required for the three checks).
+  fob.execution.v1.ExecutionIntent intent = 2;
+
+  // Routing plan synthesized by Execution Planning. Allows risk to see
+  // per-venue quantity split for slippage estimation.
+  repeated PreHedgeVenueAllocation venue_allocations = 3;
+
+  // Expected effective slippage from the planner (basis points). Risk will
+  // compare this to maxSlippage[urgency] from solver_config.
+  int32 expected_slippage_bps = 10;
+
+  // Current hedge exposure for the provider (sum of |position| in base
+  // currency across instruments). Allows risk to be stateless.
+  fob.common.v1.Decimal current_hedge_exposure = 20;
+}
+
+message PreHedgeVenueAllocation {
+  string venue_id = 1;
+  fob.common.v1.Decimal qty = 2;
+  fob.common.v1.Decimal expected_avg_price = 3;
+  int32 expected_slippage_bps = 4;
+}
+
+message PreHedgeCheckResponse {
+  fob.common.v1.EventMeta meta = 1;
+
+  // ACCEPT or REJECT only. Hedges cannot be RESIZE'd by risk because the
+  // resulting partial hedge would leave residual exposure with no
+  // automatic follow-up plan; operator must reissue smaller intent.
+  RiskDecision decision = 2;
+
+  // On REJECT, error.code is one of:
+  //   "NOTIONAL_EXCEEDED"   — target_qty * reference_mid > maxNotionalPerHedge
+  //   "EXPOSURE_EXCEEDED"   — current_hedge_exposure + target_qty > hedgeExposureLimit
+  //   "SLIPPAGE_EXCEEDED"   — expected_slippage_bps > maxSlippage[urgency]
+  //   "PROVIDER_HALTED"     — kill-switch active for provider/instrument
+  //   "VENUES_UNAVAILABLE"  — all allowed_venues have circuit breaker OPEN
+  fob.common.v1.Error error = 3;
+
+  // Diagnostic numbers from the checks (always populated, even on ACCEPT).
+  PreHedgeCheckDetails details = 10;
+}
+
+message PreHedgeCheckDetails {
+  fob.common.v1.Decimal notional_used = 1;
+  fob.common.v1.Decimal notional_limit = 2;
+  fob.common.v1.Decimal exposure_after = 3;
+  fob.common.v1.Decimal exposure_limit = 4;
+  int32 slippage_limit_bps = 5;
+  // Per-venue health snapshot used at the moment of decision.
+  repeated PreHedgeVenueHealth venues = 10;
+}
+
+message PreHedgeVenueHealth {
+  string venue_id = 1;
+  string status = 2;          // CONNECTED | STALE | DISCONNECTED
+  bool circuit_breaker_open = 3;
+  double health_score = 4;    // 0..1
+}
+
 service RiskService {
   // Pre-trade risk check (sync)
   rpc CheckNewOrder(PreTradeCheckRequest) returns (PreTradeCheckResponse);
+
+  // Pre-hedge risk check (sync). Called by Execution Planning before any
+  // ExecutionIntent is fulfilled. See PreHedgeCheckRequest for details.
+  // F-12 / DoD-3 / AC F12-8.
+  rpc PreHedgeCheck(PreHedgeCheckRequest) returns (PreHedgeCheckResponse);
 
   // Operator action: halt/resume trading (sync)
   rpc SetKillSwitch(KillSwitchRequest) returns (KillSwitchResponse);

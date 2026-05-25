@@ -1,10 +1,11 @@
 ---
 id: DOC-DATA-EXECUTION-REPORTS
 phase: 07-data
-status: spec-only
+status: schema-ready-impl-pending
 owner: core-team
 source:
   - IN-005 §1 «ExecutionReports (ClickHouse execution_reports)»
+  - IN-008 v2 (PR-F12-2 schema applied 2026-05-23)
 related:
   - docs/07-data/hedgeflows.md
   - docs/07-data/child-orders.md
@@ -15,7 +16,7 @@ related:
 
 # ClickHouse Table: `execution_reports`
 
-> **Status:** ❌ DDL отсутствует в [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql). Создание — задача T-F12-203 в [implementation plan](../implementation-plan/F-12-execution-hedge.tasks.md#t-f12-203).
+> **Status:** ✅ DDL добавлена в [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql) (PR-F12-2, 2026-05-23) с partition `toYYYYMM(event_time_ms)`, 90-day TTL и projection `prj_by_hedge_flow` для drill-down. Kafka consumer (`execution.venue` → CH ingestion) ещё не реализован в `cpp/market_data` — таблица будет наполняться после PR-F12-3.
 
 ## Owner
 

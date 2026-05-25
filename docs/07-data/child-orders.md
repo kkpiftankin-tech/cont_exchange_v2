@@ -1,10 +1,11 @@
 ---
 id: DOC-DATA-CHILD-ORDERS
 phase: 07-data
-status: spec-only
+status: schema-ready-impl-pending
 owner: core-team
 source:
   - IN-005 §1 «ChildOrder (PostgreSQL child_orders)»
+  - IN-008 v2 (PR-F12-2 schema applied 2026-05-23)
 related:
   - docs/07-data/hedgeflows.md
   - docs/07-data/execution-reports.md
@@ -14,7 +15,7 @@ related:
 
 # PostgreSQL Table: `child_orders`
 
-> **Status:** ❌ DDL отсутствует в [`infra/postgres/init.sql`](../../infra/postgres/init.sql). Создание — задача T-F12-202 в [implementation plan](../implementation-plan/F-12-execution-hedge.tasks.md#t-f12-202).
+> **Status:** ✅ DDL добавлена в [`infra/postgres/init.sql`](../../infra/postgres/init.sql) (PR-F12-2, 2026-05-23) с FK на `hedgeflows(hedge_flow_id)` и UNIQUE-индексом по `(hedge_flow_id, client_order_id)` для idempotency. C++ репозиторий-код будет реализован в PR-F12-3.
 
 ## Owner
 

@@ -62,3 +62,53 @@ CREATE TABLE IF NOT EXISTS fills (
   ingested_at        DateTime DEFAULT now()
 ) ENGINE = MergeTree
 ORDER BY (event_time_ms, batch_id, order_id);
+
+-- ---------------------------------------------------------------------------
+-- F-12 Execution Hedge: execution_reports analytics table.
+-- Sources: IN-005 v1 + IN-008 v2 (resolves DoD-7 in F-12 feature.yaml).
+--
+-- One row per ExecutionReport (Kafka topic execution.venue). Used by:
+-- - Hedge PnL Dashboard (DoD-15) for clearingPrice vs avgFillPrice
+--   scatter, slippage histogram, PnL over time.
+-- - Reconciliation Alerts to surface UNDERFILLED hedge flows.
+-- - F-15 backtest parity checks: replay-mode reports tagged with
+--   `replay::<session_id>` namespace use the same table OR a sibling
+--   `backtest_execution_reports` per BACKTEST_CLICKHOUSE_EXECUTION_VENUE_TABLE
+--   (kept analogous to BUG-2 part 2 fix in IN-007).
+--
+-- Retention: TTL set on event_time_ms - keep 90 days of execution history,
+-- per F-12 non-functional requirement (Section 2.1, "Хранение execution reports
+-- в ClickHouse с retention ≥ 90 дней").
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS execution_reports (
+  report_id         String,
+  intent_id         String,
+  hedge_flow_id     String,
+  child_order_id    String,
+  batch_id          String,
+  provider_id       String,
+  venue_id          LowCardinality(String),
+  symbol            String,
+  side              LowCardinality(String),
+  status            LowCardinality(String),
+  filled_qty        Float64,
+  remaining_qty     Float64,
+  avg_price         Float64,
+  fee_amount        Float64,
+  fee_currency      String,
+  slippage_bps      Int32,
+  reference_mid     Float64,
+  hedge_pnl         Float64,
+  event_time_ms     Int64,
+  ingested_at       DateTime DEFAULT now()
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
+ORDER BY (symbol, venue_id, event_time_ms, report_id)
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+
+-- Projection for HedgeFlow Monitor drill-down: queries by hedge_flow_id are
+-- O(N) without this projection because primary key starts with symbol.
+ALTER TABLE execution_reports
+  ADD PROJECTION IF NOT EXISTS prj_by_hedge_flow (
+    SELECT * ORDER BY (hedge_flow_id, event_time_ms)
+  );
