@@ -138,13 +138,22 @@ definitionOfDone:
     blocked_by_ac: [F12-8]
     blocked_by_issue: no-pre-hedge-rpc
   - id: DoD-4
-    status: partial
+    status: implemented
     title: Venue Execution Adapter создаёт HedgeFlow + child_orders в PostgreSQL
     description: >
-      INSERT в hedgeflows (status=OPEN), маппит routing-план в child_orders,
-      вызывает External Venues Connector с clientOrderId=hedgeFlowId_seq.
-    evidence: cpp/venues/src/app/execute_on_venue.cpp (logic есть, persistence отсутствует)
-    blocked_by_issue: no-hedgeflows-postgres-schema
+      INSERT в hedgeflows (status=OPEN) + child_orders (status=PENDING)
+      перед адаптер-вызовом; UPDATE по обоим (status, filled_qty,
+      avg_price) после Publish ExecutionReport. Идемпотентность через
+      ON CONFLICT DO NOTHING. Implemented in PR-F12-3a (2026-05-25).
+    evidence: |
+      cpp/venues/src/infra/postgres_hedgeflow_repository.{hpp,cpp},
+      cpp/venues/src/infra/postgres_child_order_repository.{hpp,cpp},
+      wired in venues_loop.cpp + main.cpp. E2E verified on ubuntu-dev:
+      order 98ab9c8c → hedgeflows.status=COMPLETED + child_orders.status=FILLED.
+    resolved_in: PR-F12-3a
+    remaining_gaps: |
+      Multi-venue split (PR-F12-5) — current code assumes 1 intent → 1 child.
+      provider_id is empty for external_fill intents (matching gap).
   - id: DoD-5
     status: implemented
     title: ExecutionReport публикуется в Kafka execution.venue
@@ -345,16 +354,16 @@ knownIssues:
       но без полной реализации.
     location: cpp/matching/src/app/execution_planning_uc.hpp
   - id: no-hedgeflows-postgres-schema
-    severity: feature-gap
-    status: schema-ready-impl-pending
+    severity: resolved
+    status: resolved
     description: >
-      `hedgeflows`, `child_orders`, `execution_reports_raw` добавлены в
-      infra/postgres/init.sql (PR-F12-2, 2026-05-23). Без репозиторий-кода
-      на C++ стороне (cpp/venues/src/infra/postgres/hedgeflow_repository*)
-      Venue Execution Adapter всё ещё не пишет в эти таблицы — таблицы
-      будут пустыми до PR-F12-3.
-    location: infra/postgres/init.sql
-    resolved_in: PR-F12-2 (schema added; persistence code pending in PR-F12-3)
+      RESOLVED in PR-F12-3a (2026-05-25). Schemas in init.sql + C++
+      repos (postgres_hedgeflow_repository, postgres_child_order_repository)
+      wired into cpp/venues. E2E verified: order → row in hedgeflows +
+      child_orders with terminal status. Schema is TEXT (not UUID) to
+      accept matching's composite external_fill intent_id format.
+    location: infra/postgres/init.sql, cpp/venues/src/infra/postgres_*
+    resolved_in: PR-F12-3a
   - id: no-execution-reports-clickhouse
     severity: feature-gap
     status: schema-ready-impl-pending
