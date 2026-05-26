@@ -29,6 +29,7 @@ owner: core-team
 | [F-15](F-15-backtest-replay/) | Backtest / Replay | [UC-F15-01](../use-cases/UC-F15-01-create-replay-session/use-case.md), [02](../use-cases/UC-F15-02-cancel-replay-session/use-case.md), [03](../use-cases/UC-F15-03-ab-compare-sessions/use-case.md), [04](../use-cases/UC-F15-04-audit-mode-replay/use-case.md), [05](../use-cases/UC-F15-05-retry-failed-session/use-case.md), [06](../use-cases/UC-F15-06-replay-determinism-check/use-case.md) | [system](../use-cases/UC-F15-01-create-replay-session/sequences/SEQ-UC-F15-01-system.md) | [F15-01](../../05-components/sequences/SEQ-F15-01-create-session-services.md), [F15-02](../../05-components/sequences/SEQ-F15-02-replay-cycle-services.md), [F15-03](../../05-components/sequences/SEQ-F15-03-cancel-services.md), [F15-04](../../05-components/sequences/SEQ-F15-04-audit-mode-services.md) |
 | [F-16](F-16-operator-console/) | Operator Console & Kill-Switch | [UC-F16-01](../use-cases/UC-F16-01-trigger-kill-switch/use-case.md) | [system](../use-cases/UC-F16-01-trigger-kill-switch/sequences/SEQ-UC-F16-01-system.md) | [services](../../05-components/sequences/SEQ-F16-UC-F16-01-services.md) |
 | [F-17](F-17-monitoring-and-alerts/) | Monitoring & Alerting | [UC-F17-01](../use-cases/UC-F17-01-fire-alert/use-case.md) | [system](../use-cases/UC-F17-01-fire-alert/sequences/SEQ-UC-F17-01-system.md) | [services](../../05-components/sequences/SEQ-F17-UC-F17-01-services.md) |
+| [F-20](F-20-live-venue-simulator/) | Live Venue Simulator | UC-F20-01..06 (planned via T-F20-001) | planned (SEQ-UC-F20-* TBD) | planned (SEQ-F20-01..03 TBD) |
 
 ## Использование
 
@@ -51,3 +52,15 @@ owner: core-team
 **Резолюция:** используется первая нумерация — она соответствует существующему коду (`specs/domain/feature-component-map.yaml`), service-level sequence diagrams и proto-контрактам. Содержание «Перемещение коллатерала» из второй таблицы вмержено в F-14 (Deposit/Withdraw) как раздел rebalance — это семантически близко (см. acceptance F-14 и `collateral_transfers.reason='rebalance'`).
 
 Trace IN-001-FR-027, IN-001-FR-028.
+
+**IN-010 vs internal "F-16" labels in source spec (зафиксировано 2026-05-26):**
+
+Источник IN-010 ("F-20 -Live-Venue-Simulator.md") внутри тела использует
+ID "F-16", но в этом репозитории F-16 уже занят за "Operator Console &
+Kill-Switch". Имя файла исходника — авторитетный ID; фича Live Venue
+Simulator зарегистрирована как **F-20**. Все "F16-*" метки из тела спека
+(включая 12 acceptance criteria F16-1..F16-12 и 15 FID-chain записей
+F16-SIM-1..15) механически переименованы в "F20-*" в derived artefacts
+(`feature.yaml`, `tasks.md`, `fragment-map.md`).
+
+Trace IN-010 (см. `incoming-docs/IN-010.meta.md`).

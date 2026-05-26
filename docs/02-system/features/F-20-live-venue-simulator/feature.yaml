@@ -1,0 +1,546 @@
+feature:
+  id: F-20
+  name: Live Venue Simulator
+  status: draft           # documentation only; no implementation yet
+  owner: core-team
+
+description: >
+  Гибридный режим работы системы: приём живых LOB-снапшотов от внешних
+  CEX/DEX/AMM через инфраструктуру F-11 продолжается без изменений, но
+  child-ордера, эмитированные Venue Execution Adapter (F-12), маршрутизируются
+  через VenueSimRouter в один из трёх режимов: SIM_ONLY (только симуляция),
+  LIVE_ONLY (только реальное исполнение, как сейчас), SHADOW (dual-send для
+  сравнения). В SIM_ONLY VenueSimulator использует актуальный VenueSnapshot
+  как источник ликвидности, применяет модели latency / market impact /
+  fees / rejection и публикует синтетический SimExecutionReport с
+  simMode=true в тот же топик execution.venue (или в опциональный
+  sim.execution.venue для изоляции).
+
+  Источник истины: IN-010 (`incoming-docs/2026-05-26-F-20-live-venue-simulator-v1.md`).
+
+  Conflict Note (feature-id rename): исходная спецификация внутри текста
+  использует ID "F-16", но в этом репозитории F-16 закреплён за
+  "Operator Console & Kill-Switch". Имя файла спецификации
+  ("F-20 -Live-Venue-Simulator.md") является авторитетным — фича
+  регистрируется как F-20. Все "F16-*" метки из тела спека механически
+  переименованы в "F20-*" в ходе ингеста (см. IN-010.meta.md и
+  IN-010.fragment-map.md).
+
+primaryComponents:
+  - venue-simulator        # F-20: новый — LOB matcher + LatencyModel + ImpactModel + FeeModel + RejectionModel
+  - venue-sim-router       # F-20: новый — switchboard SIM/LIVE/SHADOW per venueId+symbol
+  - sim-session-manager    # F-20: новый — CRUD sim_sessions, hot reload через sim.config
+  - divergence-service     # F-20: новый — pairing SIM vs LIVE в SHADOW режиме
+  - external-venues        # F-11: продолжает поставлять venue.snapshots; НЕ модифицируется
+  - venue-execution-adapter # F-12: источник ChildOrderRequest; НЕ модифицируется
+  - ledger                 # F-12: расширяется — обрабатывает simMode=true и обновляет sim-книгу отдельно
+  - risk-manager           # F-12: расширяется — может потреблять SimExecutionReport для analytics
+  - observability-reporting # F-12: новые dashboards Sim Monitor / Sim vs Live / LOB Quality
+
+protoContracts:
+  # F-20 переиспользует протокол F-12 (ExecutionIntent / ExecutionReport).
+  # SimExecutionReport — это ExecutionReport с дополнительными полями.
+  - contracts/proto/fob/execution/v1/execution.proto       # extension: simMode, simSessionId, lobSnapshotId, lobAge, impactBps, slippageBps, latencySampleMs
+  - contracts/proto/fob/venue/v1/venue.proto               # consumed: VenueSnapshot (источник LOB)
+  - contracts/proto/fob/common/v1/common.proto             # Decimal, Money, EventMeta
+  # Новый proto для F-20:
+  - contracts/proto/fob/sim/v1/sim.proto                   # NEW (planned): SimSession, SimConfigEvent, SimAlert, RoutingMode, LatencyModel, ImpactModel, FeeModel, RejectionModel
+  - contracts/openapi/fob/sim/v1/api/sim.yaml              # NEW (planned): REST API SimSession Manager (operator UI)
+
+storageDependencies:
+  postgresql:
+    - sim_sessions       # F-20: SimSession config — routingMode, scope, models JSONB, status
+  clickhouse:
+    - sim_execution_reports  # F-20: history синтетических execution reports (поля симуляции)
+    - sim_divergence_log     # F-20: per-clientOrderId delta LIVE vs SIM в SHADOW режиме
+
+codePaths:
+  # Все пути ниже — planned (NEW). На момент создания этого feature.yaml
+  # ни один файл не существует. См. implementation-plan/F-20-live-venue-simulator.tasks.md.
+  - cpp/venues/src/app/venue_simulator.cpp                 # planned
+  - cpp/venues/src/app/venue_simulator.hpp                 # planned
+  - cpp/venues/src/app/venue_sim_router.cpp                # planned
+  - cpp/venues/src/app/venue_sim_router.hpp                # planned
+  - cpp/venues/src/app/sim_session_manager.cpp             # planned
+  - cpp/venues/src/app/sim_session_manager.hpp             # planned
+  - cpp/venues/src/app/divergence_service.cpp              # planned
+  - cpp/venues/src/app/divergence_service.hpp              # planned
+  - cpp/venues/src/domain/models/latency_model.hpp         # planned
+  - cpp/venues/src/domain/models/impact_model.hpp          # planned
+  - cpp/venues/src/domain/models/fee_model.hpp             # planned
+  - cpp/venues/src/domain/models/rejection_model.hpp       # planned
+  - cpp/venues/src/infra/postgres_sim_session_repository.cpp # planned
+  - cpp/venues/src/infra/sim_config_consumer.cpp           # planned (Kafka sim.config consumer)
+
+kafkaTopics:
+  produces:
+    - execution.venue          # SimExecutionReport (simMode=true) — тот же топик, что и LIVE; consumer ignore-by-flag
+    - sim.execution.venue      # NEW (optional): изолированный mirror только sim reports
+    - sim.alerts               # NEW: STALE_LOB, SIM_TIMEOUT, LOB_SOURCE_DOWN, RANDOM_REJECT_SPIKE
+    - sim.config               # NEW: SimConfigEvent при создании/обновлении/удалении SimSession (для hot reload)
+  consumes:
+    - venue.snapshots          # из F-11: живой LOB (BookDepth) для VenueSimulator
+    - venue.health             # из F-11: влияет на параметры RejectionModel
+    - execution.intents        # внутренний consumer VenueSimRouter (источник ChildOrderRequest)
+    - sim.config               # внутренний consumer VenueSimRouter (hot reload routingMode/scope)
+    - execution.venue          # Divergence Service consumer (pairing SIM + LIVE по clientOrderId)
+
+grpcServices:
+  exposes:
+    - fob.sim.v1.SimSessionManager.CreateSession      # planned REST + gRPC duals
+    - fob.sim.v1.SimSessionManager.GetSession         # planned
+    - fob.sim.v1.SimSessionManager.UpdateSession      # planned (routingMode switch, hot reload models)
+    - fob.sim.v1.SimSessionManager.ListSessions       # planned
+    - fob.sim.v1.SimSessionManager.CompleteSession    # planned
+  calls:
+    - fob.marketdata.v1.MarketDataService.GetSnapshot # на reference snapshot для validation (optional)
+
+acceptanceCriteria:
+  # Источник: спека §2.6 (12 пунктов). Renumbered F16-* -> F20-* per Conflict Note.
+  - "F20-1: При routingMode=SIM_ONLY ни один реальный вызов к EVC для child-ордеров не производится; все ExecutionReport имеют simMode=true."
+  - "F20-2: При routingMode=SHADOW каждый ChildOrderRequest порождает ровно два ExecutionReport: simMode=false (LIVE) и simMode=true (SIM)."
+  - "F20-3: VenueSimulator использует актуальный VenueSnapshot из venue.snapshots; lobSnapshotId ссылается на конкретный снапшот."
+  - "F20-4: При lobAge > staleLobThresholdMs SimExecutionReport содержит status=REJECTED, rejectReason=SIM_STALE_LOB; реальных ордеров на биржу не уходит."
+  - "F20-5: SimExecutionReport с simMode=true НЕ изменяет реальные позиции провайдера в Ledger (обновляется изолированная sim-книга)."
+  - "F20-6: Все SimExecutionReport сохраняются в ClickHouse в течение <= 1 сек после публикации."
+  - "F20-7: Переключение routingMode через Admin API применяется в течение <= 500 мс."
+  - "F20-8: При идентичном LOB расчёт filledQty совпадает с ожидаемым LEVEL_BY_LEVEL с точностью <= 1%."
+  - "F20-9: Latency overhead F-20 (без LatencyModel sample): p95 < 50 мс."
+  - "F20-10: Divergence-метрики (SHADOW) корректно записываются в sim_divergence_log по каждому clientOrderId."
+  - "F20-11: Hot update параметров (LatencyModel/ImpactModel/...) через Admin API применяется к следующим запросам без перезапуска VenueSimulator."
+  - "F20-12: В режиме LIVE_ONLY overhead роутера <= 5 мс."
+
+# 19-item DoD из спека §6. Все пункты пока not-implemented; первый PR-F20-* будет ингестировать sub-set.
+definitionOfDone:
+  - id: DoD-1
+    status: not-implemented
+    title: VenueSimulator реализован
+    description: >
+      Подписан на Kafka venue.snapshots, поддерживает актуальный LOB-кэш по
+      (venueId, symbol), реализует LEVEL_BY_LEVEL matching, ImpactModel
+      (LINEAR / SQRT / POWER_LAW), FeeModel, RejectionModel, LatencyModel с
+      async-delay.
+    evidence: cpp/venues/src/app/venue_simulator.{cpp,hpp} (отсутствует)
+    blocked_by_ac: [F20-3, F20-8]
+  - id: DoD-2
+    status: not-implemented
+    title: VenueSimRouter реализован
+    description: >
+      Маршрутизирует ChildOrderRequest в SIM_ONLY / LIVE_ONLY / SHADOW;
+      поддерживает hot reload конфигурации из Kafka sim.config без перезапуска.
+    evidence: cpp/venues/src/app/venue_sim_router.{cpp,hpp} (отсутствует)
+    blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
+  - id: DoD-3
+    status: not-implemented
+    title: SimSession Manager реализован
+    description: >
+      CRUD SimSession через Admin API; persistence в PostgreSQL sim_sessions;
+      публикация изменений в Kafka sim.config.
+    evidence: cpp/venues/src/app/sim_session_manager.{cpp,hpp} (отсутствует)
+  - id: DoD-4
+    status: not-implemented
+    title: Алгоритм LOB-matching корректен
+    description: >
+      Расчёт filledQty, avgPrice, impactBps соответствует спеке TRD §4.4;
+      при идентичном LOB ошибка объёма <= 1%.
+    evidence: cpp/venues/tests/.../venue_simulator_lob_test.cpp (отсутствует)
+    blocked_by_ac: [F20-8]
+  - id: DoD-5
+    status: not-implemented
+    title: Stale-LOB защита
+    description: >
+      При lobAge > staleLobThresholdMs VenueSimulator возвращает
+      REJECTED, SIM_STALE_LOB; алерт в sim.alerts; реальных ордеров на биржу
+      не уходит.
+    evidence: cpp/venues/tests/.../venue_simulator_stale_lob_test.cpp (отсутствует)
+    blocked_by_ac: [F20-4]
+  - id: DoD-6
+    status: not-implemented
+    title: SimExecutionReport публикуется с расширенными полями
+    description: >
+      В execution.venue (с simMode=true) и опционально в sim.execution.venue.
+      Содержит simSessionId, lobSnapshotId, lobAge, impactBps, slippageBps,
+      latencySampleMs.
+    evidence: contracts/proto/fob/execution/v1/execution.proto (нужно расширение)
+  - id: DoD-7
+    status: not-implemented
+    title: Settlement Ledger обрабатывает simMode=true корректно
+    description: >
+      Обновляет изолированную sim-книгу позиций, НЕ изменяет реальные позиции
+      провайдера. Sim-баланс и sim-PnL хранятся отдельно.
+    evidence: cpp/ledger/src/app/ledger_uc.cpp (нужна ветка simMode)
+    blocked_by_ac: [F20-5]
+  - id: DoD-8
+    status: not-implemented
+    title: ClickHouse приём SimExecutionReport
+    description: >
+      Таблица sim_execution_reports в init.sql + market_data writer; <= 1 сек
+      latency от публикации до записи.
+    evidence: infra/clickhouse/init.sql (нет таблицы); cpp/market_data/src/infra/clickhouse_storage.cpp
+    blocked_by_ac: [F20-6]
+  - id: DoD-9
+    status: not-implemented
+    title: Divergence Service (SHADOW режим)
+    description: >
+      Pairing LIVE и SIM ExecutionReport по clientOrderId; вычисление delta
+      метрик; запись в sim_divergence_log.
+    evidence: cpp/venues/src/app/divergence_service.{cpp,hpp} (отсутствует)
+    blocked_by_ac: [F20-10]
+  - id: DoD-10
+    status: not-implemented
+    title: Unit-тесты VenueSimulator U1..U10
+    description: >
+      Happy-path FILLED, partial fill, stale LOB, LEVEL_BY_LEVEL precision,
+      ImpactModel LINEAR/SQRT, FeeModel maker/taker, RejectionModel
+      random/price_constraint, LatencyModel sampling, SHADOW fork isolation,
+      overfill guard.
+    evidence: cpp/venues/tests/venue_simulator_test.cpp (отсутствует)
+  - id: DoD-11
+    status: not-implemented
+    title: Integration-тесты IT-1..IT-5
+    description: >
+      SIM_ONLY full cycle, SHADOW dual-report + divergence logging, stale LOB
+      + alert, hot reload под нагрузкой, SIM->LIVE automatic switch.
+    evidence: cpp/venues/tests/integration/F-20-* (отсутствует)
+  - id: DoD-12
+    status: not-implemented
+    title: SLA-тест
+    description: >
+      p95 latency F-20 overhead < 50 мс при >= 500 child-ордерах/сек.
+      Зафиксированы p50/p95/p99 по этапам (TRD §5.3).
+    evidence: docs/10-testing/features/F-20-test-plan.md (отсутствует)
+    blocked_by_ac: [F20-9]
+  - id: DoD-13
+    status: not-implemented
+    title: Нагрузочный LT-1 (500/сек, SIM_ONLY, 5 мин)
+    description: >
+      Нет ошибок Kafka publish; нет потери SimExecutionReport.
+    evidence: docs/10-testing/features/F-20-test-plan.md (отсутствует)
+  - id: DoD-14
+    status: not-implemented
+    title: Admin UI SimSession Manager
+    description: >
+      Список сессий, создание, пауза, переключение routingMode, завершение,
+      real-time статус.
+    evidence: frontend/web/src/pages/SimManager/ (отсутствует)
+  - id: DoD-15
+    status: not-implemented
+    title: Admin UI Live Sim Feed
+    description: >
+      Real-time поток SimExecutionReport с lobAge, impactBps, latencySampleMs,
+      slippageBps; фильтр по simSessionId/venue/symbol.
+    evidence: frontend/web/src/pages/SimManager/LiveSimFeed.js (отсутствует)
+  - id: DoD-16
+    status: not-implemented
+    title: Admin UI Sim vs Live Comparison
+    description: >
+      Delta fillRate / delta price / delta latency по hedgeFlowId; алерт при
+      divergence > threshold.
+    evidence: frontend/web/src/pages/SimManager/ShadowCompare.js (отсутствует)
+  - id: DoD-17
+    status: not-implemented
+    title: Метрики и алерты
+    description: >
+      LOB freshness, rejection rate по типу, latency percentiles, SHADOW
+      divergence rate, ошибки hot reload — экспортированы Prometheus метриками.
+    evidence: cpp/venues/src/infra/sim_metrics.cpp (отсутствует)
+  - id: DoD-18
+    status: not-implemented
+    title: Operations runbook
+    description: >
+      Массовые SIM_STALE_LOB (F-11 диагностика), высокий SHADOW divergence
+      (model recalibration), деградация throughput (scaling), SIM->LIVE go-live
+      процедура.
+    evidence: docs/11-operations/runbooks/F-20-incidents.md (отсутствует)
+  - id: DoD-19
+    status: not-implemented
+    title: Архитектурная документация
+    description: >
+      Sequence diagrams SEQ-F20-01..03, контракты sim.config / sim.alerts /
+      sim.execution.venue, схемы PG sim_sessions + CH sim_execution_reports /
+      sim_divergence_log, cross-links к F-11/F-12/F-15.
+    evidence: docs/05-components/sequences/SEQ-F20-* (отсутствует)
+
+# UX Screens (5 шт.) из спека §2.5
+uxScreens:
+  - id: sim_session_manager
+    title: SimSession Manager
+    route: /sim/sessions
+    purpose: >
+      Список активных/прошедших SimSession; создание, пауза, переключение
+      routingMode, завершение; статусы real-time.
+    primary_data_source: PostgreSQL sim_sessions
+    api_endpoints:
+      - GET /api/v1/sim/sessions
+      - POST /api/v1/sim/sessions
+      - PATCH /api/v1/sim/sessions/{id}
+      - DELETE /api/v1/sim/sessions/{id}
+  - id: live_sim_feed
+    title: Live Sim Feed
+    route: /sim/live-feed
+    purpose: >
+      Real-time поток SimExecutionReport с полями симуляции; фильтрация по
+      simSessionId / venue / symbol.
+    primary_data_source: Kafka execution.venue (simMode=true) + ClickHouse sim_execution_reports fallback
+    api_endpoints:
+      - GET /api/v1/sim/execution-reports (history)
+      - WebSocket /api/v1/sim/execution-reports/stream
+  - id: sim_vs_live_comparison
+    title: Sim vs Live Comparison (SHADOW)
+    route: /sim/shadow-compare
+    purpose: >
+      Боковое сравнение SIM и LIVE исполнения по hedgeFlowId: delta fillRate,
+      delta slippage, delta latency.
+    primary_data_source: ClickHouse sim_divergence_log
+    api_endpoints:
+      - GET /api/v1/sim/divergence
+  - id: lob_quality_monitor
+    title: LOB Quality Monitor
+    route: /sim/lob-quality
+    purpose: >
+      График lobAge по venue/symbol; алерты Stale LOB.
+    primary_data_source: ClickHouse sim_execution_reports (агрегация lob_age_ms) + sim.alerts
+    api_endpoints:
+      - GET /api/v1/sim/lob-quality
+  - id: model_calibration_panel
+    title: Model Calibration Panel
+    route: /sim/calibration
+    purpose: >
+      Отображение и hot-update параметров LatencyModel / ImpactModel /
+      FeeModel / RejectionModel с мгновенным применением.
+    primary_data_source: PostgreSQL sim_sessions (current models) + ClickHouse sim_execution_reports (calibration metrics)
+    api_endpoints:
+      - GET /api/v1/sim/sessions/{id}/models
+      - PUT /api/v1/sim/sessions/{id}/models
+
+uxRefreshModes:
+  sim_session_manager: polling-5s
+  live_sim_feed: sse-realtime
+  sim_vs_live_comparison: polling-10s
+  lob_quality_monitor: polling-5s
+  model_calibration_panel: on-demand
+
+# Models (§1.0 LatencyModel / ImpactModel / RejectionModel / FeeModel)
+models:
+  latency:
+    distributions: [LOGNORMAL, UNIFORM, FIXED, EMPIRICAL]
+    parameters: [p50Ms, p95Ms, p99Ms, tailProbability, timeoutMs]
+    behavior: |
+      Sample latencySampleMs per child-order from chosen distribution.
+      Async-delay publication of SimExecutionReport by that amount. If
+      latencySampleMs > timeoutMs -> emit REJECTED with rejectReason=SIM_TIMEOUT.
+  impact:
+    model_types: [LINEAR, SQRT, POWER_LAW, LEVEL_BY_LEVEL]
+    parameters: [impactCoeff, powerExponent, depletionMode, depletionDecayMs]
+    formulas:
+      LINEAR: "deltaPrice = impactCoeff * filledQty"
+      SQRT: "deltaPrice = impactCoeff * sqrt(filledQty)"
+      POWER_LAW: "deltaPrice = impactCoeff * filledQty ^ powerExponent"
+      LEVEL_BY_LEVEL: "VWAP по фактически поглощённым уровням LOB"
+    derived:
+      impactBps: "(|avgPriceImpact - mid| / mid) * 10000"
+  rejection:
+    flags:
+      insufficientLiquidityEnabled: bool
+      priceConstraintEnabled: bool
+    probabilities:
+      randomRejectionRate: "[0.0, 1.0]"
+      rateLimitRejectRate: "[0.0, 1.0]"
+    thresholds:
+      minLiquidityThreshold: decimal
+    reject_codes:
+      - SIM_NO_LIQUIDITY
+      - SIM_RANDOM_REJECT
+      - SIM_RATE_LIMIT
+      - SIM_PRICE_CONSTRAINT
+      - SIM_STALE_LOB
+      - SIM_TIMEOUT
+  fee:
+    fields: [makerBps, takerBps, minFee, gasFlat]
+    behavior: |
+      fee = filledQty * avgPriceImpact * feeRate (taker если orderType=MARKET/IOC,
+      maker если LIMIT/POST_ONLY и не пересёк mid). DEX: fee = gasFlat
+      (в FeeModel.gasFlat) + AMM swap fee bps.
+
+# FID chain (§4.3) — карта взаимодействий компонентов F-20
+fidChain:
+  - id: F20-SIM-1
+    source: Kafka venue.snapshots
+    sink: VenueSimulator
+    protocol: Kafka consume
+    payload: VenueSnapshot
+  - id: F20-SIM-2
+    source: Venue Execution Adapter
+    sink: VenueSimRouter
+    protocol: in-process / gRPC
+    payload: ChildOrderRequest
+  - id: F20-SIM-3
+    source: VenueSimRouter
+    sink: VenueSimulator
+    protocol: in-process
+    payload: ChildOrderRequest + simSessionId
+  - id: F20-SIM-4
+    source: VenueSimRouter
+    sink: External Venues Connector
+    protocol: gRPC (LIVE / SHADOW fork)
+    payload: PlaceChildOrder
+  - id: F20-SIM-5
+    source: VenueSimulator
+    sink: Kafka execution.venue
+    protocol: Kafka produce
+    payload: SimExecutionReport (simMode=true)
+  - id: F20-SIM-6
+    source: VenueSimulator
+    sink: Kafka sim.execution.venue
+    protocol: Kafka produce
+    payload: SimExecutionReport (duplicate for isolated consumers)
+  - id: F20-SIM-7
+    source: VenueSimulator
+    sink: Kafka sim.alerts
+    protocol: Kafka produce
+    payload: SimAlert
+  - id: F20-SIM-8
+    source: Admin UI / API
+    sink: SimSession Manager
+    protocol: REST
+    payload: SimSession CRUD
+  - id: F20-SIM-9
+    source: SimSession Manager
+    sink: PostgreSQL
+    protocol: SQL
+    payload: sim_sessions CRUD
+  - id: F20-SIM-10
+    source: SimSession Manager
+    sink: Kafka sim.config
+    protocol: Kafka produce
+    payload: SimConfigEvent
+  - id: F20-SIM-11
+    source: Kafka sim.config
+    sink: VenueSimRouter
+    protocol: Kafka consume
+    payload: SimConfigEvent (hot reload)
+  - id: F20-SIM-12
+    source: Kafka execution.venue
+    sink: Divergence Service
+    protocol: Kafka consume
+    payload: ExecutionReport (LIVE + SIM, paired by clientOrderId)
+  - id: F20-SIM-13
+    source: Divergence Service
+    sink: ClickHouse
+    protocol: HTTP insert
+    payload: sim_divergence_log
+  - id: F20-SIM-14
+    source: Kafka execution.venue
+    sink: ClickHouse
+    protocol: Kafka -> CH connector / market_data writer
+    payload: sim_execution_reports
+  - id: F20-SIM-15
+    source: Kafka execution.venue
+    sink: Settlement Ledger
+    protocol: Kafka consume
+    payload: SimExecutionReport (sim-book branch)
+
+# SLO targets (§3.1 + §5.3)
+slo:
+  latencyBudget:
+    f20_overhead:        # без LatencyModel sample
+      p50: 6 ms
+      p95: 21 ms          # SLO < 50 ms; реальный bench при первой реализации
+      p99: 42 ms          # SLO < 100 ms
+    venue_snapshot_to_cache:
+      p50: 15 ms
+      p95: 50 ms
+      p99: 80 ms
+    venue_sim_router_routing:
+      p95: 2 ms
+      p99: 5 ms
+    lob_matching_plus_impact:
+      p95: 8 ms
+      p99: 15 ms
+    kafka_publish_sim_report:
+      p95: 10 ms
+      p99: 20 ms
+  throughput:
+    sim_only: 500 orders_per_sec
+  freshness:
+    lob_cache_lag_p95: 100 ms
+    clickhouse_ingest_p95: 1 sec
+    sim_alerts_stale_lob: 200 ms
+    sim_to_live_switch: 500 ms
+
+# Load tests (§5.2)
+loadTests:
+  - id: LT-1
+    scenario: "500 child-ордеров/сек, SIM_ONLY, 5 мин"
+    pass: "p95 latency < 50 мс, нет ошибок Kafka publish"
+  - id: LT-2
+    scenario: "200 child-ордеров/сек, SHADOW, 5 мин"
+    pass: "оба отчёта доставлены; LIVE delta overhead p95 < 10 мс"
+  - id: LT-3
+    scenario: "LOB freeze на 5 сек"
+    pass: "все ордера получают SIM_STALE_LOB в <= 200 мс"
+  - id: LT-4
+    scenario: "hot reload при нагрузке 300/сек"
+    pass: "применение <= 500 мс; нет потери ордеров"
+
+# Известные ограничения / open questions
+knownIssues:
+  - id: feature-id-rename-f16-to-f20
+    severity: rename
+    status: documented
+    description: >
+      Спека-источник внутри текста использует "F-16"; в этом репозитории
+      F-16 закреплён за "Operator Console & Kill-Switch". Имя файла
+      исходника ("F-20 -Live-Venue-Simulator.md") — авторитетный ID.
+      Все "F16-*" метки в derived artefacts переименованы в F20-*.
+    location: docs/02-system/features/feature-index.md
+  - id: sim-execution-topic-isolation-pending-adr
+    severity: design-choice
+    status: open
+    description: >
+      Спека §1.2 листит и execution.venue с маркером simMode=true, и
+      опциональный sim.execution.venue как зеркало. Перед первой
+      реализацией нужен ADR: один топик с флагом (проще, меньше
+      инфраструктуры) vs два топика (явная изоляция, но дубль producer
+      и больше CH partitioning). По умолчанию план: оба во время MVP,
+      deprecate один после operator feedback.
+    location: docs/03-architecture/adr/ (нужен ADR-NNN)
+  - id: ledger-sim-book-isolation
+    severity: feature-gap
+    status: open
+    description: >
+      Settlement Ledger сейчас имеет единое представление позиций.
+      Для F-20 DoD-7 нужна параллельная sim-book (либо отдельные
+      таблицы sim_positions/sim_balances, либо namespace в существующих
+      с simMode флагом). Это пересекается с F-12 ledger расширениями.
+    location: cpp/ledger/src/app/ledger_uc.cpp
+  - id: existing-venue-sim-adapter-relationship
+    severity: scope-clarification
+    status: open
+    description: >
+      В cpp/venues/src/infra/ уже существуют venue_sim_adapter.{cpp,hpp}
+      и simulated_venue_adapter.cpp (использовались в F-04 IT и
+      backtest). Это НЕ VenueSimulator в смысле F-20: они работают
+      без LOB-кэша, без impact/rejection/latency моделей, без
+      SimSession. Перед началом реализации F-20 нужно решение:
+      переиспользовать имя (replace) или ввести параллельный класс
+      VenueSimulator. Текущая позиция: новый класс с новым именем,
+      старый stays as legacy backtest helper.
+    location: cpp/venues/src/infra/venue_sim_adapter.{cpp,hpp}
+  - id: hft-effects-out-of-scope
+    severity: dev-limitation
+    status: documented
+    description: >
+      VenueSimulator не воспроизводит HFT-уровень (front-running,
+      microsecond latency arbitrage, queue position). LOB-depletion mode
+      корректен только при серийных ордерах по одному инструменту.
+    location: spec §1.4 constraints
+  - id: simexecutionreport-not-legally-binding
+    severity: dev-limitation
+    status: documented
+    description: >
+      SimExecutionReport не является юридически значимым исполнением
+      и не влияет на реальный P&L провайдера. Изоляция должна быть
+      строгой на всех downstream (Ledger sim-book, Risk sim-window,
+      CH sim_* таблицы).
+    location: spec §1.4 constraints
