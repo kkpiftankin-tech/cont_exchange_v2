@@ -3954,6 +3954,218 @@ async function fetchHedgeFlowTimeline(hedgeFlowId) {
   }
 }
 
+// F-12 DoD-15 (PR-F12-8): Hedge PnL dashboard endpoint.
+// Source: ClickHouse execution_reports (PR-F12-3b canonical table).
+// In dev sim mode hedge_pnl/avg_price stay at 0 (see knownIssue
+// venues-sim-zero-execution-price), so PnL columns are zeros; volumes
+// (filled_qty * reference_mid via PG join, fees) are realistic.
+
+const HEDGE_PNL_PERIODS = {
+  "1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days"
+};
+
+function buildHedgePnlFilters(query) {
+  const filters = [];
+  const period = String(query.period || "24h");
+  const interval = HEDGE_PNL_PERIODS[period] || HEDGE_PNL_PERIODS["24h"];
+  // event_time_ms is ms unix epoch; compare to now() - INTERVAL
+  // CH wants DateTime64 for toUnixTimestamp64Milli; convert via toDateTime64.
+  filters.push(`event_time_ms >= toUnixTimestamp64Milli(toDateTime64(now() - INTERVAL ${interval}, 3))`);
+
+  const symbol = String(query.symbol || "").trim();
+  if (symbol && symbol !== "all") {
+    filters.push(`symbol = '${symbol.replace(/'/g, "''")}'`);
+  }
+  const venue = String(query.venue || "").trim();
+  if (venue && venue !== "all") {
+    filters.push(`venue_id = '${venue.replace(/'/g, "''")}'`);
+  }
+  const provider = String(query.providerId || query.provider || "").trim();
+  if (provider && provider !== "all") {
+    filters.push(`provider_id = '${provider.replace(/'/g, "''")}'`);
+  }
+  return { whereSql: `WHERE ${filters.join(" AND ")}`, period };
+}
+
+async function clickhouseQueryJson(query) {
+  const url = `${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`;
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`clickhouse_http_${response.status}: ${text}`);
+  }
+  return text
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function handleHedgePnlV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/hedge/pnl") return false;
+
+  const { whereSql, period } = buildHedgePnlFilters(query);
+
+  // Summary: total flows, reports, qty, notional, pnl, fees.
+  const summaryQuery = [
+    "SELECT",
+    "  uniqExact(hedge_flow_id) AS total_flows,",
+    "  count() AS total_reports,",
+    "  countIf(status = 'FILLED') AS filled_reports,",
+    "  sum(filled_qty) AS total_filled_qty,",
+    "  sum(filled_qty * reference_mid) AS total_notional,",
+    "  sum(hedge_pnl) AS total_pnl,",
+    "  sum(fee_amount) AS total_fees,",
+    "  avgIf(slippage_bps, slippage_bps > 0) AS avg_slippage_bps",
+    "FROM execution_reports",
+    whereSql,
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  // Time series: bucket per hour for the period.
+  const timeSeriesQuery = [
+    "SELECT",
+    "  toStartOfHour(toDateTime64(event_time_ms / 1000, 3)) AS hour,",
+    "  count() AS reports,",
+    "  sum(filled_qty) AS sum_filled_qty,",
+    "  sum(filled_qty * reference_mid) AS notional,",
+    "  sum(hedge_pnl) AS pnl,",
+    "  sum(fee_amount) AS fees",
+    "FROM execution_reports",
+    whereSql,
+    "GROUP BY hour",
+    "ORDER BY hour ASC",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  // Per-symbol breakdown.
+  const symbolQuery = [
+    "SELECT",
+    "  symbol,",
+    "  uniqExact(hedge_flow_id) AS flows,",
+    "  count() AS reports,",
+    "  sum(filled_qty) AS sum_filled_qty,",
+    "  sum(filled_qty * reference_mid) AS notional,",
+    "  sum(hedge_pnl) AS pnl,",
+    "  sum(fee_amount) AS fees,",
+    "  avgIf(slippage_bps, slippage_bps > 0) AS avg_slippage_bps",
+    "FROM execution_reports",
+    whereSql,
+    "GROUP BY symbol",
+    "ORDER BY notional DESC",
+    "LIMIT 50",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  // Per-venue breakdown.
+  const venueQuery = [
+    "SELECT",
+    "  venue_id,",
+    "  uniqExact(hedge_flow_id) AS flows,",
+    "  count() AS reports,",
+    "  sum(filled_qty) AS sum_filled_qty,",
+    "  sum(filled_qty * reference_mid) AS notional,",
+    "  sum(hedge_pnl) AS pnl,",
+    "  sum(fee_amount) AS fees",
+    "FROM execution_reports",
+    whereSql,
+    "GROUP BY venue_id",
+    "ORDER BY notional DESC",
+    "LIMIT 50",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  // Distinct filter options across full table (small dim cardinality).
+  const filtersQuery = [
+    "SELECT",
+    "  groupArrayDistinct(symbol) AS symbols,",
+    "  groupArrayDistinct(venue_id) AS venues,",
+    "  groupArrayDistinct(provider_id) AS providers",
+    "FROM execution_reports",
+    "WHERE event_time_ms >= toUnixTimestamp64Milli(toDateTime64(now() - INTERVAL 30 DAY, 3))",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  try {
+    const [summaryRows, tsRows, symbolRows, venueRows, filterRows] =
+      await Promise.all([
+        clickhouseQueryJson(summaryQuery),
+        clickhouseQueryJson(timeSeriesQuery),
+        clickhouseQueryJson(symbolQuery),
+        clickhouseQueryJson(venueQuery),
+        clickhouseQueryJson(filtersQuery)
+      ]);
+
+    const summary = summaryRows[0] || {};
+    let cumulative = 0;
+    const timeSeries = tsRows.map((row) => {
+      cumulative += Number(row.pnl) || 0;
+      return {
+        hour: row.hour,
+        reports: Number(row.reports) || 0,
+        filledQty: Number(row.sum_filled_qty) || 0,
+        notional: Number(row.notional) || 0,
+        pnl: Number(row.pnl) || 0,
+        fees: Number(row.fees) || 0,
+        cumulativePnl: cumulative
+      };
+    });
+
+    const filterOpts = filterRows[0] || {};
+
+    return writeJson(res, 200, {
+      summary: {
+        totalFlows: Number(summary.total_flows) || 0,
+        totalReports: Number(summary.total_reports) || 0,
+        filledReports: Number(summary.filled_reports) || 0,
+        totalFilledQty: Number(summary.total_filled_qty) || 0,
+        totalNotional: Number(summary.total_notional) || 0,
+        totalPnl: Number(summary.total_pnl) || 0,
+        totalFees: Number(summary.total_fees) || 0,
+        netAfterFees: (Number(summary.total_pnl) || 0) - (Number(summary.total_fees) || 0),
+        avgSlippageBps: Number(summary.avg_slippage_bps) || 0
+      },
+      timeSeries,
+      symbolBreakdown: symbolRows.map((row) => ({
+        symbol: row.symbol,
+        flows: Number(row.flows) || 0,
+        reports: Number(row.reports) || 0,
+        filledQty: Number(row.sum_filled_qty) || 0,
+        notional: Number(row.notional) || 0,
+        pnl: Number(row.pnl) || 0,
+        fees: Number(row.fees) || 0,
+        avgSlippageBps: Number(row.avg_slippage_bps) || 0
+      })),
+      venueBreakdown: venueRows.map((row) => ({
+        venueId: row.venue_id || "—",
+        flows: Number(row.flows) || 0,
+        reports: Number(row.reports) || 0,
+        filledQty: Number(row.sum_filled_qty) || 0,
+        notional: Number(row.notional) || 0,
+        pnl: Number(row.pnl) || 0,
+        fees: Number(row.fees) || 0
+      })),
+      filters: {
+        symbols: Array.isArray(filterOpts.symbols) ? filterOpts.symbols.filter(Boolean).sort() : [],
+        venues: Array.isArray(filterOpts.venues) ? filterOpts.venues.filter(Boolean).sort() : [],
+        providers: Array.isArray(filterOpts.providers) ? filterOpts.providers.filter(Boolean).sort() : []
+      },
+      period,
+      generatedAt: new Date().toISOString(),
+      source: "clickhouse:execution_reports"
+    });
+  } catch (err) {
+    console.error("[ch] /api/v1/hedge/pnl query failed:", err.message);
+    return writeJson(res, 500, {
+      error: "query_failed",
+      message: err.message
+    });
+  }
+}
+
 async function handleHedgeFlowV1ById(req, res, pathname) {
   if (req.method !== "GET") return false;
   const hedgeFlowId = parseHedgeFlowsV1Id(pathname);
@@ -5498,6 +5710,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname.startsWith("/api/v1/hedge/flows/")) {
       const handled = await handleHedgeFlowV1ById(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/hedge/pnl") {
+      const handled = await handleHedgePnlV1(req, res, pathname, query);
       if (handled !== false) return;
     }
 

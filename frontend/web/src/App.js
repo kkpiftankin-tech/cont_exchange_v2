@@ -14,6 +14,7 @@ import LobFobDashboard from './pages/LobFobDashboard/LobFobDashboard';
 import HedgeFlowMonitor from './pages/HedgeFlowMonitor/HedgeFlowMonitor';
 import HedgeFlowMonitorLive from './pages/HedgeFlowMonitor/HedgeFlowMonitorLive';
 import HedgePnlDashboard from './pages/HedgePnlDashboard/HedgePnlDashboard';
+import HedgePnlDashboardLive from './pages/HedgePnlDashboard/HedgePnlDashboardLive';
 import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
 import ManualOverride from './pages/ManualOverride/ManualOverride';
@@ -37,6 +38,7 @@ function App() {
         <Route path="/hedgeflows" element={<AuthRoute><HedgeFlowMonitor /></AuthRoute>} />
         <Route path="/hedge-flows-live" element={<AuthRoute><HedgeFlowMonitorLive /></AuthRoute>} />
         <Route path="/hedge-pnl" element={<AuthRoute><HedgePnlDashboard /></AuthRoute>} />
+        <Route path="/hedge-pnl-live" element={<AuthRoute><HedgePnlDashboardLive /></AuthRoute>} />
         <Route path="/execution-live" element={<AuthRoute><ExecutionLiveFeed /></AuthRoute>} />
         <Route path="/reconciliation-alerts" element={<AuthRoute><ReconciliationAlerts /></AuthRoute>} />
         <Route path="/manual-override" element={<AuthRoute><ManualOverride /></AuthRoute>} />

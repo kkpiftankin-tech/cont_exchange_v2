@@ -298,12 +298,27 @@ definitionOfDone:
       frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.css,
       route /hedge-flows-live в App.js
   - id: DoD-15
-    status: not-implemented
+    status: partial
     title: Admin UI Execution Live Feed + Hedge PnL Dashboard + Reconciliation Alerts + Manual Override + Policy Config
     description: >
       Остальные 5 экранов из uxScreens. Manual Override создаёт ExecutionIntent
       через POST /api/v1/execution-intents (origin=MANUAL).
-    evidence: frontend/web/src/pages/ (все 5 страниц отсутствуют)
+      PR-F12-8 (2026-05-26): Hedge PnL Dashboard (live) реализован —
+      страница /hedge-pnl-live с polling-5s, фильтрами period/symbol/venue,
+      8 summary cards (flows/reports/filledQty/notional/PnL/fees/net/slip),
+      cumulative PnL sparkline + 2 breakdown tables (по symbol, по venue).
+      GET /api/v1/hedge/pnl агрегирует CH execution_reports (5 параллельных
+      запросов: summary, hourly timeSeries, symbolBreakdown, venueBreakdown,
+      filter options).
+      Остаётся (не блок MVP): Execution Live Feed (SSE), Reconciliation
+      Alerts, Manual Override form, Policy Config — каждое отдельным PR.
+      PnL/notional/slippage в dev стоят 0 из-за venues-sim-zero-execution-price
+      (знакомая нон-блок limitation).
+    evidence: |
+      frontend/api/server.js (handleHedgePnlV1, clickhouseQueryJson),
+      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.js,
+      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.css,
+      route /hedge-pnl-live в App.js
   - id: DoD-16
     status: not-implemented
     title: Observability — Prometheus metrics + Grafana dashboard
