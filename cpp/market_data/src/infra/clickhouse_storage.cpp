@@ -218,6 +218,80 @@ std::string BuildExecutionReportJsonRow(const fob::execution::v1::ExecutionRepor
   return row.str();
 }
 
+// F-12 / IN-009 DoD-7 (PR-F12-3b): JSON row builder for the canonical
+// `execution_reports` table (20 fields, matches infra/clickhouse/init.sql).
+// Differs from BuildExecutionReportJsonRow (legacy execution_venue) by:
+//  - status as LowCardinality(String) instead of Int32
+//  - additional fields: hedge_flow_id, child_order_id, batch_id,
+//    provider_id, side, slippage_bps, reference_mid, hedge_pnl
+//  - venue → venue_id, fee_total_* → fee_*, average_price → avg_price
+std::string StatusToCanonicalString(fob::execution::v1::ExecutionReportStatus s) {
+  switch (s) {
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_NEW: return "NEW";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED: return "PARTIALLY_FILLED";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED: return "FILLED";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED: return "CANCELLED";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED: return "REJECTED";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED: return "EXPIRED";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_OVERFILL_GUARD: return "OVERFILL_GUARD";
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_UNDERFILLED: return "UNDERFILLED";
+    default: return "UNSPECIFIED";
+  }
+}
+
+std::string SideToCanonicalString(fob::common::v1::Side s) {
+  switch (s) {
+    case fob::common::v1::SIDE_BUY: return "BUY";
+    case fob::common::v1::SIDE_SELL: return "SELL";
+    default: return "";
+  }
+}
+
+std::string BuildExecutionReportV2JsonRow(const fob::execution::v1::ExecutionReport& evt) {
+  const int64_t event_time_ms =
+      (evt.has_meta() && evt.meta().has_ts_event()) ? TimestampToUnixMs(evt.meta().ts_event()) : 0;
+  const double filled_qty = evt.has_filled_qty() ? DecimalToDouble(evt.filled_qty()) : 0.0;
+  const double remaining_qty = evt.has_remaining_qty() ? DecimalToDouble(evt.remaining_qty()) : 0.0;
+  const double avg_price = evt.has_average_price() ? DecimalToDouble(evt.average_price()) : 0.0;
+  const double reference_mid = evt.has_reference_mid() ? DecimalToDouble(evt.reference_mid()) : 0.0;
+  double fee_amount = 0.0;
+  std::string fee_currency;
+  if (evt.has_fee_total() && evt.fee_total().has_cost()) {
+    fee_currency = evt.fee_total().cost().currency();
+    if (evt.fee_total().cost().has_amount()) {
+      fee_amount = DecimalToDouble(evt.fee_total().cost().amount());
+    }
+  }
+  double hedge_pnl = 0.0;
+  if (evt.has_hedge_pnl() && evt.hedge_pnl().has_cost() && evt.hedge_pnl().cost().has_amount()) {
+    hedge_pnl = DecimalToDouble(evt.hedge_pnl().cost().amount());
+  }
+
+  std::ostringstream row;
+  row << "{";
+  row << "\"report_id\":\"" << JsonEscape(evt.report_id()) << "\",";
+  row << "\"intent_id\":\"" << JsonEscape(evt.intent_id()) << "\",";
+  row << "\"hedge_flow_id\":\"" << JsonEscape(evt.hedge_flow_id()) << "\",";
+  row << "\"child_order_id\":\"" << JsonEscape(evt.child_order_id()) << "\",";
+  row << "\"batch_id\":\"" << JsonEscape(evt.batch_id()) << "\",";
+  row << "\"provider_id\":\"" << JsonEscape(evt.provider_id()) << "\",";
+  row << "\"venue_id\":\"" << JsonEscape(evt.venue()) << "\",";
+  row << "\"symbol\":\"" << JsonEscape(evt.instrument().symbol()) << "\",";
+  row << "\"side\":\"" << JsonEscape(SideToCanonicalString(evt.side())) << "\",";
+  row << "\"status\":\"" << JsonEscape(StatusToCanonicalString(evt.status())) << "\",";
+  row << "\"filled_qty\":" << filled_qty << ",";
+  row << "\"remaining_qty\":" << remaining_qty << ",";
+  row << "\"avg_price\":" << avg_price << ",";
+  row << "\"fee_amount\":" << fee_amount << ",";
+  row << "\"fee_currency\":\"" << JsonEscape(fee_currency) << "\",";
+  row << "\"slippage_bps\":" << evt.slippage_bps() << ",";
+  row << "\"reference_mid\":" << reference_mid << ",";
+  row << "\"hedge_pnl\":" << hedge_pnl << ",";
+  row << "\"event_time_ms\":" << event_time_ms;
+  row << "}";
+  return row.str();
+}
+
 // Helper function for hedge PnL decimal conversion with high precision
 std::string DecimalToClickHouseDecimal(const fob::common::v1::Decimal& decimal) {
   return cex::common::Decimal::from_proto(decimal).to_string();
@@ -362,6 +436,36 @@ bool ClickHouseBatchStorage::EnsureSchema() {
       ") ENGINE = MergeTree "
       "ORDER BY (event_time_ms, venue, intent_id, report_id)";
 
+  // F-12 / IN-009 DoD-7 (PR-F12-3b): canonical execution_reports table.
+  // Mirror of infra/clickhouse/init.sql DDL with 90-day TTL and projection
+  // for hedge_flow_id drill-down. Coexists with execution_venue (legacy).
+  const std::string create_execution_reports =
+      "CREATE TABLE IF NOT EXISTS " + ExecutionReportsTableName() + " ("
+      "report_id String,"
+      "intent_id String,"
+      "hedge_flow_id String,"
+      "child_order_id String,"
+      "batch_id String,"
+      "provider_id String,"
+      "venue_id LowCardinality(String),"
+      "symbol String,"
+      "side LowCardinality(String),"
+      "status LowCardinality(String),"
+      "filled_qty Float64,"
+      "remaining_qty Float64,"
+      "avg_price Float64,"
+      "fee_amount Float64,"
+      "fee_currency String,"
+      "slippage_bps Int32,"
+      "reference_mid Float64,"
+      "hedge_pnl Float64,"
+      "event_time_ms Int64,"
+      "ingested_at DateTime DEFAULT now()"
+      ") ENGINE = MergeTree "
+      "PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000)) "
+      "ORDER BY (symbol, venue_id, event_time_ms, report_id) "
+      "TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY";
+
   const std::string create_hedge_pnl =
       "CREATE TABLE IF NOT EXISTS " + HedgePnLTableName() + " ("
       "batch_id String,"
@@ -381,6 +485,7 @@ bool ClickHouseBatchStorage::EnsureSchema() {
          ExecQuery(create_batchresults) &&
          ExecQuery(create_fills) &&
          ExecQuery(create_execution_venue) &&
+         ExecQuery(create_execution_reports) &&
          ExecQuery(create_hedge_pnl);
 }
 
@@ -400,10 +505,25 @@ bool ClickHouseBatchStorage::SaveFills(const fob::matching::v1::BatchResult& evt
 
 bool ClickHouseBatchStorage::SaveExecutionReport(
     const fob::execution::v1::ExecutionReport& evt) {
-  const std::string query =
+  // Dual-write during F-12 transition (IN-009 DoD-7 / PR-F12-3b):
+  //  - legacy `execution_venue` keeps existing read-side consumers happy
+  //  - canonical `execution_reports` is the new schema (20 fields incl.
+  //    hedge_pnl, slippage_bps, hedge_flow_id, child_order_id, side).
+  //
+  // Both writes are best-effort. If one fails the other can still
+  // succeed — service degrades gracefully (e.g. legacy consumers keep
+  // working even if v2 INSERT hits a schema mismatch).
+  const std::string legacy_query =
       "INSERT INTO " + ExecutionVenueTableName() + " FORMAT JSONEachRow";
-  const std::string row = BuildExecutionReportJsonRow(evt) + "\n";
-  return ExecQuery(query, row);
+  const std::string legacy_row = BuildExecutionReportJsonRow(evt) + "\n";
+  const bool legacy_ok = ExecQuery(legacy_query, legacy_row);
+
+  const std::string v2_query =
+      "INSERT INTO " + ExecutionReportsTableName() + " FORMAT JSONEachRow";
+  const std::string v2_row = BuildExecutionReportV2JsonRow(evt) + "\n";
+  const bool v2_ok = ExecQuery(v2_query, v2_row);
+
+  return legacy_ok && v2_ok;
 }
 
 bool ClickHouseBatchStorage::ExecQuery(const std::string& query, const std::string& body) {
@@ -514,6 +634,10 @@ std::string ClickHouseBatchStorage::BatchResultsTableName() const {
 
 std::string ClickHouseBatchStorage::FillsTableName() const {
   return cfg_.database + "." + cfg_.fills_table;
+}
+
+std::string ClickHouseBatchStorage::ExecutionReportsTableName() const {
+  return cfg_.database + "." + cfg_.execution_reports_table;
 }
 
 std::string ClickHouseBatchStorage::ExecutionVenueTableName() const {

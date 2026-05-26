@@ -30,6 +30,8 @@ int main() {
   ch_cfg.fills_table = cex::common::Env::get_string("CLICKHOUSE_FILLS_TABLE", "fills");
   ch_cfg.execution_venue_table =
       cex::common::Env::get_string("CLICKHOUSE_EXECUTION_VENUE_TABLE", "execution_venue");
+  ch_cfg.execution_reports_table =
+      cex::common::Env::get_string("CLICKHOUSE_EXECUTION_REPORTS_TABLE", "execution_reports");
   ch_cfg.marketdata_table =
       cex::common::Env::get_string("CLICKHOUSE_MARKETDATA_TABLE", "marketdata");
   ch_cfg.liquidity_curves_table =

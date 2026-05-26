@@ -22,6 +22,11 @@ struct ClickHouseConfig {
   std::string batchresults_table{"batchresults"};
   std::string fills_table{"fills"};
   std::string execution_venue_table{"execution_venue"};
+  // F-12 / IN-009 DoD-7 (PR-F12-3b): canonical execution_reports table
+  // matches infra/clickhouse/init.sql DDL — 20 columns with hedge_pnl,
+  // slippage_bps, hedge_flow_id, child_order_id, side, etc. Coexists with
+  // legacy execution_venue table during transition (dual-write).
+  std::string execution_reports_table{"execution_reports"};
   std::string marketdata_table{"marketdata"};
   std::string liquidity_curves_table{"liquidity_curves"};
   std::string hedge_pnl_table{"hedge_pnl_agg"};
@@ -68,6 +73,7 @@ class ClickHouseBatchStorage final : public app::IBatchOutputsStorage,
   std::string BatchResultsTableName() const;
   std::string FillsTableName() const;
   std::string ExecutionVenueTableName() const;
+  std::string ExecutionReportsTableName() const;
   std::string HedgePnLTableName() const;
 
   ClickHouseConfig cfg_;
