@@ -263,8 +263,9 @@ std::string BuildExecutionReportV2JsonRow(const fob::execution::v1::ExecutionRep
     }
   }
   double hedge_pnl = 0.0;
-  if (evt.has_hedge_pnl() && evt.hedge_pnl().has_cost() && evt.hedge_pnl().cost().has_amount()) {
-    hedge_pnl = DecimalToDouble(evt.hedge_pnl().cost().amount());
+  // hedge_pnl is a Money message (currency + amount); amount is Decimal.
+  if (evt.has_hedge_pnl() && evt.hedge_pnl().has_amount()) {
+    hedge_pnl = DecimalToDouble(evt.hedge_pnl().amount());
   }
 
   std::ostringstream row;
