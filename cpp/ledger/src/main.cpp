@@ -22,15 +22,20 @@ int main() {
   std::shared_ptr<cex::ledger::app::LedgerEntriesRepositoryPort> entries_repo;
   std::shared_ptr<cex::ledger::app::HedgeLedgerEntriesRepositoryPort> hedge_entries_repo;
   std::shared_ptr<cex::ledger::infra::PostgresIdempotencyRepository> idempotency_repo;
+  // F-12 / IN-009 DoD-6 (PR-F12-3c) — sink for hedge_pnl/fee deltas into
+  // PG hedgeflows. nullptr is valid (HedgePnL stays in memory only).
+  std::shared_ptr<cex::ledger::app::HedgeflowPnlSinkPort> hedgeflow_pnl_sink;
 
   if (!pg_dsn.empty()) {
     positions_repo = std::make_shared<cex::ledger::infra::PostgresPositionsRepository>(pg_dsn);
     entries_repo = std::make_shared<cex::ledger::infra::PostgresLedgerEntriesRepository>(pg_dsn);
     hedge_entries_repo = std::make_shared<cex::ledger::infra::PostgresHedgeLedgerEntriesRepository>(pg_dsn);
     idempotency_repo = std::make_shared<cex::ledger::infra::PostgresIdempotencyRepository>(pg_dsn);
+    hedgeflow_pnl_sink = std::make_shared<cex::ledger::infra::PostgresHedgeflowPnlSink>(pg_dsn);
 
     cex::common::log_json("INFO", "PostgreSQL repositories initialized",
-                          {{"dsn", pg_dsn}});
+                          {{"dsn", pg_dsn},
+                           {"hedgeflow_pnl_sink", "ready"}});
   } else {
     cex::common::log_json("WARN", "PostgreSQL DSN not set, persistence disabled");
   }
@@ -38,6 +43,7 @@ int main() {
   cex::ledger::app::LedgerUseCases uc(cex::ledger::app::LedgerUseCases::InitOptions{},
                                        positions_repo, entries_repo, hedge_entries_repo);
   uc.SetIdempotencyRepo(idempotency_repo);
+  uc.SetHedgeflowPnlSink(hedgeflow_pnl_sink);
 
   // Start Kafka consumers in background (batch.outputs, execution.intents, execution.reports, execution.venue)
   cex::ledger::infra::KafkaConsumers consumers(&uc, brokers);

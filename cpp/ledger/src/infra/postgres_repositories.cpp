@@ -338,4 +338,54 @@ void PostgresHedgeLedgerEntriesRepository::CreateHedgeEntry(
 
 #endif
 
+// ============================================================================
+// F-12 / IN-009 DoD-6 (PR-F12-3c) — PostgresHedgeflowPnlSink
+// ============================================================================
+PostgresHedgeflowPnlSink::PostgresHedgeflowPnlSink(std::string conn_str)
+    : conn_str_(std::move(conn_str)) {
+#ifndef CEX_LEDGER_HAS_LIBPQXX
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    cex::common::log_json(
+        "WARN",
+        "PostgresHedgeflowPnlSink is disabled: build without libpqxx (CEX_LEDGER_HAS_LIBPQXX=0)");
+  }
+#endif
+}
+
+void PostgresHedgeflowPnlSink::UpdateHedgePnlDelta(
+    const std::string& hedge_flow_id,
+    const std::string& pnl_delta,
+    const std::string& fee_delta) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (hedge_flow_id.empty()) return;
+  try {
+    pqxx::connection c(conn_str_);
+    pqxx::work tx(c);
+    // Accumulator UPDATE: COALESCE(..., 0) + delta. WHERE matches the row
+    // written by venues' PostgresHedgeflowRepository::InsertOpen in
+    // PR-F12-3a. NULLIF for empty strings to allow zero deltas.
+    tx.exec_params(
+        R"SQL(
+UPDATE hedgeflows
+   SET hedge_pnl  = COALESCE(hedge_pnl, 0)  + NULLIF($2, '')::NUMERIC,
+       tot_fee    = COALESCE(tot_fee, 0)    + COALESCE(NULLIF($3, '')::NUMERIC, 0),
+       updated_at = now()
+ WHERE hedge_flow_id = $1
+)SQL",
+        hedge_flow_id, pnl_delta, fee_delta);
+    tx.commit();
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Failed to update hedgeflow hedge_pnl",
+                          {{"hedge_flow_id", hedge_flow_id},
+                           {"error", ex.what()}});
+  }
+#else
+  (void)hedge_flow_id;
+  (void)pnl_delta;
+  (void)fee_delta;
+#endif
+}
+
 }  // namespace cex::ledger::infra

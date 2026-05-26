@@ -48,4 +48,19 @@ class PostgresHedgeLedgerEntriesRepository final : public app::HedgeLedgerEntrie
   std::string conn_str_;
 };
 
+// F-12 / IN-009 DoD-6 (PR-F12-3c) — accumulator for hedge_pnl + tot_fee
+// into PostgreSQL `hedgeflows` row. Used by ledger ApplyExecutionReport.
+// No-op gracefully when libpqxx is unavailable.
+class PostgresHedgeflowPnlSink final : public app::HedgeflowPnlSinkPort {
+ public:
+  explicit PostgresHedgeflowPnlSink(std::string conn_str);
+
+  void UpdateHedgePnlDelta(const std::string& hedge_flow_id,
+                           const std::string& pnl_delta,
+                           const std::string& fee_delta) override;
+
+ private:
+  std::string conn_str_;
+};
+
 }  // namespace cex::ledger::infra

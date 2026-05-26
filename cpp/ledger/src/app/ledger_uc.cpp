@@ -1021,6 +1021,35 @@ bool LedgerUseCases::apply_execution_report_locked(
       hedge_pnl_summary_[summary_key] = Decimal::add(it->second, record.hedge_pnl);
     }
 
+    // F-12 / IN-009 DoD-6 (PR-F12-3c): accumulate hedge_pnl + fee delta
+    // into PG `hedgeflows` row. Same hedge_flow_id ← intent_id fallback
+    // as venues' PostgresHedgeflowRepository (PR-F12-3a) — matching's
+    // external_fill reports carry composite intent_id, not UUID.
+    if (hedgeflow_pnl_sink_) {
+      const std::string hedge_flow_id =
+          !report.hedge_flow_id().empty() ? report.hedge_flow_id() : report.intent_id();
+      const std::string fee_delta_str =
+          (report.has_fee_total() && report.fee_total().has_cost() &&
+           report.fee_total().cost().has_amount())
+              ? Decimal::from_proto(report.fee_total().cost().amount()).to_string()
+              : std::string{};
+      hedgeflow_pnl_sink_->UpdateHedgePnlDelta(
+          hedge_flow_id,
+          record.hedge_pnl.to_string(),
+          fee_delta_str);
+    }
+
+    cex::common::log_json("INFO", "Hedge PnL computed (F-12 DoD-6)",
+                          {{"hedge_flow_id", !report.hedge_flow_id().empty()
+                                                 ? report.hedge_flow_id()
+                                                 : report.intent_id()},
+                           {"venue", report.venue()},
+                           {"side", record.side == fob::common::v1::SIDE_BUY ? "BUY" : "SELL"},
+                           {"delta_qty", record.executed_qty.to_string()},
+                           {"executed_price", record.executed_price.to_string()},
+                           {"internal_price", record.internal_price.to_string()},
+                           {"hedge_pnl_delta", record.hedge_pnl.to_string()}});
+
     ++exec_recon_stats_.applied_reports;
   }
 

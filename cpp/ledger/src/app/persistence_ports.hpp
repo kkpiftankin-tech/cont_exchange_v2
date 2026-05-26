@@ -37,4 +37,17 @@ class HedgeLedgerEntriesRepositoryPort {
   virtual void CreateHedgeEntry(const fob::ledger::v1::HedgeExecution& hedge) = 0;
 };
 
+// F-12 / IN-009 DoD-6 (PR-F12-3c) — write computed hedge_pnl + fee delta
+// back into PostgreSQL `hedgeflows` row for the UI HedgeFlow Monitor.
+// pnl_delta and fee_delta are PER-REPORT deltas; the repo MUST do
+// COALESCE(... , 0) + delta to accumulate across multiple reports.
+// All values are passed as decimal strings to avoid double precision loss.
+class HedgeflowPnlSinkPort {
+ public:
+  virtual ~HedgeflowPnlSinkPort() = default;
+  virtual void UpdateHedgePnlDelta(const std::string& hedge_flow_id,
+                                   const std::string& pnl_delta,
+                                   const std::string& fee_delta) = 0;
+};
+
 }  // namespace cex::ledger::app

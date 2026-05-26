@@ -78,6 +78,11 @@ class LedgerUseCases {
   void SetHedgeEntriesRepo(std::shared_ptr<HedgeLedgerEntriesRepositoryPort> repo) {
     hedge_entries_repo_ = std::move(repo);
   }
+  // F-12 / IN-009 DoD-6 (PR-F12-3c): sink that accumulates hedge_pnl/fee
+  // deltas into PG `hedgeflows` row. Optional — nullptr is valid.
+  void SetHedgeflowPnlSink(std::shared_ptr<HedgeflowPnlSinkPort> sink) {
+    hedgeflow_pnl_sink_ = std::move(sink);
+  }
   void SeedBalance(const std::string& user_id,
                    const std::string& currency,
                    const cex::common::Decimal& available,
@@ -169,6 +174,8 @@ class LedgerUseCases {
   std::shared_ptr<LedgerEntriesRepositoryPort> entries_repo_;
   std::shared_ptr<IdempotencyRepositoryPort> idempotency_repo_;
   std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo_;
+  // F-12 / IN-009 DoD-6 (PR-F12-3c) — optional PG sink for hedge_pnl/fee.
+  std::shared_ptr<HedgeflowPnlSinkPort> hedgeflow_pnl_sink_;
 
   // Helpers
   Balance& ensure_balance_locked(const std::string& user, const std::string& currency);
