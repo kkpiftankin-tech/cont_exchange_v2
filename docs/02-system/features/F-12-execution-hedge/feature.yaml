@@ -332,6 +332,103 @@ uxScreens:
       - GET /api/v1/policy-config/f12
       - PUT /api/v1/policy-config/f12 (требует подтверждения)
       - GET /api/v1/policy-config/f12/audit
+    refresh_mode: on-demand (operator click)
+
+# Refresh modes для всех 6 UI экранов из IN-009 §7.3 (v2.0-final).
+# Применяются дополнительно к описанию каждого экрана в uxScreens[].
+uxRefreshModes:
+  hedge_flow_monitor: polling-2s        # PG.hedgeflows + child_orders
+  execution_live_feed: sse-realtime     # Kafka execution.venue (через OBS slot)
+  hedge_pnl_dashboard: polling-batch    # ClickHouse execution_reports, ~10s refresh
+  reconciliation_alerts: polling-5s     # PG.hedgeflows(UNDERFILLED) + Kafka risk.alerts
+  manual_override: on-demand            # write-path → execution.intents
+  policy_config: on-demand              # solver_config
+
+# Architecture section из IN-009 §7.4 (v2.0-final).
+# Описывает роль Observability Reporting как read-side компонента между
+# Admin UI и хранилищами PG/CH/Kafka. UI никогда не ходит напрямую в
+# хранилища — все запросы идут через Observability Reporting (REST/SSE).
+architecture:
+  observabilityReporting:
+    role: read-side only
+    description: >
+      Единственная точка доступа Admin UI к данным F-12. Подписан на Kafka
+      (execution.venue, risk.alerts), читает PG/CH, обслуживает UI через
+      REST API и SSE. НЕ участвует в pipeline исполнения (никогда не пишет
+      в execution.intents). Исключения: Manual Override и Policy Config
+      проксируются через OBS в API Matching Backend / Venue Execution Adapter.
+    data_flows:
+      ingest_background:
+        - source: Kafka execution.venue
+          consumer: Observability Reporting
+          targets: [PostgreSQL hedgeflows/child_orders (aggregates), ClickHouse execution_reports (history)]
+          characteristic: непрерывный фон, не зависит от UI
+        - source: Kafka risk.alerts
+          consumer: Observability Reporting
+          targets: [PostgreSQL risk_alerts_log]
+      ui_request:
+        pattern: "UI → OBS → DB → OBS → UI (строгий линейный порядок)"
+        examples:
+          - "GET /api/v1/hedge/flows → SELECT FROM hedgeflows"
+          - "GET /api/v1/hedge/flows/{id}/child-orders → SELECT FROM child_orders"
+          - "GET /api/v1/hedge/flows/{id}/execution-timeline → SELECT FROM execution_reports"
+          - "GET /api/v1/execution/live → SSE stream из execution_reports/Kafka"
+    conflict_note: |
+      В текущем MVP роль "Observability Reporting" исполняется frontend-api
+      (Node.js в frontend/api/server.js), а cpp/observability — минимальный
+      Kafka logger без PG/CH access. Полноценный OBS-сервис (C++ с REST API,
+      Kafka ingest в PG/CH, SSE-стрим) — отдельный компонент будущего;
+      требует ADR-016 для выбора между:
+      (a) расширить cpp/observability до full OBS service
+      (b) формализовать frontend-api как Observability Reporting role
+      (c) выделить новый cpp/observability_reporting сервис
+
+# Operator timeline из IN-009 §7.2 (v2.0-final).
+# Step-by-step хронология того, что видит оператор в Admin UI после
+# завершения матчинга и публикации ExecutionIntent.
+# Полезно для QA test cases (можно превратить в test plan UI scenarios)
+# и для UX flow design.
+operatorTimeline:
+  - step: 1
+    actor: Matching Backend
+    action: Публикует ExecutionIntent → Kafka execution.intents
+    ui_visibility: (не видно, хедж ещё не начат)
+  - step: 2
+    actor: Venue Execution Adapter
+    action: INSERT hedgeflows (status=OPEN) → PostgreSQL
+    ui_visibility: HedgeFlow Monitor — новая строка со статусом OPEN
+  - step: 3
+    actor: Venue Execution Adapter
+    action: INSERT child_orders (status=PENDING) → PostgreSQL
+    ui_visibility: Drill-down — child-ордера со статусом PENDING
+  - step: 4
+    actor: External Venues Connector
+    action: Отправляет child-ордера на venue (CEX/DEX)
+    ui_visibility: (не видно)
+  - step: 5
+    actor: Venue
+    action: Возвращает Execution Report (FILLED/PARTIALLY_FILLED/REJECTED)
+    ui_visibility: (не видно)
+  - step: 6
+    actor: Venue Execution Adapter
+    action: Publishes ExecutionReport → Kafka execution.venue
+    ui_visibility: Execution Live Feed — новая строка в real-time
+  - step: 7
+    actor: Venue Execution Adapter
+    action: UPDATE child_orders, UPDATE hedgeflows.filledQty → PostgreSQL
+    ui_visibility: HedgeFlow Monitor — обновляется filledQty + fillRatio
+  - step: 8
+    actor: Observability Reporting
+    action: Reads execution_reports → ClickHouse
+    ui_visibility: Hedge PnL Dashboard — обновляются slippageBps, hedgePnL
+  - step: 9
+    actor: Venue Execution Adapter
+    action: Reconciliation → UPDATE hedgeflows.status = COMPLETED / UNDERFILLED
+    ui_visibility: HedgeFlow Monitor — статус меняется OPEN → COMPLETED/UNDERFILLED
+  - step: 10
+    actor: Risk Manager
+    action: risk.alerts(HEDGE_UNDERFILL) → Kafka → Observability
+    ui_visibility: Reconciliation Alerts — новая строка с gap и timestamp
 
 knownIssues:
   - id: no-venue-execution-adapter-service
@@ -437,6 +534,32 @@ knownIssues:
       (tick_size, lot_size, fee_bps) приходит из VenueSnapshot, но не
       используется при формировании child orders.
     location: cpp/venues/src/app/execute_on_venue.cpp
+  - id: observability-reporting-vs-frontend-api
+    severity: conflict
+    source: IN-009 (v2.0-final, 2026-05-25)
+    description: >
+      IN-009 §7 описывает Observability Reporting как полноценный C++ компонент
+      между Admin UI и хранилищами PG/CH/Kafka: подписан на Kafka, читает PG/CH,
+      обслуживает UI через REST/SSE. В текущем MVP эту роль исполняет
+      frontend-api (Node.js в frontend/api/server.js), а cpp/observability —
+      минимальный Kafka logger без PG/CH access.
+
+      Решение требует ADR-016 для выбора одного из трёх путей:
+      (a) расширить cpp/observability до full OBS service (C++ + libpqxx +
+          Crow REST + SSE);
+      (b) формализовать frontend-api как Observability Reporting role (Node.js
+          остаётся, но переименовывается в архитектурной документации);
+      (c) выделить новый cpp/observability_reporting сервис, оставив
+          cpp/observability как pure Kafka logger.
+
+      До решения ADR-016: используется путь (b) — frontend-api играет роль
+      OBS-слоя, но не называется так в коде. Спецификация IN-009 фиксирует
+      это явно через architecture.observabilityReporting.conflict_note.
+    location: |
+      docs/05-components/observability-reporting/ (current C++ service description)
+      vs
+      frontend/api/server.js (actual OBS implementation in MVP)
+    target_pr: ADR-016 (architecture decision pending)
 
 tests:
   unit:
