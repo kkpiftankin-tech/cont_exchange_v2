@@ -112,14 +112,27 @@ acceptanceCriteria:
 # Каждый пункт ссылается на artifact / код / тест, демонстрирующий завершённость.
 definitionOfDone:
   - id: DoD-1
-    status: partial
+    status: implemented
     title: ExecutionIntent публикуется в Kafka execution.intents
     description: >
       Producer matching/risk/manual override; payload содержит все обязательные
       поля (hedgeFlowId, batchId, providerId, symbol, side, targetQty,
       referenceMid, urgency, timeoutMs, allowedVenues).
-    evidence: cpp/matching/src/app/hedge_execution_intents_publisher.cpp
-    blocked_by_ac: [F12-1, F12-2]
+      PR-F12-5 (2026-05-26): HedgeTriggerConfig + HedgeExecutionIntentConfig
+      теперь читаются из env (HEDGE_TRIGGER_QTY_<SYM>, HEDGE_INTENT_URGENCY и
+      т.д.). Реальные F-12 intent'ы с source=HEDGE_SOURCE_AUTO_BATCH, deterministic
+      hedge_flow_id "<batch>|hedge|<provider>|<symbol>", urgency/strategy/tif/
+      allowed_venues. E2E проверено на ubuntu-dev: PG hedgeflows получает
+      строки с |hedge| суффиксом, статус COMPLETED после исполнения venues.
+    evidence: |
+      cpp/matching/src/app/matching_loop.cpp (LoadHedgeTriggerConfig,
+      LoadHedgeExecutionIntentConfig + структурный лог "F-12 hedge config loaded"),
+      cpp/matching/src/app/execution_intent_builder.cpp:279-357
+      (BuildFromHedgeTriggerDecisions),
+      cpp/matching/src/app/hedge_execution_intents_publisher.cpp,
+      cpp/venues/src/app/venues_loop.cpp (propagation
+      intent.hedge_flow_id → report.hedge_flow_id для PG update),
+      infra/env/.env-example (HEDGE_TRIGGER_* + HEDGE_INTENT_* vars)
   - id: DoD-2
     status: partial
     title: Execution Planning Forecast потребляет execution.intents + venue.liquidity.fob + venue.health
@@ -495,6 +508,20 @@ knownIssues:
       не имплементирована. Интерфейс `IExecutionPlanningUseCases` присутствует,
       но без полной реализации.
     location: cpp/matching/src/app/execution_planning_uc.hpp
+  - id: venues-sim-zero-execution-price
+    severity: dev-limitation
+    description: >
+      In simulate_orders mode (default in dev), venue adapters publish
+      ExecutionReport with executed_price = 0 (no price simulation for
+      MARKET strategy). As a result, Settlement Ledger computes
+      hedge_pnl_delta = (executed_price - internal_price) * qty = 0
+      for every real F-12 hedge intent — even though the flow is fully
+      wired and PG.hedgeflows.filled_qty/status/completed_at update correctly.
+      A non-zero PnL demonstration requires either (a) wiring sim adapters
+      to set executed_price ≈ internal_price ± slippage, or (b) running
+      against real CEX/DEX adapters (CEX_SIMULATE_ORDERS=0).
+    location: cpp/venues/src/infra/cex_ws_rest_adapter.cpp, cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+    surfaced_in: PR-F12-5 E2E (2026-05-26)
   - id: no-hedgeflows-postgres-schema
     severity: resolved
     status: resolved

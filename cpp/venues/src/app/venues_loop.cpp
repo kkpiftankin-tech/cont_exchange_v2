@@ -1605,6 +1605,14 @@ void VenuesLoop::exec_consume_loop() {
              {"venue", venue_for_event}});
       }
 
+      // F-12 / PR-F12-5: propagate hedge_flow_id from intent to report so
+      // PostgresHedgeflowRepository::ApplyReport finds the row inserted by
+      // InsertOpen. Without this, real F-12 hedge intents fall through to
+      // intent_id-fallback which has a "|intent" suffix mismatch.
+      if (rep.hedge_flow_id().empty() && !intent.hedge_flow_id().empty()) {
+        rep.set_hedge_flow_id(intent.hedge_flow_id());
+      }
+
       if (rep.has_error()) {
         (void)observability_.PublishError(
             rep.venue().empty() ? venue_for_event : rep.venue(),

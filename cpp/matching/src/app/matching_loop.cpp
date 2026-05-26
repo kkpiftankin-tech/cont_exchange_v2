@@ -1,6 +1,7 @@
 #include "app/matching_loop.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -9,6 +10,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "fob/execution/v1/execution.pb.h"
 
 #include "app/hedge_execution_intents_publisher.hpp"
 #include "cex/common/decimal.hpp"
@@ -83,6 +86,143 @@ NormalizedOrderPriceLimits NormalizeOrderPriceLimits(
   return limits;
 }
 
+// F-12 / PR-F12-5: parse a numeric string like "0.05" or "50000" into a
+// fixed-point Decimal{units, scale}. Empty / unparseable / non-finite input
+// returns zero (which the policy treats as "threshold disabled").
+cex::common::Decimal ParseDecimalString(const std::string& raw) {
+  if (raw.empty()) return cex::common::Decimal::zero();
+  std::string s = raw;
+  bool negative = false;
+  if (s[0] == '-') {
+    negative = true;
+    s.erase(0, 1);
+  } else if (s[0] == '+') {
+    s.erase(0, 1);
+  }
+  if (s.empty()) return cex::common::Decimal::zero();
+
+  const auto dot = s.find('.');
+  std::string int_part;
+  std::string frac_part;
+  if (dot == std::string::npos) {
+    int_part = s;
+  } else {
+    int_part = s.substr(0, dot);
+    frac_part = s.substr(dot + 1);
+  }
+  // strip trailing zeros from fractional part to keep scale minimal
+  while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
+  if (int_part.empty()) int_part = "0";
+
+  const std::string combined = int_part + frac_part;
+  try {
+    int64_t units = std::stoll(combined);
+    if (negative) units = -units;
+    return cex::common::Decimal{units, static_cast<int32_t>(frac_part.size())};
+  } catch (...) {
+    return cex::common::Decimal::zero();
+  }
+}
+
+// F-12 / PR-F12-5: convert "BTC/USDT" → "BTC_USDT" for env-var suffix.
+std::string SymbolToEnvSuffix(const std::string& symbol) {
+  std::string out = symbol;
+  for (auto& c : out) {
+    if (c == '/' || c == '-') c = '_';
+  }
+  return out;
+}
+
+// F-12 / PR-F12-5: load HedgeTriggerConfig from env. Defaults are zero, which
+// disables the trigger entirely (matches pre-PR behaviour). Active deployments
+// set HEDGE_TRIGGER_QTY_DEFAULT / HEDGE_TRIGGER_NOTIONAL_DEFAULT, or per-symbol
+// HEDGE_TRIGGER_QTY_BTC_USDT etc., and list active symbols in HEDGE_TRIGGER_SYMBOLS.
+HedgeTriggerConfig LoadHedgeTriggerConfig() {
+  HedgeTriggerConfig config;
+  config.default_thresholds.threshold_qty = ParseDecimalString(
+      cex::common::Env::get_string("HEDGE_TRIGGER_QTY_DEFAULT", "0"));
+  config.default_thresholds.threshold_notional = ParseDecimalString(
+      cex::common::Env::get_string("HEDGE_TRIGGER_NOTIONAL_DEFAULT", "0"));
+
+  const auto symbols_csv =
+      cex::common::Env::get_string("HEDGE_TRIGGER_SYMBOLS", "");
+  if (symbols_csv.empty()) return config;
+
+  size_t start = 0;
+  while (start <= symbols_csv.size()) {
+    auto end = symbols_csv.find(',', start);
+    if (end == std::string::npos) end = symbols_csv.size();
+    std::string symbol = symbols_csv.substr(start, end - start);
+    // trim whitespace
+    while (!symbol.empty() && std::isspace(static_cast<unsigned char>(symbol.front()))) symbol.erase(symbol.begin());
+    while (!symbol.empty() && std::isspace(static_cast<unsigned char>(symbol.back()))) symbol.pop_back();
+    if (!symbol.empty()) {
+      const auto suffix = SymbolToEnvSuffix(symbol);
+      HedgeTriggerThreshold threshold;
+      threshold.threshold_qty = ParseDecimalString(
+          cex::common::Env::get_string("HEDGE_TRIGGER_QTY_" + suffix, "0"));
+      threshold.threshold_notional = ParseDecimalString(
+          cex::common::Env::get_string("HEDGE_TRIGGER_NOTIONAL_" + suffix, "0"));
+      config.per_symbol_thresholds.emplace(symbol, threshold);
+    }
+    start = end + 1;
+  }
+  return config;
+}
+
+// F-12 / PR-F12-5: parse comma-separated string into a vector, trimming
+// surrounding whitespace per item and skipping empties.
+std::vector<std::string> ParseCsvList(const std::string& raw) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (start <= raw.size()) {
+    auto end = raw.find(',', start);
+    if (end == std::string::npos) end = raw.size();
+    std::string item = raw.substr(start, end - start);
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+    if (!item.empty()) out.push_back(std::move(item));
+    start = end + 1;
+  }
+  return out;
+}
+
+fob::execution::v1::ExecutionUrgency ParseUrgency(const std::string& raw) {
+  if (raw == "LOW") return fob::execution::v1::URGENCY_LOW;
+  if (raw == "HIGH") return fob::execution::v1::URGENCY_HIGH;
+  return fob::execution::v1::URGENCY_MEDIUM;
+}
+
+fob::execution::v1::ExecutionStrategy ParseStrategy(const std::string& raw) {
+  if (raw == "LIMIT") return fob::execution::v1::EXEC_STRATEGY_LIMIT;
+  if (raw == "TWAP") return fob::execution::v1::EXEC_STRATEGY_TWAP;
+  if (raw == "POST_ONLY") return fob::execution::v1::EXEC_STRATEGY_POST_ONLY;
+  return fob::execution::v1::EXEC_STRATEGY_MARKET;
+}
+
+fob::common::v1::TimeInForce ParseTif(const std::string& raw) {
+  if (raw == "GTC") return fob::common::v1::TIF_GTC;
+  if (raw == "FOK") return fob::common::v1::TIF_FOK;
+  return fob::common::v1::TIF_IOC;
+}
+
+// F-12 / PR-F12-5: load HedgeExecutionIntentConfig from env.
+HedgeExecutionIntentConfig LoadHedgeExecutionIntentConfig() {
+  HedgeExecutionIntentConfig config;
+  config.urgency = ParseUrgency(
+      cex::common::Env::get_string("HEDGE_INTENT_URGENCY", "MEDIUM"));
+  config.strategy = ParseStrategy(
+      cex::common::Env::get_string("HEDGE_INTENT_STRATEGY", "MARKET"));
+  config.tif = ParseTif(cex::common::Env::get_string("HEDGE_INTENT_TIF", "IOC"));
+  config.timeout_ms = static_cast<int64_t>(
+      cex::common::Env::get_int("HEDGE_INTENT_TIMEOUT_MS", 30000));
+  config.max_slippage_bps = static_cast<int32_t>(
+      cex::common::Env::get_int("HEDGE_INTENT_MAX_SLIPPAGE_BPS", 50));
+  config.allowed_venues = ParseCsvList(
+      cex::common::Env::get_string("HEDGE_INTENT_ALLOWED_VENUES", ""));
+  return config;
+}
+
 VenueThresholds LoadVenueHealthThresholds() {
   VenueThresholds thresholds;
   auto get_double = [](const char* name, double def) -> double {
@@ -144,13 +284,43 @@ MatchingLoop::MatchingLoop(
                     [this](const fob::matching::v1::BatchResult& batch) {
                       metrics_.ObserveBatch(batch);
                       return publish_batch(batch);
-                    }),
+                    },
+                    LoadHedgeTriggerConfig(),
+                    LoadHedgeExecutionIntentConfig()),
       solver_config_repo_(std::move(solver_config_repo)),
       market_data_client_(std::move(market_data_client)),
       flow_order_repository_(std::move(flow_order_repository)),
       planner_inputs_cache_(LoadVenueHealthThresholds()) {}
 
 void MatchingLoop::start() {
+  // F-12 / PR-F12-5: log effective hedge trigger config + intent config so
+  // operators can confirm thresholds without restarting the service.
+  const auto trigger_cfg = LoadHedgeTriggerConfig();
+  const auto intent_cfg = LoadHedgeExecutionIntentConfig();
+  std::string venues_csv;
+  for (size_t i = 0; i < intent_cfg.allowed_venues.size(); ++i) {
+    if (i > 0) venues_csv += ",";
+    venues_csv += intent_cfg.allowed_venues[i];
+  }
+  std::map<std::string, std::string> log_fields = {
+      {"default_threshold_qty",
+       trigger_cfg.default_thresholds.threshold_qty.to_string()},
+      {"default_threshold_notional",
+       trigger_cfg.default_thresholds.threshold_notional.to_string()},
+      {"intent_urgency", std::to_string(static_cast<int>(intent_cfg.urgency))},
+      {"intent_strategy", std::to_string(static_cast<int>(intent_cfg.strategy))},
+      {"intent_tif", std::to_string(static_cast<int>(intent_cfg.tif))},
+      {"intent_timeout_ms", std::to_string(intent_cfg.timeout_ms)},
+      {"intent_max_slippage_bps", std::to_string(intent_cfg.max_slippage_bps)},
+      {"intent_allowed_venues", venues_csv},
+      {"per_symbol_overrides_count",
+       std::to_string(trigger_cfg.per_symbol_thresholds.size())}};
+  for (const auto& [sym, th] : trigger_cfg.per_symbol_thresholds) {
+    log_fields["sym:" + sym + ":qty"] = th.threshold_qty.to_string();
+    log_fields["sym:" + sym + ":notional"] = th.threshold_notional.to_string();
+  }
+  cex::common::log_json("INFO", "F-12 hedge config loaded", log_fields);
+
   running_.store(true);
   consumer_.subscribe(
       {"orders.normalized", "venue.liquidity.fob", "venue.health"});
