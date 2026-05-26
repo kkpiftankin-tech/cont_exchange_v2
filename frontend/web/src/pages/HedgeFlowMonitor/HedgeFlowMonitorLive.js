@@ -1,0 +1,277 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
+import { isAuthenticated, logout } from '../../api/authService';
+import useInterval from '../../hooks/useInterval';
+import logo from '../../assets/logo-purple.svg';
+import './HedgeFlowMonitor.css';
+import './HedgeFlowMonitorLive.css';
+
+const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
+const POLL_INTERVAL_MS = 2000;
+
+const STATUS_FILTERS = [
+  'all', 'OPEN', 'COMPLETED', 'UNDERFILLED', 'REJECTED', 'RISK_REJECTED', 'CANCELLED'
+];
+
+const PERIOD_FILTERS = [
+  { value: 'all', label: 'Все' },
+  { value: '1h', label: '1 час' },
+  { value: '24h', label: '24 часа' },
+  { value: '7d', label: '7 дней' },
+];
+
+function formatNumber(value, digits = 6) {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  return n.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatPnl(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString('ru-RU', { hour12: false });
+  } catch (e) {
+    return String(value);
+  }
+}
+
+function formatRatio(filled, target) {
+  const f = Number(filled);
+  const t = Number(target);
+  if (!Number.isFinite(f) || !Number.isFinite(t) || t === 0) return '—';
+  return `${((f / t) * 100).toFixed(1)}%`;
+}
+
+const HedgeFlowMonitorLive = () => {
+  const navigate = useNavigate();
+  const [isAuth, setIsAuth] = useState(null);
+  const [data, setData] = useState({ items: [], summary: {}, generatedAt: null, source: '' });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [periodFilter, setPeriodFilter] = useState('24h');
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      const auth = await isAuthenticated();
+      setIsAuth(auth);
+      if (!auth) navigate('/login');
+    };
+    checkAuth();
+  }, [navigate]);
+
+  const load = useCallback(async ({ showLoader = false } = {}) => {
+    if (showLoader) setLoading(true);
+    try {
+      const params = { limit: 50 };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      if (periodFilter !== 'all') params.period = periodFilter;
+      const response = await axios.get(`${API_BASE}/v1/hedge/flows`, {
+        params,
+        timeout: 5000,
+      });
+      setData(response.data || { items: [], summary: {} });
+      setError('');
+    } catch (err) {
+      setError(err.response?.data?.message || err.message || 'Ошибка загрузки');
+    } finally {
+      if (showLoader) setLoading(false);
+    }
+  }, [statusFilter, periodFilter]);
+
+  useEffect(() => {
+    if (isAuth) load({ showLoader: true });
+  }, [isAuth, load]);
+
+  useInterval(() => {
+    if (isAuth) load();
+  }, isAuth ? POLL_INTERVAL_MS : null);
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  if (isAuth === null) {
+    return <div className="loading-screen">Загрузка...</div>;
+  }
+
+  const summary = data.summary || {};
+  const items = data.items || [];
+
+  return (
+    <div className="hedge-page">
+      <nav className="navbar-main hedge-navbar">
+        <div className="logo">
+          <img src={logo} alt="Logo" className="logo-purple" />
+          <span>CEX</span>
+        </div>
+        <div className="nav-links">
+          <a href="/main">Торговля</a>
+          <a href="/profile">Профиль</a>
+          <a href="/venues">Площадки</a>
+          <a href="/hedgeflows">HedgeFlow (mock)</a>
+          <a href="/hedge-flows-live" className="active">HedgeFlow (live)</a>
+          <a href="/hedge-pnl">PnL</a>
+          <a href="/execution-live">Execution feed</a>
+          <a href="/reconciliation-alerts">Alerts</a>
+          <a href="/manual-override">Manual override</a>
+          <a href="/policy-config">Policy</a>
+          <a href="/replay">Replay</a>
+          <button onClick={handleLogout} className="logout-btn">Выйти</button>
+        </div>
+      </nav>
+
+      <main className="hedge-shell">
+        <section className="hedge-hero">
+          <div className="hedge-hero-copy">
+            <span className="hedge-kicker">F-12 / DoD-14</span>
+            <h1>HedgeFlow Monitor — PG live</h1>
+            <p>Источник: PostgreSQL <code>hedgeflows</code>. Обновление каждые 2 сек.</p>
+          </div>
+          <div className="hedge-hero-meta">
+            <button type="button" className="hedge-refresh-btn" onClick={() => load({ showLoader: true })}>
+              Обновить
+            </button>
+            <div className="hedge-live-pill">
+              <span className="hedge-live-dot" />
+              live 2s
+            </div>
+            <div className="hedge-refresh-label">
+              Обновлено: {formatDateTime(data.generatedAt)}
+            </div>
+          </div>
+        </section>
+
+        <section className="hedge-summary-grid">
+          <article className="hedge-summary-card">
+            <span>Всего</span>
+            <strong>{summary.total ?? 0}</strong>
+            <small>HedgeFlow в выборке</small>
+          </article>
+          <article className="hedge-summary-card hedge-summary-open">
+            <span>OPEN</span>
+            <strong>{summary.open ?? 0}</strong>
+            <small>в исполнении</small>
+          </article>
+          <article className="hedge-summary-card">
+            <span>COMPLETED</span>
+            <strong>{summary.completed ?? 0}</strong>
+            <small>исполнены</small>
+          </article>
+          <article className="hedge-summary-card">
+            <span>UNDERFILLED</span>
+            <strong>{summary.underfilled ?? 0}</strong>
+            <small>недоисполнены</small>
+          </article>
+          <article className="hedge-summary-card">
+            <span>REJECTED</span>
+            <strong>{summary.rejected ?? 0}</strong>
+            <small>отклонены</small>
+          </article>
+        </section>
+
+        <section className="hedge-toolbar">
+          <div className="hedge-status-filter">
+            {STATUS_FILTERS.map((status) => (
+              <button
+                type="button"
+                key={status}
+                className={`hedge-filter-chip ${statusFilter === status ? 'active' : ''}`}
+                onClick={() => setStatusFilter(status)}
+              >
+                {status === 'all' ? 'Все' : status}
+              </button>
+            ))}
+          </div>
+          <div className="hedge-field-group">
+            <label>
+              <span>Период</span>
+              <select value={periodFilter} onChange={(e) => setPeriodFilter(e.target.value)}>
+                {PERIOD_FILTERS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="hedge-list-panel">
+          <div className="hedge-panel-title list-title">
+            <div>
+              <h2>HedgeFlows ({items.length})</h2>
+              <p>Источник: {data.source || 'postgres:hedgeflows'}</p>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="hedge-empty-state">Загрузка...</div>
+          ) : error ? (
+            <div className="hedge-empty-state error">{error}</div>
+          ) : items.length === 0 ? (
+            <div className="hedge-empty-state">Нет данных — таблица hedgeflows пуста или фильтр исключил все строки.</div>
+          ) : (
+            <div className="hedge-live-table-wrap">
+              <table className="hedge-live-table">
+                <thead>
+                  <tr>
+                    <th>Время</th>
+                    <th>HedgeFlowId</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Provider</th>
+                    <th>Target qty</th>
+                    <th>Filled qty</th>
+                    <th>Ratio</th>
+                    <th>Ref mid</th>
+                    <th>Avg fill</th>
+                    <th>Fee</th>
+                    <th>HedgePnL</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((flow) => (
+                    <tr key={flow.hedgeFlowId} className={`status-${flow.status}`}>
+                      <td>{formatDateTime(flow.createdAt)}</td>
+                      <td className="hedge-id" title={flow.hedgeFlowId}>
+                        {flow.hedgeFlowId.length > 18
+                          ? `${flow.hedgeFlowId.slice(0, 18)}…`
+                          : flow.hedgeFlowId}
+                      </td>
+                      <td>{flow.symbol}</td>
+                      <td className={`hedge-side hedge-side-${flow.side?.toLowerCase()}`}>{flow.side}</td>
+                      <td>{flow.providerId}</td>
+                      <td>{formatNumber(flow.targetQty)}</td>
+                      <td>{formatNumber(flow.filledQty)}</td>
+                      <td>{formatRatio(flow.filledQty, flow.targetQty)}</td>
+                      <td>{formatNumber(flow.referenceMid, 4)}</td>
+                      <td>{formatNumber(flow.avgFillPrice, 4)}</td>
+                      <td>{formatNumber(flow.totFee, 4)}</td>
+                      <td className={Number(flow.hedgePnl) >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                        {formatPnl(flow.hedgePnl)}
+                      </td>
+                      <td><span className={`hedge-status-badge status-${flow.status}`}>{flow.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+};
+
+export default HedgeFlowMonitorLive;

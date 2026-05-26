@@ -13,6 +13,8 @@ services:
       MATCHING_VIEW_CACHE_TTL_MS: ${MATCHING_VIEW_CACHE_TTL_MS:-5000}
       LEDGER_GRPC_ADDR: ${LEDGER_GRPC_ADDR:-ledger:50053}
       VENUES_HTTP_ADDR: ${VENUES_HTTP_ADDR:-http://venues:8087}
+      # F-12 DoD-14: HedgeFlow Monitor reads PG hedgeflows directly.
+      FRONTEND_POSTGRES_DSN: ${FRONTEND_POSTGRES_DSN:-postgresql://cex:cex@postgres:5432/cex}
     ports:
       - "8090:8090"
     networks: [default, cex_net]

@@ -228,6 +228,19 @@ AC: F12-10, F12-N1..N8.
 
 #### T-F12-1001. HedgeFlow Monitor screen
 
+PR-F12-6 (2026-05-26) — минимальный PG-backed monitor доставлен:
+
+- `frontend/api/server.js`: `GET /api/v1/hedge/flows` запрашивает PG
+  `hedgeflows` напрямую (pg-pool, filter по status/period/symbol/provider).
+- `frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js`:
+  React-страница с polling-2s, summary cards (OPEN/COMPLETED/
+  UNDERFILLED/REJECTED), table со всеми колонками PG hedgeflows.
+- Route `/hedge-flows-live` в `App.js`.
+- F-12 DoD-14 → `partial`.
+
+Остаётся: drill-down (Overview + Child Orders + Execution Timeline),
+CSV export, фильтры по venue + batchId.
+
 #### T-F12-1002. Execution Live Feed
 
 #### T-F12-1003. Hedge PnL Dashboard

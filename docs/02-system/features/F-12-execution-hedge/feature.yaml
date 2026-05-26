@@ -258,13 +258,24 @@ definitionOfDone:
     evidence: cpp/venues/tests/backtest_parity_check_test.cpp (smoke есть, full parity нет)
     blocked_by_ac: [F12-9]
   - id: DoD-14
-    status: not-implemented
+    status: partial
     title: Admin UI HedgeFlow Monitor
     description: >
       Список HedgeFlow с filter по symbol/batchId/provider/status/period,
       drill-down (Overview + Child Orders + Execution Timeline tabs),
       экспорт CSV. См. uxScreens.hedge_flow_monitor.
-    evidence: frontend/web/src/pages/ (страница отсутствует)
+      PR-F12-6 (2026-05-26): доставлен минимальный PG-backed monitor —
+      страница /hedge-flows-live с polling-2s, фильтрами по
+      status/period, badge-индикатором источника. GET /api/v1/hedge/flows
+      запрашивает PG hedgeflows напрямую (frontend-api → pg pool).
+      Остаётся: drill-down (Overview + Child Orders + Execution Timeline),
+      CSV export, фильтры по symbol/batchId/provider, фильтры по venue.
+      Старый /hedgeflows (mock) сохранён до миграции остальных tabs.
+    evidence: |
+      frontend/api/server.js (handleHedgeFlowsV1, PG pool),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js,
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.css,
+      route /hedge-flows-live в App.js
   - id: DoD-15
     status: not-implemented
     title: Admin UI Execution Live Feed + Hedge PnL Dashboard + Reconciliation Alerts + Manual Override + Policy Config

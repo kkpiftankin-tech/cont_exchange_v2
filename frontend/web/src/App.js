@@ -12,6 +12,7 @@ import ExternalVenueDetails from './pages/ExternalVenues/ExternalVenueDetails';
 import BacktestReplay from './pages/BacktestReplay/BacktestReplay';
 import LobFobDashboard from './pages/LobFobDashboard/LobFobDashboard';
 import HedgeFlowMonitor from './pages/HedgeFlowMonitor/HedgeFlowMonitor';
+import HedgeFlowMonitorLive from './pages/HedgeFlowMonitor/HedgeFlowMonitorLive';
 import HedgePnlDashboard from './pages/HedgePnlDashboard/HedgePnlDashboard';
 import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
@@ -34,6 +35,7 @@ function App() {
         <Route path="/venues" element={<AuthRoute><ExternalVenuesList /></AuthRoute>} />
         <Route path="/venues/:venueId" element={<AuthRoute><ExternalVenueDetails /></AuthRoute>} />
         <Route path="/hedgeflows" element={<AuthRoute><HedgeFlowMonitor /></AuthRoute>} />
+        <Route path="/hedge-flows-live" element={<AuthRoute><HedgeFlowMonitorLive /></AuthRoute>} />
         <Route path="/hedge-pnl" element={<AuthRoute><HedgePnlDashboard /></AuthRoute>} />
         <Route path="/execution-live" element={<AuthRoute><ExecutionLiveFeed /></AuthRoute>} />
         <Route path="/reconciliation-alerts" element={<AuthRoute><ReconciliationAlerts /></AuthRoute>} />

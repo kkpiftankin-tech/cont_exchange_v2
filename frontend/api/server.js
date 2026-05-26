@@ -8,6 +8,7 @@ const { createHash, randomUUID } = require("crypto");
 // gRPC client for ledger
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
+const { Pool } = require('pg');
 
 const PORT = Number(process.env.PORT || 8090);
 const NODE_ENV = process.env.NODE_ENV || "development";
@@ -37,11 +38,38 @@ const CLICKHOUSE_EXECUTION_VENUE_TABLE =
   process.env.CLICKHOUSE_EXECUTION_VENUE_TABLE || 'execution_venue';
 const CLICKHOUSE_TIMEOUT_MS = Number(process.env.CLICKHOUSE_TIMEOUT_MS || 5000);
 const FRONTEND_USER_ID = process.env.FRONTEND_USER_ID || 'demo-user';
+// F-12 DoD-14 (PR-F12-6): PG DSN for HedgeFlow Monitor and other read-side
+// dashboards. Empty string disables PG-backed endpoints (404 returned).
+const FRONTEND_POSTGRES_DSN = process.env.FRONTEND_POSTGRES_DSN || '';
 const PROTO_DIR = join(__dirname, 'proto');
 const LEDGER_PROTO = join(PROTO_DIR, 'fob/ledger/v1/ledger.proto');
 const COMMON_PROTO = join(PROTO_DIR, 'fob/common/v1/common.proto');
 
 let ledgerClient = null;
+
+// F-12 DoD-14 (PR-F12-6): lazy-initialized PG pool. Frontend-api is a
+// read-side gateway here — we only SELECT from hedgeflows.
+let pgPool = null;
+function getPgPool() {
+  if (pgPool) return pgPool;
+  if (!FRONTEND_POSTGRES_DSN) return null;
+  try {
+    pgPool = new Pool({
+      connectionString: FRONTEND_POSTGRES_DSN,
+      max: 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 3000
+    });
+    pgPool.on('error', (err) => {
+      console.error('[pg] idle client error:', err.message);
+    });
+    console.log(`[pg] pool initialized (max=5)`);
+  } catch (err) {
+    console.error('[pg] failed to init pool:', err.message);
+    pgPool = null;
+  }
+  return pgPool;
+}
 
 // Initialize gRPC client
 function initLedgerClient() {
@@ -3702,6 +3730,138 @@ async function handleHedgeFlows(req, res, pathname, query) {
   return false;
 }
 
+// F-12 DoD-14 (PR-F12-6): HedgeFlow Monitor — reads PG `hedgeflows` directly.
+// Mock /api/hedgeflows above is kept for legacy UI tabs; new screens should
+// migrate to /api/v1/hedge/flows once PG-backed data is stable.
+const HEDGE_FLOWS_DEFAULT_LIMIT = 50;
+const HEDGE_FLOWS_MAX_LIMIT = 500;
+const HEDGE_FLOWS_VALID_STATUS = new Set([
+  "OPEN", "COMPLETED", "UNDERFILLED", "REJECTED", "RISK_REJECTED", "CANCELLED"
+]);
+
+function toHedgeFlowsApiRow(row) {
+  return {
+    hedgeFlowId: row.hedge_flow_id,
+    intentId: row.intent_id,
+    batchId: row.batch_id || null,
+    providerId: row.provider_id,
+    symbol: row.symbol,
+    side: row.side,
+    targetQty: row.target_qty,
+    filledQty: row.filled_qty,
+    fillRatio: row.target_qty && Number(row.target_qty) > 0
+      ? Number((Number(row.filled_qty) / Number(row.target_qty)).toFixed(6))
+      : null,
+    targetNotional: row.target_notional,
+    referenceMid: row.reference_mid,
+    avgFillPrice: row.avg_fill_price,
+    totFee: row.tot_fee,
+    hedgePnl: row.hedge_pnl,
+    urgency: row.urgency,
+    timeoutMs: row.timeout_ms,
+    status: row.status,
+    errorCode: row.error_code || null,
+    errorMessage: row.error_message || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+    completedAt: row.completed_at
+      ? (row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at)
+      : null
+  };
+}
+
+async function handleHedgeFlowsV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/hedge/flows") return false;
+
+  const pool = getPgPool();
+  if (!pool) {
+    return writeJson(res, 503, {
+      error: "postgres_not_configured",
+      message: "FRONTEND_POSTGRES_DSN is not set; PG-backed endpoints disabled."
+    });
+  }
+
+  const filters = [];
+  const params = [];
+  const symbol = (query.symbol || "").trim();
+  if (symbol && symbol !== "all") {
+    params.push(symbol);
+    filters.push(`symbol = $${params.length}`);
+  }
+  const status = (query.status || "").trim().toUpperCase();
+  if (status && status !== "ALL" && HEDGE_FLOWS_VALID_STATUS.has(status)) {
+    params.push(status);
+    filters.push(`status = $${params.length}`);
+  }
+  const provider = (query.providerId || query.provider || "").trim();
+  if (provider && provider !== "all") {
+    params.push(provider);
+    filters.push(`provider_id = $${params.length}`);
+  }
+  const sincePeriod = String(query.period || "").trim();
+  if (sincePeriod === "1h" || sincePeriod === "24h" || sincePeriod === "7d") {
+    const interval = sincePeriod === "1h" ? "1 hour"
+      : (sincePeriod === "24h" ? "24 hours" : "7 days");
+    filters.push(`created_at >= now() - INTERVAL '${interval}'`);
+  }
+
+  let limit = parseInt(query.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = HEDGE_FLOWS_DEFAULT_LIMIT;
+  if (limit > HEDGE_FLOWS_MAX_LIMIT) limit = HEDGE_FLOWS_MAX_LIMIT;
+
+  const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const sql = `
+    SELECT hedge_flow_id, intent_id, batch_id, provider_id, symbol, side,
+           target_qty::text AS target_qty,
+           filled_qty::text AS filled_qty,
+           target_notional::text AS target_notional,
+           reference_mid::text AS reference_mid,
+           avg_fill_price::text AS avg_fill_price,
+           tot_fee::text AS tot_fee,
+           hedge_pnl::text AS hedge_pnl,
+           urgency, timeout_ms, status, error_code, error_message,
+           created_at, updated_at, completed_at
+    FROM hedgeflows
+    ${whereSql}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+
+  try {
+    const result = await pool.query(sql, params);
+    const items = result.rows.map(toHedgeFlowsApiRow);
+
+    const summary = {
+      total: items.length,
+      open: items.filter((it) => it.status === "OPEN").length,
+      completed: items.filter((it) => it.status === "COMPLETED").length,
+      underfilled: items.filter((it) => it.status === "UNDERFILLED").length,
+      rejected: items.filter((it) => it.status === "REJECTED" || it.status === "RISK_REJECTED").length,
+      cancelled: items.filter((it) => it.status === "CANCELLED").length
+    };
+
+    return writeJson(res, 200, {
+      items,
+      summary,
+      filters: {
+        symbol: symbol || null,
+        status: status || null,
+        providerId: provider || null,
+        period: sincePeriod || null,
+        limit
+      },
+      generatedAt: new Date().toISOString(),
+      source: "postgres:hedgeflows"
+    });
+  } catch (err) {
+    console.error("[pg] /api/v1/hedge/flows query failed:", err.message);
+    return writeJson(res, 500, {
+      error: "query_failed",
+      message: err.message
+    });
+  }
+}
+
 function reconciliationAlertTimestamp(flow) {
   const timestamps = [
     flow.completedAt,
@@ -5159,6 +5319,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/hedgeflows" || pathname.startsWith("/api/hedgeflows/")) {
       const handled = await handleHedgeFlows(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/hedge/flows") {
+      const handled = await handleHedgeFlowsV1(req, res, pathname, query);
       if (handled !== false) return;
     }
 

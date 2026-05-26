@@ -1,0 +1,97 @@
+.hedge-live-table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.hedge-live-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-family: 'Roboto Mono', 'Menlo', monospace;
+}
+
+.hedge-live-table thead th {
+  text-align: left;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+
+.hedge-live-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+}
+
+.hedge-live-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hedge-live-table .hedge-id {
+  color: rgba(180, 160, 255, 0.9);
+  font-family: 'Roboto Mono', monospace;
+  cursor: help;
+}
+
+.hedge-live-table .hedge-side-buy {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.hedge-live-table .hedge-side-sell {
+  color: #f44336;
+  font-weight: 600;
+}
+
+.hedge-live-table .pnl-pos {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.hedge-live-table .pnl-neg {
+  color: #f44336;
+  font-weight: 600;
+}
+
+.hedge-status-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.hedge-status-badge.status-OPEN {
+  background: rgba(80, 130, 255, 0.18);
+  color: #6fa8ff;
+}
+
+.hedge-status-badge.status-COMPLETED {
+  background: rgba(76, 175, 80, 0.18);
+  color: #4caf50;
+}
+
+.hedge-status-badge.status-UNDERFILLED {
+  background: rgba(255, 180, 0, 0.18);
+  color: #ffb400;
+}
+
+.hedge-status-badge.status-REJECTED,
+.hedge-status-badge.status-RISK_REJECTED {
+  background: rgba(244, 67, 54, 0.18);
+  color: #f44336;
+}
+
+.hedge-status-badge.status-CANCELLED {
+  background: rgba(160, 160, 160, 0.18);
+  color: #999;
+}
