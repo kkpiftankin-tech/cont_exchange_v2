@@ -163,14 +163,33 @@ definitionOfDone:
     evidence: IN-007 runtime confirmation (2026-05-22, 70 reports за 3 мин)
     blocked_by_ac: [F12-6]
   - id: DoD-6
-    status: partial
+    status: implemented
     title: Settlement Ledger потребляет execution.venue и обновляет positions/balances/HedgePnL
     description: >
-      Consumer уже подписан на оба топика с идемпотентностью по report_id.
-      HedgePnL расчёт по формуле (avgFillPrice - referenceMid) * filledQty - fee
-      ещё не имплементирован.
-    evidence: cpp/ledger/src/infra/kafka_consumers.cpp (consume OK), cpp/ledger/src/app/ledger_uc.cpp (PnL = log only)
-    blocked_by_issue: hedge-pnl-not-computed
+      Consumer (cpp/ledger/src/infra/kafka_consumers.cpp) подписан на оба
+      топика execution.venue/execution.reports с идемпотентностью по
+      report_id. HedgePnL рассчитывается в
+      LedgerUseCases::calculate_hedge_pnl по формуле
+      pnl = (executed - internal) * qty (sign-flip для BUY) — что
+      эквивалентно IN-009 §4.6 для favorable side. После расчёта
+      аккумулируется в PG hedgeflows row через PostgresHedgeflowPnlSink
+      (PR-F12-3c).
+    evidence: |
+      cpp/ledger/src/app/ledger_uc.cpp::calculate_hedge_pnl,
+      cpp/ledger/src/infra/postgres_repositories.cpp::PostgresHedgeflowPnlSink.
+      E2E verified on ubuntu-dev (2026-05-26): order 71f8b9c1 ->
+      hedgeflows row gets hedge_pnl + tot_fee columns populated (NUMERIC,
+      not NULL); ledger emits structured log "Hedge PnL computed (F-12 DoD-6)".
+    resolved_in: PR-F12-3c
+    remaining_gaps: |
+      For matching's external_fill intents, internal_price == executed_price
+      by construction (single-leg fill against external liquidity), so
+      hedge_pnl_delta = 0. Real non-zero PnL requires the proper F-12 hedge
+      path (hedge_trigger_policy → execution_intent_builder → routing plan)
+      that ships in PR-F12-5.
+      ClickHouse execution_reports.hedge_pnl still receives 0 (market_data
+      reads it from ExecutionReport proto field, which matching does not
+      populate). Cross-PG join workaround documented in IN-009 §7.
   - id: DoD-7
     status: implemented
     title: ClickHouse table execution_reports с retention >= 90 дней
@@ -500,12 +519,18 @@ knownIssues:
     location: contracts/proto/fob/risk/v1/risk.proto
     resolved_in: PR-F12-2 (contract added; server impl pending in PR-F12-4)
   - id: hedge-pnl-not-computed
-    severity: feature-gap
+    severity: resolved
+    status: resolved
     description: >
-      LedgerService::ApplyExecutionReport не вычисляет HedgePnL по формуле
-      из IN-005 ((avgFillPrice - referenceMid) * filledQty - feesTotal для
-      SELL и зеркальная для BUY); сейчас выполняется только логирование.
-    location: cpp/ledger/src/app/ledger_uc.cpp
+      RESOLVED in PR-F12-3c (2026-05-26). calculate_hedge_pnl in
+      ledger_uc.cpp already had correct math (sign-flip for BUY) —
+      what was missing was persistence. New PostgresHedgeflowPnlSink
+      writes computed hedge_pnl + tot_fee deltas into PG hedgeflows row.
+      Live verified: hedge_pnl column transitions NULL -> NUMERIC on
+      first ExecutionReport. UI HedgeFlow Monitor (PR-F12-6) can now
+      display per-flow PnL.
+    location: cpp/ledger/src/app/ledger_uc.cpp, cpp/ledger/src/infra/postgres_repositories.cpp
+    resolved_in: PR-F12-3c
   - id: execution-reports-topic-name-mismatch
     severity: conflict
     description: >
