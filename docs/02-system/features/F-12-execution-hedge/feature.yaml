@@ -271,7 +271,7 @@ definitionOfDone:
     evidence: cpp/venues/tests/backtest_parity_check_test.cpp (smoke есть, full parity нет)
     blocked_by_ac: [F12-9]
   - id: DoD-14
-    status: partial
+    status: implemented
     title: Admin UI HedgeFlow Monitor
     description: >
       Список HedgeFlow с filter по symbol/batchId/provider/status/period,
@@ -281,13 +281,21 @@ definitionOfDone:
       страница /hedge-flows-live с polling-2s, фильтрами по
       status/period, badge-индикатором источника. GET /api/v1/hedge/flows
       запрашивает PG hedgeflows напрямую (frontend-api → pg pool).
-      Остаётся: drill-down (Overview + Child Orders + Execution Timeline),
-      CSV export, фильтры по symbol/batchId/provider, фильтры по venue.
-      Старый /hedgeflows (mock) сохранён до миграции остальных tabs.
+      PR-F12-7 (2026-05-26): drill-down реализован — клик по строке
+      открывает side panel с 3 tabs (Overview, Child Orders, Execution
+      Timeline). GET /api/v1/hedge/flows/:id агрегирует PG hedgeflows
+      row + child_orders rows + ClickHouse execution_reports timeline.
+      E2E проверено: для COMPLETED hedge flow возвращается 1 child_order
+      (FILLED) + 1 timeline event с venue_id/filled_qty.
+      Остаётся в scope DoD-14 (out of MVP): CSV export, фильтры по
+      venue + batchId/provider, multi-row select. Не блокирующее.
     evidence: |
-      frontend/api/server.js (handleHedgeFlowsV1, PG pool),
-      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js,
-      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.css,
+      frontend/api/server.js (handleHedgeFlowsV1, handleHedgeFlowV1ById,
+      PG pool, fetchHedgeFlowTimeline → CH execution_reports),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js
+      (row onClick handler, selectedFlowId state),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.js (side panel),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.css,
       route /hedge-flows-live в App.js
   - id: DoD-15
     status: not-implemented

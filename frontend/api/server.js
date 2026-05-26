@@ -3862,6 +3862,175 @@ async function handleHedgeFlowsV1(req, res, pathname, query) {
   }
 }
 
+// F-12 DoD-14 (PR-F12-7): drill-down endpoint — single HedgeFlow with
+// child_orders (from PG) and execution timeline (from CH execution_reports).
+function parseHedgeFlowsV1Id(pathname) {
+  const match = pathname.match(/^\/api\/v1\/hedge\/flows\/(.+)$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch (err) {
+    return null;
+  }
+}
+
+function toChildOrderApiRow(row) {
+  return {
+    childOrderId: row.child_order_id,
+    venueId: row.venue_id || null,
+    symbol: row.symbol,
+    side: row.side,
+    orderType: row.order_type,
+    qty: row.qty,
+    price: row.price,
+    tif: row.tif,
+    filledQty: row.filled_qty,
+    avgPrice: row.avg_price,
+    fee: row.fee,
+    feeCurrency: row.fee_currency || null,
+    clientOrderId: row.client_order_id,
+    venueOrderId: row.venue_order_id || null,
+    status: row.status,
+    errorCode: row.error_code || null,
+    errorMessage: row.error_message || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at
+  };
+}
+
+async function fetchHedgeFlowTimeline(hedgeFlowId) {
+  const query = [
+    "SELECT report_id, intent_id, hedge_flow_id, child_order_id, venue_id,",
+    "       symbol, side, status, filled_qty, remaining_qty, avg_price,",
+    "       fee_amount, fee_currency, slippage_bps, reference_mid, hedge_pnl,",
+    "       event_time_ms",
+    "FROM execution_reports",
+    "WHERE hedge_flow_id = {hedge_flow_id:String}",
+    "ORDER BY event_time_ms ASC",
+    "LIMIT 200",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  try {
+    const url = `${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}&param_hedge_flow_id=${encodeURIComponent(hedgeFlowId)}`;
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("[ch] timeline query failed:", response.status, text);
+      return [];
+    }
+    return text
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const row = JSON.parse(line);
+        return {
+          reportId: row.report_id,
+          intentId: row.intent_id,
+          childOrderId: row.child_order_id || null,
+          venueId: row.venue_id || null,
+          symbol: row.symbol,
+          side: row.side || null,
+          status: row.status,
+          filledQty: row.filled_qty,
+          remainingQty: row.remaining_qty,
+          avgPrice: row.avg_price,
+          feeAmount: row.fee_amount,
+          feeCurrency: row.fee_currency || null,
+          slippageBps: row.slippage_bps,
+          referenceMid: row.reference_mid,
+          hedgePnl: row.hedge_pnl,
+          eventTimeMs: Number(row.event_time_ms),
+          eventTime: new Date(Number(row.event_time_ms)).toISOString()
+        };
+      });
+  } catch (err) {
+    console.error("[ch] timeline fetch failed:", err.message);
+    return [];
+  }
+}
+
+async function handleHedgeFlowV1ById(req, res, pathname) {
+  if (req.method !== "GET") return false;
+  const hedgeFlowId = parseHedgeFlowsV1Id(pathname);
+  if (!hedgeFlowId) return false;
+
+  const pool = getPgPool();
+  if (!pool) {
+    return writeJson(res, 503, {
+      error: "postgres_not_configured",
+      message: "FRONTEND_POSTGRES_DSN is not set; PG-backed endpoints disabled."
+    });
+  }
+
+  try {
+    const flowResult = await pool.query(`
+      SELECT hedge_flow_id, intent_id, batch_id, provider_id, symbol, side,
+             target_qty::text AS target_qty,
+             filled_qty::text AS filled_qty,
+             target_notional::text AS target_notional,
+             reference_mid::text AS reference_mid,
+             avg_fill_price::text AS avg_fill_price,
+             tot_fee::text AS tot_fee,
+             hedge_pnl::text AS hedge_pnl,
+             urgency, timeout_ms, status, error_code, error_message,
+             created_at, updated_at, completed_at
+      FROM hedgeflows
+      WHERE hedge_flow_id = $1
+    `, [hedgeFlowId]);
+
+    if (flowResult.rows.length === 0) {
+      return writeJson(res, 404, {
+        error: "hedge_flow_not_found",
+        hedgeFlowId
+      });
+    }
+
+    const flow = toHedgeFlowsApiRow(flowResult.rows[0]);
+
+    const childResult = await pool.query(`
+      SELECT child_order_id, hedge_flow_id, venue_id, symbol, side, order_type,
+             qty::text AS qty,
+             price::text AS price,
+             tif,
+             filled_qty::text AS filled_qty,
+             avg_price::text AS avg_price,
+             fee::text AS fee,
+             fee_currency, client_order_id, venue_order_id, status,
+             error_code, error_message, created_at, updated_at
+      FROM child_orders
+      WHERE hedge_flow_id = $1
+      ORDER BY created_at ASC
+      LIMIT 100
+    `, [hedgeFlowId]);
+
+    const childOrders = childResult.rows.map(toChildOrderApiRow);
+    const timeline = await fetchHedgeFlowTimeline(hedgeFlowId);
+
+    return writeJson(res, 200, {
+      flow,
+      childOrders,
+      timeline,
+      counts: {
+        childOrders: childOrders.length,
+        timelineEvents: timeline.length
+      },
+      generatedAt: new Date().toISOString(),
+      source: "postgres:hedgeflows+child_orders, clickhouse:execution_reports"
+    });
+  } catch (err) {
+    console.error("[pg] /api/v1/hedge/flows/:id query failed:", err.message);
+    return writeJson(res, 500, {
+      error: "query_failed",
+      message: err.message
+    });
+  }
+}
+
 function reconciliationAlertTimestamp(flow) {
   const timestamps = [
     flow.completedAt,
@@ -5324,6 +5493,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/flows") {
       const handled = await handleHedgeFlowsV1(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname.startsWith("/api/v1/hedge/flows/")) {
+      const handled = await handleHedgeFlowV1ById(req, res, pathname);
       if (handled !== false) return;
     }
 

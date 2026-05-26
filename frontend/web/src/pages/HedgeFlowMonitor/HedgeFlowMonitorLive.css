@@ -34,6 +34,14 @@
   background: rgba(255, 255, 255, 0.03);
 }
 
+.hedge-live-table tbody tr.hedge-row-clickable {
+  cursor: pointer;
+}
+
+.hedge-live-table tbody tr.hedge-row-clickable:hover {
+  background: rgba(180, 140, 255, 0.08);
+}
+
 .hedge-live-table .hedge-id {
   color: rgba(180, 160, 255, 0.9);
   font-family: 'Roboto Mono', monospace;

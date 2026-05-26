@@ -4,6 +4,7 @@ import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
+import HedgeFlowDrillPanel from './HedgeFlowDrillPanel';
 import './HedgeFlowMonitor.css';
 import './HedgeFlowMonitorLive.css';
 
@@ -60,6 +61,7 @@ const HedgeFlowMonitorLive = () => {
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [periodFilter, setPeriodFilter] = useState('24h');
+  const [selectedFlowId, setSelectedFlowId] = useState(null);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -242,7 +244,12 @@ const HedgeFlowMonitorLive = () => {
                 </thead>
                 <tbody>
                   {items.map((flow) => (
-                    <tr key={flow.hedgeFlowId} className={`status-${flow.status}`}>
+                    <tr
+                      key={flow.hedgeFlowId}
+                      className={`status-${flow.status} hedge-row-clickable`}
+                      onClick={() => setSelectedFlowId(flow.hedgeFlowId)}
+                      title="Открыть drill-down"
+                    >
                       <td>{formatDateTime(flow.createdAt)}</td>
                       <td className="hedge-id" title={flow.hedgeFlowId}>
                         {flow.hedgeFlowId.length > 18
@@ -270,6 +277,13 @@ const HedgeFlowMonitorLive = () => {
           )}
         </section>
       </main>
+
+      {selectedFlowId && (
+        <HedgeFlowDrillPanel
+          hedgeFlowId={selectedFlowId}
+          onClose={() => setSelectedFlowId(null)}
+        />
+      )}
     </div>
   );
 };
