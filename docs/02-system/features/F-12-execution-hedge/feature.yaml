@@ -172,12 +172,27 @@ definitionOfDone:
     evidence: cpp/ledger/src/infra/kafka_consumers.cpp (consume OK), cpp/ledger/src/app/ledger_uc.cpp (PnL = log only)
     blocked_by_issue: hedge-pnl-not-computed
   - id: DoD-7
-    status: not-implemented
+    status: implemented
     title: ClickHouse table execution_reports с retention >= 90 дней
     description: >
-      Поля для PnL/slippage/latency analytics, разрезы по venue/symbol/время.
-    evidence: infra/clickhouse/init.sql (table missing)
-    blocked_by_issue: no-execution-reports-clickhouse
+      Canonical 20-field schema создана в init.sql (PR-F12-2) и в C++
+      CREATE TABLE через ClickHouseBatchStorage::EnsureSchema (PR-F12-3b).
+      cpp/market_data dual-write'ит ExecutionReport в обе таблицы:
+      legacy execution_venue (Int32 status, 19 полей) и canonical
+      execution_reports (LowCardinality(String) status, 20 полей с
+      hedge_pnl, slippage_bps, hedge_flow_id, child_order_id, side).
+      Partition by toYYYYMM(event_time_ms), TTL 90 дней.
+    evidence: |
+      infra/clickhouse/init.sql + cpp/market_data/src/infra/clickhouse_storage.cpp
+      (BuildExecutionReportV2JsonRow). E2E verified on ubuntu-dev:
+      order bb28e3bd → 1 row в execution_reports, venue_id=binance,
+      status=FILLED, filled_qty=0.05, avg_price=76814.1.
+    resolved_in: PR-F12-3b
+    remaining_gaps: |
+      side, hedge_flow_id, slippage_bps, hedge_pnl остаются пустыми для
+      external_fill intents из matching (matching не заполняет эти поля).
+      Полная заливка приходит с PR-F12-5 (multi-venue routing + proper
+      hedge_trigger_policy intents).
   - id: DoD-8
     status: not-implemented
     title: PostgreSQL OLTP tables hedgeflows / child_orders / execution_reports_raw с индексами
@@ -462,15 +477,17 @@ knownIssues:
     location: infra/postgres/init.sql, cpp/venues/src/infra/postgres_*
     resolved_in: PR-F12-3a
   - id: no-execution-reports-clickhouse
-    severity: feature-gap
-    status: schema-ready-impl-pending
+    severity: resolved
+    status: resolved
     description: >
-      Таблица `execution_reports` добавлена в infra/clickhouse/init.sql
-      (PR-F12-2, 2026-05-23) с 90-day TTL и projection по hedge_flow_id.
-      Ingestion-код (Kafka execution.venue -> ClickHouse) ещё не реализован
-      в cpp/market_data — будет добавлен в PR-F12-3.
-    location: infra/clickhouse/init.sql
-    resolved_in: PR-F12-2 (schema added; ingestion code pending in PR-F12-3)
+      RESOLVED in PR-F12-3b (2026-05-26). Schema in init.sql + C++
+      EnsureSchema; cpp/market_data dual-writes ExecutionReport via
+      SaveExecutionReport (both legacy execution_venue + canonical
+      execution_reports). Live verified: 1 row appears in execution_reports
+      after a single test sell order. Hedge PnL Dashboard and
+      Reconciliation Alerts (UI screens in PR-F12-6) can now query this table.
+    location: infra/clickhouse/init.sql, cpp/market_data/src/infra/clickhouse_storage.*
+    resolved_in: PR-F12-3b
   - id: no-pre-hedge-rpc
     severity: feature-gap
     status: contract-ready-impl-pending
