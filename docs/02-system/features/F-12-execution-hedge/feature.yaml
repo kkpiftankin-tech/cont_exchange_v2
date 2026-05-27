@@ -260,12 +260,36 @@ definitionOfDone:
       Полная заливка приходит с PR-F12-5 (multi-venue routing + proper
       hedge_trigger_policy intents).
   - id: DoD-8
-    status: not-implemented
+    status: implemented
     title: PostgreSQL OLTP tables hedgeflows / child_orders / execution_reports_raw с индексами
     description: >
       Индексы по hedgeFlowId, providerId, symbol, status для SLA UI/services.
-    evidence: infra/postgres/init.sql (tables missing)
-    blocked_by_issue: no-hedgeflows-postgres-schema
+
+      Все три таблицы существуют в `infra/postgres/init.sql`:
+        - `hedgeflows` (line 126-153): PK hedge_flow_id (TEXT), индексы
+          provider_id+symbol, batch_id, status (OPEN), status
+          (UNDERFILLED/REJECTED). NUMERIC(38,18) для qty/price/pnl.
+        - `child_orders` (line 163-185): PK child_order_id (TEXT), FK
+          hedge_flow_id, индексы venue_id+status, hedge_flow_id,
+          venue_order_id; unique (hedge_flow_id, client_order_id) для
+          idempotency.
+        - `execution_reports_raw` (line 196-222): optional landing
+          zone для нормализованных ExecutionReport (опционально пишется
+          ledger для audit). Индексы hedge_flow_id, venue_id+applied_at.
+
+      Drift correction (см. DoD-18 / PR-F12-11): id-колонки TEXT (не
+      UUID) — чтобы accommodate matching's composite intent_id формат
+      от F-04 external_fill path. NUMERIC precision (38,18) (не 24,8).
+
+      Этот DoD был помечен not-implemented до PR-F12-13 (2026-05-27),
+      но фактически таблицы доставлены в PR-F12-2 / PR-F12-3a. Status
+      обновлён в PR-F12-14 после re-audit.
+    evidence: |
+      infra/postgres/init.sql:123-222 (3 tables + 8 indexes),
+      docs/07-data/{hedgeflows,child-orders,execution-reports}.md
+      (актуальные DDL с drift notes, обновлено в PR-F12-11).
+    resolved_in: PR-F12-2 (schema), PR-F12-3a (C++ repos wired),
+      PR-F12-14 (status update)
   - id: DoD-9
     status: not-implemented
     title: Unit-тесты Venue Execution Adapter U1-U10
