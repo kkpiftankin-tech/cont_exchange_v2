@@ -433,4 +433,241 @@ void RiskUseCases::OnSyntheticOrder(
   publisher_.publish(alert);
 }
 
+// ============================================================================
+// F-12 DoD-3 / AC F12-8 — PreHedgeCheck (PR-F12-13).
+// ============================================================================
+namespace {
+
+// Parse fixed-point decimal string ("1.5", "50000", "0.001") into
+// cex::common::Decimal{units, scale}. Returns Decimal::zero() on
+// empty/unparseable input — caller treats zero as "limit disabled".
+// Mirrors the parser added in cpp/matching/src/app/matching_loop.cpp
+// (PR-F12-5); duplicated here to avoid a cross-service common-utils
+// refactor while DoD-3 is a focused PR.
+Decimal ParseDecimalString(const std::string& raw) {
+  if (raw.empty()) return Decimal::zero();
+  std::string s = raw;
+  bool negative = false;
+  if (s[0] == '-') { negative = true; s.erase(0, 1); }
+  else if (s[0] == '+') { s.erase(0, 1); }
+  if (s.empty()) return Decimal::zero();
+
+  const auto dot = s.find('.');
+  std::string int_part;
+  std::string frac_part;
+  if (dot == std::string::npos) {
+    int_part = s;
+  } else {
+    int_part = s.substr(0, dot);
+    frac_part = s.substr(dot + 1);
+  }
+  while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
+  if (int_part.empty()) int_part = "0";
+
+  const std::string combined = int_part + frac_part;
+  try {
+    int64_t units = std::stoll(combined);
+    if (negative) units = -units;
+    return Decimal{units, static_cast<int32_t>(frac_part.size())};
+  } catch (...) {
+    return Decimal::zero();
+  }
+}
+
+bool ThresholdEnabled(const Decimal& threshold) {
+  return Decimal::cmp(threshold, Decimal::zero()) > 0;
+}
+
+struct HedgeRiskConfig {
+  Decimal max_notional_per_hedge{Decimal::zero()};   // 0 = disabled
+  Decimal hedge_exposure_limit{Decimal::zero()};     // 0 = disabled
+  int32_t max_slippage_bps_low{0};
+  int32_t max_slippage_bps_medium{0};
+  int32_t max_slippage_bps_high{0};
+};
+
+HedgeRiskConfig LoadHedgeRiskConfig() {
+  HedgeRiskConfig cfg;
+  cfg.max_notional_per_hedge = ParseDecimalString(
+      cex::common::Env::get_string("RISK_HEDGE_MAX_NOTIONAL", "0"));
+  cfg.hedge_exposure_limit = ParseDecimalString(
+      cex::common::Env::get_string("RISK_HEDGE_EXPOSURE_LIMIT", "0"));
+  cfg.max_slippage_bps_low = static_cast<int32_t>(
+      cex::common::Env::get_int("RISK_HEDGE_MAX_SLIPPAGE_LOW_BPS", 0));
+  cfg.max_slippage_bps_medium = static_cast<int32_t>(
+      cex::common::Env::get_int("RISK_HEDGE_MAX_SLIPPAGE_MEDIUM_BPS", 0));
+  cfg.max_slippage_bps_high = static_cast<int32_t>(
+      cex::common::Env::get_int("RISK_HEDGE_MAX_SLIPPAGE_HIGH_BPS", 0));
+  return cfg;
+}
+
+int32_t MaxSlippageBpsForUrgency(const HedgeRiskConfig& cfg,
+                                 fob::execution::v1::ExecutionUrgency urgency) {
+  switch (urgency) {
+    case fob::execution::v1::URGENCY_LOW: return cfg.max_slippage_bps_low;
+    case fob::execution::v1::URGENCY_HIGH: return cfg.max_slippage_bps_high;
+    case fob::execution::v1::URGENCY_MEDIUM:
+    default:
+      return cfg.max_slippage_bps_medium;
+  }
+}
+
+void FillRejectError(fob::risk::v1::PreHedgeCheckResponse* resp,
+                     const std::string& code,
+                     const std::string& message) {
+  resp->set_decision(fob::risk::v1::RISK_DECISION_REJECT);
+  auto* e = resp->mutable_error();
+  e->set_code(code);
+  e->set_message(message);
+}
+
+}  // namespace
+
+fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
+    const fob::risk::v1::PreHedgeCheckRequest& req) {
+  fob::risk::v1::PreHedgeCheckResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("risk");
+
+  const auto cfg = LoadHedgeRiskConfig();
+  const auto& intent = req.intent();
+  const auto& instrument = intent.instrument();
+
+  // Always populate details (even on ACCEPT) per proto contract §165.
+  auto* details = resp.mutable_details();
+  details->set_slippage_limit_bps(MaxSlippageBpsForUrgency(cfg, intent.urgency()));
+  *details->mutable_notional_limit() = cfg.max_notional_per_hedge.to_proto();
+  *details->mutable_exposure_limit() = cfg.hedge_exposure_limit.to_proto();
+
+  const Decimal target_qty = Decimal::from_proto(intent.target_qty());
+  const Decimal reference_mid = Decimal::from_proto(intent.reference_mid());
+  const Decimal notional = Decimal::mul(target_qty, reference_mid);
+  *details->mutable_notional_used() = notional.to_proto();
+
+  const Decimal current_exposure = Decimal::from_proto(req.current_hedge_exposure());
+  const Decimal exposure_after = Decimal::add(current_exposure, target_qty);
+  *details->mutable_exposure_after() = exposure_after.to_proto();
+
+  // Snapshot venue health gates for details.venues — copy what we know.
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+    for (const auto& [venue_id, state] : venue_health_gate_) {
+      auto* vh = details->add_venues();
+      vh->set_venue_id(venue_id);
+      vh->set_status(fob::venue::v1::VenueHealthStatus_Name(state.status));
+      vh->set_circuit_breaker_open(
+          state.breaker == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN);
+      vh->set_health_score(state.health_score);
+    }
+  }
+
+  // Check 1: kill-switch / PROVIDER_HALTED.
+  // Halt is per-instrument-symbol or global; same gate that PreTradeCheck
+  // uses (is_halted_locked). Lock once, evaluate everything, then drop —
+  // checks 2-5 are pure computation against the snapshot.
+  bool halted = false;
+  bool all_venues_blocked = false;
+  bool any_allowed_venue_known = false;
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+    halted = is_halted_locked(instrument.symbol());
+
+    // Check 5 (computed early so we can short-circuit): all allowed
+    // venues have circuit breaker open. If the intent didn't list
+    // allowed_venues we skip this check (planner already filtered).
+    if (intent.allowed_venues_size() > 0) {
+      int blocked_count = 0;
+      int known_count = 0;
+      for (const auto& venue_id : intent.allowed_venues()) {
+        auto it = venue_health_gate_.find(venue_id);
+        if (it == venue_health_gate_.end()) continue;
+        ++known_count;
+        if (it->second.breaker == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN ||
+            it->second.routing == fob::venue::v1::ROUTING_RECOMMENDATION_BLOCK) {
+          ++blocked_count;
+        }
+      }
+      any_allowed_venue_known = (known_count > 0);
+      all_venues_blocked = (known_count > 0 && blocked_count == known_count);
+    }
+  }
+
+  if (halted) {
+    FillRejectError(&resp, "PROVIDER_HALTED",
+                    "Kill-switch active for symbol " + instrument.symbol());
+    cex::common::log_json("WARN", "PreHedgeCheck REJECTED",
+                          {{"reason", "PROVIDER_HALTED"},
+                           {"hedge_flow_id", intent.hedge_flow_id()},
+                           {"symbol", instrument.symbol()}});
+    return resp;
+  }
+
+  // Check 2: NOTIONAL_EXCEEDED.
+  if (ThresholdEnabled(cfg.max_notional_per_hedge) &&
+      Decimal::cmp(notional, cfg.max_notional_per_hedge) > 0) {
+    FillRejectError(&resp, "NOTIONAL_EXCEEDED",
+                    "target_qty * reference_mid = " + notional.to_string() +
+                        " exceeds maxNotionalPerHedge = " +
+                        cfg.max_notional_per_hedge.to_string());
+    cex::common::log_json("WARN", "PreHedgeCheck REJECTED",
+                          {{"reason", "NOTIONAL_EXCEEDED"},
+                           {"hedge_flow_id", intent.hedge_flow_id()},
+                           {"notional", notional.to_string()},
+                           {"limit", cfg.max_notional_per_hedge.to_string()}});
+    return resp;
+  }
+
+  // Check 3: EXPOSURE_EXCEEDED.
+  if (ThresholdEnabled(cfg.hedge_exposure_limit) &&
+      Decimal::cmp(exposure_after, cfg.hedge_exposure_limit) > 0) {
+    FillRejectError(&resp, "EXPOSURE_EXCEEDED",
+                    "current_exposure + target_qty = " +
+                        exposure_after.to_string() +
+                        " exceeds hedgeExposureLimit = " +
+                        cfg.hedge_exposure_limit.to_string());
+    cex::common::log_json("WARN", "PreHedgeCheck REJECTED",
+                          {{"reason", "EXPOSURE_EXCEEDED"},
+                           {"hedge_flow_id", intent.hedge_flow_id()},
+                           {"exposure_after", exposure_after.to_string()},
+                           {"limit", cfg.hedge_exposure_limit.to_string()}});
+    return resp;
+  }
+
+  // Check 4: SLIPPAGE_EXCEEDED.
+  const int32_t slippage_limit = MaxSlippageBpsForUrgency(cfg, intent.urgency());
+  if (slippage_limit > 0 && req.expected_slippage_bps() > slippage_limit) {
+    FillRejectError(&resp, "SLIPPAGE_EXCEEDED",
+                    "expected_slippage_bps = " +
+                        std::to_string(req.expected_slippage_bps()) +
+                        " exceeds maxSlippage[urgency] = " +
+                        std::to_string(slippage_limit));
+    cex::common::log_json("WARN", "PreHedgeCheck REJECTED",
+                          {{"reason", "SLIPPAGE_EXCEEDED"},
+                           {"hedge_flow_id", intent.hedge_flow_id()},
+                           {"expected_bps", std::to_string(req.expected_slippage_bps())},
+                           {"limit_bps", std::to_string(slippage_limit)}});
+    return resp;
+  }
+
+  // Check 5: VENUES_UNAVAILABLE — already computed under lock.
+  if (any_allowed_venue_known && all_venues_blocked) {
+    FillRejectError(&resp, "VENUES_UNAVAILABLE",
+                    "All allowed_venues have circuit breaker OPEN");
+    cex::common::log_json("WARN", "PreHedgeCheck REJECTED",
+                          {{"reason", "VENUES_UNAVAILABLE"},
+                           {"hedge_flow_id", intent.hedge_flow_id()}});
+    return resp;
+  }
+
+  // All checks passed.
+  resp.set_decision(fob::risk::v1::RISK_DECISION_ACCEPT);
+  cex::common::log_json("INFO", "PreHedgeCheck ACCEPT",
+                        {{"hedge_flow_id", intent.hedge_flow_id()},
+                         {"symbol", instrument.symbol()},
+                         {"target_qty", target_qty.to_string()},
+                         {"notional", notional.to_string()},
+                         {"urgency", std::to_string(static_cast<int>(intent.urgency()))}});
+  return resp;
+}
+
 }  // namespace cex::risk::app

@@ -142,14 +142,48 @@ definitionOfDone:
     evidence: cpp/matching/src/app/execution_planning_uc.hpp (интерфейс есть, реализация partial)
     blocked_by_ac: [F12-3]
   - id: DoD-3
-    status: not-implemented
+    status: implemented
     title: Pre-hedge risk check (RPC RiskService.PreHedgeCheck)
     description: >
       Проверки maxNotionalPerHedge, hedgeExposureLimit, expectedSlippage;
       при fail publish risk.alerts{type=HEDGE_RISK_REJECT}.
-    evidence: contracts/proto/fob/risk/v1/risk.proto (no PreHedgeCheck method)
-    blocked_by_ac: [F12-8]
-    blocked_by_issue: no-pre-hedge-rpc
+
+      PR-F12-13 (2026-05-27): RPC реализован в cpp/risk. Пять проверок
+      в фиксированном порядке (см. proto §111):
+        1. PROVIDER_HALTED      — kill-switch state (per-symbol или global)
+        2. NOTIONAL_EXCEEDED    — target_qty * reference_mid > RISK_HEDGE_MAX_NOTIONAL
+        3. EXPOSURE_EXCEEDED    — current + target > RISK_HEDGE_EXPOSURE_LIMIT
+        4. SLIPPAGE_EXCEEDED    — expected_slippage_bps > RISK_HEDGE_MAX_SLIPPAGE_<URGENCY>_BPS
+        5. VENUES_UNAVAILABLE   — все allowed_venues с circuit breaker OPEN
+
+      Решение ACCEPT или REJECT (без RESIZE — частичный хедж создаёт
+      «тихий» риск с residual exposure без auto-follow-up, оператор
+      должен переиздать меньший intent).
+
+      `details` (PreHedgeCheckDetails) заполняется всегда, в том числе
+      на ACCEPT — содержит notional_used/limit, exposure_after/limit,
+      slippage_limit_bps, per-venue health snapshot.
+
+      Caller integration (Execution Planning блокирующий вызов перед
+      публикацией intent) — отдельный PR. Сейчас RPC доступен,
+      thresholds конфигурируются через env в `.env-example`.
+
+      Publish risk.alerts на REJECT — отложен в follow-up PR
+      (структурный лог "PreHedgeCheck REJECTED" пишется, alert не
+      эмитируется).
+
+      E2E verified on ubuntu-dev: grpcurl против infra-risk-1
+      (172.19.0.3:50052) — ACCEPT (0.05 BTC at 76k = 3800 USDT <
+      100k limit) + REJECT NOTIONAL_EXCEEDED + REJECT SLIPPAGE_EXCEEDED
+      + REJECT EXPOSURE_EXCEEDED. Все ответы содержат корректные
+      diagnostic details.
+    evidence: |
+      contracts/proto/fob/risk/v1/risk.proto (PreHedgeCheck RPC, PR-F12-2),
+      cpp/risk/src/app/risk_uc.{hpp,cpp} (PreHedgeCheck method, 5 checks,
+      HedgeRiskConfig env loader),
+      cpp/risk/src/transport/grpc_risk_service.{hpp,cpp} (gRPC handler),
+      infra/env/.env-example (RISK_HEDGE_MAX_NOTIONAL, _EXPOSURE_LIMIT,
+      _MAX_SLIPPAGE_{LOW,MEDIUM,HIGH}_BPS).
   - id: DoD-4
     status: implemented
     title: Venue Execution Adapter создаёт HedgeFlow + child_orders в PostgreSQL
@@ -683,16 +717,23 @@ knownIssues:
     location: infra/clickhouse/init.sql, cpp/market_data/src/infra/clickhouse_storage.*
     resolved_in: PR-F12-3b
   - id: no-pre-hedge-rpc
-    severity: feature-gap
-    status: contract-ready-impl-pending
+    severity: resolved
+    status: resolved
     description: >
-      В `fob.risk.v1.RiskService` добавлен RPC `PreHedgeCheck` с messages
-      `PreHedgeCheckRequest/Response/Details`, `PreHedgeVenueAllocation`,
-      `PreHedgeVenueHealth` (PR-F12-2, 2026-05-23). Реализация в C++
-      `cpp/risk/src/transport/grpc_risk_service.cpp` отсутствует — будет
-      добавлена в PR-F12-4.
-    location: contracts/proto/fob/risk/v1/risk.proto
-    resolved_in: PR-F12-2 (contract added; server impl pending in PR-F12-4)
+      RESOLVED in PR-F12-13 (2026-05-27). PreHedgeCheck RPC реализован
+      в cpp/risk/src/app/risk_uc.cpp + grpc_risk_service.cpp. Пять
+      проверок (PROVIDER_HALTED, NOTIONAL_EXCEEDED, EXPOSURE_EXCEEDED,
+      SLIPPAGE_EXCEEDED, VENUES_UNAVAILABLE) в фиксированном порядке.
+      Thresholds конфигурируются через env (RISK_HEDGE_MAX_NOTIONAL,
+      _EXPOSURE_LIMIT, _MAX_SLIPPAGE_{LOW,MEDIUM,HIGH}_BPS).
+      Diagnostic details (notional_used/limit, exposure_after/limit,
+      slippage_limit_bps, venue health snapshot) возвращаются всегда.
+
+      Остаётся в follow-up: (a) caller integration — Execution Planning
+      должен вызывать PreHedgeCheck блокирующе перед публикацией intent,
+      (b) publish risk.alerts на REJECT (сейчас только structured log).
+    location: cpp/risk/src/app/risk_uc.cpp, cpp/risk/src/transport/grpc_risk_service.cpp
+    resolved_in: PR-F12-13
   - id: hedge-pnl-not-computed
     severity: resolved
     status: resolved

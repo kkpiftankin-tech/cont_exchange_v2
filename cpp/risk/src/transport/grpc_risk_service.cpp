@@ -10,6 +10,14 @@ grpc::Status GrpcRiskService::CheckNewOrder(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcRiskService::PreHedgeCheck(
+    grpc::ServerContext*,
+    const fob::risk::v1::PreHedgeCheckRequest* request,
+    fob::risk::v1::PreHedgeCheckResponse* response) {
+  *response = uc_->PreHedgeCheck(*request);
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcRiskService::SetKillSwitch(
     grpc::ServerContext*,
     const fob::risk::v1::KillSwitchRequest* request,

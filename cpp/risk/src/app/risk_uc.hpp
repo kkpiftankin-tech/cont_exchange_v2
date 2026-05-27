@@ -19,6 +19,15 @@ public:
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
 
+  // F-12 DoD-3 / AC F12-8 (PR-F12-13). Pre-hedge risk check called by
+  // Execution Planning before any ExecutionIntent is fulfilled. Five
+  // checks in fixed order: PROVIDER_HALTED, NOTIONAL_EXCEEDED,
+  // EXPOSURE_EXCEEDED, SLIPPAGE_EXCEEDED, VENUES_UNAVAILABLE. Decision
+  // is ACCEPT or REJECT only (no RESIZE — hedges with residual exposure
+  // create silent risk; operator must reissue smaller intent).
+  fob::risk::v1::PreHedgeCheckResponse
+  PreHedgeCheck(const fob::risk::v1::PreHedgeCheckRequest &req);
+
   fob::risk::v1::KillSwitchResponse
   SetKillSwitch(const fob::risk::v1::KillSwitchRequest &req);
 

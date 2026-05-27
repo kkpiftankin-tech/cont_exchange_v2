@@ -12,6 +12,11 @@ class GrpcRiskService final : public fob::risk::v1::RiskService::Service {
                             const fob::risk::v1::PreTradeCheckRequest* request,
                             fob::risk::v1::PreTradeCheckResponse* response) override;
 
+  // F-12 DoD-3 (PR-F12-13).
+  grpc::Status PreHedgeCheck(grpc::ServerContext* context,
+                             const fob::risk::v1::PreHedgeCheckRequest* request,
+                             fob::risk::v1::PreHedgeCheckResponse* response) override;
+
   grpc::Status SetKillSwitch(grpc::ServerContext* context,
                              const fob::risk::v1::KillSwitchRequest* request,
                              fob::risk::v1::KillSwitchResponse* response) override;
