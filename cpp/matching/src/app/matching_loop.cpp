@@ -13,6 +13,7 @@
 
 #include "fob/execution/v1/execution.pb.h"
 
+#include "app/execution_planner.hpp"
 #include "app/hedge_execution_intents_publisher.hpp"
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"
@@ -975,9 +976,69 @@ void MatchingLoop::run_one_batch() {
            std::to_string(batch_result.hedge_execution_intents.size())}
   });
 
+  // F-12 DoD-2 (PR-F12-15): multi-venue routing fan-out.
+  // For each pre-fan-out intent, ask BuildMultiVenuePlan to split
+  // target_qty across allowed venues proportionally to L(v). If the
+  // plan yields >=2 allocations we replace the single intent with N
+  // child clones (each gets its own hedge_flow_id, venue, qty share).
+  // No-op fallback: when only 1 venue passes filtering or planner
+  // returns infeasible, we keep the original intent unchanged.
+  std::vector<fob::execution::v1::ExecutionIntent> fanned_out;
+  fanned_out.reserve(batch_result.hedge_execution_intents.size());
+  std::size_t fanout_expansions = 0;
+  for (const auto& intent : batch_result.hedge_execution_intents) {
+    PlanRequest plan_req;
+    plan_req.symbol = intent.instrument().symbol();
+    plan_req.side = intent.side();
+    plan_req.target_qty = cex::common::Decimal::from_proto(intent.target_qty());
+    for (const auto& v : intent.allowed_venues()) plan_req.allowed_venues.push_back(v);
+    {
+      std::lock_guard<std::mutex> lock(planner_inputs_cache_mutex_);
+      plan_req.planner_inputs =
+          planner_inputs_cache_.GetPlannerInputsSnapshotForSymbol(
+              intent.instrument().symbol());
+    }
+    const auto plan = BuildMultiVenuePlan(plan_req);
+
+    if (plan.feasible && plan.allocations.size() >= 2) {
+      auto children = FanOutIntentByPlan(intent, plan);
+      ++fanout_expansions;
+      cex::common::log_json(
+          "INFO",
+          "Multi-venue routing plan expanded hedge intent",
+          {{"batch_id", batch_id},
+           {"hedge_flow_id", intent.hedge_flow_id()},
+           {"symbol", intent.instrument().symbol()},
+           {"allocations", std::to_string(plan.allocations.size())},
+           {"target_qty", plan_req.target_qty.to_string()}});
+      for (auto& child : children) fanned_out.push_back(std::move(child));
+    } else {
+      // 0 or 1 allocation — keep original.
+      fanned_out.push_back(intent);
+      if (!plan.feasible) {
+        cex::common::log_json(
+            "WARN",
+            "Multi-venue routing plan not feasible; emitting original intent",
+            {{"batch_id", batch_id},
+             {"hedge_flow_id", intent.hedge_flow_id()},
+             {"reject_reason", plan.reject_reason}});
+      }
+    }
+  }
+  if (fanout_expansions > 0) {
+    cex::common::log_json(
+        "INFO",
+        "Multi-venue routing summary",
+        {{"batch_id", batch_id},
+         {"input_intents",
+          std::to_string(batch_result.hedge_execution_intents.size())},
+         {"expanded_intents", std::to_string(fanout_expansions)},
+         {"output_intents", std::to_string(fanned_out.size())}});
+  }
+
   const auto hedge_publish_result = PublishAutoHedgeExecutionIntents(
       batch_id,
-      batch_result.hedge_execution_intents,
+      fanned_out,
       execution_intents_producer);
   hedge_execution_intents_attempted = hedge_publish_result.attempted;
   hedge_execution_intents_published = hedge_publish_result.published;

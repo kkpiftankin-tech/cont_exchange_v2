@@ -134,12 +134,55 @@ definitionOfDone:
       intent.hedge_flow_id → report.hedge_flow_id для PG update),
       infra/env/.env-example (HEDGE_TRIGGER_* + HEDGE_INTENT_* vars)
   - id: DoD-2
-    status: partial
+    status: code-complete-verify-pending
     title: Execution Planning Forecast потребляет execution.intents + venue.liquidity.fob + venue.health
     description: >
       Строит routing-план (qty split по venues, urgency, fallback list),
       передаёт в Venue Execution Adapter.
-    evidence: cpp/matching/src/app/execution_planning_uc.hpp (интерфейс есть, реализация partial)
+
+      PR-F12-15 (2026-05-27): multi-venue routing реализован в matching.
+      Новый модуль `cpp/matching/src/app/execution_planner.{hpp,cpp}`:
+        - `BuildMultiVenuePlan(request, config)` — pure function,
+          фильтрует planner_inputs по allowed_venues + usable + health,
+          вычисляет L(v) = max(q_grid) на нужной стороне curve,
+          распределяет target_qty proportionally to L(v), отбрасывает
+          sub-threshold allocations (default 5% от target) и
+          перераспределяет share на выживших.
+        - `FanOutIntentByPlan(intent, plan)` — клонирует
+          ExecutionIntent на N штук, по одному на venue allocation.
+          Каждый клон: hedge_flow_id = <base>|<venue>,
+          intent_id = <new_hedge_flow_id>|intent,
+          target_qty = allocated_qty, venue = venue_id,
+          allowed_venues = [venue_id], partition_key обновлён.
+      Wiring в `matching_loop.cpp` перед PublishAutoHedgeExecutionIntents:
+        - snapshot planner_inputs_cache_ для symbol под mutex,
+        - для каждого intent вызвать BuildMultiVenuePlan,
+        - если plan.feasible && >=2 allocations → FanOutIntentByPlan и
+          использовать клонов вместо оригинала,
+        - иначе оригинальный intent сохраняется (fallback-safe).
+
+      Statuc `code-complete-verify-pending`: E2E build + verify на
+      ubuntu-dev отложен — Tailscale недоступен в момент PR. Когда
+      хост поднимется, нужно:
+        1. docker compose build matching на ubuntu-dev,
+        2. отправить SELL >0.001 BTC, дождаться batch,
+        3. в PG hedgeflows должно появиться N>1 строк с suffix
+           |binance / |okx (по числу здоровых venues).
+
+      Ограничения текущей реализации:
+        - PreHedgeCheck НЕ вызывается перед fan-out (caller integration
+          для DoD-3 — отдельный PR, см. DoD-3 description).
+        - Urgency → strategy mapping остаётся config-driven из env,
+          не per-allocation.
+        - reject_reason из plan'а попадает только в structured log,
+          не в risk.alerts.
+    evidence: |
+      cpp/matching/src/app/execution_planner.hpp (PlanRequest, PlanResult,
+      VenueAllocation, BuildMultiVenuePlan, FanOutIntentByPlan),
+      cpp/matching/src/app/execution_planner.cpp,
+      cpp/matching/src/app/matching_loop.cpp (fan-out integration
+      before PublishAutoHedgeExecutionIntents),
+      cpp/matching/CMakeLists.txt (new source registered).
     blocked_by_ac: [F12-3]
   - id: DoD-3
     status: implemented

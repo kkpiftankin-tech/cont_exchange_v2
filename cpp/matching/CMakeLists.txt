@@ -33,6 +33,7 @@ endif()
 add_executable(matching
   src/main.cpp
   src/app/execution_intent_builder.cpp
+  src/app/execution_planner.cpp
   src/app/external_venue_filter.cpp
   src/app/hedge_execution_intents_publisher.cpp
   src/app/hedge_trigger_policy.cpp
