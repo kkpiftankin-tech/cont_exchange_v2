@@ -378,13 +378,47 @@ definitionOfDone:
       Execution Live Feed, Manual Override, Policy Config) упомянуты
       как dashboard references.
   - id: DoD-18
-    status: partial
+    status: implemented
     title: Архитектурная документация синхронна с реализацией
     description: >
       Sequence diagrams (SEQ-F12-01..03), контракты Kafka/REST/gRPC,
       схемы PG/CH, cross-links к F-04/F-06/F-11/F-15 актуальны и согласованы
       с фактическим кодом cpp/venues + cpp/matching + cpp/ledger + frontend.
-    evidence: docs/05-components/sequences/SEQ-F12-* (есть), docs/06-api/* (partial), docs/07-data/* (partial)
+      PR-F12-11 (2026-05-27): docs-sync sweep после всех PR-F12-3..10.
+
+      Обновлено:
+      - docs/06-api/rest/hedgeflows.md: статус-таблица 10 endpoints
+        (7 ✅ wired через frontend/api/server.js, 4 ❌ deferred), путь
+        prefix /api/v1/hedge/ задокументирован.
+      - docs/07-data/hedgeflows.md: DDL переписан под actual schema
+        (TEXT не UUID, NUMERIC(38,18) не (24,8), отсутствие `source`
+        колонки задокументировано).
+      - docs/07-data/child-orders.md: то же; PARTIALLY_FILLED status
+        присутствует в CHECK constraint но dev sim adapter его не
+        генерирует — задокументировано.
+      - docs/07-data/execution-reports.md: 20-field actual schema
+        + drift-table vs IN-005 §1 (LowCardinality string не Enum8,
+        event_time_ms не DateTime64+intent_created_at, direct HTTP
+        INSERT не Kafka engine + MV).
+      - docs/05-components/sequences/SEQ-F12-01-auto-hedge-services.md:
+        7 drift-correction notes (deterministic hedge_flow_id format,
+        venues InsertOpen step, hedge_flow_id propagation fix,
+        ledger HedgePnL sink, CH dual-write, UI read-path,
+        env-gated trigger).
+      - docs/06-api/messaging/execution-intents.md: implementation
+        notes по composite hedge_flow_id, HEDGE_SOURCE_AUTO_BATCH,
+        env thresholds, allowed_venues CSV.
+      - docs/06-api/messaging/execution-venue.md: notes по dual publish
+        (execution.venue + execution.reports legacy), hedge_flow_id
+        propagation в venues_loop, Money→Float64 conversion, sim
+        executed_price=0 caveat.
+      - docs/traceability/feature-traceability.md F-12 row: contracts,
+        data objects, components, tests, code пути обновлены с TODO
+        на actual file paths.
+    evidence: |
+      Per-file drift correction notes referenced above; commit
+      PR-F12-11 (b...). Single-pass sync — re-check needed when next
+      F-12 PR lands.
 
 # UX Screens из IN-008 (v2 spec, §2.5).
 # Каждый экран — отдельная React-страница, потребляющая один или несколько

@@ -96,3 +96,32 @@ Kafka engine table читает `execution.venue`, MV агрегирует в Me
 - IN-005 §2 «Sequence diagram — основной happy path» (publish ExecutionReport)
 - IN-005 §6 «slippageBps», «HedgePnL»
 - IN-005 §9 «Kafka topics» (canonical name `execution.venue`)
+
+## Implementation notes (DoD-18 sync, 2026-05-27)
+
+- **Dual publish today**: `cpp/venues/src/infra/execution_report_producer.cpp`
+  publishes every ExecutionReport to BOTH `execution.venue` (canonical
+  per IN-005) and `execution.reports` (legacy, for backwards
+  compatibility with consumers that haven't migrated yet). The legacy
+  topic will be retired after migration completes; see CLAUDE.md §7.3.
+- **`hedge_flow_id` must be propagated by venues**: PR-F12-5 added
+  the line `rep.set_hedge_flow_id(intent.hedge_flow_id())` after
+  `execute_on_venue_.Run(...)` in `cpp/venues/src/app/venues_loop.cpp`.
+  Without this, `PostgresHedgeflowRepository::ApplyReport` falls
+  through to `intent_id`-fallback which carries a `|intent` suffix
+  mismatch and the PG UPDATE doesn't find the row inserted by
+  `InsertOpen`. This is non-obvious but load-bearing — preserve when
+  refactoring.
+- **`hedge_pnl` proto vs CH type mismatch**: in the protobuf
+  `ExecutionReport` the field is `fob.common.v1.Money` (currency +
+  amount). In ClickHouse `execution_reports` it is stored as `Float64`
+  for query convenience (see [`07-data/execution-reports.md`](../../07-data/execution-reports.md)
+  drift table). The Money→Float64 conversion happens in
+  `cpp/market_data/src/infra/clickhouse_storage.cpp` `BuildExecutionReportV2JsonRow`.
+- **In dev sim mode `executed_price=0`**: documented knownIssue
+  `venues-sim-zero-execution-price` in F-12 feature.yaml — VenueSim
+  adapter publishes ExecutionReport with avg_price=0 and slippage_bps=0
+  for MARKET intents. As a consequence, downstream `hedge_pnl` computed
+  by ledger is also 0. Affects ALL F-12 PnL dashboards / metrics until
+  the F-20 Live Venue Simulator (IN-010) lands or sim adapter is
+  fixed.

@@ -82,3 +82,27 @@
 
 - IN-005 §1 «ExecutionIntent (Kafka execution.intents)»
 - IN-005 §9 «Kafka topics»
+
+## Implementation notes (DoD-18 sync, 2026-05-27)
+
+- **`hedge_flow_id` is TEXT (composite), not UUID**. matching's F-04
+  external_fill path uses `<batch_id>|<order_id>|<symbol>|<venue_id>|external_fill_N`;
+  the real F-12 auto-hedge path (PR-F12-5,
+  `cpp/matching/src/app/execution_intent_builder.cpp`)
+  uses `<batch_id>|hedge|<provider_id>|<symbol>`. Both shapes are
+  carried in this Kafka field as `string` (proto type) and persisted
+  to PG `hedgeflows.hedge_flow_id` as `TEXT`.
+- **`source` enum**: F-12 auto-hedge intents set
+  `source = HEDGE_SOURCE_AUTO_BATCH` (enum value 1, see
+  `contracts/proto/fob/execution/v1/execution.proto`). F-04
+  external_fill intents currently do **not** set this field (default
+  unset). The `manual` origin (operator-created intent) is reserved
+  for a future PR (`POST /api/v1/hedge/manual-overrides`).
+- **Per-symbol thresholds gate emission**: matching only publishes a
+  real F-12 intent when `HEDGE_TRIGGER_QTY_<SYM>` or
+  `HEDGE_TRIGGER_NOTIONAL_<SYM>` is non-zero and the per-batch net
+  exposure exceeds it. Defaults are 0 — feature is disabled out of
+  the box. Configure via `infra/env/.env-example`.
+- **`allowed_venues` is CSV-parsed from `HEDGE_INTENT_ALLOWED_VENUES`**
+  env (PR-F12-5). Today there is no per-symbol allow-list; venues
+  selection happens uniformly across all F-12 intents.

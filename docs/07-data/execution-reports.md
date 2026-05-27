@@ -34,105 +34,65 @@ related:
 
 Retention: **90+ дней** (per IN-005 §11 DoD).
 
-## DDL (target)
+## DDL (actual — `cpp/market_data/src/infra/clickhouse_storage.cpp:443-468`)
+
+The actual ingestion path is **simpler** than the IN-005 target: instead
+of a Kafka engine + materialized view, `cpp/market_data` consumes
+`execution.venue` directly (Protobuf-deserialised in C++) and INSERTs
+via HTTP into ClickHouse via `SaveExecutionReport`. This was the
+chosen path in PR-F12-3b (2026-05-26) because it lets us co-locate
+custom field mapping (e.g. `event_time_ms` instead of `DateTime64`)
+without coupling CH to the proto wire format.
 
 ```sql
--- F-12 Execution Hedge: ClickHouse execution_reports table.
---
--- Schema mirrors fob.execution.v1.ExecutionReport.
--- Ingestion path: Kafka 'execution.venue' (Protobuf) -> Kafka engine table
--- -> materialized view -> MergeTree.
-
+-- 20-field canonical schema. Created by EnsureSchema() in C++.
 CREATE TABLE IF NOT EXISTS execution_reports (
-    -- identification
     report_id        String,
     intent_id        String,
-    hedge_flow_id    String,
+    hedge_flow_id    String,                       -- propagated from intent by venues (PR-F12-5)
     child_order_id   String,
-    batch_id         String,                       -- back-ref F-04
+    batch_id         String,
     provider_id      String,
-
-    -- venue
-    venue_id         LowCardinality(String),       -- binance / coinbase / uniswap_v3 / venue_sim
-    venue_symbol     String,
-    symbol           LowCardinality(String),       -- internal symbol
-    side             Enum8('BUY' = 1, 'SELL' = 2),
-
-    -- venue order ids
-    venue_order_id   String,
-    client_order_id  String,
-
-    -- status (mirrors ExecutionReportStatus)
-    status           Enum8(
-        'NEW' = 1, 'PARTIALLY_FILLED' = 2, 'FILLED' = 3,
-        'CANCELLED' = 4, 'REJECTED' = 5, 'EXPIRED' = 6,
-        'OVERFILL_GUARD' = 7, 'UNDERFILLED' = 8
-    ),
-    reason           String,                       -- свободная форма для REJECTED/CANCELLED
-
-    -- quantities and prices
+    venue_id         LowCardinality(String),
+    symbol           String,
+    side             LowCardinality(String),
+    status           LowCardinality(String),
     filled_qty       Float64,
     remaining_qty    Float64,
-    average_price    Float64,
-    reference_mid    Float64,
-    slippage_bps     Float64,
-    hedge_pnl        Float64,
-
-    -- fee
+    avg_price        Float64,                      -- was average_price in IN-005 §1
     fee_amount       Float64,
-    fee_currency     LowCardinality(String),
-
-    -- urgency (для anti-join с intent)
-    urgency          LowCardinality(String),
-
-    -- timing
-    timestamp        DateTime64(3, 'UTC'),         -- event_time из ExecutionReport.meta
-    intent_created_at DateTime64(3, 'UTC'),        -- для latency analysis
-    latency_ms       UInt32 MATERIALIZED toUInt32((timestamp - intent_created_at) * 1000),
-
-    ingested_at      DateTime DEFAULT now(),
-
-    INDEX idx_hedge_flow hedge_flow_id TYPE bloom_filter GRANULARITY 1,
-    INDEX idx_intent intent_id TYPE bloom_filter GRANULARITY 1
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (symbol, venue_id, timestamp);
-
--- Kafka source table
-CREATE TABLE IF NOT EXISTS execution_reports_kafka (
-    -- те же поля, в том же порядке
-    report_id String, intent_id String, hedge_flow_id String, child_order_id String,
-    batch_id String, provider_id String, venue_id String, venue_symbol String,
-    symbol String, side String,
-    venue_order_id String, client_order_id String,
-    status String, reason String,
-    filled_qty Float64, remaining_qty Float64, average_price Float64,
-    reference_mid Float64, slippage_bps Float64, hedge_pnl Float64,
-    fee_amount Float64, fee_currency String,
-    urgency String,
-    timestamp DateTime64(3, 'UTC'), intent_created_at DateTime64(3, 'UTC')
-) ENGINE = Kafka SETTINGS
-    kafka_broker_list = 'redpanda:9092',
-    kafka_topic_list = 'execution.venue',
-    kafka_group_name = 'ch-execution-reports',
-    kafka_format = 'Protobuf',
-    kafka_schema = 'fob/execution/v1/execution.proto:ExecutionReport';
-
--- materialized view: Kafka -> MergeTree
-CREATE MATERIALIZED VIEW IF NOT EXISTS execution_reports_mv TO execution_reports AS
-SELECT
-    report_id, intent_id, hedge_flow_id, child_order_id,
-    batch_id, provider_id, venue_id, venue_symbol, symbol,
-    side,  -- enum cast выполняется неявно при INSERT
-    venue_order_id, client_order_id,
-    status, reason,
-    filled_qty, remaining_qty, average_price,
-    reference_mid, slippage_bps, hedge_pnl,
-    fee_amount, fee_currency, urgency,
-    timestamp, intent_created_at
-FROM execution_reports_kafka;
+    fee_currency     String,
+    slippage_bps     Int32,                        -- was Float64 in IN-005 §1
+    reference_mid    Float64,
+    hedge_pnl        Float64,                      -- Float64 here; proto carries fob.common.v1.Money (currency+amount)
+    event_time_ms    Int64,                        -- ms since epoch; was DateTime64(3, 'UTC') 'timestamp' in IN-005
+    ingested_at      DateTime DEFAULT now()
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
+ORDER BY (symbol, venue_id, event_time_ms, report_id)
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
 ```
+
+### Drift from IN-005 §1 target
+
+| IN-005 §1 (target) | Actual (PR-F12-3b) | Reason |
+| --- | --- | --- |
+| `Enum8(status)` | `LowCardinality(String) status` | simpler ingestion; status values stable enough not to need enum encoding |
+| `Enum8(side)` | `LowCardinality(String) side` | same |
+| `average_price Float64` | `avg_price Float64` | naming chosen to match `child_orders.avg_price` |
+| `slippage_bps Float64` | `slippage_bps Int32` | bps is integer-grade in practice |
+| `timestamp DateTime64(3,'UTC')` + `intent_created_at DateTime64` + `latency_ms MATERIALIZED` | `event_time_ms Int64` only | latency_ms via cross-row join planned (T-F12-501 follow-up) |
+| `reason String` | — (absent) | reason data goes into `error_code` / `error_message` which live in **PG** `hedgeflows.error_*`, not CH |
+| `venue_symbol`, `venue_order_id`, `urgency` | — (absent) | venue-specific id lives in PG `child_orders`; urgency lives in PG `hedgeflows` |
+| Kafka engine + MV ingestion | direct INSERT by `cpp/market_data` HTTP client | simpler; PR-F12-3b chose this to avoid coupling CH to proto schema evolution |
+| `bloom_filter` indexes on hedge_flow_id/intent_id | — (absent) | not yet observed in query profiling — add when needed |
+
+### Legacy mirror table
+
+Both `execution_reports` (canonical, this doc) and `execution_venue`
+(legacy, fewer fields) are written by `SaveExecutionReport` simultaneously
+during the migration period. See `cpp/market_data/src/infra/clickhouse_storage.cpp`
+for the dual-write logic.
 
 ## Поля
 

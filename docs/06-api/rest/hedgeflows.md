@@ -133,17 +133,36 @@ Timeline ExecutionReport для HedgeFlow.
 
 ## Implementation Status
 
-| Endpoint | Реализация |
-| --- | --- |
-| GET `/hedge/flows` | ❌ нет backend |
-| GET `/hedge/flows/{id}` | ❌ |
-| GET `/hedge/flows/{id}/child-orders` | ❌ |
-| GET `/hedge/flows/{id}/execution-reports` | ❌ |
-| POST `/hedge/intents/manual` | ❌ требует Gateway extension |
-| POST `/hedge/flows/{id}/cancel` | ❌ |
-| POST `/hedge/flows/{id}/retry` | ❌ |
+**Reality after PR-F12-6..9 (2026-05-26..27):** the read-side endpoints
+are implemented in `frontend/api/server.js` (Node.js), not in
+`cpp/gateway`. This is the MVP arrangement per the IN-009
+"observability-reporting-vs-frontend-api" knownIssue — frontend-api
+currently doubles as the Observability Reporting service. Future:
+move read-side to a dedicated component (ADR pending).
 
-Все endpoints определены в OpenAPI, реализация в gateway отсутствует.
+| Endpoint | Реализация | PR | Code path |
+| --- | --- | --- | --- |
+| GET `/api/v1/hedge/flows` | ✅ | PR-F12-6 | `frontend/api/server.js#handleHedgeFlowsV1` |
+| GET `/api/v1/hedge/flows/{id}` | ✅ (returns flow + child_orders + CH timeline) | PR-F12-7 | `server.js#handleHedgeFlowV1ById` |
+| GET `/api/v1/hedge/flows/{id}/child-orders` | ✅ (bundled into `/{id}` response under `childOrders`) | PR-F12-7 | same |
+| GET `/api/v1/hedge/flows/{id}/execution-reports` | ✅ (bundled into `/{id}` response under `timeline`, reads CH `execution_reports`) | PR-F12-7 | `server.js#fetchHedgeFlowTimeline` |
+| GET `/api/v1/hedge/pnl` | ✅ (dashboard aggregation, 5 parallel CH queries) | PR-F12-8 | `server.js#handleHedgePnlV1` |
+| GET `/api/v1/hedge/reconciliation-alerts` | ✅ | PR-F12-9a | `server.js#handleReconciliationAlertsV1` |
+| POST `/api/v1/hedge/reconciliation-alerts/{id}/acknowledge` | ✅ (in-memory only; PG persist deferred) | PR-F12-9a | `server.js#handleReconciliationAlertAckV1` |
+| GET `/api/v1/execution/recent` | ✅ (Execution Live Feed CH-backed) | PR-F12-9b | `server.js#handleExecutionLiveFeedV1` |
+| GET `/api/v1/hedge/manual-overrides` | ✅ (read-only listing with derived `origin`) | PR-F12-9c | `server.js#handleManualOverridesV1` |
+| GET `/api/v1/hedge/policy-config` | ✅ (PG `solver_config` + matching env mirror) | PR-F12-9d | `server.js#handlePolicyConfigV1` |
+| POST `/api/v1/hedge/intents/manual` | ❌ deferred | — | requires proto extension + audit log |
+| POST `/api/v1/hedge/flows/{id}/cancel` | ❌ deferred | — | requires gRPC into venues/order_flow |
+| POST `/api/v1/hedge/flows/{id}/retry` | ❌ deferred | — | requires gRPC into execution-planning |
+| PUT `/api/v1/hedge/policy-config` | ❌ deferred | — | requires audit log + Kafka hot-reload |
+
+**Path prefix note:** OpenAPI spec drafted the path tree as
+`/hedge/flows`; the implemented endpoints use `/api/v1/hedge/flows` to
+match the rest of the frontend-api naming convention. The OpenAPI doc
+in `contracts/openapi/fob/hedge/v1/api/hedge.yaml` is the eventual
+contract once the read-side migrates to gateway; until then,
+`frontend/api/server.js` is the operational source-of-truth.
 
 ## Used In Features
 

@@ -127,3 +127,79 @@ sequenceDiagram
 - IN-005 §2 «Sequence diagram — основной happy path»
 - IN-005 §6 «Формулы расчётов» (routing plan, pre-hedge checks)
 - IN-005 §7 (F12-1..F12-12)
+
+## Drift correction notes (DoD-18 sync, 2026-05-27)
+
+The Mermaid diagram above shows the **target** flow per IN-005. The
+**actual** runtime after PR-F12-3..10 differs in the following ways
+(captured here pending a diagram rewrite — keep this section in sync
+when redrawing):
+
+1. **`hedge_flow_id` generation** (PR-F12-5, `cpp/matching/src/app/execution_intent_builder.cpp:316`):
+   matching's `BuildFromHedgeTriggerDecisions` builds a deterministic
+   `hedge_flow_id = "<batch_id>|hedge|<provider_id>|<symbol>"`, not a
+   UUID. The diagram step `MATCH → ADP: ExecutionIntent` should be
+   annotated with this format so the trace `|hedge|` marker is
+   recognised in PG/CH/logs.
+
+2. **PG `hedgeflows` row creation by venues** (PR-F12-3a, `cpp/venues/src/infra/postgres_hedgeflow_repository.cpp:137-204`):
+   venues calls `InsertOpen(intent)` synchronously **before** sending
+   to the venue adapter. This step is missing from the diagram —
+   should appear between "ADP → ADP: idempotency check" and "ADP →
+   EVC: PlaceChildOrder".
+
+3. **`hedge_flow_id` propagation in ExecutionReport** (PR-F12-5 fix,
+   `cpp/venues/src/app/venues_loop.cpp` after `execute_on_venue_.Run`):
+   venues now explicitly sets `rep.hedge_flow_id = intent.hedge_flow_id`
+   so the downstream `PostgresHedgeflowRepository::ApplyReport` query
+   finds the inserted row. Before this fix, F-12 hedge reports fell
+   through to intent_id-fallback which has a "|intent" suffix
+   mismatch. The diagram's "ADP → K3: ExecutionReport" step assumes
+   this propagation but the spec didn't mandate it explicitly.
+
+4. **HedgePnL computation in ledger + PG sink** (PR-F12-3c,
+   `cpp/ledger/src/app/ledger_uc.cpp` `calculate_hedge_pnl` + new
+   `PostgresHedgeflowPnlSink` in `cpp/ledger/src/infra/postgres_repositories.cpp:358-385`):
+   the diagram shows "ADP → UPDATE hedgeflows (hedge_pnl)" but
+   actually it's the **ledger** that computes hedge_pnl (per IN-009
+   §4.6: `(executed_price − internal_price) × qty` with sign-flip for
+   BUY) and writes back to PG via a new repository port
+   `HedgeflowPnlSinkPort`. The Adapter's role is just bookkeeping of
+   filled_qty/avg_price.
+
+5. **CH execution_reports dual-write** (PR-F12-3b, `cpp/market_data/src/infra/clickhouse_storage.cpp`
+   `SaveExecutionReport`): `market_data` writes every report to BOTH
+   the legacy `execution_venue` table and the canonical
+   `execution_reports` table (20 fields). The diagram step "K3 → CH"
+   should be split into "K3 → market_data → CH execution_venue (legacy)"
+   and "K3 → market_data → CH execution_reports (canonical)" — and
+   note that ingestion is **not** via Kafka engine + MV; it's a direct
+   HTTP INSERT from C++. See [`07-data/execution-reports.md`](../../07-data/execution-reports.md)
+   "Drift from IN-005 §1 target" section.
+
+6. **UI read-path (added 2026-05-26..27)**: PR-F12-6/7/8/9 added a
+   read-side path NOT shown in the original diagram:
+
+   ```text
+   Operator/Trader → /hedge-flows-live (React)
+                  → GET /api/v1/hedge/flows[/{id}]
+                  → frontend/api/server.js
+                  → PG hedgeflows + child_orders (sync)
+                    + CH execution_reports (drill-down timeline)
+   ```
+
+   The frontend-api currently fulfils the Observability Reporting
+   role (per IN-009 §7 architecture; documented in F-12 feature.yaml
+   `knownIssues.observability-reporting-vs-frontend-api`). When the
+   dedicated component lands, this read-path moves there.
+
+7. **Real F-12 hedge intent emission is gated by env config**
+   (PR-F12-5): the diagram shows `MATCH → ADP: ExecutionIntent` as a
+   given, but in reality matching only emits a real F-12 intent when
+   `HedgeTriggerPolicy.Evaluate(snapshots)` returns `triggered=true`,
+   which requires non-zero thresholds in `HEDGE_TRIGGER_QTY_<SYM>` or
+   `HEDGE_TRIGGER_NOTIONAL_<SYM>` env vars. With defaults at 0 the
+   policy never fires and only F-04 external_fill intents flow. This
+   is the most common reason for "I expected a |hedge| row in
+   hedgeflows but only got |external_fill_N|" reports — see
+   `docs/11-operations/runbooks/F-12-incidents.md` Incident 8.

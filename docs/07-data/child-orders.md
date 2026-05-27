@@ -28,65 +28,65 @@ related:
 - retry / fallback: новые child_orders с тем же `hedge_flow_id`;
 - partial fill требует доразмещения.
 
-## DDL (target)
+## DDL (actual — `infra/postgres/init.sql:163-194`)
 
 ```sql
 -- F-12 Execution Hedge: child_orders table.
 --
--- Lifecycle: PENDING -> FILLED | PARTIALLY_FILLED | CANCELLED | REJECTED
+-- Lifecycle: PENDING -> FILLED | PARTIALLY_FILLED | CANCELLED | REJECTED.
 --
--- Statuses соответствуют fob.hedge.v1.ChildOrderStatus.
--- order_type соответствует fob.execution.v1.ExecutionStrategy.
-
+-- =====================================================================
+-- Различия с исходной IN-005 спекой (drift correction 2026-05-27, DoD-18):
+--   1. id-колонки TEXT, не UUID — см. hedgeflows.md (composite intent_id
+--      от matching's F-04 external_fill пути).
+--   2. Decimal precision NUMERIC(38,18), не (24,8).
+--   3. ENUM-набор order_type сейчас включает 'IOC' и 'FOK' напрямую как
+--      order_type (исторически правильнее это TIF, но venues генерирует
+--      такие записи). Перенос в tif — отдельный refactor PR.
+--   4. UNIQUE index по (hedge_flow_id, client_order_id), не
+--      (venue_id, client_order_id) — потому что matching's composite
+--      client_order_id уже включает venue в свой хвост.
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS child_orders (
-    child_order_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    hedge_flow_id    UUID NOT NULL REFERENCES hedgeflows(hedge_flow_id) ON DELETE CASCADE,
-
-    venue_id         VARCHAR(32) NOT NULL,        -- binance / coinbase / uniswap_v3 / venue_sim
-    venue_symbol     VARCHAR(32) NOT NULL,        -- venue-specific symbol
-    symbol           VARCHAR(32) NOT NULL,        -- internal symbol (denormalized для запросов)
-    side             VARCHAR(4) NOT NULL CHECK (side IN ('BUY', 'SELL')),
-    order_type       VARCHAR(16) NOT NULL CHECK (order_type IN ('MARKET','LIMIT','TWAP','POST_ONLY','IOC')),
-    tif              VARCHAR(8) CHECK (tif IS NULL OR tif IN ('GTC','GTD','IOC','FOK')),
-
-    qty              NUMERIC(24,8) NOT NULL CHECK (qty > 0),
-    price            NUMERIC(24,8),               -- NULL для MARKET
-
-    -- идемпотентность на стороне venue
-    client_order_id  VARCHAR(64) NOT NULL,
-    venue_order_id   VARCHAR(64),                 -- ID после ack от venue
-
-    -- aggregates
-    filled_qty       NUMERIC(24,8) NOT NULL DEFAULT 0 CHECK (filled_qty >= 0),
-    avg_price        NUMERIC(24,8),
-    fee_amount       NUMERIC(24,8),
-    fee_currency     VARCHAR(16),
-
-    -- lifecycle
-    status           VARCHAR(20) NOT NULL DEFAULT 'PENDING'
-        CHECK (status IN ('PENDING','FILLED','PARTIALLY_FILLED','CANCELLED','REJECTED')),
-    error_code       TEXT,
-    error_message    TEXT,
-
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT child_orders_filled_le_qty CHECK (filled_qty <= qty * 1.01)
+  child_order_id   TEXT PRIMARY KEY,                                 -- was UUID
+  hedge_flow_id    TEXT NOT NULL REFERENCES hedgeflows(hedge_flow_id) ON DELETE CASCADE,  -- was UUID
+  venue_id         TEXT NOT NULL,
+  symbol           TEXT NOT NULL,                                    -- venue-mapped symbol (e.g. XBTUSD on Kraken)
+  side             TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  order_type       TEXT NOT NULL CHECK (order_type IN ('MARKET', 'LIMIT', 'POST_ONLY', 'IOC', 'FOK')),
+  qty              NUMERIC(38, 18) NOT NULL CHECK (qty > 0),         -- was (24,8)
+  price            NUMERIC(38, 18),                                  -- nullable for MARKET
+  tif              TEXT NOT NULL CHECK (tif IN ('GTC', 'IOC', 'FOK')),
+  filled_qty       NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (filled_qty >= 0),
+  avg_price        NUMERIC(38, 18),
+  fee              NUMERIC(38, 18) NOT NULL DEFAULT 0,               -- was fee_amount in spec
+  fee_currency     TEXT,
+  client_order_id  TEXT NOT NULL,
+  venue_order_id   TEXT,                                             -- assigned by venue after accept
+  status           TEXT NOT NULL CHECK (status IN ('PENDING', 'FILLED', 'PARTIALLY_FILLED', 'CANCELLED', 'REJECTED')),
+  error_code       TEXT,
+  error_message    TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT child_orders_filled_le_qty CHECK (filled_qty <= qty * 1.01)
 );
 
--- idempotency на стороне venue: один client_order_id на venue
-CREATE UNIQUE INDEX IF NOT EXISTS child_orders_venue_client_order_uniq
-    ON child_orders (venue_id, client_order_id);
+-- Idempotency: prevent retry duplicates per (hedge_flow_id, client_order_id).
+CREATE UNIQUE INDEX IF NOT EXISTS child_orders_idem
+  ON child_orders (hedge_flow_id, client_order_id);
 
--- частые запросы
+CREATE INDEX IF NOT EXISTS idx_child_orders_venue ON child_orders (venue_id, status);
 CREATE INDEX IF NOT EXISTS idx_child_orders_hedge_flow ON child_orders (hedge_flow_id);
-CREATE INDEX IF NOT EXISTS idx_child_orders_venue_status ON child_orders (venue_id, status);
-CREATE INDEX IF NOT EXISTS idx_child_orders_open
-    ON child_orders (hedge_flow_id, status)
-    WHERE status IN ('PENDING', 'PARTIALLY_FILLED');
 CREATE INDEX IF NOT EXISTS idx_child_orders_venue_order_id
-    ON child_orders (venue_order_id) WHERE venue_order_id IS NOT NULL;
+  ON child_orders (venue_id, venue_order_id) WHERE venue_order_id IS NOT NULL;
 ```
+
+**Note on `PARTIALLY_FILLED`**: included in the CHECK constraint, but in
+dev runtime venues' sim adapter always returns FILLED in a single
+ApplyReport. PARTIALLY_FILLED state appears in row history only when
+real CEX/DEX adapter returns multi-step fills — not yet observed in
+dev. When backtest/replay (F-15) drives venues with historical traces,
+PARTIALLY_FILLED becomes a normal transient state.
 
 ## Поля
 
