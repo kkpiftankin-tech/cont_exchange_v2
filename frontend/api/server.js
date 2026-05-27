@@ -4004,6 +4004,380 @@ async function clickhouseQueryJson(query) {
     .map((line) => JSON.parse(line));
 }
 
+// F-12 DoD-15 (PR-F12-9d): Policy Config (live, read-only view).
+// Sources:
+//   - PostgreSQL solver_config — single active row with batch params + fee model
+//   - matching service env (HEDGE_TRIGGER_*, HEDGE_INTENT_*) — mirrored from
+//     frontend-api's own env (which docker-compose sets from the same .env-example)
+// PUT/edit is deferred: full policy management UI needs an audit log table
+// (`policy_audit`) and a Kafka topic to propagate hot reload — separate PR.
+async function handlePolicyConfigV1(req, res, pathname) {
+  if (req.method !== "GET" || pathname !== "/api/v1/hedge/policy-config") return false;
+
+  const pool = getPgPool();
+  let solverConfig = null;
+  let solverError = null;
+  if (pool) {
+    try {
+      const result = await pool.query(`
+        SELECT version, batchintervalms, maxiterations,
+               epsilonliquidity, tolerance, feemodel, isactive, created_at
+        FROM solver_config
+        ORDER BY created_at DESC
+        LIMIT 1
+      `);
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        solverConfig = {
+          version: row.version,
+          batchIntervalMs: row.batchintervalms,
+          maxIterations: row.maxiterations,
+          epsilonLiquidity: row.epsilonliquidity,
+          tolerance: row.tolerance,
+          feeModel: row.feemodel,
+          isActive: row.isactive,
+          createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at
+        };
+      }
+    } catch (err) {
+      solverError = err.message;
+      console.error("[pg] solver_config query failed:", err.message);
+    }
+  }
+
+  // Mirror matching service F-12 env (frontend-api shares the same .env-example).
+  const hedgeTrigger = {
+    qtyDefault: process.env.HEDGE_TRIGGER_QTY_DEFAULT || "0",
+    notionalDefault: process.env.HEDGE_TRIGGER_NOTIONAL_DEFAULT || "0",
+    activeSymbols: (process.env.HEDGE_TRIGGER_SYMBOLS || "").split(",").map((s) => s.trim()).filter(Boolean),
+    perSymbol: {}
+  };
+  hedgeTrigger.activeSymbols.forEach((sym) => {
+    const suffix = sym.replace(/[/-]/g, "_");
+    hedgeTrigger.perSymbol[sym] = {
+      qty: process.env[`HEDGE_TRIGGER_QTY_${suffix}`] || null,
+      notional: process.env[`HEDGE_TRIGGER_NOTIONAL_${suffix}`] || null
+    };
+  });
+
+  const hedgeIntent = {
+    urgency: process.env.HEDGE_INTENT_URGENCY || "MEDIUM",
+    strategy: process.env.HEDGE_INTENT_STRATEGY || "MARKET",
+    tif: process.env.HEDGE_INTENT_TIF || "IOC",
+    timeoutMs: Number(process.env.HEDGE_INTENT_TIMEOUT_MS || 30000),
+    maxSlippageBps: Number(process.env.HEDGE_INTENT_MAX_SLIPPAGE_BPS || 50),
+    allowedVenues: (process.env.HEDGE_INTENT_ALLOWED_VENUES || "").split(",").map((s) => s.trim()).filter(Boolean)
+  };
+
+  return writeJson(res, 200, {
+    solverConfig,
+    solverConfigError: solverError,
+    hedgeTriggerPolicy: hedgeTrigger,
+    hedgeIntentPolicy: hedgeIntent,
+    generatedAt: new Date().toISOString(),
+    sources: {
+      solver: "postgres:solver_config (latest row)",
+      hedge: "frontend-api env (mirrors matching service env from same .env-example)"
+    },
+    note: "Read-only. PUT /api/v1/hedge/policy-config (with audit log + Kafka hot-reload) is a deferred PR."
+  });
+}
+
+// F-12 DoD-15 (PR-F12-9c): Manual Override (live, read-only listing).
+// Source: PostgreSQL hedgeflows. "origin" is derived from intent_id pattern:
+//   *|external_fill_N   -> source=F-04 external_fill (matching's leftover)
+//   *|hedge|*            -> source=F-12 auto-hedge (real F-12 intents)
+//   anything else        -> source=manual (operator override; expected pattern
+//                           when POST /api/v1/execution-intents lands).
+// True manual-override creation (POST) is a deferred PR — needs proto/Kafka
+// path from frontend-api to matching/risk via gRPC or a new manual-intents
+// topic. Captured as knownIssue.
+function deriveIntentOrigin(intentId) {
+  if (!intentId) return "unknown";
+  if (intentId.includes("|external_fill_")) return "f04_external_fill";
+  if (intentId.includes("|hedge|")) return "f12_auto_hedge";
+  return "manual";
+}
+
+async function handleManualOverridesV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/hedge/manual-overrides") return false;
+
+  const pool = getPgPool();
+  if (!pool) {
+    return writeJson(res, 503, {
+      error: "postgres_not_configured",
+      message: "FRONTEND_POSTGRES_DSN is not set."
+    });
+  }
+
+  let limit = parseInt(query.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+  if (limit > 200) limit = 200;
+
+  try {
+    const result = await pool.query(`
+      SELECT hedge_flow_id, intent_id, batch_id, provider_id, symbol, side,
+             target_qty::text AS target_qty,
+             filled_qty::text AS filled_qty,
+             avg_fill_price::text AS avg_fill_price,
+             hedge_pnl::text AS hedge_pnl,
+             urgency, status, error_code,
+             created_at, completed_at
+      FROM hedgeflows
+      ORDER BY created_at DESC
+      LIMIT $1
+    `, [limit]);
+
+    const items = result.rows.map((row) => {
+      const flow = toHedgeFlowsApiRow(row);
+      const origin = deriveIntentOrigin(flow.intentId);
+      return {
+        hedgeFlowId: flow.hedgeFlowId,
+        intentId: flow.intentId,
+        batchId: flow.batchId,
+        providerId: flow.providerId,
+        symbol: flow.symbol,
+        side: flow.side,
+        targetQty: flow.targetQty,
+        filledQty: flow.filledQty,
+        avgFillPrice: flow.avgFillPrice,
+        hedgePnl: flow.hedgePnl,
+        urgency: flow.urgency,
+        status: flow.status,
+        errorCode: flow.errorCode,
+        createdAt: flow.createdAt,
+        completedAt: flow.completedAt,
+        origin
+      };
+    });
+
+    const counts = items.reduce((acc, it) => {
+      acc[it.origin] = (acc[it.origin] || 0) + 1;
+      return acc;
+    }, {});
+
+    return writeJson(res, 200, {
+      items,
+      summary: {
+        total: items.length,
+        f12AutoHedge: counts.f12_auto_hedge || 0,
+        f04ExternalFill: counts.f04_external_fill || 0,
+        manual: counts.manual || 0,
+        unknown: counts.unknown || 0
+      },
+      generatedAt: new Date().toISOString(),
+      source: "postgres:hedgeflows (origin derived from intent_id pattern)",
+      note: "Manual-override creation (POST /api/v1/hedge/manual-overrides) deferred. Today: read-only listing with derived origin from intent_id pattern."
+    });
+  } catch (err) {
+    console.error("[pg] /api/v1/hedge/manual-overrides query failed:", err.message);
+    return writeJson(res, 500, { error: "query_failed", message: err.message });
+  }
+}
+
+// F-12 DoD-15 (PR-F12-9b): Execution Live Feed (live).
+// Source: ClickHouse execution_reports — recent rows, polling fallback.
+// True SSE/WebSocket from Kafka execution.venue is a deferred (separate PR);
+// 3-second polling against CH gives a satisfactory dev-ops feed.
+async function handleExecutionLiveFeedV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/execution/recent") return false;
+
+  let limit = parseInt(query.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+  if (limit > 500) limit = 500;
+
+  const filters = [];
+  const venue = String(query.venue || "").trim();
+  if (venue && venue !== "all") {
+    filters.push(`venue_id = '${venue.replace(/'/g, "''")}'`);
+  }
+  const symbol = String(query.symbol || "").trim();
+  if (symbol && symbol !== "all") {
+    filters.push(`symbol = '${symbol.replace(/'/g, "''")}'`);
+  }
+  const status = String(query.status || "").trim().toUpperCase();
+  if (status && status !== "ALL") {
+    filters.push(`status = '${status.replace(/'/g, "''")}'`);
+  }
+  const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  const sqlRecent = [
+    "SELECT report_id, intent_id, hedge_flow_id, child_order_id, venue_id,",
+    "       symbol, side, status, filled_qty, remaining_qty, avg_price,",
+    "       fee_amount, fee_currency, slippage_bps, reference_mid, hedge_pnl,",
+    "       event_time_ms",
+    "FROM execution_reports",
+    whereSql,
+    "ORDER BY event_time_ms DESC",
+    `LIMIT ${limit}`,
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  const sqlFilters = [
+    "SELECT",
+    "  groupArrayDistinct(venue_id) AS venues,",
+    "  groupArrayDistinct(symbol) AS symbols,",
+    "  groupArrayDistinct(status) AS statuses",
+    "FROM execution_reports",
+    "WHERE event_time_ms >= toUnixTimestamp64Milli(toDateTime64(now() - INTERVAL 7 DAY, 3))",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+
+  try {
+    const [recentRows, filterRows] = await Promise.all([
+      clickhouseQueryJson(sqlRecent),
+      clickhouseQueryJson(sqlFilters)
+    ]);
+
+    const items = recentRows.map((row) => ({
+      reportId: row.report_id,
+      intentId: row.intent_id,
+      hedgeFlowId: row.hedge_flow_id || null,
+      childOrderId: row.child_order_id || null,
+      venueId: row.venue_id || null,
+      symbol: row.symbol,
+      side: row.side || null,
+      status: row.status,
+      filledQty: Number(row.filled_qty) || 0,
+      remainingQty: Number(row.remaining_qty) || 0,
+      avgPrice: Number(row.avg_price) || 0,
+      feeAmount: Number(row.fee_amount) || 0,
+      feeCurrency: row.fee_currency || null,
+      slippageBps: Number(row.slippage_bps) || 0,
+      referenceMid: Number(row.reference_mid) || 0,
+      hedgePnl: Number(row.hedge_pnl) || 0,
+      eventTimeMs: Number(row.event_time_ms),
+      eventTime: new Date(Number(row.event_time_ms)).toISOString()
+    }));
+
+    const filterOpts = filterRows[0] || {};
+
+    return writeJson(res, 200, {
+      items,
+      filters: {
+        venues: Array.isArray(filterOpts.venues) ? filterOpts.venues.filter(Boolean).sort() : [],
+        symbols: Array.isArray(filterOpts.symbols) ? filterOpts.symbols.filter(Boolean).sort() : [],
+        statuses: Array.isArray(filterOpts.statuses) ? filterOpts.statuses.filter(Boolean).sort() : [],
+        applied: {
+          venue: venue || null,
+          symbol: symbol || null,
+          status: status || null,
+          limit
+        }
+      },
+      generatedAt: new Date().toISOString(),
+      source: "clickhouse:execution_reports",
+      note: "Polling fallback; true SSE from Kafka execution.venue is a deferred PR."
+    });
+  } catch (err) {
+    console.error("[ch] /api/v1/execution/recent query failed:", err.message);
+    return writeJson(res, 500, { error: "query_failed", message: err.message });
+  }
+}
+
+// F-12 DoD-15 (PR-F12-9a): Reconciliation Alerts (live).
+// Source: PostgreSQL hedgeflows WHERE status IN ('UNDERFILLED','REJECTED',
+// 'RISK_REJECTED'). Operators acknowledge alerts; ack is in-memory only
+// (no PG column yet — captured as knownIssue and deferred until ADR).
+const ACKNOWLEDGED_RECONCILIATION_ALERTS = new Set();
+
+async function handleReconciliationAlertsV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/hedge/reconciliation-alerts") return false;
+
+  const pool = getPgPool();
+  if (!pool) {
+    return writeJson(res, 503, {
+      error: "postgres_not_configured",
+      message: "FRONTEND_POSTGRES_DSN is not set."
+    });
+  }
+
+  const includeAcked = String(query.includeAcked || "0") === "1";
+  const symbol = (query.symbol || "").trim();
+  const filters = [`status IN ('UNDERFILLED', 'REJECTED', 'RISK_REJECTED')`];
+  const params = [];
+  if (symbol && symbol !== "all") {
+    params.push(symbol);
+    filters.push(`symbol = $${params.length}`);
+  }
+  const sql = `
+    SELECT hedge_flow_id, intent_id, batch_id, provider_id, symbol, side,
+           target_qty::text AS target_qty,
+           filled_qty::text AS filled_qty,
+           target_notional::text AS target_notional,
+           reference_mid::text AS reference_mid,
+           avg_fill_price::text AS avg_fill_price,
+           hedge_pnl::text AS hedge_pnl,
+           urgency, timeout_ms, status, error_code, error_message,
+           created_at, updated_at, completed_at
+    FROM hedgeflows
+    WHERE ${filters.join(" AND ")}
+    ORDER BY updated_at DESC
+    LIMIT 200
+  `;
+
+  try {
+    const result = await pool.query(sql, params);
+    const items = result.rows
+      .map((row) => {
+        const flow = toHedgeFlowsApiRow(row);
+        const targetQty = Number(flow.targetQty);
+        const filledQty = Number(flow.filledQty);
+        const gapQty = Number.isFinite(targetQty) && Number.isFinite(filledQty)
+          ? Math.max(0, targetQty - filledQty)
+          : null;
+        const gapPct = gapQty !== null && targetQty > 0
+          ? Number(((gapQty / targetQty) * 100).toFixed(2))
+          : null;
+        const acknowledged = ACKNOWLEDGED_RECONCILIATION_ALERTS.has(flow.hedgeFlowId);
+        return {
+          ...flow,
+          gapQty: gapQty !== null ? gapQty.toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : null,
+          gapPct,
+          severity: flow.status === "RISK_REJECTED" || flow.status === "REJECTED" ? "critical" : "warning",
+          acknowledged,
+          ackDeferred: true
+        };
+      })
+      .filter((alert) => includeAcked || !alert.acknowledged);
+
+    const summary = {
+      total: items.length,
+      underfilled: items.filter((a) => a.status === "UNDERFILLED").length,
+      rejected: items.filter((a) => a.status === "REJECTED").length,
+      riskRejected: items.filter((a) => a.status === "RISK_REJECTED").length,
+      critical: items.filter((a) => a.severity === "critical").length,
+      warning: items.filter((a) => a.severity === "warning").length,
+      acknowledgedInSession: ACKNOWLEDGED_RECONCILIATION_ALERTS.size
+    };
+
+    return writeJson(res, 200, {
+      items,
+      summary,
+      filters: { symbol: symbol || null, includeAcked },
+      generatedAt: new Date().toISOString(),
+      source: "postgres:hedgeflows (status IN UNDERFILLED,REJECTED,RISK_REJECTED)",
+      note: "Acknowledge is in-memory only (no PG column yet) — resets on frontend-api restart."
+    });
+  } catch (err) {
+    console.error("[pg] /api/v1/hedge/reconciliation-alerts query failed:", err.message);
+    return writeJson(res, 500, { error: "query_failed", message: err.message });
+  }
+}
+
+async function handleReconciliationAlertAckV1(req, res, pathname) {
+  if (req.method !== "POST") return false;
+  const match = pathname.match(/^\/api\/v1\/hedge\/reconciliation-alerts\/([^/]+)\/acknowledge$/);
+  if (!match) return false;
+  const hedgeFlowId = decodeURIComponent(match[1]);
+  ACKNOWLEDGED_RECONCILIATION_ALERTS.add(hedgeFlowId);
+  return writeJson(res, 200, {
+    hedgeFlowId,
+    acknowledged: true,
+    note: "In-memory only; persisted to PG in future PR."
+  });
+}
+
 async function handleHedgePnlV1(req, res, pathname, query) {
   if (req.method !== "GET" || pathname !== "/api/v1/hedge/pnl") return false;
 
@@ -5715,6 +6089,30 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/pnl") {
       const handled = await handleHedgePnlV1(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/hedge/reconciliation-alerts") {
+      const handled = await handleReconciliationAlertsV1(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+    if (pathname.startsWith("/api/v1/hedge/reconciliation-alerts/")) {
+      const handled = await handleReconciliationAlertAckV1(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/execution/recent") {
+      const handled = await handleExecutionLiveFeedV1(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/hedge/manual-overrides") {
+      const handled = await handleManualOverridesV1(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/hedge/policy-config") {
+      const handled = await handlePolicyConfigV1(req, res, pathname);
       if (handled !== false) return;
     }
 

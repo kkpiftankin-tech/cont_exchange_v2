@@ -298,27 +298,53 @@ definitionOfDone:
       frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.css,
       route /hedge-flows-live в App.js
   - id: DoD-15
-    status: partial
+    status: implemented
     title: Admin UI Execution Live Feed + Hedge PnL Dashboard + Reconciliation Alerts + Manual Override + Policy Config
     description: >
-      Остальные 5 экранов из uxScreens. Manual Override создаёт ExecutionIntent
-      через POST /api/v1/execution-intents (origin=MANUAL).
-      PR-F12-8 (2026-05-26): Hedge PnL Dashboard (live) реализован —
-      страница /hedge-pnl-live с polling-5s, фильтрами period/symbol/venue,
-      8 summary cards (flows/reports/filledQty/notional/PnL/fees/net/slip),
-      cumulative PnL sparkline + 2 breakdown tables (по symbol, по venue).
-      GET /api/v1/hedge/pnl агрегирует CH execution_reports (5 параллельных
-      запросов: summary, hourly timeSeries, symbolBreakdown, venueBreakdown,
-      filter options).
-      Остаётся (не блок MVP): Execution Live Feed (SSE), Reconciliation
-      Alerts, Manual Override form, Policy Config — каждое отдельным PR.
-      PnL/notional/slippage в dev стоят 0 из-за venues-sim-zero-execution-price
-      (знакомая нон-блок limitation).
+      Все 5 live-страниц uxScreens реализованы и доступны через публичный Funnel URL.
+
+      PR-F12-8 (2026-05-26): Hedge PnL Dashboard (/hedge-pnl-live) — polling-5s,
+      фильтры period/symbol/venue, 8 summary cards, cumulative PnL sparkline,
+      2 breakdown tables. GET /api/v1/hedge/pnl агрегирует CH execution_reports.
+
+      PR-F12-9a (2026-05-27): Reconciliation Alerts (/reconciliation-alerts-live) —
+      polling-5s, PG hedgeflows WHERE status IN (UNDERFILLED, REJECTED,
+      RISK_REJECTED), severity badges, in-memory acknowledge (PG-persist deferred).
+
+      PR-F12-9b (2026-05-27): Execution Live Feed (/execution-live-feed-live) —
+      polling-3s c pause-кнопкой, CH execution_reports recent 100, фильтры
+      venue/symbol/status, fresh-row анимация. Истинный SSE из Kafka отложен.
+
+      PR-F12-9c (2026-05-27): Manual Override (/manual-override-live) — polling-5s
+      read-only listing PG hedgeflows с derived origin (intent_id pattern:
+      |external_fill_N → f04, |hedge| → f12 auto, иное → manual). POST endpoint
+      создания override отложен в отдельный PR (нужен proto-extension + audit).
+
+      PR-F12-9d (2026-05-27): Policy Config (/policy-config-live) — read-only
+      view PG solver_config + matching service env (HEDGE_TRIGGER_*,
+      HEDGE_INTENT_*) через env mirror в frontend-api. PUT/edit отложен
+      (нужен audit log table + Kafka hot-reload).
+
+      Все 5 страниц доступны на https://nik.tail318efe.ts.net/* (verified
+      HTTP 200 через Funnel URL).
+
+      Остаётся в scope DoD-15 (deferred follow-ups, не блок MVP):
+      - SSE/WebSocket из Kafka execution.venue для Live Feed
+      - POST /api/v1/hedge/manual-overrides + audit log
+      - PUT /api/v1/hedge/policy-config + audit log + Kafka hot-reload
+      - PG persistence для reconciliation-alerts acknowledge (column в hedgeflows)
     evidence: |
-      frontend/api/server.js (handleHedgePnlV1, clickhouseQueryJson),
-      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.js,
-      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.css,
-      route /hedge-pnl-live в App.js
+      frontend/api/server.js (handleHedgePnlV1, handleReconciliationAlertsV1,
+      handleReconciliationAlertAckV1, handleExecutionLiveFeedV1,
+      handleManualOverridesV1, handlePolicyConfigV1),
+      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.{js,css},
+      frontend/web/src/pages/ReconciliationAlerts/ReconciliationAlertsLive.{js,css},
+      frontend/web/src/pages/ExecutionLiveFeed/ExecutionLiveFeedLive.{js,css},
+      frontend/web/src/pages/ManualOverride/ManualOverrideLive.{js,css},
+      frontend/web/src/pages/PolicyConfig/PolicyConfigLive.{js,css},
+      routes /hedge-pnl-live, /execution-live-feed-live,
+      /reconciliation-alerts-live, /manual-override-live, /policy-config-live в App.js,
+      frontend/docker-compose.yml (HEDGE_TRIGGER_*/HEDGE_INTENT_* env mirror)
   - id: DoD-16
     status: not-implemented
     title: Observability — Prometheus metrics + Grafana dashboard

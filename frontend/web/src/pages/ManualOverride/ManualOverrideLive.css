@@ -1,0 +1,127 @@
+.mo-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0a0a1a 0%, #14132a 60%, #1a1a35 100%);
+  color: #fff;
+}
+.mo-shell { padding: 32px 40px 80px; max-width: 1400px; margin: 0 auto; }
+
+.mo-hero {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 24px; margin-bottom: 20px; padding-bottom: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.mo-hero h1 { margin: 6px 0 8px; font-size: 26px; font-weight: 600; }
+.mo-hero p { margin: 0; color: rgba(255, 255, 255, 0.6); font-size: 13px; }
+.mo-hero code {
+  background: rgba(180, 140, 255, 0.12); padding: 1px 6px; border-radius: 4px;
+  font-family: 'Roboto Mono', monospace; font-size: 12px;
+}
+.mo-kicker {
+  display: inline-block; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: rgba(180, 160, 255, 0.85);
+  background: rgba(180, 140, 255, 0.1); padding: 3px 8px; border-radius: 6px;
+}
+.mo-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.mo-refresh {
+  background: rgba(180, 140, 255, 0.18); color: #fff;
+  border: 1px solid rgba(180, 140, 255, 0.3);
+  padding: 7px 14px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.mo-refresh:hover { background: rgba(180, 140, 255, 0.28); }
+.mo-create-btn {
+  background: rgba(76, 175, 80, 0.18); color: #6fdc6f;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  padding: 7px 14px; border-radius: 7px; cursor: not-allowed; font-size: 13px;
+  opacity: 0.5;
+}
+.mo-refresh-label { font-size: 11px; color: rgba(255, 255, 255, 0.5); }
+
+.mo-banner {
+  background: rgba(255, 180, 0, 0.08);
+  border: 1px solid rgba(255, 180, 0, 0.2);
+  border-left: 3px solid #ffb400;
+  padding: 12px 16px; border-radius: 8px;
+  font-size: 13px; color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 24px;
+}
+.mo-banner strong { color: #ffb400; margin-right: 4px; }
+.mo-banner code {
+  background: rgba(255, 180, 0, 0.12);
+  padding: 1px 5px; border-radius: 3px;
+  font-family: 'Roboto Mono', monospace; font-size: 11px;
+}
+
+.mo-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.mo-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.mo-card-highlight { border-color: rgba(180, 140, 255, 0.35); background: rgba(180, 140, 255, 0.08); }
+.mo-card span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(255, 255, 255, 0.55); }
+.mo-card strong { font-size: 22px; font-family: 'Roboto Mono', monospace; color: #fff; }
+.mo-card small { font-size: 11px; color: rgba(255, 255, 255, 0.45); }
+
+.mo-toolbar { display: flex; gap: 16px; margin-bottom: 18px; }
+.mo-field { display: flex; flex-direction: column; gap: 4px; }
+.mo-field label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(255, 255, 255, 0.55); }
+.mo-field select {
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff; padding: 7px 10px; border-radius: 7px; font-size: 13px; min-width: 200px;
+}
+
+.mo-state {
+  text-align: center; padding: 60px 20px;
+  color: rgba(255, 255, 255, 0.7); font-size: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+.mo-state.error { color: #f44336; }
+.mo-state h3 { margin: 0 0 8px; color: #fff; font-size: 16px; }
+
+.mo-table-wrap { overflow-x: auto; background: rgba(255, 255, 255, 0.02); border-radius: 10px; padding: 4px; }
+.mo-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Roboto Mono', monospace; }
+.mo-table thead th {
+  text-align: left; padding: 9px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7); font-weight: 600;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08); white-space: nowrap;
+}
+.mo-table tbody td {
+  padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: #fff; white-space: nowrap;
+}
+.mo-table tbody tr.origin-manual { background: rgba(180, 140, 255, 0.04); }
+.mo-table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+.mo-table .mo-id { color: rgba(180, 160, 255, 0.9); cursor: help; }
+.mo-table .side-buy { color: #4caf50; font-weight: 600; }
+.mo-table .side-sell { color: #f44336; font-weight: 600; }
+.mo-table .pnl-pos { color: #4caf50; font-weight: 600; }
+.mo-table .pnl-neg { color: #f44336; font-weight: 600; }
+
+.mo-origin-badge {
+  display: inline-block; padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600;
+}
+.mo-origin-badge.origin-manual { background: rgba(180, 140, 255, 0.2); color: #b48cff; }
+.mo-origin-badge.origin-f12_auto_hedge { background: rgba(76, 175, 80, 0.15); color: #6fdc6f; }
+.mo-origin-badge.origin-f04_external_fill { background: rgba(80, 130, 255, 0.15); color: #6fa8ff; }
+.mo-origin-badge.origin-unknown { background: rgba(160, 160, 160, 0.15); color: #999; }
+
+.hedge-status-badge {
+  display: inline-block; padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.hedge-status-badge.status-COMPLETED { background: rgba(76, 175, 80, 0.18); color: #4caf50; }
+.hedge-status-badge.status-OPEN { background: rgba(80, 130, 255, 0.18); color: #6fa8ff; }
+.hedge-status-badge.status-UNDERFILLED { background: rgba(255, 180, 0, 0.18); color: #ffb400; }
+.hedge-status-badge.status-REJECTED,
+.hedge-status-badge.status-RISK_REJECTED { background: rgba(244, 67, 54, 0.18); color: #f44336; }
+.hedge-status-badge.status-CANCELLED { background: rgba(160, 160, 160, 0.18); color: #999; }

@@ -15,6 +15,10 @@ import HedgeFlowMonitor from './pages/HedgeFlowMonitor/HedgeFlowMonitor';
 import HedgeFlowMonitorLive from './pages/HedgeFlowMonitor/HedgeFlowMonitorLive';
 import HedgePnlDashboard from './pages/HedgePnlDashboard/HedgePnlDashboard';
 import HedgePnlDashboardLive from './pages/HedgePnlDashboard/HedgePnlDashboardLive';
+import ExecutionLiveFeedLive from './pages/ExecutionLiveFeed/ExecutionLiveFeedLive';
+import ReconciliationAlertsLive from './pages/ReconciliationAlerts/ReconciliationAlertsLive';
+import ManualOverrideLive from './pages/ManualOverride/ManualOverrideLive';
+import PolicyConfigLive from './pages/PolicyConfig/PolicyConfigLive';
 import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
 import ManualOverride from './pages/ManualOverride/ManualOverride';
@@ -39,6 +43,10 @@ function App() {
         <Route path="/hedge-flows-live" element={<AuthRoute><HedgeFlowMonitorLive /></AuthRoute>} />
         <Route path="/hedge-pnl" element={<AuthRoute><HedgePnlDashboard /></AuthRoute>} />
         <Route path="/hedge-pnl-live" element={<AuthRoute><HedgePnlDashboardLive /></AuthRoute>} />
+        <Route path="/execution-live-feed-live" element={<AuthRoute><ExecutionLiveFeedLive /></AuthRoute>} />
+        <Route path="/reconciliation-alerts-live" element={<AuthRoute><ReconciliationAlertsLive /></AuthRoute>} />
+        <Route path="/manual-override-live" element={<AuthRoute><ManualOverrideLive /></AuthRoute>} />
+        <Route path="/policy-config-live" element={<AuthRoute><PolicyConfigLive /></AuthRoute>} />
         <Route path="/execution-live" element={<AuthRoute><ExecutionLiveFeed /></AuthRoute>} />
         <Route path="/reconciliation-alerts" element={<AuthRoute><ReconciliationAlerts /></AuthRoute>} />
         <Route path="/manual-override" element={<AuthRoute><ManualOverride /></AuthRoute>} />
