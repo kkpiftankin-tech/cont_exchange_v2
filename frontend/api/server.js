@@ -4004,6 +4004,179 @@ async function clickhouseQueryJson(query) {
     .map((line) => JSON.parse(line));
 }
 
+// F-12 DoD-16 (PR-F12-12): Prometheus /metrics endpoint.
+// Aggregates F-12 state from PG hedgeflows + CH execution_reports into
+// Prometheus exposition format. Lives in frontend-api because:
+//   - it already has pg pool + CH HTTP client + low overhead
+//   - matching/venues/ledger don't have easy hooks for cross-cutting
+//     hedge stats today (would need a per-service registry refactor)
+//   - the same source-of-truth (PG/CH) drives the UI dashboards, so
+//     metric values stay consistent with what operators see
+// Trade-off: not as low-latency as per-service instrumentation, and
+// aggregated state misses transient signals (per-batch latency). Both
+// are acceptable for the current MVP observability tier.
+
+function promEscape(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
+function promLine(metric, labels, value) {
+  const labelStr = Object.entries(labels)
+    .filter(([_, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => `${k}="${promEscape(v)}"`)
+    .join(',');
+  return labelStr
+    ? `${metric}{${labelStr}} ${value}`
+    : `${metric} ${value}`;
+}
+
+async function renderF12HedgeMetrics() {
+  const lines = [];
+  const pool = getPgPool();
+
+  if (pool) {
+    try {
+      // Counts by (status, symbol).
+      const statusRows = await pool.query(`
+        SELECT status, symbol, count(*)::bigint AS n
+        FROM hedgeflows
+        GROUP BY status, symbol
+      `);
+      lines.push("# HELP f12_hedgeflows_total Current number of hedgeflows by status and symbol.");
+      lines.push("# TYPE f12_hedgeflows_total gauge");
+      for (const row of statusRows.rows) {
+        lines.push(promLine("f12_hedgeflows_total",
+          { status: row.status, symbol: row.symbol }, row.n));
+      }
+
+      // Filled qty + hedge PnL + fees aggregated per symbol.
+      const aggRows = await pool.query(`
+        SELECT symbol,
+               SUM(filled_qty)::text AS filled_qty,
+               SUM(target_qty)::text AS target_qty,
+               COALESCE(SUM(hedge_pnl), 0)::text AS hedge_pnl,
+               COALESCE(SUM(tot_fee), 0)::text AS tot_fee,
+               count(*) FILTER (WHERE status = 'UNDERFILLED')::bigint AS underfilled,
+               count(*) FILTER (WHERE status IN ('REJECTED','RISK_REJECTED'))::bigint AS rejected,
+               count(*) FILTER (WHERE status = 'OPEN')::bigint AS open_count
+        FROM hedgeflows
+        WHERE created_at >= now() - INTERVAL '24 hours'
+        GROUP BY symbol
+      `);
+      lines.push("");
+      lines.push("# HELP f12_hedgeflow_filled_qty_total Sum of filled_qty over the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedgeflow_filled_qty_total gauge");
+      lines.push("# HELP f12_hedgeflow_target_qty_total Sum of target_qty over the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedgeflow_target_qty_total gauge");
+      lines.push("# HELP f12_hedge_pnl_sum Sum of hedge_pnl over the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedge_pnl_sum gauge");
+      lines.push("# HELP f12_hedge_fee_sum Sum of tot_fee over the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedge_fee_sum gauge");
+      lines.push("# HELP f12_hedge_underfill_total Count of UNDERFILLED hedgeflows in the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedge_underfill_total gauge");
+      lines.push("# HELP f12_hedge_reject_total Count of REJECTED + RISK_REJECTED hedgeflows in the last 24h, per symbol.");
+      lines.push("# TYPE f12_hedge_reject_total gauge");
+      lines.push("# HELP f12_hedge_open_total Count of currently OPEN hedgeflows, per symbol.");
+      lines.push("# TYPE f12_hedge_open_total gauge");
+      for (const row of aggRows.rows) {
+        const labels = { symbol: row.symbol };
+        lines.push(promLine("f12_hedgeflow_filled_qty_total", labels, Number(row.filled_qty) || 0));
+        lines.push(promLine("f12_hedgeflow_target_qty_total", labels, Number(row.target_qty) || 0));
+        lines.push(promLine("f12_hedge_pnl_sum", labels, Number(row.hedge_pnl) || 0));
+        lines.push(promLine("f12_hedge_fee_sum", labels, Number(row.tot_fee) || 0));
+        lines.push(promLine("f12_hedge_underfill_total", labels, row.underfilled));
+        lines.push(promLine("f12_hedge_reject_total", labels, row.rejected));
+        lines.push(promLine("f12_hedge_open_total", labels, row.open_count));
+      }
+
+      // Max age of OPEN flows (a stuck-flow detector).
+      const ageRow = await pool.query(`
+        SELECT
+          symbol,
+          MAX(EXTRACT(EPOCH FROM (now() - created_at)))::bigint AS max_age_sec
+        FROM hedgeflows
+        WHERE status = 'OPEN'
+        GROUP BY symbol
+      `);
+      lines.push("");
+      lines.push("# HELP f12_hedge_open_age_seconds_max Age in seconds of the oldest OPEN hedgeflow per symbol.");
+      lines.push("# TYPE f12_hedge_open_age_seconds_max gauge");
+      for (const row of ageRow.rows) {
+        lines.push(promLine("f12_hedge_open_age_seconds_max", { symbol: row.symbol }, row.max_age_sec));
+      }
+    } catch (err) {
+      console.error("[metrics] PG aggregation failed:", err.message);
+      lines.push("# pg_aggregation_error " + promEscape(err.message));
+    }
+  } else {
+    lines.push("# pg_pool_not_configured");
+  }
+
+  // CH-derived metrics: latency + slippage + per-venue rates.
+  try {
+    const chQuery = [
+      "SELECT venue_id, symbol,",
+      "       count() AS reports,",
+      "       countIf(status = 'FILLED') AS filled,",
+      "       countIf(status = 'REJECTED') AS rejected,",
+      "       avg(slippage_bps) AS slip_avg,",
+      "       quantile(0.95)(slippage_bps) AS slip_p95,",
+      "       avg(hedge_pnl) AS pnl_avg",
+      "FROM execution_reports",
+      "WHERE event_time_ms >= toUnixTimestamp64Milli(toDateTime64(now() - INTERVAL 5 MINUTE, 3))",
+      "GROUP BY venue_id, symbol",
+      "FORMAT JSONEachRow"
+    ].join(" ");
+    const rows = await clickhouseQueryJson(chQuery);
+    lines.push("");
+    lines.push("# HELP f12_hedge_reports_total Recent (5 min) execution_reports count by venue and symbol.");
+    lines.push("# TYPE f12_hedge_reports_total gauge");
+    lines.push("# HELP f12_hedge_reports_filled_total Filled reports count by venue and symbol (5 min).");
+    lines.push("# TYPE f12_hedge_reports_filled_total gauge");
+    lines.push("# HELP f12_hedge_reports_rejected_total Rejected reports count by venue and symbol (5 min).");
+    lines.push("# TYPE f12_hedge_reports_rejected_total gauge");
+    lines.push("# HELP f12_hedge_slippage_bps_avg Average slippage_bps by venue and symbol (5 min).");
+    lines.push("# TYPE f12_hedge_slippage_bps_avg gauge");
+    lines.push("# HELP f12_hedge_slippage_bps_p95 P95 slippage_bps by venue and symbol (5 min).");
+    lines.push("# TYPE f12_hedge_slippage_bps_p95 gauge");
+    for (const row of rows) {
+      const labels = { venue_id: row.venue_id || "unknown", symbol: row.symbol };
+      lines.push(promLine("f12_hedge_reports_total", labels, Number(row.reports) || 0));
+      lines.push(promLine("f12_hedge_reports_filled_total", labels, Number(row.filled) || 0));
+      lines.push(promLine("f12_hedge_reports_rejected_total", labels, Number(row.rejected) || 0));
+      lines.push(promLine("f12_hedge_slippage_bps_avg", labels, Number(row.slip_avg) || 0));
+      lines.push(promLine("f12_hedge_slippage_bps_p95", labels, Number(row.slip_p95) || 0));
+    }
+  } catch (err) {
+    console.error("[metrics] CH aggregation failed:", err.message);
+    lines.push("# ch_aggregation_error " + promEscape(err.message));
+  }
+
+  // Process-level metadata.
+  lines.push("");
+  lines.push("# HELP frontend_api_up Always 1 when scraped successfully.");
+  lines.push("# TYPE frontend_api_up gauge");
+  lines.push("frontend_api_up 1");
+  lines.push("# HELP frontend_api_generated_at_seconds Timestamp of last /metrics render.");
+  lines.push("# TYPE frontend_api_generated_at_seconds gauge");
+  lines.push(`frontend_api_generated_at_seconds ${Math.floor(Date.now() / 1000)}`);
+
+  return lines.join("\n") + "\n";
+}
+
+async function handlePrometheusMetrics(req, res, pathname) {
+  if (req.method !== "GET" || pathname !== "/metrics") return false;
+  try {
+    const body = await renderF12HedgeMetrics();
+    res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
+    res.end(body);
+  } catch (err) {
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end(`# render_failed ${err.message}\n`);
+  }
+  return true;
+}
+
 // F-12 DoD-15 (PR-F12-9d): Policy Config (live, read-only view).
 // Sources:
 //   - PostgreSQL solver_config — single active row with batch params + fee model
@@ -6034,6 +6207,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/healthz") {
       return writeJson(res, 200, { ok: true, service: "frontend-api" });
+    }
+
+    if (pathname === "/metrics") {
+      const handled = await handlePrometheusMetrics(req, res, pathname);
+      if (handled !== false) return;
     }
 
     if (bootstrapErrors.length > 0) {

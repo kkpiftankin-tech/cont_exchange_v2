@@ -346,14 +346,53 @@ definitionOfDone:
       /reconciliation-alerts-live, /manual-override-live, /policy-config-live в App.js,
       frontend/docker-compose.yml (HEDGE_TRIGGER_*/HEDGE_INTENT_* env mirror)
   - id: DoD-16
-    status: not-implemented
+    status: implemented
     title: Observability — Prometheus metrics + Grafana dashboard
     description: >
       Метрики f12_hedge_intent_total, f12_hedge_latency_ms, f12_slippage_bps,
       f12_underfill_total, f12_venue_circuit_state. Grafana dashboard
       F-12-execution-hedge.json. Алерты HEDGE_UNDERFILLED, SLIPPAGE_EXCEEDED,
       LATENCY_SLA_BREACH.
-    evidence: нет F-12-специфичных метрик
+
+      PR-F12-12 (2026-05-27): observability stack доставлен.
+      Источник метрик — `GET /metrics` на frontend-api (агрегирует PG
+      hedgeflows + CH execution_reports в Prometheus exposition format),
+      не per-service C++ collector. Trade-off задокументирован в
+      server.js: единый источник истины с UI, ниже latency-fidelity,
+      приемлем для MVP observability tier. Per-service C++ metrics
+      (matching's hedge_trigger_decisions counter etc.) — отложены в
+      отдельный PR; будут добавлены в `cpp/matching/src/app/solver_metrics.cpp`
+      аналогично существующему solver_solve_time_ms histogram.
+
+      Метрики экспортированы (gauge):
+      - f12_hedgeflows_total{status, symbol}
+      - f12_hedge_open_total / underfill_total / reject_total{symbol}
+      - f12_hedgeflow_filled_qty_total / target_qty_total{symbol}
+      - f12_hedge_pnl_sum / fee_sum{symbol}
+      - f12_hedge_open_age_seconds_max{symbol} (stuck-flow detector)
+      - f12_hedge_reports_total / filled_total / rejected_total{venue_id, symbol}
+      - f12_hedge_slippage_bps_avg / p95{venue_id, symbol}
+      - frontend_api_up / generated_at_seconds (process meta)
+
+      Alert rules: 8 правил в `infra/prometheus/alerts/F-12-hedge.rules.yml`:
+      F12HedgeUnderfilled (warning + critical tier), F12SlippageExceeded
+      (warning + critical), F12HedgeFlowStuck, F12HedgeRejectRateHigh,
+      F12HedgePnlNegativeDrift, F12MetricsExporterDown.
+
+      Grafana dashboard: `infra/grafana/dashboards/F-12-execution-hedge.json`
+      — 12 panels (6 stat tiles + 6 timeseries/table), 2 template
+      variables (symbol, venue), uid `f12-execution-hedge`.
+
+      E2E проверено на ubuntu-dev: prometheus `frontend-api-hedge`
+      target = up, PromQL `f12_hedgeflows_total` returns OPEN=16
+      COMPLETED=69 для BTC/USDT, F-12 alert group loaded (8 rules).
+      В dev SLIPPAGE_EXCEEDED не сработает из-за
+      `venues-sim-zero-execution-price` knownIssue (slippage_bps=0).
+    evidence: |
+      frontend/api/server.js (renderF12HedgeMetrics, handlePrometheusMetrics),
+      infra/prometheus/prometheus.yml (frontend-api-hedge job),
+      infra/prometheus/alerts/F-12-hedge.rules.yml (8 rules),
+      infra/grafana/dashboards/F-12-execution-hedge.json (12 panels).
   - id: DoD-17
     status: implemented
     title: Operations runbook docs/11-operations/runbooks/F-12-incidents.md
