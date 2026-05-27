@@ -355,13 +355,28 @@ definitionOfDone:
       LATENCY_SLA_BREACH.
     evidence: нет F-12-специфичных метрик
   - id: DoD-17
-    status: not-implemented
+    status: implemented
     title: Operations runbook docs/11-operations/runbooks/F-12-incidents.md
     description: >
       Диагностические сценарии: повышенный slippage, массовые UNDERFILLED,
       падение venue (circuit breaker), SLA-нарушение latency. Decision tree
       для on-call (change config, disable venue, manual override).
-    evidence: docs/11-operations/runbooks/ (нет F-12-incidents.md)
+      PR-F12-10 (2026-05-27): runbook доставлен. Покрывает 8 incident
+      playbooks (slippage, mass-underfilled, latency SLA, venue circuit,
+      ledger HedgePnL outlier, reconciliation UI empty, live page won't
+      load, no |hedge| rows in monitor) + 3 routine ops (urgency switch,
+      pause F-12 emission, re-enable venue) + escalation table + links
+      на feature.yaml#knownIssues для актуальных gap-ов.
+      Включает готовые SQL-запросы (PG + CH) и docker logs grep-снайпеты
+      для каждого playbook'а.
+      Marked `draft` until production deploys; threshold numbers reflect
+      current dev/staging env. Escalation contacts pending.
+    evidence: |
+      docs/11-operations/runbooks/F-12-incidents.md (created),
+      links from feature.yaml DoD-17 + IDE search confirms все 5
+      live-страниц (HedgeFlow Monitor, PnL, Reconciliation Alerts,
+      Execution Live Feed, Manual Override, Policy Config) упомянуты
+      как dashboard references.
   - id: DoD-18
     status: partial
     title: Архитектурная документация синхронна с реализацией
