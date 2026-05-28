@@ -393,12 +393,39 @@ definitionOfDone:
       Cross-refs: cpp/matching/tests/app/execution_planner_test.cpp (U9),
       cpp/risk/src/app/risk_uc.cpp PreHedgeCheck (U10).
   - id: DoD-10
-    status: not-implemented
+    status: partial
     title: Integration-тесты IT-1..IT-4 (E2E через docker compose)
     description: >
       Полный цикл ExecutionIntent → ExecutionReport → Ledger; partial fill+retry;
       rejection+fallback; timeout+UNDERFILLED+risk alert.
-    evidence: cpp/venues/tests/integration/ (отсутствует)
+
+      PR-F12-18 (2026-05-28): `Testing/f12_it_e2e.sh` — shell E2E поверх
+      running dev stack. Драйвит gateway HTTP, ассертит PG/CH/ledger.
+
+      IT-1 (full happy-path chain) — ✅ implemented + verified on
+      ubuntu-dev, 5/5 assertions pass:
+        - flow order → matching hedge_trigger → ExecutionIntent →
+          venues execute → PG hedgeflows COMPLETED (filled_qty>0)
+        - child_orders FILLED >= 1
+        - ClickHouse execution_reports >= 1 для hedge_flow_id
+        - ledger "Ledger applied execution report" log present
+
+      IT-2 (partial+retry), IT-3 (rejection+fallback), IT-4 (timeout+
+      UNDERFILLED+alert) — ⏸ SKIP с явной причиной в скрипте: требуют
+      FAULT INJECTION на venue side (partial fill / forced reject /
+      response timeout), которого dev sim adapter не поддерживает.
+      Это домен F-20 Live Venue Simulator (partialFillMode /
+      RejectionModel / LatencyModel). Маппинг исходов покрыт unit-тестами
+      execute_on_venue_test U2/U4/U5; полный E2E этих сценариев
+      разблокируется после F-20.
+
+      Поэтому DoD-10 — `partial`: 1 из 4 IT реализован E2E, 3 ждут
+      F-20 fault injection (не блок MVP happy-path).
+    evidence: |
+      Testing/f12_it_e2e.sh (IT-1 verified 5/5; IT-2/3/4 documented skips),
+      docs/10-testing/features/F-12-test-plan.md §2 (IT-1 ✅, IT-2/3/4 ⏸),
+      cross-ref unit coverage: cpp/venues/tests/execute_on_venue_test.cpp
+      (U2/U4/U5).
   - id: DoD-11
     status: not-implemented
     title: SLA-тест IT-5 latency p95 <= 100 ms (CEX)

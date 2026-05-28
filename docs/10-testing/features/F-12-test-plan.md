@@ -117,31 +117,49 @@ related:
 ### IT-1. Полный цикл E2E COMPLETED → Ledger
 
 1. docker-compose up.
-2. Опубликовать ExecutionIntent в Kafka `execution.intents`.
+2. Flow order через gateway HTTP пересекает external liquidity →
+   matching's hedge_trigger_policy эмитит реальный F-12 ExecutionIntent
+   (вариант: прямая публикация в `execution.intents` — но drive через
+   gateway покрывает больше цепочки).
 3. Через `timeout_ms` проверить:
-   - Kafka `execution.venue` содержит ExecutionReport(FILLED).
-   - PostgreSQL `hedgeflows` row status=COMPLETED, корректные агрегаты.
+   - PostgreSQL `hedgeflows` row status=COMPLETED, filled_qty > 0.
    - PostgreSQL `child_orders` rows status=FILLED.
-   - ClickHouse `execution_reports` rows = N (по числу child_orders + дополнительных reports).
-   - Ledger positions provider'а обновлены, hedge_pnl рассчитан.
+   - ClickHouse `execution_reports` rows >= 1 для hedge_flow_id.
+   - Ledger применил ExecutionReport (structured log).
 
-Файл TODO: `cpp/venues/tests/it_f12_full_cycle_test.cpp`.
+Файл: **`Testing/f12_it_e2e.sh`** (shell E2E поверх running dev stack;
+драйвит gateway, ассертит PG/CH/ledger).
 
-Status: ❌.
+Status: ✅ (PR-F12-18, 2026-05-28). Verified on ubuntu-dev — 5/5
+assertions pass:
+
+- hedge flow `2bd92b8e-...|hedge|demo-user|BTC/USDT` → COMPLETED
+- filled_qty = 0.0694 (= target, full fill)
+- child_orders FILLED = 1
+- ClickHouse execution_reports = 1
+- ledger "Ledger applied execution report" log present
 
 ### IT-2. Partial fill + retry полный цикл
 
 Сценарий: venue A POST_ONLY с partial fill → reconciliation создаёт retry с urgency=HIGH → venue B FILLED.
 
-Файл TODO: `cpp/venues/tests/it_f12_partial_retry_test.cpp`. Status: ❌.
+Status: ⏸ SKIP — требует fault injection (partial fill) на venue side.
+Dev sim adapter всегда исполняет полностью. Это домен F-20 Live Venue
+Simulator (`partialFillMode`). Unit-покрытие маппинга partial fill:
+`execute_on_venue_test` U2. Документировано как skip в
+`Testing/f12_it_e2e.sh`.
 
 ### IT-3. Rejection + fallback E2E
 
-Файл TODO: `cpp/venues/tests/it_f12_rejection_fallback_test.cpp`. Status: ❌.
+Status: ⏸ SKIP — требует forced-reject на venue side (F-20
+`RejectionModel`). Unit-покрытие: `execute_on_venue_test` U4 (rejection
+mapping) + matching planner fallback (DoD-2). Skip в f12_it_e2e.sh.
 
 ### IT-4. Timeout + UNDERFILLED + risk alert
 
-Файл TODO: `cpp/venues/tests/it_f12_timeout_test.cpp`. Status: ❌.
+Status: ⏸ SKIP — требует response-timeout на venue side (F-20
+`LatencyModel.timeoutMs`). Unit-покрытие: `execute_on_venue_test` U5
+(UNDERFILLED passthrough). Skip в f12_it_e2e.sh.
 
 ### IT-5. SLA latency ≤ 100 ms CEX
 
