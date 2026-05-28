@@ -389,6 +389,25 @@ if (BUILD_TESTING)
   target_compile_options(venues_venue_simulator_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_venue_simulator_test COMMAND venues_venue_simulator_test)
 
+  # F-20 VenueSimRouter + SimSessionRegistry (Phase 4, T-F20-401/402).
+  add_executable(venues_venue_sim_router_test
+    tests/venue_sim_router_test.cpp
+    src/app/venue_sim_router.cpp
+    src/app/sim_session_registry.cpp
+  )
+
+  target_include_directories(venues_venue_sim_router_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_venue_sim_router_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_venue_sim_router_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_venue_sim_router_test COMMAND venues_venue_sim_router_test)
+
   add_executable(venues_amm_pool_extractor_test
     tests/amm_pool_extractor_test.cpp
     src/domain/amm_pool_extractor.cpp

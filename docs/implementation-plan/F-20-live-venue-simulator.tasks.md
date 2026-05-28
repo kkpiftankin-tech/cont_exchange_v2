@@ -197,11 +197,20 @@ Verified U10.
 `cpp/venues/src/app/sim_session_manager.{cpp,hpp}` + `postgres_sim_session_repository.{cpp,hpp}`.
 gRPC + REST endpoints per OpenAPI. Hot reload via Kafka `sim.config` producer.
 
-#### T-F20-402. VenueSimRouter
+#### T-F20-402. VenueSimRouter — ✅ decision core DONE (wiring deferred)
 
-`cpp/venues/src/app/venue_sim_router.{cpp,hpp}`. Cache `(venueId,symbol)→routingMode`.
-Subscribe to `sim.config` for hot reload. Implement SIM_ONLY / LIVE_ONLY /
-SHADOW (fork). Test F20-1, F20-2, F20-7, F20-11, F20-12.
+`cpp/venues/src/app/venue_sim_router.{cpp,hpp}` + `sim_session_registry.{cpp,hpp}`.
+PR-F20-6 (2026-05-28): pure `Decide(venue,symbol) -> RouteDecision`
+(SIM_ONLY / LIVE_ONLY / SHADOW), default LIVE_ONLY when no ACTIVE SimSession
+governs `(venue,instrument)` — opt-in. SimSessionRegistry = thread-safe live
+store, `Resolve` with scope-match (empty=wildcard), ACTIVE filter,
+deterministic `activated_at`-desc tie-break. 12-case unit suite
+`venue_sim_router_test.cpp` ALL PASS on ubuntu-dev (exit 0).
+
+**Deferred to next wiring PR**: `sim.config` Kafka consumer feeding the
+registry (hot reload — currently programmatic only), SHADOW execution fork,
+async-delay + publish. Test F20-1, F20-2, F20-7, F20-11, F20-12 (E2E) land
+with the wiring PR.
 
 #### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter
 

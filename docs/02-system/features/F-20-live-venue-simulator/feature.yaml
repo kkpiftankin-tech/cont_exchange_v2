@@ -148,12 +148,33 @@ definitionOfDone:
       built+run on ubuntu-dev exit 0).
     blocked_by_ac: [F20-3, F20-8]
   - id: DoD-2
-    status: not-implemented
+    status: partial
     title: VenueSimRouter реализован
     description: >
       Маршрутизирует ChildOrderRequest в SIM_ONLY / LIVE_ONLY / SHADOW;
       поддерживает hot reload конфигурации из Kafka sim.config без перезапуска.
-    evidence: cpp/venues/src/app/venue_sim_router.{cpp,hpp} (отсутствует)
+
+      PR-F20-6 (2026-05-28): ЯДРО решения реализовано — pure routing
+      decision cpp/venues/src/app/venue_sim_router.{hpp,cpp}
+      `Decide(venue, symbol) -> RouteDecision` (SIM_ONLY/LIVE_ONLY/SHADOW),
+      по умолчанию LIVE_ONLY когда активная сессия не покрывает
+      (venue,instrument) — симулятор строго opt-in. + SimSessionRegistry
+      cpp/venues/src/app/sim_session_registry.{hpp,cpp}: thread-safe
+      in-memory store live SimSession, Resolve со scope-match (пустой
+      scope = wildcard), ACTIVE-фильтром и детерминированным tie-break
+      (activated_at desc, затем sim_session_id). RouteDecision несёт
+      SimModels + staleLobThreshold + partialFillMode для VenueSimulator.
+
+      Остаётся (следующий wiring PR): hot reload из Kafka sim.config
+      consumer (сейчас registry наполняется только программно — будущий
+      consumer/gRPC SimSessionManager), execution fork (вызов
+      VenueSimulator, async-delay, publish в sim.execution.venue +
+      SimExecutionAnnotation), SimAlert эмиссия.
+    evidence: |
+      cpp/venues/src/app/venue_sim_router.{hpp,cpp},
+      cpp/venues/src/app/sim_session_registry.{hpp,cpp},
+      cpp/venues/tests/venue_sim_router_test.cpp (12 cases ALL PASS,
+      built+run on ubuntu-dev exit 0).
     blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
   - id: DoD-3
     status: not-implemented
