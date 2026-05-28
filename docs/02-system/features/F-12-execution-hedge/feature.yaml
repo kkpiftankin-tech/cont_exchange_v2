@@ -350,13 +350,48 @@ definitionOfDone:
     resolved_in: PR-F12-2 (schema), PR-F12-3a (C++ repos wired),
       PR-F12-14 (status update)
   - id: DoD-9
-    status: not-implemented
+    status: implemented
     title: Unit-тесты Venue Execution Adapter U1-U10
     description: >
       Happy path, partial+retry, overfill guard, rejection+fallback,
       timeout→UNDERFILLED, urgency→orderType mapping, reconciliation gap,
       clientOrderId idempotency, multi-venue split, pre-hedge risk reject.
-    evidence: cpp/venues/tests/execute_on_venue_test.cpp (только базовый smoke)
+
+      PR-F12-17 (2026-05-28): U-suite доставлен. ExecuteOnVenue —
+      тонкий adapter (строит child intent, reconnect, маппит
+      VenueOrderResult → ExecutionReport), поэтому U-кейсы разнесены
+      по слоям. cpp/venues/tests/execute_on_venue_test.cpp расширен
+      с 5 до 13 тестов (ALL PASS, verified on ubuntu-dev):
+        - U1 happy path FILLED — маппинг status/filled_qty/avg_price/venue_order_id
+        - U2 partial fill — PARTIALLY_FILLED + remaining_qty
+        - U3 overfill — passthrough БЕЗ trim (документирует gap:
+          трим не реализован, есть только enum EXECUTION_REPORT_STATUS_OVERFILL_GUARD
+          в PG mapping)
+        - U4 rejection — REJECTED + error code/message propagation
+        - U5 timeout/UNDERFILLED — status passthrough
+        - U6 strategy/tif defaults (at-layer slice; urgency→strategy
+          полный mapping в matching execution_intent_builder)
+        - U8 clientOrderId idempotency fallback (true dedup = PG
+          ON CONFLICT в postgres_child_order_repository)
+        - + fee/slippage enrichment + 5 support (symbol map, reconnect,
+          missing-adapter, runtime override).
+
+      Кейсы вне слоя ExecuteOnVenue (cross-referenced в header теста):
+        - U7 reconciliation gap → ledger/venues_loop watchdog
+        - U9 multi-venue split → matching execution_planner_test (DoD-2)
+        - U10 pre-hedge risk reject → risk PreHedgeCheck (DoD-3,
+          verified via grpcurl).
+
+      Honest gap: U2 "retry" и U4 "fallback" — это venues_loop/planning
+      concerns, не ExecuteOnVenue; покрыт только маппинг исходов, не
+      retry/fallback orchestration. Полный retry/fallback E2E — DoD-10
+      (integration tests).
+    evidence: |
+      cpp/venues/tests/execute_on_venue_test.cpp (13 tests, ALL PASS),
+      built via builder stage TARGET=venues_execute_on_venue_test,
+      run on ubuntu-dev exit 0.
+      Cross-refs: cpp/matching/tests/app/execution_planner_test.cpp (U9),
+      cpp/risk/src/app/risk_uc.cpp PreHedgeCheck (U10).
   - id: DoD-10
     status: not-implemented
     title: Integration-тесты IT-1..IT-4 (E2E через docker compose)
