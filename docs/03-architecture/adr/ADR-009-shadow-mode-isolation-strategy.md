@@ -1,9 +1,19 @@
-# ADR-009 — Shadow-mode isolation strategy for F-15 Replay
+---
+id: ADR-009
+status: accepted
+date: 2026-05-20
+owners:
+  - core-team
+related:
+  - docs/02-system/features/F-15-backtest-replay/
+  - cpp/backtest/src/infra/in_memory_shadow_ledger.cpp
+  - incoming-docs/IN-006.fragment-map.md
+---
 
-- **Status:** Accepted (текущая реализация)
-- **Date:** 2026-05-20
-- **Deciders:** core-team
-- **Source:** IN-006 (F-15 spec), фактический код cpp/backtest
+# ADR-009: Shadow-mode isolation strategy for F-15 Replay
+
+> **Status:** accepted (отражает текущую реализацию).
+> **Источники:** IN-006 (F-15 spec), фактический код `cpp/backtest`.
 
 ## Контекст
 

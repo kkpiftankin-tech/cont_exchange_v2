@@ -1,6 +1,6 @@
 ---
 id: ADR-017
-status: draft
+status: accepted
 date: 2026-05-28
 owners:
   - architecture
@@ -119,4 +119,4 @@ LIVE-таргетом роутера в backtest, что подтверждае�
 
 ## Status
 
-Draft. Резолвит F-20 knownIssue `existing-venue-sim-adapter-relationship`.
+Accepted (2026-05-28). Резолвит F-20 knownIssue `existing-venue-sim-adapter-relationship`. `VenueSimulator` реализован в `cpp/venues/src/app/venue_simulator.{hpp,cpp}` (F-20 Phase 3); legacy `venue_sim_adapter` не тронут.

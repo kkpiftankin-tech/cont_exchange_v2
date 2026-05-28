@@ -1,12 +1,15 @@
 ---
 id: ADR-015
-status: draft
+status: accepted
 date: 2026-05-28
 owners:
   - architecture
   - core-team
 related:
   - docs/02-system/features/F-20-live-venue-simulator/feature.yaml
+  - docs/03-architecture/adr/ADR-016-ledger-sim-book-storage.md
+  - docs/03-architecture/adr/ADR-002-protobuf-grpc-contracts.md
+  - docs/03-architecture/adr/ADR-009-shadow-mode-isolation-strategy.md
   - incoming-docs/2026-05-26-F-20-live-venue-simulator-v1.md
   - incoming-docs/IN-010.fragment-map.md
   - docs/06-api/messaging/execution-venue.md
@@ -164,6 +167,16 @@ SimExecutionReport описан как «ExecutionReport + дополнител�
 статистировки». Дополнительные поля выносятся в сайдкар, чтобы общий
 исполнительный контракт оставался venue-agnostic.
 
+## Зависимости
+
+- **[ADR-016](ADR-016-ledger-sim-book-storage.md)** — sim-book storage: куда применяется SimExecutionReport, прочитанный из изолированного топика.
+- **[ADR-002](ADR-002-protobuf-grpc-contracts.md)** — proto source of truth: `SimExecutionAnnotation` живёт в `contracts/proto/fob/sim/v1/sim.proto`, `ExecutionReport` не расширяется.
+- **[ADR-009](ADR-009-shadow-mode-isolation-strategy.md)** — общий принцип изоляции shadow/replay от боевых топиков; F-20 `sim.*` топики совместимы с ним.
+
+### CI-инвариант
+
+`contracts/proto/fob/execution/v1/execution.proto` **не должен** содержать полей `simMode` / `lobSnapshotId` / `impactBps` — они принадлежат `sim.proto` (`SimExecutionAnnotation`). Дискриминатор sim/live — топик, не поле.
+
 ## Status
 
-Draft. Резолвит F-20 knownIssue `sim-execution-topic-isolation-pending-adr`.
+Accepted (2026-05-28). Резолвит F-20 knownIssue `sim-execution-topic-isolation-pending-adr`. Реализуется в F-20 (sim.proto — PR-F20-3; sim CH-таблицы — init.sql).

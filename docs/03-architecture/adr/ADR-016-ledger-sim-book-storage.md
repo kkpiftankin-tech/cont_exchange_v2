@@ -1,6 +1,6 @@
 ---
 id: ADR-016
-status: draft
+status: accepted
 date: 2026-05-28
 owners:
   - architecture
@@ -111,4 +111,4 @@ Ledger сейчас хранит:
 
 ## Status
 
-Draft. Резолвит F-20 knownIssue `ledger-sim-book-isolation`.
+Accepted (2026-05-28). Резолвит F-20 knownIssue `ledger-sim-book-isolation`. Таблицы `sim_positions` / `sim_hedge_pnl` добавлены в `infra/postgres/init.sql` (F-20 Phase 2).

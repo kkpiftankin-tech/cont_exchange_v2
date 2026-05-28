@@ -1,6 +1,6 @@
 ---
 id: ADR-012
-status: draft
+status: accepted
 date: 2026-05-20
 owners:
   - architecture
@@ -9,6 +9,7 @@ related:
   - docs/02-system/features/F-12-execution-hedge/
   - docs/05-components/venue-execution-adapter/overview.md
   - docs/05-components/external-venues/overview.md
+  - docs/03-architecture/adr/ADR-014-venues-binary-vs-components.md
   - incoming-docs/2026-05-20-F-12-execution-hedge-v1.md
 ---
 
@@ -47,6 +48,11 @@ related:
 1. Throughput хеджей превышает throughput market-data ingestion в `venues`, и они начинают конкурировать за ресурсы.
 2. Хочется деплоить Adapter с отличной от EVC scaling-стратегией.
 3. EVC переходит в другую кодовую базу (например, отдельный bridge-сервис для DEX/AMM).
+
+> **Scope vs ADR-014.** Этот ADR решает только **логическую/модульную** границу
+> Venue Execution Adapter. Решение о runtime-упаковке (единый бинарь `cpp/venues`
+> vs отдельный сервис) подчинено [ADR-014](ADR-014-venues-binary-vs-components.md),
+> который фиксирует, что Adapter физически живёт в процессе `cpp/venues`.
 
 ## Альтернативы
 
@@ -95,4 +101,4 @@ related:
 
 ## Status
 
-Draft. Ожидает review архитектурной группы. После approve → status=accepted.
+Accepted (2026-05-28). Решение реализовано в F-12 MVP: Venue Execution Adapter — модуль `cpp/venues/src/app/`, без отдельного бинарника. Runtime-упаковка зафиксирована в [ADR-014](ADR-014-venues-binary-vs-components.md).

@@ -1,9 +1,19 @@
-# ADR-011 — replay_agentlogs DDL placement
+---
+id: ADR-011
+status: accepted
+date: 2026-05-20
+owners:
+  - core-team
+related:
+  - cpp/backtest/src/infra/clickhouse_storage.cpp
+  - docs/07-data/replay-agentlogs.md
+  - incoming-docs/IN-006.fragment-map.md
+---
 
-- **Status:** Accepted (текущая реализация)
-- **Date:** 2026-05-20
-- **Deciders:** core-team
-- **Source:** F-15 ingest (IN-006) — Conflict Note CN-IN006-04
+# ADR-011: replay_agentlogs DDL placement
+
+> **Status:** accepted (отражает текущую реализацию).
+> **Источник:** F-15 ingest (IN-006) — Conflict Note CN-IN006-04.
 
 ## Контекст
 

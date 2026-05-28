@@ -1,6 +1,6 @@
 ---
 id: ADR-014
-status: Accepted
+status: accepted
 date: 2026-05-20
 owners:
   - core-team
@@ -111,3 +111,4 @@ related:
 - [F-11 README → Conflict Notes C-1](../../02-system/features/F-11-external-venues-lob-to-fob/README.md#conflict-notes)
 - [T-F11-330. Decide on Curve Builder split](../../implementation-plan/F-11-external-venues.tasks.md)
 - ADR-001 (event-driven microservices) — общий принцип, который этот ADR уточняет для F-11.
+- [ADR-012](ADR-012-venue-execution-adapter-decomposition.md), [ADR-013](ADR-013-execution-planning-placement.md) — логические/модульные границы Venue Execution Adapter и Execution Planning. **ADR-014 задаёт их runtime-упаковку** (единый бинарь `cpp/venues`) и тем самым constrains packaging-решения этих ADR.

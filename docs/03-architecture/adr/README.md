@@ -2,26 +2,46 @@
 
 Журнал архитектурных решений. Новый ADR создаётся при любом значимом архитектурном выборе.
 
+## Нумерация и статусы
+
+- Единый формат `ADR-NNN` (трёхзначный, без вариантов `ADR-000N`).
+- `status` синхронизирован между этим реестром, frontmatter и телом ADR.
+- Допустимые статусы: `accepted`, `proposed`, `planned`, `deprecated`, `superseded`.
+- Все ADR используют YAML-frontmatter (`id` / `status` / `date` / `owners` / `related`).
+
 ## Реестр
 
 | ID | Title | Status |
 | --- | --- | --- |
-| ADR-001 | Event-driven microservices | planned |
-| ADR-002 | Protobuf + gRPC contracts | [accepted](ADR-002-protobuf-grpc-contracts.md) |
-| ADR-003 | Redpanda / Kafka as message broker | planned |
-| ADR-004 | PostgreSQL OLTP + ClickHouse OLAP | planned |
-| ADR-005 | Fixed-point Decimal for money | planned |
+| ADR-001 | Event-driven C++ microservices | [accepted](ADR-001-event-driven-microservices.md) |
+| ADR-002 | Protobuf / gRPC / Kafka payload contracts as source of truth | [accepted](ADR-002-protobuf-grpc-contracts.md) |
+| ADR-003 | Kafka-совместимый брокер (Redpanda / Kafka) | [accepted](ADR-003-kafka-redpanda-broker.md) |
+| ADR-004 | PostgreSQL OLTP + ClickHouse OLAP | [accepted](ADR-004-postgres-clickhouse-data-platform.md) |
+| ADR-005 | Fixed-point Decimal for money, qty, price, fee, PnL | [accepted](ADR-005-fixed-point-decimal-money.md) |
 | ADR-006 | Docs-as-code repository structure | [accepted](ADR-006-docs-as-code-repository-structure.md) |
 | ADR-007 | Feature traceability gate | [accepted](ADR-007-feature-traceability-gate.md) |
 | ADR-008 | Code/Doc drift policy | [accepted](ADR-008-code-doc-drift-policy.md) |
 | ADR-009 | Shadow-mode isolation strategy for F-15 Replay | [accepted](ADR-009-shadow-mode-isolation-strategy.md) |
 | ADR-010 | AgentLog vs ReplayAgentLog unification strategy | [proposed](ADR-010-agentlog-replay-agentlog-unification.md) |
 | ADR-011 | replay_agentlogs DDL placement | [accepted](ADR-011-replay-agentlogs-ddl-placement.md) |
-| ADR-012 | Venue Execution Adapter decomposition | [accepted](ADR-012-venue-execution-adapter-decomposition.md) |
+| ADR-012 | Venue Execution Adapter logical decomposition | [accepted](ADR-012-venue-execution-adapter-decomposition.md) |
 | ADR-013 | Execution Planning placement (library vs service) | [accepted](ADR-013-execution-planning-placement.md) |
-| ADR-014 | `cpp/venues` единый бинарь vs отдельные сервисы | [accepted](ADR-014-venues-binary-vs-components.md) |
-| ADR-015 | F-20 SimExecutionReport — strict topic isolation (`sim.execution.venue` only) | [draft](ADR-015-sim-execution-topic-isolation.md) |
-| ADR-016 | F-20 ledger sim-book — separate `sim_*` tables vs simMode flag | [draft](ADR-016-ledger-sim-book-storage.md) |
-| ADR-017 | F-20 VenueSimulator — new class vs reuse legacy `venue_sim_adapter` | [draft](ADR-017-venue-simulator-vs-legacy-adapter.md) |
+| ADR-014 | `cpp/venues` runtime packaging for F-11/F-12 | [accepted](ADR-014-venues-binary-vs-components.md) |
+| ADR-015 | F-20 sim.execution.venue strict topic isolation | [accepted](ADR-015-sim-execution-topic-isolation.md) |
+| ADR-016 | F-20 ledger sim-book — separate `sim_*` tables vs simMode flag | [accepted](ADR-016-ledger-sim-book-storage.md) |
+| ADR-017 | F-20 VenueSimulator — new class vs reuse legacy `venue_sim_adapter` | [accepted](ADR-017-venue-simulator-vs-legacy-adapter.md) |
+| ADR-018 | End-to-end design traceability chain | [accepted](ADR-018-design-traceability-chain.md) |
+| ADR-019 | C4 documentation standard | [accepted](ADR-019-c4-documentation-standard.md) |
+| ADR-020 | Event ordering, idempotency and delivery semantics | [accepted](ADR-020-event-ordering-idempotency.md) |
+| ADR-021 | FlowOrder lifecycle and invariants | [accepted](ADR-021-floworder-lifecycle.md) |
+| ADR-022 | Batch clearing solver and deterministic replay | [accepted](ADR-022-batch-clearing-solver-replay.md) |
+| ADR-023 | LOB→FOB curve construction and validation | [accepted](ADR-023-lob-to-fob-curve.md) |
+| ADR-024 | Time Alignment & Latency-Aware Venue Curve Correction | [proposed](ADR-024-latency-aware-venue-curve.md) |
+| ADR-025 | Risk Manager boundaries and checks | [accepted](ADR-025-risk-manager-boundaries.md) |
+| ADR-026 | Ledger accounting and PnL source of truth | [accepted](ADR-026-ledger-accounting-pnl.md) |
+| ADR-027 | Execution routing algorithm strategy | [accepted](ADR-027-execution-routing-algorithm.md) |
+| ADR-028 | Backtest/replay parity and audit mode | [accepted](ADR-028-backtest-replay-parity.md) |
+| ADR-029 | LLM-assisted development governance | [accepted](ADR-029-llm-assisted-development-governance.md) |
+| ADR-030 | Legacy MVP migration policy | [accepted](ADR-030-legacy-mvp-migration-policy.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

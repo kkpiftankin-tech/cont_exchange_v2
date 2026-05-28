@@ -1,8 +1,16 @@
-# ADR-0001 — Docs-as-code и LLM-синхронизация
+---
+id: ADR-006
+status: accepted
+date: 2026-05-13
+owners:
+  - core-team
+related:
+  - docs/00-methodology/repository-map.md
+  - docs/03-architecture/adr/ADR-018-design-traceability-chain.md
+  - docs/03-architecture/adr/ADR-029-llm-assisted-development-governance.md
+---
 
-- **Status:** Accepted
-- **Date:** 2026-05-13
-- **Deciders:** core-team
+# ADR-006: Docs-as-code repository structure
 
 ## Контекст
 

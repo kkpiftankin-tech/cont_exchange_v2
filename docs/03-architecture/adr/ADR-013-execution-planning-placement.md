@@ -1,6 +1,6 @@
 ---
 id: ADR-013
-status: draft
+status: accepted
 date: 2026-05-20
 owners:
   - architecture
@@ -10,6 +10,7 @@ related:
   - docs/05-components/execution-planning/overview.md
   - docs/05-components/matching-fob-core/overview.md
   - docs/05-components/venue-execution-adapter/overview.md
+  - docs/03-architecture/adr/ADR-014-venues-binary-vs-components.md
   - incoming-docs/2026-05-20-F-12-execution-hedge-v1.md
 ---
 
@@ -40,6 +41,12 @@ IN-005 описывает **Execution Planning** как самостоятель
 1. Routing logic усложняется (ILP / cost-minimization вместо proportional);
 2. Несколько consumers ожидают routing decisions (например, telemetry, simulation);
 3. Хочется деплоить planning с отличной шкалой (например, более CPU-heavy).
+
+> **Scope vs ADR-014.** Runtime-упаковка (этот модуль в процессе `cpp/venues`
+> vs отдельный сервис `cpp/execution_planning/`) подчинена
+> [ADR-014](ADR-014-venues-binary-vs-components.md). Данный ADR решает
+> *размещение и эволюцию* Execution Planning; выбор routing-алгоритма —
+> отдельный ADR (TBD).
 
 ## Почему **не** оставлять Planning внутри matching
 
@@ -120,4 +127,4 @@ Acceptable как **первый MVP-шаг**, потом split.
 
 ## Status
 
-Draft. Ожидает review.
+Accepted (2026-05-28). MVP-размещение — модуль `cpp/venues/src/app/execution_planning/` (см. Phased Implementation). Runtime-упаковка согласована с [ADR-014](ADR-014-venues-binary-vs-components.md); выбор routing-алгоритма выносится в отдельный ADR (TBD).

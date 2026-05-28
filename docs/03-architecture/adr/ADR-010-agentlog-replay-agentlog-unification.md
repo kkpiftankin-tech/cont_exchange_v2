@@ -1,8 +1,16 @@
-# ADR-010 — AgentLog vs ReplayAgentLog: unification strategy
+---
+id: ADR-010
+status: proposed
+date: 2026-05-20
+owners:
+  - core-team
+related:
+  - contracts/proto/fob/agent/v1/agent.proto
+  - docs/07-data/replay-agentlogs.md
+  - docs/02-system/features/F-15-backtest-replay/
+---
 
-- **Status:** Proposed
-- **Date:** 2026-05-20
-- **Deciders:** core-team
+# ADR-010: AgentLog vs ReplayAgentLog — unification strategy
 
 ## Контекст
 

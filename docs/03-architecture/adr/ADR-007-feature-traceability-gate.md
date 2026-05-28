@@ -1,8 +1,16 @@
-# ADR-0003 — Traceability gate: каждое изменение кода связано с фичей
+---
+id: ADR-007
+status: accepted
+date: 2026-05-13
+owners:
+  - core-team
+related:
+  - specs/domain/traceability.yaml
+  - docs/traceability/feature-traceability.md
+  - docs/03-architecture/adr/ADR-018-design-traceability-chain.md
+---
 
-- **Status:** Accepted
-- **Date:** 2026-05-13
-- **Deciders:** core-team
+# ADR-007: Feature traceability gate
 
 ## Контекст
 
