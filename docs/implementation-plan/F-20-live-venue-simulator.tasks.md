@@ -85,7 +85,10 @@ Append F-20 row to `docs/02-system/features/feature-index.md`.
 
 ### Phase 1 — Proto contracts
 
-#### T-F20-101. Define `contracts/proto/fob/sim/v1/sim.proto`
+#### T-F20-101. Define `contracts/proto/fob/sim/v1/sim.proto` — ✅ DONE (PR-F20-3)
+
+Created and protoc-verified (cpp + grpc stubs generate cleanly). Picked
+up automatically by `contracts/CMakeLists.txt` GLOB_RECURSE.
 
 Messages:
 
@@ -289,7 +292,7 @@ Coverage list in spec §5.2.
 
 ## Critical path
 
-```
+```text
 Phase 0 (docs+ADRs) -> Phase 1 (protos) -> Phase 2 (storage) ->
 Phase 3 (simulator) -> Phase 4 (router) -> Phase 5 (ledger/CH/divergence) ->
 Phase 6 (UI) -> Phase 7 (tests) -> Phase 8 (runbook)

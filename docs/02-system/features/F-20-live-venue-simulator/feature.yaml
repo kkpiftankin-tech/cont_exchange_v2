@@ -47,7 +47,7 @@ protoContracts:
   - contracts/proto/fob/venue/v1/venue.proto               # consumed: VenueSnapshot (источник LOB)
   - contracts/proto/fob/common/v1/common.proto             # Decimal, Money, EventMeta
   # Новый proto для F-20:
-  - contracts/proto/fob/sim/v1/sim.proto                   # NEW (planned): SimSession, SimConfigEvent, SimAlert, SimExecutionAnnotation (telemetry sidecar), RoutingMode, LatencyModel, ImpactModel, FeeModel, RejectionModel
+  - contracts/proto/fob/sim/v1/sim.proto                   # CREATED (PR-F20-3): SimSession, SimConfigEvent, SimAlert, SimExecutionAnnotation, RoutingMode + 5 enums, 4 models, SimSessionManager service. protoc cpp+grpc verified.
   - contracts/openapi/fob/sim/v1/api/sim.yaml              # NEW (planned): REST API SimSession Manager (operator UI)
 
 storageDependencies:
