@@ -209,7 +209,7 @@ definitionOfDone:
     evidence: cpp/venues/tests/venue_simulator_test.cpp (U3_stale — PASS); SimAlert emit pending Phase 4
     blocked_by_ac: [F20-4]
   - id: DoD-6
-    status: not-implemented
+    status: partial
     title: ExecutionReport (unchanged) в sim.execution.venue + SimExecutionAnnotation sidecar
     description: >
       ADR-015: VenueSimulator публикует ОБЫЧНЫЙ ExecutionReport (тот же
@@ -220,7 +220,24 @@ definitionOfDone:
       impact_bps, latency_sample_ms) едет отдельным
       fob.sim.v1.SimExecutionAnnotation, коррелированным по report_id,
       в sim.execution.annotations.
-    evidence: contracts/proto/fob/sim/v1/sim.proto SimExecutionAnnotation (planned, T-F20-101); execution.proto НЕ трогается
+
+      PR-F20-7 (2026-05-28): СБОРКА сообщений реализована — pure
+      SimExecutionAssembler cpp/venues/src/app/sim_execution_assembler.{hpp,cpp}
+      `Assemble(inputs, RouteDecision) -> {ExecutionReport, SimExecutionAnnotation}`.
+      Прогоняет VenueSimulator и собирает ExecutionReport (идентичный LIVE
+      контракт, source=venue-simulator, переносит F-12 поля hedge_flow_id/
+      child_order_id/batch_id/provider_id/side/reference_mid, fee_total из
+      sim fee) + SimExecutionAnnotation (report_id-корреляция, sim_session_id,
+      lob_snapshot_id, lob_age_ms, impact_bps, latency_sample_ms).
+      execution.proto НЕ изменён.
+
+      Остаётся (следующий wiring PR): Kafka producers — publish report в
+      sim.execution.venue и annotation в sim.execution.annotations, +
+      async-delay (latency_sample_ms) перед публикацией.
+    evidence: |
+      cpp/venues/src/app/sim_execution_assembler.{hpp,cpp},
+      cpp/venues/tests/sim_execution_assembler_test.cpp (5 cases ALL PASS,
+      built+run on ubuntu-dev exit 0). execution.proto не трогается.
   - id: DoD-7
     status: not-implemented
     title: Settlement Ledger sim-book consumer на sim.execution.venue

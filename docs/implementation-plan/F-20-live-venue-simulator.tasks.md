@@ -212,11 +212,23 @@ registry (hot reload — currently programmatic only), SHADOW execution fork,
 async-delay + publish. Test F20-1, F20-2, F20-7, F20-11, F20-12 (E2E) land
 with the wiring PR.
 
-#### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter
+#### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter — ◐ data-plane core DONE
 
 Replace direct EVC call with `VenueSimRouter.Route(ChildOrderRequest)`.
 Backward-compatible default: when no SimSession active for
 `(venueId,symbol)`, behaviour is identical to current LIVE_ONLY.
+
+PR-F20-7 (2026-05-28): SimExecutionAssembler
+`cpp/venues/src/app/sim_execution_assembler.{hpp,cpp}` — pure
+`Assemble(inputs, RouteDecision) -> {ExecutionReport, SimExecutionAnnotation}`.
+Runs VenueSimulator and builds the sim ExecutionReport (identical LIVE
+contract, ADR-015; F-12 correlation fields carried) + the annotation sidecar
+(report_id-correlated). 5-case unit suite ALL PASS on ubuntu-dev (exit 0).
+
+**Deferred to wiring PR**: instantiate router+assembler in `venues_loop`,
+SIM/SHADOW fork off `ExecuteOnVenue`, Kafka producers for
+`sim.execution.venue` + `sim.execution.annotations`, async latency delay,
+`sim.config` consumer feeding the registry, SimAlert emission.
 
 ### Phase 5 — Downstream extensions
 
