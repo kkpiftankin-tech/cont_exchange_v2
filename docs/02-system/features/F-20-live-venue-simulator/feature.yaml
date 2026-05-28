@@ -12,9 +12,12 @@ description: >
   LIVE_ONLY (только реальное исполнение, как сейчас), SHADOW (dual-send для
   сравнения). В SIM_ONLY VenueSimulator использует актуальный VenueSnapshot
   как источник ликвидности, применяет модели latency / market impact /
-  fees / rejection и публикует синтетический SimExecutionReport с
-  simMode=true в тот же топик execution.venue (или в опциональный
-  sim.execution.venue для изоляции).
+  fees / rejection и публикует обычный ExecutionReport (тот же контракт,
+  что и реальный venue) в изолированный топик sim.execution.venue.
+  Sim-телеметрия (sim_session_id, lob_snapshot_id, lob_age_ms, impact_bps,
+  latency_sample_ms) едет отдельным сайдкаром SimExecutionAnnotation —
+  ExecutionReport НЕ расширяется sim-полями. Дискриминатор sim/live —
+  топик, не поле (ADR-015).
 
   Источник истины: IN-010 (`incoming-docs/2026-05-26-F-20-live-venue-simulator-v1.md`).
 
@@ -33,18 +36,18 @@ primaryComponents:
   - divergence-service     # F-20: новый — pairing SIM vs LIVE в SHADOW режиме
   - external-venues        # F-11: продолжает поставлять venue.snapshots; НЕ модифицируется
   - venue-execution-adapter # F-12: источник ChildOrderRequest; НЕ модифицируется
-  - ledger                 # F-12: расширяется — обрабатывает simMode=true и обновляет sim-книгу отдельно
-  - risk-manager           # F-12: расширяется — может потреблять SimExecutionReport для analytics
+  - ledger                 # F-12: новый sim-book consumer на sim.execution.venue → sim_positions/sim_hedge_pnl (ADR-016)
+  - risk-manager           # F-12: может потреблять sim.execution.venue для analytics
   - observability-reporting # F-12: новые dashboards Sim Monitor / Sim vs Live / LOB Quality
 
 protoContracts:
-  # F-20 переиспользует протокол F-12 (ExecutionIntent / ExecutionReport).
-  # SimExecutionReport — это ExecutionReport с дополнительными полями.
-  - contracts/proto/fob/execution/v1/execution.proto       # extension: simMode, simSessionId, lobSnapshotId, lobAge, impactBps, slippageBps, latencySampleMs
+  # F-20 переиспользует протокол F-12 БЕЗ изменений: симулятор эмитит
+  # тот же ExecutionReport, что и реальный venue (ADR-015).
+  - contracts/proto/fob/execution/v1/execution.proto       # consumed/produced AS-IS — НЕ расширяется sim-полями (ADR-015)
   - contracts/proto/fob/venue/v1/venue.proto               # consumed: VenueSnapshot (источник LOB)
   - contracts/proto/fob/common/v1/common.proto             # Decimal, Money, EventMeta
   # Новый proto для F-20:
-  - contracts/proto/fob/sim/v1/sim.proto                   # NEW (planned): SimSession, SimConfigEvent, SimAlert, RoutingMode, LatencyModel, ImpactModel, FeeModel, RejectionModel
+  - contracts/proto/fob/sim/v1/sim.proto                   # NEW (planned): SimSession, SimConfigEvent, SimAlert, SimExecutionAnnotation (telemetry sidecar), RoutingMode, LatencyModel, ImpactModel, FeeModel, RejectionModel
   - contracts/openapi/fob/sim/v1/api/sim.yaml              # NEW (planned): REST API SimSession Manager (operator UI)
 
 storageDependencies:
@@ -74,8 +77,9 @@ codePaths:
 
 kafkaTopics:
   produces:
-    - execution.venue          # SimExecutionReport (simMode=true) — тот же топик, что и LIVE; consumer ignore-by-flag
-    - sim.execution.venue      # NEW (optional): изолированный mirror только sim reports
+    # ADR-015: sim ExecutionReport идёт ТОЛЬКО сюда, НЕ в общий execution.venue.
+    - sim.execution.venue      # NEW: обычный ExecutionReport (unchanged contract), изолированный sim-поток
+    - sim.execution.annotations # NEW: SimExecutionAnnotation (sim telemetry sidecar, corr. by report_id)
     - sim.alerts               # NEW: STALE_LOB, SIM_TIMEOUT, LOB_SOURCE_DOWN, RANDOM_REJECT_SPIKE
     - sim.config               # NEW: SimConfigEvent при создании/обновлении/удалении SimSession (для hot reload)
   consumes:
@@ -83,7 +87,8 @@ kafkaTopics:
     - venue.health             # из F-11: влияет на параметры RejectionModel
     - execution.intents        # внутренний consumer VenueSimRouter (источник ChildOrderRequest)
     - sim.config               # внутренний consumer VenueSimRouter (hot reload routingMode/scope)
-    - execution.venue          # Divergence Service consumer (pairing SIM + LIVE по clientOrderId)
+    - execution.venue          # Divergence Service: LIVE-сторона (SHADOW pairing по clientOrderId)
+    - sim.execution.venue      # Divergence Service: SIM-сторона + sim-book ledger consumer (ADR-015/016)
 
 grpcServices:
   exposes:
@@ -97,12 +102,12 @@ grpcServices:
 
 acceptanceCriteria:
   # Источник: спека §2.6 (12 пунктов). Renumbered F16-* -> F20-* per Conflict Note.
-  - "F20-1: При routingMode=SIM_ONLY ни один реальный вызов к EVC для child-ордеров не производится; все ExecutionReport имеют simMode=true."
-  - "F20-2: При routingMode=SHADOW каждый ChildOrderRequest порождает ровно два ExecutionReport: simMode=false (LIVE) и simMode=true (SIM)."
-  - "F20-3: VenueSimulator использует актуальный VenueSnapshot из venue.snapshots; lobSnapshotId ссылается на конкретный снапшот."
-  - "F20-4: При lobAge > staleLobThresholdMs SimExecutionReport содержит status=REJECTED, rejectReason=SIM_STALE_LOB; реальных ордеров на биржу не уходит."
-  - "F20-5: SimExecutionReport с simMode=true НЕ изменяет реальные позиции провайдера в Ledger (обновляется изолированная sim-книга)."
-  - "F20-6: Все SimExecutionReport сохраняются в ClickHouse в течение <= 1 сек после публикации."
+  - "F20-1: При routingMode=SIM_ONLY ни один реальный вызов к EVC для child-ордеров не производится; все ExecutionReport идут в топик sim.execution.venue (не execution.venue)."
+  - "F20-2: При routingMode=SHADOW каждый ChildOrderRequest порождает ровно два ExecutionReport: один в execution.venue (LIVE), один в sim.execution.venue (SIM), коррелированы по clientOrderId."
+  - "F20-3: VenueSimulator использует актуальный VenueSnapshot из venue.snapshots; SimExecutionAnnotation.lob_snapshot_id ссылается на конкретный снапшот."
+  - "F20-4: При lobAge > staleLobThresholdMs ExecutionReport содержит status=REJECTED, rejectReason=SIM_STALE_LOB; реальных ордеров на биржу не уходит."
+  - "F20-5: ExecutionReport из sim.execution.venue НЕ изменяет реальные позиции провайдера в Ledger (обновляется изолированная sim-книга sim_positions)."
+  - "F20-6: Все sim ExecutionReport + SimExecutionAnnotation сохраняются в ClickHouse sim_execution_reports в течение <= 1 сек после публикации."
   - "F20-7: Переключение routingMode через Admin API применяется в течение <= 500 мс."
   - "F20-8: При идентичном LOB расчёт filledQty совпадает с ожидаемым LEVEL_BY_LEVEL с точностью <= 1%."
   - "F20-9: Latency overhead F-20 (без LatencyModel sample): p95 < 50 мс."
@@ -156,19 +161,27 @@ definitionOfDone:
     blocked_by_ac: [F20-4]
   - id: DoD-6
     status: not-implemented
-    title: SimExecutionReport публикуется с расширенными полями
+    title: ExecutionReport (unchanged) в sim.execution.venue + SimExecutionAnnotation sidecar
     description: >
-      В execution.venue (с simMode=true) и опционально в sim.execution.venue.
-      Содержит simSessionId, lobSnapshotId, lobAge, impactBps, slippageBps,
-      latencySampleMs.
-    evidence: contracts/proto/fob/execution/v1/execution.proto (нужно расширение)
+      ADR-015: VenueSimulator публикует ОБЫЧНЫЙ ExecutionReport (тот же
+      контракт F-12, заполняет filled_qty/average_price/slippage_bps/
+      hedge_pnl/reference_mid/fee_total) в изолированный топик
+      sim.execution.venue — НЕ в общий execution.venue, без поля simMode.
+      Sim-телеметрия (sim_session_id, lob_snapshot_id, lob_age_ms,
+      impact_bps, latency_sample_ms) едет отдельным
+      fob.sim.v1.SimExecutionAnnotation, коррелированным по report_id,
+      в sim.execution.annotations.
+    evidence: contracts/proto/fob/sim/v1/sim.proto SimExecutionAnnotation (planned, T-F20-101); execution.proto НЕ трогается
   - id: DoD-7
     status: not-implemented
-    title: Settlement Ledger обрабатывает simMode=true корректно
+    title: Settlement Ledger sim-book consumer на sim.execution.venue
     description: >
-      Обновляет изолированную sim-книгу позиций, НЕ изменяет реальные позиции
-      провайдера. Sim-баланс и sim-PnL хранятся отдельно.
-    evidence: cpp/ledger/src/app/ledger_uc.cpp (нужна ветка simMode)
+      ADR-016: новый sim-book consumer подписан на sim.execution.venue
+      (всё на этом топике — sim по определению, ADR-015), обновляет
+      изолированные таблицы sim_positions / sim_hedge_pnl, НЕ изменяет
+      реальные positions/balances/hedgeflows. Никакого simMode-флага в
+      боевых таблицах.
+    evidence: cpp/ledger/src/app/ (новый sim-book consumer, planned T-F20-501)
     blocked_by_ac: [F20-5]
   - id: DoD-8
     status: not-implemented
@@ -279,9 +292,10 @@ uxScreens:
     title: Live Sim Feed
     route: /sim/live-feed
     purpose: >
-      Real-time поток SimExecutionReport с полями симуляции; фильтрация по
+      Real-time поток sim ExecutionReport + SimExecutionAnnotation
+      (lob_age_ms, impact_bps, latency_sample_ms); фильтрация по
       simSessionId / venue / symbol.
-    primary_data_source: Kafka execution.venue (simMode=true) + ClickHouse sim_execution_reports fallback
+    primary_data_source: Kafka sim.execution.venue + sim.execution.annotations (SSE) + ClickHouse sim_execution_reports fallback
     api_endpoints:
       - GET /api/v1/sim/execution-reports (history)
       - WebSocket /api/v1/sim/execution-reports/stream
@@ -386,14 +400,14 @@ fidChain:
     payload: PlaceChildOrder
   - id: F20-SIM-5
     source: VenueSimulator
-    sink: Kafka execution.venue
-    protocol: Kafka produce
-    payload: SimExecutionReport (simMode=true)
-  - id: F20-SIM-6
-    source: VenueSimulator
     sink: Kafka sim.execution.venue
     protocol: Kafka produce
-    payload: SimExecutionReport (duplicate for isolated consumers)
+    payload: ExecutionReport (unchanged contract; ADR-015 — NOT execution.venue)
+  - id: F20-SIM-6
+    source: VenueSimulator
+    sink: Kafka sim.execution.annotations
+    protocol: Kafka produce
+    payload: SimExecutionAnnotation (telemetry sidecar, corr. by report_id)
   - id: F20-SIM-7
     source: VenueSimulator
     sink: Kafka sim.alerts
@@ -420,25 +434,25 @@ fidChain:
     protocol: Kafka consume
     payload: SimConfigEvent (hot reload)
   - id: F20-SIM-12
-    source: Kafka execution.venue
+    source: Kafka execution.venue (LIVE) + sim.execution.venue (SIM)
     sink: Divergence Service
-    protocol: Kafka consume
-    payload: ExecutionReport (LIVE + SIM, paired by clientOrderId)
+    protocol: Kafka consume (two topics)
+    payload: ExecutionReport pair, joined by clientOrderId
   - id: F20-SIM-13
     source: Divergence Service
     sink: ClickHouse
     protocol: HTTP insert
     payload: sim_divergence_log
   - id: F20-SIM-14
-    source: Kafka execution.venue
+    source: Kafka sim.execution.venue + sim.execution.annotations
     sink: ClickHouse
-    protocol: Kafka -> CH connector / market_data writer
-    payload: sim_execution_reports
+    protocol: market_data writer / CH ingest
+    payload: sim_execution_reports (ExecutionReport fields + annotation columns)
   - id: F20-SIM-15
-    source: Kafka execution.venue
-    sink: Settlement Ledger
+    source: Kafka sim.execution.venue
+    sink: Settlement Ledger (sim-book consumer)
     protocol: Kafka consume
-    payload: SimExecutionReport (sim-book branch)
+    payload: ExecutionReport (sim-book branch -> sim_positions/sim_hedge_pnl)
 
 # SLO targets (§3.1 + §5.3)
 slo:

@@ -108,18 +108,61 @@ boevых consumers при миграции имени топика. Для sim �
 
 ### Обратимость
 
-Высокая. Если позже захотим единый топик — добавить `simMode` фильтр
-в boevые consumers и схлопнуть. Обратно (из shared в isolated) —
-сложнее, поэтому начинаем со строгой изоляции (safe default).
+Высокая. Если позже захотим единый топик — пришлось бы вернуть
+дискриминатор (поле `simMode` или header) и добавить фильтр во все
+boevые consumers. Обратно (из shared в isolated) — сложнее, поэтому
+начинаем со строгой изоляции (safe default).
 
 ## Влияние на контракты
 
 - Новый Kafka topic `sim.execution.venue` (в `infra/kafka/create_topics.sh`).
-- `execution.proto` ExecutionReport всё равно расширяется sim-полями
-  (они нужны на `sim.execution.venue`), но boevые продьюсеры их не
-  заполняют — unknown/zero, безопасно.
+- **`execution.proto` ExecutionReport НЕ расширяется sim-полями.**
+  Контракт venues↔ledger един для sim и live — симулятор эмитит тот же
+  самый `ExecutionReport`, что и реальный venue, просто в другой топик.
+  Дискриминатор sim/live — ТОПИК, а не поле (см. §ниже).
 - F-20 feature.yaml kafkaTopics.produces: `sim.execution.venue`,
   `sim.alerts`, `sim.config`; НЕ `execution.venue` для sim.
+
+## ExecutionReport остаётся неизменным; sim/live различаются топиком
+
+Прямое следствие принципа «взаимодействие с симулятором и с реальными
+биржами идёт по одинаковым контрактам»:
+
+1. **`ExecutionReport` не меняется.** Он уже содержит все
+   venue-agnostic поля качества исполнения: `filled_qty`,
+   `remaining_qty`, `average_price`, `slippage_bps`, `hedge_pnl`,
+   `reference_mid`, `fee_total`. Симулятор заполняет их так же, как
+   реальный venue. Никаких `simMode` / `lobSnapshotId` / `impactBps` в
+   этом сообщении.
+2. **`simMode`-поле избыточно.** Раз потоки разделены топиком
+   (`sim.execution.venue` vs `execution.venue`), consumer знает природу
+   отчёта по своей подписке. Поле дублировало бы дискриминатор и давало
+   лишнюю поверхность для ошибок (доверять полю вместо топика).
+3. **Sim-телеметрия — в отдельном сайдкаре, не в execution-контракте.**
+   `sim_session_id`, `lob_snapshot_id`, `lob_age_ms`, `impact_bps`,
+   `latency_sample_ms` — это provenance / output моделей симуляции, а не
+   факт исполнения. Они живут в отдельном сообщении
+   `fob.sim.v1.SimExecutionAnnotation`, коррелированном по `report_id`,
+   которое VenueSimulator эмитит в sim-only телеметрию и которое ложится
+   колонками в ClickHouse `sim_execution_reports`. Боевой путь его не
+   производит и не потребляет.
+
+```proto
+// fob/sim/v1/sim.proto — НЕ в execution.proto
+message SimExecutionAnnotation {
+  string report_id = 1;        // correlation -> ExecutionReport.report_id
+  string sim_session_id = 2;
+  string lob_snapshot_id = 3;
+  uint32 lob_age_ms = 4;
+  double impact_bps = 5;
+  uint32 latency_sample_ms = 6;
+}
+```
+
+Это уточнение **корректирует** исходную спеку IN-010 §1.0, где
+SimExecutionReport описан как «ExecutionReport + дополнительные поля
+статистировки». Дополнительные поля выносятся в сайдкар, чтобы общий
+исполнительный контракт оставался venue-agnostic.
 
 ## Status
 

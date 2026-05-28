@@ -57,7 +57,7 @@ Create `docs/05-components/`:
 - `docs/06-api/messaging/sim-config-topic.md` — schema for `sim.config` Kafka events.
 - `docs/06-api/messaging/sim-alerts-topic.md` — schema for `sim.alerts`.
 - `docs/06-api/messaging/sim-execution-venue-topic.md` — schema for optional `sim.execution.venue` mirror.
-- `docs/06-api/messaging/execution-topics.md` — **extend** existing doc with simulation fields (`simMode`, `simSessionId`, `lobSnapshotId`, `lobAge`, `impactBps`, `slippageBps`, `latencySampleMs`).
+- `docs/06-api/messaging/sim-execution-venue-topic.md` — `sim.execution.venue` carries the *unchanged* `ExecutionReport` (ADR-015). Document that `execution.proto` is NOT extended and that sim telemetry rides the separate `SimExecutionAnnotation` (sim.proto).
 - `docs/06-api/rest/sim-sessions.md` — REST API SimSession Manager.
 
 #### T-F20-005. Data docs
@@ -92,24 +92,32 @@ Messages:
 - `SimSession` — config + status.
 - `SimConfigEvent` — Kafka topic envelope for hot reload.
 - `SimAlert` — STALE_LOB / SIM_TIMEOUT / LOB_SOURCE_DOWN / RANDOM_REJECT_SPIKE.
+- `SimExecutionAnnotation` — sim telemetry sidecar correlated to an
+  `ExecutionReport` by `report_id`: `sim_session_id`, `lob_snapshot_id`,
+  `lob_age_ms`, `impact_bps`, `latency_sample_ms`. (See T-F20-102 for why
+  this is separate from ExecutionReport.)
 - Enums: `RoutingMode { SIM_ONLY, LIVE_ONLY, SHADOW }`, `SimSessionStatus { ACTIVE, PAUSED, COMPLETED, CANCELLED }`.
 - Embedded models (`LatencyModel`, `ImpactModel`, `FeeModel`, `RejectionModel`) as messages with `oneof distribution_type` etc.
 
-#### T-F20-102. Extend `contracts/proto/fob/execution/v1/execution.proto`
+#### T-F20-102. `execution.proto` is NOT extended (ADR-015 decision)
 
-Add to `ExecutionReport`:
+The shared `ExecutionReport` contract stays **unchanged**. Per ADR-015,
+the simulator emits the *same* `ExecutionReport` a real venue would
+(populating the existing `filled_qty` / `average_price` / `slippage_bps`
+/ `hedge_pnl` / `reference_mid` / `fee_total` fields), just to a
+different topic (`sim.execution.venue`). The topic is the sim/live
+discriminator — there is no `sim_mode` field.
 
-```proto
-bool sim_mode = N;
-string sim_session_id = N+1;
-string lob_snapshot_id = N+2;
-uint32 lob_age_ms = N+3;
-double impact_bps = N+4;
-double slippage_bps = N+5;
-uint32 latency_sample_ms = N+6;
-```
+Sim-only provenance/telemetry (`sim_session_id`, `lob_snapshot_id`,
+`lob_age_ms`, `impact_bps`, `latency_sample_ms`) lives in
+`fob.sim.v1.SimExecutionAnnotation` (T-F20-101), published to a sim-only
+telemetry stream and landed as columns in CH `sim_execution_reports`.
+The VenueSimulator, which has the LOB context, writes the annotation;
+the live path never produces or consumes it.
 
-Field tags TBD per existing reserved ranges; must NOT break wire compatibility.
+Rationale: keep the venues↔ledger execution contract venue-agnostic
+(the user's principle: sim and real exchanges interact via identical
+contracts). See ADR-015 §"ExecutionReport остаётся неизменным".
 
 #### T-F20-103. `contracts/openapi/fob/sim/v1/api/sim.yaml`
 
@@ -186,9 +194,11 @@ Backward-compatible default: when no SimSession active for
 
 #### T-F20-501. Ledger sim-book
 
-Per ADR-016 (separate sim_* tables). When `report.sim_mode == true`, update
-isolated balance/position records without touching real provider state.
-Test DoD-7, F20-5.
+Per ADR-016 (separate sim_* tables). The sim-book consumer subscribes to
+`sim.execution.venue` (ADR-015) — every report on that topic is sim by
+definition (no `sim_mode` field needed), so it updates the isolated
+`sim_positions` / `sim_hedge_pnl` records without touching real provider
+state. Test DoD-7, F20-5.
 
 #### T-F20-502. ClickHouse ingest for sim_execution_reports
 
@@ -254,7 +264,7 @@ Coverage list in spec §5.2.
 | DoD-3 (SimSession Manager) | T-F20-401 |
 | DoD-4 (LOB-matching correctness) | T-F20-302, T-F20-701 (U4) |
 | DoD-5 (Stale-LOB) | T-F20-306, T-F20-701 (U3) |
-| DoD-6 (SimExecutionReport fields) | T-F20-102, T-F20-301 |
+| DoD-6 (ExecutionReport unchanged + SimExecutionAnnotation sidecar) | T-F20-101 (annotation), T-F20-301 |
 | DoD-7 (Ledger sim-book) | T-F20-501 |
 | DoD-8 (ClickHouse ingest) | T-F20-202, T-F20-502 |
 | DoD-9 (Divergence Service) | T-F20-503 |
@@ -297,6 +307,7 @@ go-live; SLA failures rollback PR.
 
 All three `knownIssues` in feature.yaml flipped to `status=resolved`.
 **Phase 1 (proto) is unblocked.** Next concrete step: T-F20-101
-(define `contracts/proto/fob/sim/v1/sim.proto` + extend `execution.proto`
-with sim fields — note ADR-015 means sim fields ride on
-`sim.execution.venue`, NOT shared `execution.venue`).
+(define `contracts/proto/fob/sim/v1/sim.proto` incl. `SimExecutionAnnotation`).
+Per ADR-015, `execution.proto` is NOT extended — the simulator emits the
+unchanged `ExecutionReport` to `sim.execution.venue`, and sim telemetry
+travels in the separate `SimExecutionAnnotation` sidecar.
