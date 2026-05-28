@@ -71,11 +71,13 @@ Create `docs/05-components/`:
 `docs/10-testing/features/F-20-test-plan.md` covering U1..U10, IT-1..IT-5,
 LT-1..LT-4 from spec.
 
-#### T-F20-007. ADRs
+#### T-F20-007. ADRs — ✅ DONE (PR-F20-1, 2026-05-28)
 
-- `docs/03-architecture/adr/ADR-NNN-sim-topic-isolation.md` — single vs dual topic for SimExecutionReport.
-- `docs/03-architecture/adr/ADR-NNN-ledger-sim-book.md` — sim-book storage strategy.
-- `docs/03-architecture/adr/ADR-NNN-venue-simulator-vs-legacy-adapter.md` — coexistence with existing `cpp/venues/src/infra/venue_sim_adapter.*`.
+- [`ADR-015-sim-execution-topic-isolation.md`](../03-architecture/adr/ADR-015-sim-execution-topic-isolation.md) — **strict isolation**: SimExecutionReport only on `sim.execution.venue`, never shared `execution.venue` (avoids SHADOW double-apply).
+- [`ADR-016-ledger-sim-book-storage.md`](../03-architecture/adr/ADR-016-ledger-sim-book-storage.md) — **separate tables** `sim_positions`/`sim_hedge_pnl`, not a simMode flag (financial-safety by construction).
+- [`ADR-017-venue-simulator-vs-legacy-adapter.md`](../03-architecture/adr/ADR-017-venue-simulator-vs-legacy-adapter.md) — **new class** `VenueSimulator`, legacy `venue_sim_adapter` stays as backtest helper.
+
+These three gates are now resolved; Phase 1 is unblocked.
 
 #### T-F20-008. Update feature-index.md
 
@@ -184,7 +186,7 @@ Backward-compatible default: when no SimSession active for
 
 #### T-F20-501. Ledger sim-book
 
-Per ADR-NNN-ledger-sim-book. When `report.sim_mode == true`, update
+Per ADR-016 (separate sim_* tables). When `report.sim_mode == true`, update
 isolated balance/position records without touching real provider state.
 Test DoD-7, F20-5.
 
@@ -287,11 +289,14 @@ Phases 1-2 can overlap. Phase 6 UI can start in parallel with Phase 5
 once Phase 4 contract endpoints are stable. Phase 7 load tests gate
 go-live; SLA failures rollback PR.
 
-## Open items requiring user approval before Phase 1 starts
+## ADR gates — RESOLVED (PR-F20-1, 2026-05-28)
 
-1. ADR-NNN-sim-topic-isolation (single vs dual topic).
-2. ADR-NNN-ledger-sim-book (storage strategy).
-3. ADR-NNN-venue-simulator-vs-legacy-adapter (rename or coexist).
+1. ✅ [ADR-015](../03-architecture/adr/ADR-015-sim-execution-topic-isolation.md) sim-topic-isolation → strict isolation (`sim.execution.venue` only).
+2. ✅ [ADR-016](../03-architecture/adr/ADR-016-ledger-sim-book-storage.md) ledger sim-book → separate `sim_positions`/`sim_hedge_pnl` tables.
+3. ✅ [ADR-017](../03-architecture/adr/ADR-017-venue-simulator-vs-legacy-adapter.md) venue-simulator-vs-legacy → new `VenueSimulator` class.
 
-These are listed as `knownIssues.status=open` in feature.yaml. Do not
-start T-F20-101 until they are resolved.
+All three `knownIssues` in feature.yaml flipped to `status=resolved`.
+**Phase 1 (proto) is unblocked.** Next concrete step: T-F20-101
+(define `contracts/proto/fob/sim/v1/sim.proto` + extend `execution.proto`
+with sim fields — note ADR-015 means sim fields ride on
+`sim.execution.venue`, NOT shared `execution.venue`).

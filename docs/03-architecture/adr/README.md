@@ -20,5 +20,8 @@
 | ADR-012 | Venue Execution Adapter decomposition | [accepted](ADR-012-venue-execution-adapter-decomposition.md) |
 | ADR-013 | Execution Planning placement (library vs service) | [accepted](ADR-013-execution-planning-placement.md) |
 | ADR-014 | `cpp/venues` единый бинарь vs отдельные сервисы | [accepted](ADR-014-venues-binary-vs-components.md) |
+| ADR-015 | F-20 SimExecutionReport — strict topic isolation (`sim.execution.venue` only) | [draft](ADR-015-sim-execution-topic-isolation.md) |
+| ADR-016 | F-20 ledger sim-book — separate `sim_*` tables vs simMode flag | [draft](ADR-016-ledger-sim-book-storage.md) |
+| ADR-017 | F-20 VenueSimulator — new class vs reuse legacy `venue_sim_adapter` | [draft](ADR-017-venue-simulator-vs-legacy-adapter.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).
