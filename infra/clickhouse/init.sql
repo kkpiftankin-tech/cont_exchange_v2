@@ -112,3 +112,79 @@ ALTER TABLE execution_reports
   ADD PROJECTION IF NOT EXISTS prj_by_hedge_flow (
     SELECT * ORDER BY (hedge_flow_id, event_time_ms)
   );
+
+-- ===========================================================================
+-- F-20 Live Venue Simulator (PR-F20-4). OLAP history for sim execution +
+-- SHADOW divergence. ADR-015: this is fed from `sim.execution.venue` (sim
+-- ExecutionReport, identical to the live contract) plus the
+-- `sim.execution.annotations` sidecar (SimExecutionAnnotation). There is NO
+-- `sim_mode` column — every row in this table is sim by construction (it
+-- only exists because the row arrived on a sim topic).
+-- ===========================================================================
+
+-- sim_execution_reports: the F-12 ExecutionReport fields (same columns as
+-- the live `execution_reports` table) PLUS the SimExecutionAnnotation
+-- columns (lob_snapshot_id / lob_age_ms / impact_bps / latency_sample_ms),
+-- joined by report_id at ingest time by the sim CH writer.
+CREATE TABLE IF NOT EXISTS sim_execution_reports (
+  -- --- shared ExecutionReport columns (mirror execution_reports) ---
+  report_id          String,
+  intent_id          String,
+  hedge_flow_id      String,
+  child_order_id     String,
+  batch_id           String,
+  provider_id        String,
+  venue_id           LowCardinality(String),
+  symbol             String,
+  side               LowCardinality(String),
+  status             LowCardinality(String),
+  filled_qty         Float64,
+  remaining_qty      Float64,
+  avg_price          Float64,
+  fee_amount         Float64,
+  fee_currency       String,
+  slippage_bps       Int32,
+  reference_mid      Float64,
+  hedge_pnl          Float64,
+  event_time_ms      Int64,
+  -- --- SimExecutionAnnotation sidecar columns (ADR-015) ---
+  sim_session_id     String,
+  lob_snapshot_id    String,
+  lob_age_ms         UInt32,
+  impact_bps         Float64,
+  latency_sample_ms  UInt32,
+  ingested_at        DateTime DEFAULT now()
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
+ORDER BY (sim_session_id, symbol, venue_id, event_time_ms, report_id)
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+
+-- sim_divergence_log: SHADOW-mode comparison of LIVE vs SIM execution for
+-- the same clientOrderId. Written by the Divergence Service after it pairs
+-- the two ExecutionReports (one from execution.venue, one from
+-- sim.execution.venue). Per F20-10 / DoD-9.
+CREATE TABLE IF NOT EXISTS sim_divergence_log (
+  divergence_id      String,
+  sim_session_id     String,
+  client_order_id    String,
+  hedge_flow_id      String,
+  venue_id           LowCardinality(String),
+  symbol             String,
+  live_filled_qty    Float64,
+  sim_filled_qty     Float64,
+  delta_fill_qty     Float64,
+  live_avg_price     Float64,
+  sim_avg_price      Float64,
+  delta_price_bps    Float64,
+  live_latency_ms    UInt32,
+  sim_latency_ms     UInt32,
+  delta_latency_ms   Int32,
+  live_fee           Float64,
+  sim_fee            Float64,
+  delta_fee          Float64,
+  event_time_ms      Int64,
+  ingested_at        DateTime DEFAULT now()
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
+ORDER BY (sim_session_id, event_time_ms, client_order_id)
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;

@@ -220,3 +220,71 @@ CREATE TABLE IF NOT EXISTS execution_reports_raw (
 
 CREATE INDEX IF NOT EXISTS idx_exec_reports_raw_hedge ON execution_reports_raw (hedge_flow_id);
 CREATE INDEX IF NOT EXISTS idx_exec_reports_raw_venue ON execution_reports_raw (venue_id, applied_at);
+
+-- ===========================================================================
+-- F-20 Live Venue Simulator (PR-F20-4). Control-plane + sim-book tables.
+-- ADRs: ADR-015 (topic isolation), ADR-016 (separate sim-book), ADR-017
+-- (VenueSimulator new component).
+-- ===========================================================================
+
+-- sim_sessions: one row per active simulation configuration period.
+-- Owner: SimSession Manager (cpp/venues). Source of truth for which
+-- venues/instruments run in sim mode and with which behaviour models.
+-- Model fields are JSONB so the proto messages (LatencyModel/ImpactModel/
+-- FeeModel/RejectionModel) can be stored/hot-reloaded without per-field
+-- columns. sim_session_id is a genuine UUID (operator-created), unlike
+-- hedgeflows.hedge_flow_id which is composite TEXT.
+CREATE TABLE IF NOT EXISTS sim_sessions (
+  sim_session_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                    TEXT NOT NULL,
+  routing_mode            TEXT NOT NULL CHECK (routing_mode IN ('SIM_ONLY', 'LIVE_ONLY', 'SHADOW')),
+  scope_venues            TEXT[] NOT NULL DEFAULT '{}',
+  scope_instruments       TEXT[] NOT NULL DEFAULT '{}',
+  latency_model           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  impact_model            JSONB NOT NULL DEFAULT '{}'::jsonb,
+  fee_model               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  rejection_model         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  stale_lob_threshold_ms  INTEGER NOT NULL DEFAULT 2000 CHECK (stale_lob_threshold_ms > 0),
+  partial_fill_mode       TEXT NOT NULL DEFAULT 'LEVEL_BY_LEVEL'
+                          CHECK (partial_fill_mode IN ('PROPORTIONAL', 'LEVEL_BY_LEVEL', 'NONE')),
+  status                  TEXT NOT NULL DEFAULT 'ACTIVE'
+                          CHECK (status IN ('ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED')),
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  activated_at            TIMESTAMPTZ,
+  completed_at            TIMESTAMPTZ,
+  created_by              TEXT NOT NULL DEFAULT 'operator'
+);
+
+-- Only one ACTIVE session may scope a given (venue, instrument) at a time —
+-- enforced in application logic (overlapping array membership is awkward to
+-- express as a PG constraint). This index speeds the lookup.
+CREATE INDEX IF NOT EXISTS idx_sim_sessions_status ON sim_sessions (status, created_at DESC);
+
+-- sim_positions: ADR-016 isolated sim-book. The sim-book ledger consumer
+-- (subscribed to sim.execution.venue, ADR-015) updates these. NEVER the
+-- real `positions` table. Keyed by (sim_session_id, provider, instrument)
+-- so sessions are independent and teardown is a single DELETE by session.
+CREATE TABLE IF NOT EXISTS sim_positions (
+  sim_session_id      UUID NOT NULL REFERENCES sim_sessions(sim_session_id) ON DELETE CASCADE,
+  provider_id         TEXT NOT NULL,
+  instrument_symbol   TEXT NOT NULL,
+  net_qty             NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  avg_entry_price     NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  realised_pnl        NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (sim_session_id, provider_id, instrument_symbol)
+);
+
+-- sim_hedge_pnl: ADR-016 sim-book aggregate (sim analog of the PG
+-- hedgeflows.hedge_pnl/tot_fee sink). Per (session, venue, instrument).
+CREATE TABLE IF NOT EXISTS sim_hedge_pnl (
+  sim_session_id      UUID NOT NULL REFERENCES sim_sessions(sim_session_id) ON DELETE CASCADE,
+  venue_id            TEXT NOT NULL,
+  instrument_symbol   TEXT NOT NULL,
+  total_hedge_pnl     NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  total_fee           NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  total_filled_qty    NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  trade_count         BIGINT NOT NULL DEFAULT 0,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (sim_session_id, venue_id, instrument_symbol)
+);

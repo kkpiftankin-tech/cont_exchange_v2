@@ -52,10 +52,12 @@ protoContracts:
 
 storageDependencies:
   postgresql:
-    - sim_sessions       # F-20: SimSession config — routingMode, scope, models JSONB, status
+    - sim_sessions       # CREATED PR-F20-4: SimSession config — routingMode, scope, models JSONB, status
+    - sim_positions      # CREATED PR-F20-4 (ADR-016): isolated sim-book positions (sim-book ledger consumer)
+    - sim_hedge_pnl      # CREATED PR-F20-4 (ADR-016): isolated sim-book hedge_pnl/fee aggregate
   clickhouse:
-    - sim_execution_reports  # F-20: history синтетических execution reports (поля симуляции)
-    - sim_divergence_log     # F-20: per-clientOrderId delta LIVE vs SIM в SHADOW режиме
+    - sim_execution_reports  # CREATED PR-F20-4: ExecutionReport columns + SimExecutionAnnotation sidecar columns; no sim_mode col (topic = discriminator)
+    - sim_divergence_log     # CREATED PR-F20-4: per-clientOrderId delta LIVE vs SIM в SHADOW режиме
 
 codePaths:
   # Все пути ниже — planned (NEW). На момент создания этого feature.yaml
@@ -184,12 +186,19 @@ definitionOfDone:
     evidence: cpp/ledger/src/app/ (новый sim-book consumer, planned T-F20-501)
     blocked_by_ac: [F20-5]
   - id: DoD-8
-    status: not-implemented
+    status: partial
     title: ClickHouse приём SimExecutionReport
     description: >
       Таблица sim_execution_reports в init.sql + market_data writer; <= 1 сек
       latency от публикации до записи.
-    evidence: infra/clickhouse/init.sql (нет таблицы); cpp/market_data/src/infra/clickhouse_storage.cpp
+      PR-F20-4 (2026-05-28): SCHEMA готова — sim_execution_reports +
+      sim_divergence_log созданы в infra/clickhouse/init.sql, применены и
+      проверены на live CH (DESCRIBE ok). Колонки = ExecutionReport +
+      SimExecutionAnnotation sidecar; sim_mode-колонки нет (топик —
+      дискриминатор, ADR-015). Остаётся WRITER: cpp/market_data (или
+      sim CH ingest) должен читать sim.execution.venue +
+      sim.execution.annotations и писать строки (T-F20-502).
+    evidence: infra/clickhouse/init.sql (sim_execution_reports + sim_divergence_log — applied+verified); writer pending T-F20-502
     blocked_by_ac: [F20-6]
   - id: DoD-9
     status: not-implemented

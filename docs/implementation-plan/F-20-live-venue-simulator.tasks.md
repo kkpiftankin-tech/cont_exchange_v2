@@ -128,17 +128,20 @@ REST contract for SimSession Manager CRUD.
 
 ### Phase 2 — Storage
 
-#### T-F20-201. PostgreSQL `sim_sessions`
+#### T-F20-201. PostgreSQL `sim_sessions` (+ sim-book) — ✅ DONE (PR-F20-4)
 
-Add to `infra/postgres/init.sql`. Fields per spec §4.5: `sim_session_id UUID PRIMARY KEY`,
-`name`, `routing_mode`, `scope_venues TEXT[]`, `scope_instruments TEXT[]`,
-`latency_model JSONB`, `impact_model JSONB`, `fee_model JSONB`,
-`rejection_model JSONB`, `stale_lob_threshold_ms`, `partial_fill_mode`,
-`status`, `created_at`, `activated_at`, `completed_at`, `created_by`.
+Added to `infra/postgres/init.sql`, applied + verified on live PG:
 
-#### T-F20-202. ClickHouse `sim_execution_reports` + `sim_divergence_log`
+- `sim_sessions` (spec §4.5 fields, models as JSONB).
+- `sim_positions` and `sim_hedge_pnl` (ADR-016 isolated sim-book, FK to
+  sim_sessions ON DELETE CASCADE for clean teardown).
 
-Add to `infra/clickhouse/init.sql` per spec §4.5.
+#### T-F20-202. ClickHouse `sim_execution_reports` + `sim_divergence_log` — ✅ DONE (PR-F20-4)
+
+Added to `infra/clickhouse/init.sql`, applied + verified on live CH
+(DESCRIBE ok). `sim_execution_reports` carries the shared ExecutionReport
+columns plus the SimExecutionAnnotation sidecar columns (no `sim_mode` —
+topic is the discriminator, ADR-015). 90-day TTL, monthly partition.
 
 ### Phase 3 — Core simulator
 
