@@ -120,14 +120,32 @@ acceptanceCriteria:
 # 19-item DoD из спека §6. Все пункты пока not-implemented; первый PR-F20-* будет ингестировать sub-set.
 definitionOfDone:
   - id: DoD-1
-    status: not-implemented
+    status: partial
     title: VenueSimulator реализован
     description: >
       Подписан на Kafka venue.snapshots, поддерживает актуальный LOB-кэш по
       (venueId, symbol), реализует LEVEL_BY_LEVEL matching, ImpactModel
       (LINEAR / SQRT / POWER_LAW), FeeModel, RejectionModel, LatencyModel с
       async-delay.
-    evidence: cpp/venues/src/app/venue_simulator.{cpp,hpp} (отсутствует)
+
+      PR-F20-5 (2026-05-28): ЯДРО реализовано — pure engine
+      cpp/venues/src/app/venue_simulator.{hpp,cpp} `Simulate(request,
+      models) -> SimulateResult`. Покрывает LEVEL_BY_LEVEL matching (VWAP
+      по уровням book), ImpactModel (LINEAR/SQRT/POWER_LAW/LEVEL_BY_LEVEL),
+      FeeModel (maker/taker/min/gas), RejectionModel (stale/no-liq/
+      random/rate-limit/price-constraint), LatencyModel (FIXED/UNIFORM/
+      LOGNORMAL sampling + timeout→SIM_TIMEOUT). Детерминирован по
+      rng_seed. Математика в double (CLAUDE.md §9 — симуляция, sim-book
+      non-authoritative).
+
+      Остаётся (Phase 4 wiring, НЕ в этом ядре): Kafka venue.snapshots
+      consumer + LOB-кэш по (venue,symbol), async-delay реальная задержка
+      перед publish (сейчас latency только СЭМПЛИТСЯ в результат). Это
+      T-F20-301 runtime часть + VenueSimRouter (DoD-2).
+    evidence: |
+      cpp/venues/src/app/venue_simulator.{hpp,cpp},
+      cpp/venues/tests/venue_simulator_test.cpp (12 cases ALL PASS,
+      built+run on ubuntu-dev exit 0).
     blocked_by_ac: [F20-3, F20-8]
   - id: DoD-2
     status: not-implemented
@@ -145,21 +163,29 @@ definitionOfDone:
       публикация изменений в Kafka sim.config.
     evidence: cpp/venues/src/app/sim_session_manager.{cpp,hpp} (отсутствует)
   - id: DoD-4
-    status: not-implemented
+    status: implemented
     title: Алгоритм LOB-matching корректен
     description: >
       Расчёт filledQty, avgPrice, impactBps соответствует спеке TRD §4.4;
       при идентичном LOB ошибка объёма <= 1%.
-    evidence: cpp/venues/tests/.../venue_simulator_lob_test.cpp (отсутствует)
+      PR-F20-5: verified unit-тестами venue_simulator_test U1/U2/U4/U10 —
+      VWAP precision (BUY 2.0 → 1.0@101+1.0@102 → 101.5 exact),
+      impact_bps vs mid (~150bps), partial fill (6 of 10), no-overfill
+      (filled == target exactly), sell-side hits bids.
+    evidence: cpp/venues/tests/venue_simulator_test.cpp (U1,U2,U4,U10,sell — ALL PASS)
     blocked_by_ac: [F20-8]
   - id: DoD-5
-    status: not-implemented
+    status: partial
     title: Stale-LOB защита
     description: >
       При lobAge > staleLobThresholdMs VenueSimulator возвращает
       REJECTED, SIM_STALE_LOB; алерт в sim.alerts; реальных ордеров на биржу
       не уходит.
-    evidence: cpp/venues/tests/.../venue_simulator_stale_lob_test.cpp (отсутствует)
+      PR-F20-5: engine-часть реализована + verified (U3: lobAge 5000 >
+      threshold 2000 → REJECTED/SIM_STALE_LOB, никакого fill). Остаётся:
+      эмиссия SimAlert в sim.alerts — это runtime/wiring часть (Phase 4,
+      когда VenueSimulator подключён к Kafka producer).
+    evidence: cpp/venues/tests/venue_simulator_test.cpp (U3_stale — PASS); SimAlert emit pending Phase 4
     blocked_by_ac: [F20-4]
   - id: DoD-6
     status: not-implemented

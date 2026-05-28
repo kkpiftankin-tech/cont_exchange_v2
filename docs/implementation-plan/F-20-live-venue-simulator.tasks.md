@@ -143,39 +143,52 @@ Added to `infra/clickhouse/init.sql`, applied + verified on live CH
 columns plus the SimExecutionAnnotation sidecar columns (no `sim_mode` —
 topic is the discriminator, ADR-015). 90-day TTL, monthly partition.
 
-### Phase 3 — Core simulator
+### Phase 3 — Core simulator — ✅ ENGINE DONE (PR-F20-5)
 
-#### T-F20-301. VenueSimulator skeleton
+Pure engine `cpp/venues/src/app/venue_simulator.{hpp,cpp}` —
+`Simulate(SimulateRequest, SimModels) -> SimulateResult`. Verified by
+`cpp/venues/tests/venue_simulator_test.cpp` (12 cases, ALL PASS on
+ubuntu-dev). Math in double (CLAUDE.md §9, sim-book non-authoritative).
 
-`cpp/venues/src/app/venue_simulator.{cpp,hpp}`. Subscribe to
-`venue.snapshots`, maintain LOB cache keyed by `(venueId, symbol)`,
-expose `SimulateOrder(ChildOrderRequest) -> SimExecutionReport`.
+#### T-F20-301. VenueSimulator engine — ✅ DONE (runtime wiring deferred)
 
-#### T-F20-302. LOB-matching algorithm
+Engine implemented. **Deferred to Phase 4**: the Kafka `venue.snapshots`
+consumer + `(venueId,symbol)` LOB cache, and the real async-delay before
+publish (engine currently SAMPLES latency into the result; the actual
+wait is a runtime concern). `SimulateOrder` takes a `SimulateRequest`
+(snapshot passed in) rather than reading the cache — the cache/consumer
+is the VenueSimRouter integration (DoD-2).
 
-Per spec §4.4. Tests U4 (LEVEL_BY_LEVEL precision) + DoD-4.
+#### T-F20-302. LOB-matching algorithm — ✅ DONE
 
-#### T-F20-303. ImpactModel implementations
+Per spec §4.4. Verified U4 (VWAP 101.5 exact) + U10 (no overfill) + DoD-4.
 
-LINEAR / SQRT / POWER_LAW / LEVEL_BY_LEVEL per spec §1.0 ImpactModel
-section. Tests U5.
+#### T-F20-303. ImpactModel implementations — ✅ DONE
 
-#### T-F20-304. FeeModel + RejectionModel
+LINEAR / SQRT / POWER_LAW / LEVEL_BY_LEVEL. Verified U5 (LINEAR delta).
 
-Tests U6, U7.
+#### T-F20-304. FeeModel + RejectionModel — ✅ DONE
 
-#### T-F20-305. LatencyModel + async-delay publication
+Verified U6 (taker fee) + U7 (random reject). RejectionModel covers
+stale / no-liquidity / random / rate-limit / price-constraint /
+min-liquidity.
 
-Tests U8.
+#### T-F20-305. LatencyModel — ✅ engine DONE (async-delay deferred)
 
-#### T-F20-306. Stale-LOB protection
+FIXED / UNIFORM / LOGNORMAL sampling + timeout→SIM_TIMEOUT. Verified
+U8 (timeout) + U8b (under-timeout) + determinism. The actual async
+wait-before-publish is Phase 4 runtime.
 
-`lobAge > staleLobThresholdMs` → `REJECTED, SIM_STALE_LOB` + `sim.alerts`.
-Tests U3, DoD-5, F20-4.
+#### T-F20-306. Stale-LOB protection — ✅ engine DONE (alert emit deferred)
 
-#### T-F20-307. Overfill guard
+`lobAge > staleLobThresholdMs` → `REJECTED, SIM_STALE_LOB`. Verified U3.
+The `sim.alerts` emission is Phase 4 (engine returns reject_reason; the
+producer wiring publishes the alert).
 
-Trim filledQty to targetQty. Test U10.
+#### T-F20-307. Overfill guard — ✅ DONE
+
+Engine never fills beyond target_qty (caps per-level take at remaining).
+Verified U10.
 
 ### Phase 4 — Router + sessions
 
