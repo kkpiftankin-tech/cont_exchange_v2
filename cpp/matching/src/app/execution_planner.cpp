@@ -31,8 +31,8 @@ const fob::venue::v1::SideLiquidityCurve& SideCurveForIntent(
 }
 
 bool VenueHealthGreen(const fob::venue::v1::VenueHealth& health) {
-  if (health.routing() == fob::venue::v1::ROUTING_RECOMMENDATION_BLOCK) return false;
-  if (health.breaker() == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN) return false;
+  if (health.routing_recommendation() == fob::venue::v1::ROUTING_RECOMMENDATION_BLOCK) return false;
+  if (health.breaker_state() == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN) return false;
   return true;
 }
 
@@ -76,7 +76,10 @@ PlanResult BuildMultiVenuePlan(const PlanRequest& request,
     if (!input.usable) continue;
     if (has_allow_list && allowed.find(input.venue_id) == allowed.end()) continue;
     if (input.health.has_value() && !VenueHealthGreen(*input.health)) continue;
-    if (input.curve.instrument().symbol() != request.symbol) continue;
+    // NOTE: do NOT filter on input.curve.instrument().symbol() — the
+    // snapshot is already symbol-scoped by PlannerInputsCache's CurveKey,
+    // and the embedded curve.instrument may carry the venue-normalized
+    // symbol (e.g. WBTCUSDC on uniswap) rather than the internal symbol.
 
     const double liquidity = MaxQtyOnSide(SideCurveForIntent(input.curve, request.side));
     if (!(liquidity > 0.0)) continue;

@@ -1000,6 +1000,28 @@ void MatchingLoop::run_one_batch() {
     }
     const auto plan = BuildMultiVenuePlan(plan_req);
 
+    // F-12 DoD-2 diagnostic: always log the plan outcome so operators
+    // can see why a fan-out did or didn't happen (candidate count is
+    // the usual surprise — health/liquidity filters narrow venues).
+    {
+      std::string venue_list;
+      for (const auto& a : plan.allocations) {
+        if (!venue_list.empty()) venue_list += ",";
+        venue_list += a.venue_id + ":" + a.qty.to_string();
+      }
+      cex::common::log_json(
+          "INFO", "Multi-venue routing plan computed",
+          {{"batch_id", batch_id},
+           {"hedge_flow_id", intent.hedge_flow_id()},
+           {"symbol", intent.instrument().symbol()},
+           {"planner_inputs", std::to_string(plan_req.planner_inputs.size())},
+           {"allowed_venues_count", std::to_string(plan_req.allowed_venues.size())},
+           {"allocations", std::to_string(plan.allocations.size())},
+           {"feasible", plan.feasible ? "true" : "false"},
+           {"reject_reason", plan.reject_reason},
+           {"venue_split", venue_list}});
+    }
+
     if (plan.feasible && plan.allocations.size() >= 2) {
       auto children = FanOutIntentByPlan(intent, plan);
       ++fanout_expansions;

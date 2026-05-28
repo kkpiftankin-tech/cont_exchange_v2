@@ -213,6 +213,24 @@ if(BUILD_TESTING)
   target_compile_options(matching_planner_inputs_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_planner_inputs_test COMMAND matching_planner_inputs_test)
 
+  # F-12 DoD-2 (PR-F12-15): multi-venue routing planner unit tests.
+  add_executable(matching_execution_planner_test
+    tests/app/execution_planner_test.cpp
+    src/app/execution_planner.cpp
+  )
+
+  target_include_directories(matching_execution_planner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(matching_execution_planner_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(matching_execution_planner_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_execution_planner_test COMMAND matching_execution_planner_test)
+
   add_executable(matching_f04_solver_u1_u10_test
     tests/domain/f04_solver_u1_u10_test.cpp
     src/domain/solver_impl.cpp
