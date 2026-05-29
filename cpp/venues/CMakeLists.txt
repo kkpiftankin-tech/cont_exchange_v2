@@ -451,6 +451,24 @@ if (BUILD_TESTING)
   target_compile_options(venues_sim_config_applier_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_sim_config_applier_test COMMAND venues_sim_config_applier_test)
 
+  # F-20 SimSessionManager application core (Phase 4, DoD-3 / T-F20-401).
+  add_executable(venues_sim_session_manager_test
+    tests/sim_session_manager_test.cpp
+    src/app/sim_session_manager.cpp
+  )
+
+  target_include_directories(venues_sim_session_manager_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_sim_session_manager_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_sim_session_manager_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_sim_session_manager_test COMMAND venues_sim_session_manager_test)
+
   add_executable(venues_amm_pool_extractor_test
     tests/amm_pool_extractor_test.cpp
     src/domain/amm_pool_extractor.cpp

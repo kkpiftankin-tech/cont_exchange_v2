@@ -199,12 +199,31 @@ definitionOfDone:
       E2E через Kafka — pending (DoD-10).
     blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
   - id: DoD-3
-    status: not-implemented
+    status: partial
     title: SimSession Manager реализован
     description: >
       CRUD SimSession через Admin API; persistence в PostgreSQL sim_sessions;
       публикация изменений в Kafka sim.config.
-    evidence: cpp/venues/src/app/sim_session_manager.{cpp,hpp} (отсутствует)
+
+      PR-F20-10 (2026-05-29): ЯДРО приложения реализовано — pure
+      SimSessionManagerUseCases (sim_session_manager.{hpp,cpp}) поверх портов
+      ISimSessionRepository + IMessagePublisher. Create (валидация
+      routing_mode, генерация id, created_at/activated_at, status ACTIVE),
+      Get, List (фильтр по статусу), Update (routing_mode/models/status,
+      ACTIVE<->PAUSED), Complete (COMPLETED + completed_at). Публикует
+      SimConfigEvent в sim.config: UPSERT на create/update, DELETE на
+      complete/terminal — это и есть продюсер, который кормит consumer из
+      PR-F20-8 (замыкает hot-reload контур). 8 unit-кейсов с fake repo +
+      fake publisher.
+
+      Остаётся: PostgresSimSessionRepository (PG sim_sessions CRUD, JSONB
+      models) и транспорт (gRPC SimSessionManager service + REST dual) +
+      wiring в main.cpp/venues_loop (использовать тот же kafka_publisher_ для
+      sim.config) — отдельные PR.
+    evidence: |
+      cpp/venues/src/app/sim_session_manager.{hpp,cpp},
+      cpp/venues/tests/sim_session_manager_test.cpp (8 cases ALL PASS,
+      built+run on ubuntu-dev exit 0). PG repo + gRPC/REST transport pending.
   - id: DoD-4
     status: implemented
     title: Алгоритм LOB-matching корректен

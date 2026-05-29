@@ -192,10 +192,22 @@ Verified U10.
 
 ### Phase 4 — Router + sessions
 
-#### T-F20-401. SimSession Manager
+#### T-F20-401. SimSession Manager — ◐ app core DONE
 
 `cpp/venues/src/app/sim_session_manager.{cpp,hpp}` + `postgres_sim_session_repository.{cpp,hpp}`.
 gRPC + REST endpoints per OpenAPI. Hot reload via Kafka `sim.config` producer.
+
+PR-F20-10 (2026-05-29): application core `SimSessionManagerUseCases` over ports
+`ISimSessionRepository` + `IMessagePublisher` — Create (validate routing_mode,
+assign id/timestamps, ACTIVE), Get, List (status filter), Update
+(routing_mode/models/status, ACTIVE↔PAUSED), Complete. Emits the `sim.config`
+SimConfigEvent (UPSERT on create/update, DELETE on complete/terminal) — the
+**producer** that feeds the PR-F20-8 consumer, closing the hot-reload loop.
+8-case unit suite (fake repo + fake publisher) ALL PASS on ubuntu-dev (exit 0).
+
+**Deferred**: `PostgresSimSessionRepository` (PG `sim_sessions` CRUD, JSONB
+models) and transport (gRPC `SimSessionManager` service + REST dual) + wiring
+in main.cpp / venues_loop (reuse `kafka_publisher_` for `sim.config`).
 
 #### T-F20-402. VenueSimRouter — ✅ decision core DONE (wiring deferred)
 
