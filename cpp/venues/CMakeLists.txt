@@ -53,6 +53,9 @@ add_executable(venues
   src/infra/postgres_venue_config_repository.cpp
   src/infra/postgres_hedgeflow_repository.cpp
   src/infra/postgres_child_order_repository.cpp
+  src/infra/sim_session_pg_codec.cpp
+  src/infra/postgres_sim_session_repository.cpp
+  src/app/sim_session_manager.cpp
   src/domain/depth_canonicalizer.cpp
   src/domain/depth_curve_builder.cpp
   src/domain/normalize_snapshot.cpp
@@ -468,6 +471,24 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_sim_session_manager_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_sim_session_manager_test COMMAND venues_sim_session_manager_test)
+
+  # F-20 sim_session PG codec (enum<->TEXT, model<->JSONB). Pure, no libpqxx.
+  add_executable(venues_sim_session_pg_codec_test
+    tests/sim_session_pg_codec_test.cpp
+    src/infra/sim_session_pg_codec.cpp
+  )
+
+  target_include_directories(venues_sim_session_pg_codec_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_sim_session_pg_codec_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_sim_session_pg_codec_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_sim_session_pg_codec_test COMMAND venues_sim_session_pg_codec_test)
 
   add_executable(venues_amm_pool_extractor_test
     tests/amm_pool_extractor_test.cpp

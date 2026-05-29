@@ -205,9 +205,17 @@ SimConfigEvent (UPSERT on create/update, DELETE on complete/terminal) — the
 **producer** that feeds the PR-F20-8 consumer, closing the hot-reload loop.
 8-case unit suite (fake repo + fake publisher) ALL PASS on ubuntu-dev (exit 0).
 
-**Deferred**: `PostgresSimSessionRepository` (PG `sim_sessions` CRUD, JSONB
-models) and transport (gRPC `SimSessionManager` service + REST dual) + wiring
-in main.cpp / venues_loop (reuse `kafka_publisher_` for `sim.config`).
+PR-F20-11 (2026-05-29): `PostgresSimSessionRepository`
+(`postgres_sim_session_repository.{hpp,cpp}`) implements the
+`ISimSessionRepository` port via libpqxx (guarded `CEX_VENUES_HAS_LIBPQXX`):
+EnsureSchema + Upsert (ON CONFLICT DO UPDATE) + Get + List (status filter,
+limit). Enum↔TEXT and model↔JSONB via pure `sim_session_pg_codec`
+(protobuf JSON util; 6-case round-trip test); scope as TEXT[]; timestamps as
+epoch. Compile-verified in the full venues binary.
+
+**Deferred**: transport (gRPC `SimSessionManager` service + REST dual) + wiring
+in main.cpp / venues_loop (instantiate manager with repo + `kafka_publisher_`
+for `sim.config`; call EnsureSchema at startup).
 
 #### T-F20-402. VenueSimRouter — ✅ decision core DONE (wiring deferred)
 
