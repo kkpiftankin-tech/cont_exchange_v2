@@ -37,6 +37,9 @@ add_executable(venues
   src/app/venues_loop.cpp
   src/app/sim_session_registry.cpp
   src/app/sim_config_applier.cpp
+  src/app/venue_sim_router.cpp
+  src/app/venue_simulator.cpp
+  src/app/sim_execution_assembler.cpp
   src/app/liquidity_curve_producer.cpp
   src/infra/simulated_venue_adapter.cpp
   src/infra/venue_sim_adapter.cpp

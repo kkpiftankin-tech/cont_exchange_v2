@@ -173,18 +173,30 @@ definitionOfDone:
       execution fork. Топики sim.* добавлены в create_topics.sh. Эффект
       read-only — боевой LIVE-путь не затронут.
 
-      Остаётся (PR-F20-9 execution fork): вызов VenueSimRouter.Decide +
-      SimExecutionAssembler в exec-пути, async-delay (latency_sample_ms),
-      publish report в sim.execution.venue + annotation в
-      sim.execution.annotations, SHADOW dual-send, SimAlert эмиссия.
+      PR-F20-9 (2026-05-28): EXECUTION FORK подключён в exec_consume_loop —
+      sim_router_.Decide(venue, symbol) перед persist; SIM_ONLY → ранний
+      выход (только симуляция, без живых EVC/PG/execution.venue); SHADOW →
+      живой путь + PublishSimExecution; LIVE_ONLY/нет сессии → без изменений.
+      PublishSimExecution берёт LOB из last_snapshots_, применяет capped
+      sampled-задержку (VENUES_SIM_MAX_DELAY_MS), публикует report в
+      sim.execution.venue и annotation в sim.execution.annotations.
+      Безопасно по умолчанию: пустой реестр → LIVE_ONLY (поведение venues
+      без активных sim-сессий не меняется).
+
+      Остаётся: E2E-проверка через Kafka (AC F20-1/2/7/11/12, DoD-10) —
+      текущая верификация COMPILE-ONLY (full venues binary build); эмиссия
+      SimAlert (DoD-5).
     evidence: |
       cpp/venues/src/app/venue_sim_router.{hpp,cpp},
       cpp/venues/src/app/sim_session_registry.{hpp,cpp},
       cpp/venues/src/app/sim_config_applier.{hpp,cpp} + sim.config consume
       loop в venues_loop.cpp,
-      cpp/venues/tests/venue_sim_router_test.cpp (12 cases) +
-      sim_config_applier_test.cpp (7 cases) ALL PASS; full venues binary
-      builds (ubuntu-dev exit 0).
+      cpp/venues/src/app/sim_execution_assembler.{hpp,cpp} + SIM/SHADOW fork
+      (PublishSimExecution) в venues_loop.cpp exec_consume_loop,
+      cpp/venues/tests/venue_sim_router_test.cpp (12) +
+      sim_config_applier_test.cpp (7) + sim_execution_assembler_test.cpp (5)
+      ALL PASS; full venues binary builds with the fork (ubuntu-dev exit 0).
+      E2E через Kafka — pending (DoD-10).
     blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
   - id: DoD-3
     status: not-implemented
@@ -241,13 +253,19 @@ definitionOfDone:
       lob_snapshot_id, lob_age_ms, impact_bps, latency_sample_ms).
       execution.proto НЕ изменён.
 
-      Остаётся (следующий wiring PR): Kafka producers — publish report в
-      sim.execution.venue и annotation в sim.execution.annotations, +
-      async-delay (latency_sample_ms) перед публикацией.
+      PR-F20-9 (2026-05-28): ПУБЛИКАЦИЯ подключена — PublishSimExecution в
+      venues_loop публикует report в sim.execution.venue (key=hedge_flow_id)
+      и annotation в sim.execution.annotations (key=report_id) через
+      kafka_publisher_, с capped async-delay (latency_sample_ms,
+      VENUES_SIM_MAX_DELAY_MS) перед публикацией.
+
+      Остаётся: E2E-проверка через Kafka (DoD-10) — верификация COMPILE-ONLY.
     evidence: |
-      cpp/venues/src/app/sim_execution_assembler.{hpp,cpp},
-      cpp/venues/tests/sim_execution_assembler_test.cpp (5 cases ALL PASS,
-      built+run on ubuntu-dev exit 0). execution.proto не трогается.
+      cpp/venues/src/app/sim_execution_assembler.{hpp,cpp} +
+      PublishSimExecution в venues_loop.cpp,
+      cpp/venues/tests/sim_execution_assembler_test.cpp (5 cases ALL PASS);
+      full venues binary builds with the fork (ubuntu-dev exit 0).
+      execution.proto не трогается.
   - id: DoD-7
     status: not-implemented
     title: Settlement Ledger sim-book consumer на sim.execution.venue

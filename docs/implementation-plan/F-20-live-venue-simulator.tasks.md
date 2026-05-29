@@ -219,7 +219,7 @@ earliest-offset, идемпотентный replay) наполняет `SimSessi
 `sim.execution.venue` / `sim.execution.annotations`, SimAlert emission. Tests
 F20-1, F20-2, F20-7, F20-11, F20-12 (E2E) land with that PR.
 
-#### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter — ◐ data-plane core DONE
+#### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter — ◐ fork wired (compile-only)
 
 Replace direct EVC call with `VenueSimRouter.Route(ChildOrderRequest)`.
 Backward-compatible default: when no SimSession active for
@@ -232,10 +232,19 @@ Runs VenueSimulator and builds the sim ExecutionReport (identical LIVE
 contract, ADR-015; F-12 correlation fields carried) + the annotation sidecar
 (report_id-correlated). 5-case unit suite ALL PASS on ubuntu-dev (exit 0).
 
-**Deferred to wiring PR**: instantiate router+assembler in `venues_loop`,
-SIM/SHADOW fork off `ExecuteOnVenue`, Kafka producers for
-`sim.execution.venue` + `sim.execution.annotations`, async latency delay,
-`sim.config` consumer feeding the registry, SimAlert emission.
+PR-F20-9 (2026-05-28): SIM/SHADOW fork wired into `exec_consume_loop`.
+`sim_router_` + `sim_assembler_` are VenuesLoop members; `Decide(venue,symbol)`
+runs before persist. SIM_ONLY → early return (sim only, no live EVC/PG/
+execution.venue); SHADOW → live path + `PublishSimExecution`; LIVE_ONLY/no
+session → unchanged (safe by default). `PublishSimExecution` reads the cached
+LOB (`last_snapshots_`), applies the capped sampled latency delay
+(`VENUES_SIM_MAX_DELAY_MS`), and publishes report → `sim.execution.venue` +
+annotation → `sim.execution.annotations` via `kafka_publisher_`. Full venues
+binary builds with the fork (ubuntu-dev exit 0).
+
+**Deferred**: E2E verification through Kafka (publish→`sim.execution.venue`,
+AC F20-1/2/7/11/12, DoD-10) — current verification is COMPILE-ONLY; SimAlert
+emission to `sim.alerts` (DoD-5).
 
 ### Phase 5 — Downstream extensions
 

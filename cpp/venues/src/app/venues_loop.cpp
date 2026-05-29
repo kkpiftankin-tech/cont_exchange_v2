@@ -3,6 +3,8 @@
 #include "app/sim_config_applier.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <thread>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -29,6 +31,16 @@
 namespace cex::venues::app {
 
 using cex::common::Decimal;
+
+namespace {
+// F-20 — symbol used for sim-routing scope match; same canonical form the
+// SimExecutionAssembler uses (symbol, else base/quote).
+std::string RoutingSymbol(const fob::common::v1::Instrument& i) {
+  if (!i.symbol().empty()) return i.symbol();
+  if (!i.base().empty() && !i.quote().empty()) return i.base() + "/" + i.quote();
+  return i.symbol();
+}
+}  // namespace
 
 namespace {
 
@@ -1237,6 +1249,73 @@ void VenuesLoop::sim_config_consume_loop() {
   cex::common::log_json("INFO", "Venues sim.config consumer loop stopped");
 }
 
+void VenuesLoop::PublishSimExecution(
+    const fob::execution::v1::ExecutionIntent& intent,
+    const RouteDecision& decision) {
+  // Cached live LOB for the venue. nullptr -> the engine rejects with
+  // SIM_NO_LIQUIDITY (no crash), which is the correct outcome (cannot
+  // simulate without a book).
+  std::optional<fob::venue::v1::VenueSnapshot> snap =
+      GetLastVenueSnapshot(intent.venue());
+  uint32_t lob_age_ms = 0;
+  if (snap.has_value()) {
+    const auto now = cex::common::now_ts();
+    const int64_t now_ms =
+        static_cast<int64_t>(now.seconds()) * 1000 + now.nanos() / 1000000;
+    const auto& ts = snap->meta().ts_event();
+    const int64_t snap_ms =
+        static_cast<int64_t>(ts.seconds()) * 1000 + ts.nanos() / 1000000;
+    if (now_ms > snap_ms) {
+      lob_age_ms = static_cast<uint32_t>(
+          std::min<int64_t>(now_ms - snap_ms, 0xFFFFFFFF));
+    }
+  }
+
+  SimExecutionInputs inputs;
+  inputs.intent = intent;
+  inputs.snapshot = snap.has_value() ? &*snap : nullptr;
+  inputs.lob_age_ms = lob_age_ms;
+  const std::string& seed_key = intent.client_order_id().empty()
+                                    ? intent.intent_id()
+                                    : intent.client_order_id();
+  inputs.rng_seed = static_cast<uint64_t>(std::hash<std::string>{}(seed_key));
+
+  const SimExecutionOutput out = sim_assembler_.Assemble(inputs, decision);
+
+  // Async venue latency: apply the sampled delay before publishing, capped to
+  // avoid pathologically blocking the single exec consumer thread. MVP
+  // simplification — a production impl would use a delayed-publish queue.
+  const uint32_t cap_ms = static_cast<uint32_t>(
+      std::max(0, cex::common::Env::get_int("VENUES_SIM_MAX_DELAY_MS", 1000)));
+  const uint32_t delay_ms = std::min(out.annotation.latency_sample_ms(), cap_ms);
+  if (delay_ms > 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+  }
+
+  if (kafka_publisher_ != nullptr) {
+    const std::string key = intent.hedge_flow_id().empty()
+                                ? intent.intent_id()
+                                : intent.hedge_flow_id();
+    (void)kafka_publisher_->Publish("sim.execution.venue", key,
+                                    cex::common::to_bytes(out.report));
+    (void)kafka_publisher_->Publish("sim.execution.annotations",
+                                    out.report.report_id(),
+                                    cex::common::to_bytes(out.annotation));
+  }
+
+  cex::common::log_json(
+      "INFO", "Produced sim execution report",
+      {{"service", "venues"},
+       {"component", "venue_sim_router"},
+       {"stage", "publish_sim_execution"},
+       {"topic", "sim.execution.venue"},
+       {"intent_id", intent.intent_id()},
+       {"sim_session_id", decision.sim_session_id},
+       {"report_id", out.report.report_id()},
+       {"status", std::to_string(static_cast<int>(out.report.status()))},
+       {"applied_latency_ms", std::to_string(delay_ms)}});
+}
+
 void VenuesLoop::connect_and_subscribe_defaults() {
   std::lock_guard<std::mutex> lock(runtime_mu_);
   for (auto& adapter : adapters_) {
@@ -1632,6 +1711,18 @@ void VenuesLoop::exec_consume_loop() {
           "inbound",
           intent.intent_id());
 
+      // F-20 Phase 4 — SIM/SHADOW routing decision. With no active SimSession
+      // governing this (venue, instrument) the registry resolves to LIVE_ONLY,
+      // so this is a no-op for the existing live path (opt-in by construction).
+      const RouteDecision sim_decision =
+          sim_router_.Decide(intent.venue(), RoutingSymbol(intent.instrument()));
+      if (sim_decision.mode == fob::sim::v1::ROUTING_MODE_SIM_ONLY) {
+        // Simulate only: no real EVC call, no live PG writes, nothing on
+        // execution.venue. The sim report goes to the isolated sim.* topics.
+        PublishSimExecution(intent, sim_decision);
+        return;
+      }
+
       // F-12 / IN-008 DoD-4 (PR-F12-3a): persist HedgeFlow + ChildOrder
       // BEFORE execution starts so PG reflects what venues is about to do
       // even if the adapter call hangs. Idempotent (ON CONFLICT DO NOTHING).
@@ -1748,6 +1839,13 @@ void VenuesLoop::exec_consume_loop() {
             "Execution report post-processing threw unknown exception",
             {{"intent_id", intent.intent_id()},
              {"venue", rep.venue().empty() ? venue_for_event : rep.venue()}});
+      }
+
+      // F-20 SHADOW — after the LIVE send completed above, also run the
+      // simulation and publish to the isolated sim.* topics (paired with the
+      // LIVE report by client_order_id for the Divergence Service).
+      if (sim_decision.mode == fob::sim::v1::ROUTING_MODE_SHADOW) {
+        PublishSimExecution(intent, sim_decision);
       }
     });
 
