@@ -192,7 +192,7 @@ Verified U10.
 
 ### Phase 4 — Router + sessions
 
-#### T-F20-401. SimSession Manager — ◐ app core DONE
+#### T-F20-401. SimSession Manager — ◐ all layers code-complete (compile-only)
 
 `cpp/venues/src/app/sim_session_manager.{cpp,hpp}` + `postgres_sim_session_repository.{cpp,hpp}`.
 gRPC + REST endpoints per OpenAPI. Hot reload via Kafka `sim.config` producer.
@@ -213,9 +213,18 @@ limit). Enum↔TEXT and model↔JSONB via pure `sim_session_pg_codec`
 (protobuf JSON util; 6-case round-trip test); scope as TEXT[]; timestamps as
 epoch. Compile-verified in the full venues binary.
 
-**Deferred**: transport (gRPC `SimSessionManager` service + REST dual) + wiring
-in main.cpp / venues_loop (instantiate manager with repo + `kafka_publisher_`
-for `sim.config`; call EnsureSchema at startup).
+PR-F20-12 (2026-05-29): REST Admin API (Crow, dual of the gRPC service) in
+main.cpp — GET/POST `/admin/v1/sim-sessions`, GET/PUT/PATCH
+`/admin/v1/sim-sessions/{id}`, POST `/admin/v1/sim-sessions/{id}/complete`.
+JSON↔proto via protobuf JSON util. main instantiates
+`PostgresSimSessionRepository` (EnsureSchema at startup) + a dedicated
+`KafkaProducer`→`KafkaMessagePublisher` for `sim.config` +
+`SimSessionManagerUseCases`; 503 when no `VENUES_POSTGRES_DSN`. Full venues
+binary builds.
+
+**Deferred**: runtime E2E (HTTP→PG→Kafka→router; DoD-10) — transport/PG path is
+COMPILE-ONLY; the gRPC service proper (beyond the REST dual) is an optional
+follow-up.
 
 #### T-F20-402. VenueSimRouter — ✅ decision core DONE (wiring deferred)
 

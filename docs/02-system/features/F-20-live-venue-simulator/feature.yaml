@@ -226,12 +226,25 @@ definitionOfDone:
       TEXT[]; timestamps — epoch via to_timestamp/EXTRACT. Codec round-trip
       покрыт 6 unit-кейсами.
 
-      Остаётся: транспорт (gRPC SimSessionManager service + REST dual) + wiring
-      в main.cpp/venues_loop (инстанцировать manager с repo + kafka_publisher_
-      для sim.config; вызвать EnsureSchema на старте) — отдельный PR.
+      PR-F20-12 (2026-05-29): ТРАНСПОРТ + wiring — REST Admin API через Crow
+      (дуал gRPC-сервиса SimSessionManager) в main.cpp: GET /admin/v1/sim-
+      sessions (?status=&limit=), GET /admin/v1/sim-sessions/{id}, POST
+      /admin/v1/sim-sessions (create), PUT|PATCH /admin/v1/sim-sessions/{id}
+      (update), POST /admin/v1/sim-sessions/{id}/complete. JSON↔proto через
+      protobuf JSON util (proto3 camelCase). main инстанцирует
+      PostgresSimSessionRepository (EnsureSchema на старте) + выделенный
+      KafkaProducer→KafkaMessagePublisher для sim.config + SimSessionManagerUseCases;
+      без VENUES_POSTGRES_DSN Admin API отдаёт 503. Каждый мутирующий вызов
+      публикует sim.config → hot-reload роутера в этом же процессе.
+
+      Все слои DoD-3 присутствуют (app core unit-tested; PG + REST транспорт
+      compile-verified). Остаётся: runtime E2E (HTTP→PG→Kafka→router, DoD-10) —
+      верификация транспорта/PG пока COMPILE-ONLY; gRPC-сервис (помимо
+      реализованного REST-дуала) — опциональный follow-up.
     evidence: |
       cpp/venues/src/app/sim_session_manager.{hpp,cpp} (8 cases),
       cpp/venues/src/infra/sim_session_pg_codec.{hpp,cpp} (6 cases),
+      cpp/venues/src/main.cpp REST routes /admin/v1/sim-sessions/*,
       cpp/venues/src/infra/postgres_sim_session_repository.{hpp,cpp} (libpqxx,
       compile-verified in full venues binary, ubuntu-dev exit 0).
       gRPC/REST transport + main wiring pending.

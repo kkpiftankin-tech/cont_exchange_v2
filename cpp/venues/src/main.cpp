@@ -3,10 +3,16 @@
 #include "cex/common/decimal.hpp"
 
 #include "app/venues_loop.hpp"
+#include "app/sim_session_manager.hpp"
 #include "infra/postgres_child_order_repository.hpp"
 #include "infra/postgres_hedgeflow_repository.hpp"
+#include "infra/postgres_sim_session_repository.hpp"
 #include "infra/postgres_venue_config_repository.hpp"
+#include "infra/sim_session_pg_codec.hpp"
+#include "infra/kafka_message_publisher.hpp"
 #include "infra/snapshot_clickhouse_writer.hpp"
+#include "cex/common/kafka.hpp"
+#include "google/protobuf/util/json_util.h"
 #include "crow.h"
 
 #include <chrono>
@@ -112,6 +118,33 @@ int main() {
                           "F-12 PG repositories attached",
                           {{"hedgeflow_repo", "ready"},
                            {"child_order_repo", "ready"}});
+  }
+
+  // F-20 DoD-3 — SimSession Manager. PG persistence (sim_sessions) + a
+  // sim.config producer; that is the same topic VenuesLoop's sim.config
+  // consumer drains, so Create/Update/Complete hot-reload the in-process
+  // VenueSimRouter (and any other venues instance). The Admin API degrades
+  // to 503 when no PG DSN is configured.
+  std::unique_ptr<cex::venues::infra::PostgresSimSessionRepository> sim_session_repo;
+  std::unique_ptr<cex::common::KafkaProducer> sim_config_producer;
+  std::unique_ptr<cex::venues::infra::KafkaMessagePublisher> sim_config_publisher;
+  std::unique_ptr<cex::venues::app::SimSessionManagerUseCases> sim_mgr;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    sim_session_repo =
+        std::make_unique<cex::venues::infra::PostgresSimSessionRepository>(
+            *venues_postgres_dsn);
+    if (!sim_session_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure sim_sessions schema");
+    }
+    sim_config_producer = std::make_unique<cex::common::KafkaProducer>(
+        cex::common::KafkaConfig{.brokers = brokers,
+                                 .client_id = "venues_sim_config_mgr"});
+    sim_config_publisher =
+        std::make_unique<cex::venues::infra::KafkaMessagePublisher>(
+            sim_config_producer.get());
+    sim_mgr = std::make_unique<cex::venues::app::SimSessionManagerUseCases>(
+        *sim_session_repo, *sim_config_publisher);
+    cex::common::log_json("INFO", "F-20 SimSession Manager attached", {});
   }
 
   const auto admin_port = static_cast<uint16_t>(
@@ -933,6 +966,93 @@ int main() {
         out["count"] = items.size();
         return crow::response(200, out);
       });
+
+  // F-20 DoD-3 — SimSession Manager Admin API (REST dual of the gRPC
+  // SimSessionManager service). JSON <-> proto via protobuf JSON util
+  // (proto3 camelCase). Each mutating call publishes a sim.config event that
+  // hot-reloads the router.
+  auto sim_msg_to_json = [](const google::protobuf::Message& msg) {
+    std::string out;
+    google::protobuf::util::JsonPrintOptions opt;
+    opt.add_whitespace = true;
+    (void)google::protobuf::util::MessageToJsonString(msg, &out, opt);
+    return out;
+  };
+  auto sim_json_to_msg = [](const std::string& body,
+                            google::protobuf::Message* msg) {
+    google::protobuf::util::JsonParseOptions opt;
+    opt.ignore_unknown_fields = true;
+    return google::protobuf::util::JsonStringToMessage(body, msg, opt).ok();
+  };
+  auto sim_json_response = [&sim_msg_to_json](
+                               const cex::venues::app::SimSessionResult& r) {
+    if (r.ok) {
+      crow::response resp(200, sim_msg_to_json(r.session));
+      resp.set_header("Content-Type", "application/json");
+      return resp;
+    }
+    const int code = r.error_code == "NOT_FOUND"          ? 404
+                     : r.error_code == "INVALID_ARGUMENT" ? 400
+                                                          : 500;
+    return crow::response(code, r.error_message);
+  };
+
+  CROW_ROUTE(admin, "/admin/v1/sim-sessions").methods(crow::HTTPMethod::Get)(
+      [&sim_mgr, &sim_msg_to_json](const crow::request& req) {
+        if (!sim_mgr) return crow::response(503, "sim session manager unavailable");
+        fob::sim::v1::ListSimSessionsRequest lreq;
+        const char* status = req.url_params.get("status");
+        if (status != nullptr) {
+          lreq.set_status(cex::venues::infra::SimStatusFromText(status));
+        }
+        const char* limit = req.url_params.get("limit");
+        if (limit != nullptr) {
+          lreq.set_limit(static_cast<uint32_t>(std::max(0, std::atoi(limit))));
+        }
+        crow::response resp(200, sim_msg_to_json(sim_mgr->List(lreq)));
+        resp.set_header("Content-Type", "application/json");
+        return resp;
+      });
+
+  CROW_ROUTE(admin, "/admin/v1/sim-sessions/<string>").methods(crow::HTTPMethod::Get)(
+      [&sim_mgr, &sim_json_response](const std::string& id) {
+        if (!sim_mgr) return crow::response(503, "sim session manager unavailable");
+        fob::sim::v1::GetSimSessionRequest greq;
+        greq.set_sim_session_id(id);
+        return sim_json_response(sim_mgr->Get(greq));
+      });
+
+  CROW_ROUTE(admin, "/admin/v1/sim-sessions").methods(crow::HTTPMethod::Post)(
+      [&sim_mgr, &sim_json_to_msg, &sim_json_response](const crow::request& req) {
+        if (!sim_mgr) return crow::response(503, "sim session manager unavailable");
+        fob::sim::v1::CreateSimSessionRequest creq;
+        if (!sim_json_to_msg(req.body, creq.mutable_session())) {
+          return crow::response(400, "invalid sim session json");
+        }
+        return sim_json_response(sim_mgr->Create(creq));
+      });
+
+  CROW_ROUTE(admin, "/admin/v1/sim-sessions/<string>")
+      .methods(crow::HTTPMethod::Put, crow::HTTPMethod::Patch)(
+          [&sim_mgr, &sim_json_to_msg, &sim_json_response](
+              const crow::request& req, const std::string& id) {
+            if (!sim_mgr) return crow::response(503, "sim session manager unavailable");
+            fob::sim::v1::UpdateSimSessionRequest ureq;
+            if (!req.body.empty() && !sim_json_to_msg(req.body, &ureq)) {
+              return crow::response(400, "invalid update json");
+            }
+            ureq.set_sim_session_id(id);  // path is authoritative
+            return sim_json_response(sim_mgr->Update(ureq));
+          });
+
+  CROW_ROUTE(admin, "/admin/v1/sim-sessions/<string>/complete")
+      .methods(crow::HTTPMethod::Post)(
+          [&sim_mgr, &sim_json_response](const std::string& id) {
+            if (!sim_mgr) return crow::response(503, "sim session manager unavailable");
+            fob::sim::v1::CompleteSimSessionRequest creq;
+            creq.set_sim_session_id(id);
+            return sim_json_response(sim_mgr->Complete(creq));
+          });
 
   std::thread admin_thread([&admin, admin_port] {
     cex::common::log_json("INFO", "Venues admin API listening",
