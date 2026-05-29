@@ -1,5 +1,7 @@
 #include "app/venues_loop.hpp"
 
+#include "app/sim_config_applier.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -1170,12 +1172,69 @@ void VenuesLoop::start() {
   connect_and_subscribe_defaults();
   t_md_ = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
+  t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
 }
 
 void VenuesLoop::stop() {
   running_.store(false);
   if (t_md_.joinable()) t_md_.join();
   if (t_exec_.joinable()) t_exec_.join();
+  if (t_sim_config_.joinable()) t_sim_config_.join();
+}
+
+// F-20 Phase 4 — consume `sim.config` (SimConfigEvent) and apply each to the
+// in-memory SimSessionRegistry for hot reload. Read-only side effect: only the
+// registry changes; existing LIVE flows are untouched until the router fork
+// (next wiring step) reads it. auto_offset_reset defaults to "earliest" so a
+// restarted consumer replays the config stream and rebuilds the registry
+// (UPSERT/DELETE are idempotent and order-stable).
+void VenuesLoop::sim_config_consume_loop() {
+  const std::string group = cex::common::Env::get_string(
+      "VENUES_SIM_CONFIG_CONSUMER_GROUP", "venues_sim_config");
+  cex::common::log_json("INFO", "Venues sim.config consumer loop starting",
+                        {{"group_id", group}, {"topic", "sim.config"}});
+  cex::common::KafkaConsumer consumer(
+      {.brokers = brokers_,
+       .group_id = group,
+       .client_id = "venues_sim_config",
+       .enable_auto_commit = false,
+       .auto_offset_reset = cex::common::Env::get_string(
+           "VENUES_SIM_CONFIG_AUTO_OFFSET_RESET", "earliest")});
+  if (!consumer.subscribe({"sim.config"})) {
+    cex::common::log_json("ERROR", "Venues sim.config consumer subscribe failed");
+    return;
+  }
+
+  while (running_.load()) {
+    bool ok = consumer.poll_once(
+        500, [this](const std::string& topic, const std::string& key,
+                    const std::string& payload) {
+          (void)topic;
+          (void)key;
+          fob::sim::v1::SimConfigEvent evt;
+          if (!cex::common::from_bytes(payload, evt)) {
+            cex::common::log_json("ERROR", "Failed to parse SimConfigEvent");
+            return;
+          }
+          const SimConfigAction action =
+              ApplySimConfigEvent(evt, sim_session_registry_);
+          cex::common::log_json(
+              "INFO", "Applied sim.config event",
+              {{"service", "venues"},
+               {"component", "venue_sim_router"},
+               {"action", ToString(action)},
+               {"sim_session_id", evt.session().sim_session_id()},
+               {"routing_mode",
+                std::to_string(static_cast<int>(evt.session().routing_mode()))},
+               {"active_sessions",
+                std::to_string(sim_session_registry_.ActiveCount())}});
+        });
+    if (!ok) {
+      cex::common::log_json("ERROR", "Venues sim.config consumer poll error");
+      break;
+    }
+  }
+  cex::common::log_json("INFO", "Venues sim.config consumer loop stopped");
 }
 
 void VenuesLoop::connect_and_subscribe_defaults() {

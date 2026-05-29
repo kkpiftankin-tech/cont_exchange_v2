@@ -207,10 +207,17 @@ store, `Resolve` with scope-match (empty=wildcard), ACTIVE filter,
 deterministic `activated_at`-desc tie-break. 12-case unit suite
 `venue_sim_router_test.cpp` ALL PASS on ubuntu-dev (exit 0).
 
-**Deferred to next wiring PR**: `sim.config` Kafka consumer feeding the
-registry (hot reload — currently programmatic only), SHADOW execution fork,
-async-delay + publish. Test F20-1, F20-2, F20-7, F20-11, F20-12 (E2E) land
-with the wiring PR.
+PR-F20-8 (2026-05-28): hot-reload feeder подключён —
+`sim_config_applier.{hpp,cpp}` (pure `ApplySimConfigEvent`, 7 unit-кейсов) +
+`sim.config` consume loop в `venues_loop.cpp` (поток `t_sim_config_`,
+earliest-offset, идемпотентный replay) наполняет `SimSessionRegistry`.
+Аксессор `VenuesLoop::sim_session_registry()` готов для router fork.
+`sim.*` топики добавлены в `create_topics.sh`.
+
+**Deferred to PR-F20-9 (execution fork)**: SHADOW/SIM fork off the exec path
+(`VenueSimRouter.Decide` + `SimExecutionAssembler`), async-delay + publish to
+`sim.execution.venue` / `sim.execution.annotations`, SimAlert emission. Tests
+F20-1, F20-2, F20-7, F20-11, F20-12 (E2E) land with that PR.
 
 #### T-F20-403. Wire VenueSimRouter into Venue Execution Adapter — ◐ data-plane core DONE
 

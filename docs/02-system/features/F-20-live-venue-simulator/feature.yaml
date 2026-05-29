@@ -165,16 +165,26 @@ definitionOfDone:
       (activated_at desc, затем sim_session_id). RouteDecision несёт
       SimModels + staleLobThreshold + partialFillMode для VenueSimulator.
 
-      Остаётся (следующий wiring PR): hot reload из Kafka sim.config
-      consumer (сейчас registry наполняется только программно — будущий
-      consumer/gRPC SimSessionManager), execution fork (вызов
-      VenueSimulator, async-delay, publish в sim.execution.venue +
-      SimExecutionAnnotation), SimAlert эмиссия.
+      PR-F20-8 (2026-05-28): HOT RELOAD подключён — sim.config consumer в
+      VenuesLoop (отдельный поток t_sim_config_, earliest-offset,
+      идемпотентный replay) применяет SimConfigEvent к SimSessionRegistry
+      через pure ApplySimConfigEvent (sim_config_applier.{hpp,cpp}, 7 unit-
+      кейсов). Аксессор VenuesLoop::sim_session_registry() готов для
+      execution fork. Топики sim.* добавлены в create_topics.sh. Эффект
+      read-only — боевой LIVE-путь не затронут.
+
+      Остаётся (PR-F20-9 execution fork): вызов VenueSimRouter.Decide +
+      SimExecutionAssembler в exec-пути, async-delay (latency_sample_ms),
+      publish report в sim.execution.venue + annotation в
+      sim.execution.annotations, SHADOW dual-send, SimAlert эмиссия.
     evidence: |
       cpp/venues/src/app/venue_sim_router.{hpp,cpp},
       cpp/venues/src/app/sim_session_registry.{hpp,cpp},
-      cpp/venues/tests/venue_sim_router_test.cpp (12 cases ALL PASS,
-      built+run on ubuntu-dev exit 0).
+      cpp/venues/src/app/sim_config_applier.{hpp,cpp} + sim.config consume
+      loop в venues_loop.cpp,
+      cpp/venues/tests/venue_sim_router_test.cpp (12 cases) +
+      sim_config_applier_test.cpp (7 cases) ALL PASS; full venues binary
+      builds (ubuntu-dev exit 0).
     blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
   - id: DoD-3
     status: not-implemented

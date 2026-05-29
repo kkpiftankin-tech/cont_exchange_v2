@@ -35,6 +35,8 @@ add_executable(venues
   src/app/backtest_parity_check.cpp
   src/app/backtest_synthetic_scenarios.cpp
   src/app/venues_loop.cpp
+  src/app/sim_session_registry.cpp
+  src/app/sim_config_applier.cpp
   src/app/liquidity_curve_producer.cpp
   src/infra/simulated_venue_adapter.cpp
   src/infra/venue_sim_adapter.cpp
@@ -426,6 +428,25 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_sim_execution_assembler_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_sim_execution_assembler_test COMMAND venues_sim_execution_assembler_test)
+
+  # F-20 sim.config applier (Phase 4 hot-reload core, T-F20-401).
+  add_executable(venues_sim_config_applier_test
+    tests/sim_config_applier_test.cpp
+    src/app/sim_config_applier.cpp
+    src/app/sim_session_registry.cpp
+  )
+
+  target_include_directories(venues_sim_config_applier_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_sim_config_applier_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_sim_config_applier_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_sim_config_applier_test COMMAND venues_sim_config_applier_test)
 
   add_executable(venues_amm_pool_extractor_test
     tests/amm_pool_extractor_test.cpp

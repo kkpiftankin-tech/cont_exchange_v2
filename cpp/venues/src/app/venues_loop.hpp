@@ -13,6 +13,7 @@
 
 #include "app/execute_on_venue.hpp"
 #include "app/liquidity_curve_producer.hpp"
+#include "app/sim_session_registry.hpp"
 #include "app/snapshot_producer.hpp"
 #include "cex/common/kafka.hpp"
 #include "domain/venue_adapter.hpp"
@@ -101,9 +102,15 @@ class VenuesLoop {
     child_order_repo_ = repo;
   }
 
+  // F-20 Phase 4 — live registry of active SimSessions, populated by the
+  // sim.config consume loop (hot reload). Exposed so the VenueSimRouter
+  // (next wiring step) can read routing decisions from it.
+  SimSessionRegistry& sim_session_registry() { return sim_session_registry_; }
+
  private:
   void md_publish_loop();
   void exec_consume_loop();
+  void sim_config_consume_loop();
   void connect_and_subscribe_defaults();
   domain::VenueAdapter* find_adapter(const std::string& venue_id);
   void reload_producers_locked();
@@ -124,6 +131,7 @@ class VenuesLoop {
   std::unique_ptr<SnapshotProducer> snapshot_producer_;
   std::unique_ptr<LiquidityCurveProducer> liquidity_curve_producer_;
   ExecuteOnVenue execute_on_venue_;
+  SimSessionRegistry sim_session_registry_;
   SnapshotProducerConfig snapshot_config_{};
   LiquidityCurveProducerConfig curve_config_{};
   domain::VenueSubscription default_subscription_{};
@@ -147,6 +155,7 @@ class VenuesLoop {
   std::atomic<bool> running_{false};
   std::thread t_md_;
   std::thread t_exec_;
+  std::thread t_sim_config_;
 };
 
 }  // namespace cex::venues::app

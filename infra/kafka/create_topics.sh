@@ -69,6 +69,13 @@ create_topic venue.snapshots "$(retention_for_topic venue.snapshots 3600000)" # 
 create_topic replay.commands "$(retention_for_topic replay.commands 604800000)"
 create_topic replay.results "$(retention_for_topic replay.results 604800000)"
 
+# F-20 Live Venue Simulator. Strict isolation from live execution (ADR-015):
+# sim ExecutionReports never share the live execution.venue topic.
+create_topic sim.config "$(retention_for_topic sim.config 604800000)" # key = sim_session_id (SimConfigEvent; VenueSimRouter hot reload)
+create_topic sim.execution.venue "$(retention_for_topic sim.execution.venue 604800000)" # key = hedge_flow_id (sim ExecutionReport, same contract as live)
+create_topic sim.execution.annotations "$(retention_for_topic sim.execution.annotations 604800000)" # key = report_id (SimExecutionAnnotation sidecar)
+create_topic sim.alerts "$(retention_for_topic sim.alerts 2592000000)" # key = sim_session_id (SimAlert)
+
 create_topic logs "$(retention_for_topic logs 604800000)"
 create_topic metrics "$(retention_for_topic metrics 604800000)"
 
