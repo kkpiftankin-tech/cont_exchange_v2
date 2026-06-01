@@ -325,7 +325,7 @@ definitionOfDone:
       full venues binary builds with the fork (ubuntu-dev exit 0).
       execution.proto не трогается.
   - id: DoD-7
-    status: not-implemented
+    status: partial
     title: Settlement Ledger sim-book consumer на sim.execution.venue
     description: >
       ADR-016: новый sim-book consumer подписан на sim.execution.venue
@@ -333,7 +333,25 @@ definitionOfDone:
       изолированные таблицы sim_positions / sim_hedge_pnl, НЕ изменяет
       реальные positions/balances/hedgeflows. Никакого simMode-флага в
       боевых таблицах.
-    evidence: cpp/ledger/src/app/ (новый sim-book consumer, planned T-F20-501)
+
+      PR-F20-15 (2026-06-01): ЯДРО реализовано — pure SimBookApplier
+      cpp/ledger/src/app/sim_book_applier.{hpp,cpp}: `Apply(SimReportPair)
+      -> SimBookApplyResult` поверх (ExecutionReport, SimExecutionAnnotation).
+      Гейтинг: report_id/sim_session_id/provider_id обязательны, status ∈
+      {FILLED, PARTIALLY_FILLED}, filled_qty > 0, in-memory dedup по
+      report_id. Эмитит SimPositionDelta (signed_qty по side, exec_price)
+      и SimHedgePnlDelta (hedge_pnl_delta = (ref-exec)*qty со sign-flip
+      для SELL, fee/filled/trade_count из report). 8 unit-кейсов ALL PASS.
+
+      Остаётся (следующие PR): PostgresSimPositionsRepository +
+      PostgresSimHedgePnlRepository (ON CONFLICT DO UPDATE с арифметикой
+      для weighted avg_entry / realised_pnl); sim-book Kafka consumer в
+      cpp/ledger, коррелирующий sim.execution.venue + sim.execution.
+      annotations по report_id и зовущий applier+repos; wiring в main.cpp.
+    evidence: |
+      cpp/ledger/src/app/sim_book_applier.{hpp,cpp},
+      cpp/ledger/tests/sim_book_applier_test.cpp (8 cases ALL PASS,
+      ubuntu-dev exit 0). PG repos + consumer wiring pending.
     blocked_by_ac: [F20-5]
   - id: DoD-8
     status: partial

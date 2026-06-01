@@ -50,6 +50,25 @@ if (BUILD_TESTING)
 
   add_test(NAME ledger_uc_test COMMAND ledger_uc_test)
 
+  # F-20 DoD-7 sim-book applier (pure; no PG, no Kafka).
+  add_executable(ledger_sim_book_applier_test
+    tests/sim_book_applier_test.cpp
+    src/app/sim_book_applier.cpp
+  )
+
+  target_include_directories(ledger_sim_book_applier_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(ledger_sim_book_applier_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(ledger_sim_book_applier_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+
+  add_test(NAME ledger_sim_book_applier_test COMMAND ledger_sim_book_applier_test)
+
   add_executable(ledger_persistence_test
     tests/ledger_persistence_test.cpp
     src/app/ledger_uc.cpp
