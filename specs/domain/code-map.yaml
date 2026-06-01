@@ -56,6 +56,12 @@ codeMap:
   order-flow:
     codePath: cpp/order_flow
     role: order-lifecycle
+    aliases:
+      # Внешние термины из спецификаций, ссылающиеся на этот же компонент.
+      # См. также docs/05-components/order-flow/component.yaml → aliases.
+      - Provider-Client Backend
+      - Provider Client Backend
+      - order_flow
     docsPath: docs/05-components/order-flow
     protoContracts:
       - contracts/proto/fob/orders/v1/orders.proto

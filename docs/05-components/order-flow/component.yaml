@@ -5,12 +5,22 @@ component:
   status: active
   codePath: cpp/order_flow
   owner: core-team
+  aliases:
+    # Терминологические синонимы из внешних спецификаций. Любой документ,
+    # употребляющий любой из этих терминов, должен трактоваться как
+    # ссылка на этот компонент (order-flow / cpp/order_flow). Создание
+    # параллельного компонента под любой из алиасов запрещено без ADR.
+    - Provider-Client Backend
+    - Provider Client Backend
+    - order_flow
 
 responsibility:
   summary: >
-    Принимает команды создания/изменения FlowOrder, вызывает Risk Manager
-    (pre-trade), резервирует средства в Ledger, публикует orders.normalized
-    в Kafka. Точка входа доменной логики.
+    Принимает команды создания/изменения FlowOrder от клиентов и
+    провайдеров (роль Provider-Client Backend), вызывает Risk Manager
+    (pre-trade), резервирует средства в Ledger, публикует
+    orders.normalized в Kafka, опционально пишет flow_orders в
+    PostgreSQL (PR-F02-001). Точка входа доменной логики.
 
 sourceTreeEvidence:
   main:
