@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import PublicRoute from './components/PublicRoute';
 import AuthRoute from './components/AuthRoute';
 import About from './pages/About/About';
@@ -32,7 +32,8 @@ function App() {
     <Router>
       <LanguageSwitcher />
       <Routes>
-        <Route path="/" element={<PublicRoute><About /></PublicRoute>} />
+        {/* F-20 dev/demo: open URL -> trader screen directly, no login. */}
+        <Route path="/" element={<Navigate to="/main" replace />} />
         <Route path="/about" element={<PublicRoute><About /></PublicRoute>} />
         <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
         <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
