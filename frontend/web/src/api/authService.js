@@ -85,5 +85,10 @@ export const logout = () => {
 };
 
 export const isAuthenticated = async () => {
-  return await verifyToken();
+  // F-20 dev/demo bypass: every "protected" page (Main, HedgeFlowMonitorLive,
+  // ExecutionLiveFeedLive, ReconciliationAlertsLive, etc.) calls this and
+  // navigates to /login when it returns false. For internal F-12 + Sim
+  // verification we want all pages to render without login. Restore
+  // `return await verifyToken();` to re-enable auth.
+  return true;
 };
