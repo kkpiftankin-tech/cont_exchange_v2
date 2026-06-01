@@ -416,6 +416,19 @@ definitionOfDone:
       с avg_price из реальной глубины. Соответствует продуктовой цели:
       «Sim срабатывает на основе реального состояния внешних бирж».
 
+      PR-F20-17 (2026-06-01): **F-12 + Sim end-to-end через gateway** —
+      Testing/f20_f12_e2e.sh прогоняет полный продуктовый путь:
+      demo-user POST FlowOrder в gateway (8088) → order_flow.CreateFlowOrder →
+      matching batch (5s) → fills + position snapshot →
+      HedgeTriggerPolicy.Evaluate (notional > $10 trigger) → auto-hedge
+      ExecutionIntent на execution.intents → venues exec_consume_loop →
+      SimSessionRegistry SIM_ONLY decision → SimExecutionAssembler против
+      **живого binance LOB** → sim ExecutionReport на sim.execution.venue
+      (status=FILLED, ≈5 сек от POST до отчёта, реальная binance цена).
+      Подтверждает продуктовый сценарий: трейдер кладёт ордер, F-12
+      генерирует хедж, симулятор реально исполняет на действующем рынке —
+      без касания живых внешних бирж.
+
       Harness: Testing/f20_it_e2e.sh + Testing/docker-compose.f20-e2e.override.yml +
       cpp/venues/tests/f20_e2e_probe.cpp (C++ probe для proto-сообщений).
 
