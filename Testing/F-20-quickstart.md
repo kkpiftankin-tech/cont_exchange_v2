@@ -25,7 +25,60 @@ binance LOB.
 В сети нужен доступ к binance/coinbase/Ethereum RPC. Симулятор работает на
 актуальном LOB этих площадок.
 
-## Типичный demo-цикл
+## Веб-UI для проверки (PR-F20-19)
+
+Поднимите фронт (отдельный compose):
+```bash
+cd frontend && docker compose up -d --build
+```
+
+Открыть в браузере (после логина `demo@cont.local` / `password123`):
+
+| URL                                       | Что делает                                                |
+|-------------------------------------------|-----------------------------------------------------------|
+| http://localhost:8091/sim-sessions        | **Sim sessions** — create / list / complete (SIM_ONLY/SHADOW/LIVE_ONLY) |
+| http://localhost:8091/main                | размещение FlowOrder (BUY/SELL, цены, qty)                |
+| http://localhost:8091/hedge-flows-live    | F-12: hedgeflows status, filled_qty, hedge_pnl            |
+| http://localhost:8091/hedge-pnl-live      | F-12 PnL аналитика по venue/symbol                        |
+| http://localhost:8091/execution-live-feed-live | live execution reports (ClickHouse)                  |
+| http://localhost:8091/reconciliation-alerts-live | алерты расхождения live vs sim                     |
+| http://localhost:8091/policy-config-live  | F-12 hedge trigger / intent policy конфиг                 |
+| http://localhost:8080                     | Redpanda Console: топики, schemas, сообщения              |
+
+Минимальный сценарий "проверить F-12 + Sim из UI":
+1. `/sim-sessions` → **Создать** сессию: name=demo, mode=SIM_ONLY, venues=binance, instruments=BTC/USDT → Активировать.
+2. `/main` → разместить BUY 0.002 BTC по диапазону вокруг текущей binance цены.
+3. Через ~5 сек на `/execution-live-feed-live` появится sim-исполнение; в `/hedge-flows-live` — соответствующий hedgeflow.
+4. `/sim-sessions` → **Complete** для отключения sim-режима.
+
+## Автоматический режим (опт-ин через env)
+
+По умолчанию sim **не активируется автоматически** — оператор должен создать
+SimSession (через UI/REST/CLI). Это безопасный дефолт: вы случайно не
+переключите production в sim.
+
+Если хотите чтобы venues при старте сами поднимали sim-сессию (полезно для
+dev/staging — нулевой риск отправить реальный ордер), выставьте env:
+
+```bash
+VENUES_AUTO_SIM_MODE=SIM_ONLY          # SIM_ONLY | SHADOW | LIVE_ONLY
+VENUES_AUTO_SIM_NAME=auto-default       # отображается в UI
+VENUES_AUTO_SIM_SCOPE_VENUES=           # csv; пусто = wildcard (все venues)
+VENUES_AUTO_SIM_SCOPE_INSTRUMENTS=      # csv; пусто = wildcard
+VENUES_AUTO_SIM_STALE_LOB_THRESHOLD_MS=600000
+```
+
+После рестарта venues:
+- Если сессии с этим именем нет — создаётся одна `auto-default` с заданными
+  scope/mode. Сразу публикуется в `sim.config` → подхватывается роутером.
+- Если она уже ACTIVE — оставляется как есть (нет дублей при рестартах).
+
+Отключить authentication автоматики после запуска: `Complete` сессии через
+UI (`/sim-sessions`) или REST — venues её больше не создаёт пока имя
+остаётся занятым (PG `sim_sessions` PK). Чтобы заставить пере-создать —
+поменяйте `VENUES_AUTO_SIM_NAME` на другое.
+
+## Типичный demo-цикл (CLI)
 
 ```bash
 # 1) Поднять (или убедиться что поднят)

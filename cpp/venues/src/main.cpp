@@ -15,6 +15,7 @@
 #include "google/protobuf/util/json_util.h"
 #include "crow.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 int main() {
   const std::string brokers =
@@ -145,6 +147,102 @@ int main() {
     sim_mgr = std::make_unique<cex::venues::app::SimSessionManagerUseCases>(
         *sim_session_repo, *sim_config_publisher);
     cex::common::log_json("INFO", "F-20 SimSession Manager attached", {});
+
+    // F-20 auto-bootstrap. When VENUES_AUTO_SIM_MODE is set
+    // (SIM_ONLY | SHADOW | LIVE_ONLY) and no session with the configured
+    // name is currently ACTIVE, create one at startup so the operator does
+    // not have to activate the simulator by hand in dev / staging. It goes
+    // through the manager so it appears in PG + UI + sim.config like any
+    // hand-created session, and can be Completed via REST/UI to turn off.
+    const std::string auto_mode_raw =
+        cex::common::Env::get_string("VENUES_AUTO_SIM_MODE", "");
+    if (!auto_mode_raw.empty()) {
+      fob::sim::v1::RoutingMode auto_mode =
+          fob::sim::v1::ROUTING_MODE_UNSPECIFIED;
+      if (auto_mode_raw == "SIM_ONLY") {
+        auto_mode = fob::sim::v1::ROUTING_MODE_SIM_ONLY;
+      } else if (auto_mode_raw == "SHADOW") {
+        auto_mode = fob::sim::v1::ROUTING_MODE_SHADOW;
+      } else if (auto_mode_raw == "LIVE_ONLY") {
+        auto_mode = fob::sim::v1::ROUTING_MODE_LIVE_ONLY;
+      } else {
+        cex::common::log_json(
+            "WARN",
+            "VENUES_AUTO_SIM_MODE invalid (use SIM_ONLY | SHADOW | LIVE_ONLY)",
+            {{"value", auto_mode_raw}});
+      }
+      if (auto_mode != fob::sim::v1::ROUTING_MODE_UNSPECIFIED) {
+        const std::string auto_name = cex::common::Env::get_string(
+            "VENUES_AUTO_SIM_NAME", "auto-default");
+        fob::sim::v1::ListSimSessionsRequest list_req;
+        list_req.set_status(fob::sim::v1::SIM_SESSION_STATUS_ACTIVE);
+        auto existing = sim_mgr->List(list_req);
+        bool already = false;
+        for (int i = 0; i < existing.sessions_size(); ++i) {
+          if (existing.sessions(i).name() == auto_name) {
+            already = true;
+            cex::common::log_json(
+                "INFO", "F-20 auto SimSession already ACTIVE — leaving as is",
+                {{"name", auto_name},
+                 {"sim_session_id",
+                  existing.sessions(i).sim_session_id()}});
+            break;
+          }
+        }
+        if (!already) {
+          // Parse csv scope env vars (empty -> wildcard).
+          auto parse_csv = [](const std::string& src) {
+            std::vector<std::string> out;
+            std::string cur;
+            for (char c : src) {
+              if (c == ',') {
+                if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+              } else if (c != ' ' && c != '\t') {
+                cur += c;
+              }
+            }
+            if (!cur.empty()) out.push_back(cur);
+            return out;
+          };
+          fob::sim::v1::CreateSimSessionRequest req;
+          auto* s = req.mutable_session();
+          s->set_name(auto_name);
+          s->set_routing_mode(auto_mode);
+          for (const auto& v : parse_csv(cex::common::Env::get_string(
+                   "VENUES_AUTO_SIM_SCOPE_VENUES", ""))) {
+            s->add_scope_venues(v);
+          }
+          for (const auto& i : parse_csv(cex::common::Env::get_string(
+                   "VENUES_AUTO_SIM_SCOPE_INSTRUMENTS", ""))) {
+            s->add_scope_instruments(i);
+          }
+          s->set_stale_lob_threshold_ms(static_cast<uint32_t>(
+              std::max(100, cex::common::Env::get_int(
+                                "VENUES_AUTO_SIM_STALE_LOB_THRESHOLD_MS",
+                                600000))));
+          s->mutable_latency_model()->set_distribution(
+              fob::sim::v1::LATENCY_DISTRIBUTION_FIXED);
+          s->mutable_latency_model()->set_p50_ms(5);
+          s->mutable_impact_model()->set_model_type(
+              fob::sim::v1::IMPACT_MODEL_TYPE_LEVEL_BY_LEVEL);
+          s->set_created_by("venues-bootstrap");
+          auto result = sim_mgr->Create(req);
+          if (result.ok) {
+            cex::common::log_json(
+                "INFO", "F-20 auto SimSession bootstrapped",
+                {{"sim_session_id", result.session.sim_session_id()},
+                 {"name", auto_name},
+                 {"mode", auto_mode_raw}});
+          } else {
+            cex::common::log_json(
+                "WARN", "F-20 auto SimSession bootstrap failed",
+                {{"name", auto_name},
+                 {"error_code", result.error_code},
+                 {"error_message", result.error_message}});
+          }
+        }
+      }
+    }
   }
 
   const auto admin_port = static_cast<uint16_t>(
