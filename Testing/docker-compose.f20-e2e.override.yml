@@ -1,13 +1,16 @@
-# F-20 DoD-10 E2E override for infra/docker-compose.dev.yml.
-# Runs venues with the internet-free `simulated` adapter (synthetic LOB for
-# binance / BTC/USDT). The admin API is reached from inside the compose network
-# (curl sidecar -> http://venues:8087), so no host port is published (avoids
-# clashing with an already-running dev stack on 8087).
+# F-20 E2E override for infra/docker-compose.dev.yml.
+#
+# Inherits the base venues service (which defaults to VENUES_ADAPTER_MODE=
+# multi_real — real binance/coinbase/uniswap LOB feeds). The simulator must
+# fire against REAL exchange state per product intent, so we DO NOT downgrade
+# the adapter to the synthetic SimulatedVenueAdapter.
+#
+# The admin API is reached from inside the compose network (curl sidecar ->
+# http://venues:8087), so no host port is published (avoids clashing with an
+# already-running dev stack on 8087).
 services:
   venues:
     environment:
-      VENUES_ADAPTER_MODE: "simulated"
-      SIMULATED_VENUE_ID: "binance"
       VENUES_POSTGRES_DSN: "postgresql://cex:cex@postgres:5432/cex"
       VENUES_ADMIN_HTTP_PORT: "8087"
     depends_on:

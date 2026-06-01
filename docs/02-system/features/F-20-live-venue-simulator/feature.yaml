@@ -408,6 +408,14 @@ definitionOfDone:
       VenueSimRouter.Decide(SIM_ONLY) + SimExecutionAssembler + публикация в
       sim.execution.venue. Снимает оговорку «compile-only» с DoD-1/2/3/5/6.
 
+      PR-F20-16 (2026-06-01): IT-1 расширен — override `simulated` снят,
+      venues запущен в **multi_real** режиме (cex_ws_rest_adapter с реальными
+      binance/coinbase, dex_amm_rpc_adapter с uniswap_v3). Симулятор теперь
+      исполняет ордера по **живому LOB binance** через WS+REST. Verified:
+      best_ask = $72,339 (реальная цена), sim ExecutionReport status=FILLED
+      с avg_price из реальной глубины. Соответствует продуктовой цели:
+      «Sim срабатывает на основе реального состояния внешних бирж».
+
       Harness: Testing/f20_it_e2e.sh + Testing/docker-compose.f20-e2e.override.yml +
       cpp/venues/tests/f20_e2e_probe.cpp (C++ probe для proto-сообщений).
 
