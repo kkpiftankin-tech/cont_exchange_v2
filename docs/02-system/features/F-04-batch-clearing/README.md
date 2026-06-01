@@ -1,6 +1,8 @@
 # F-04 — Batch Clearing Cycle
 
-> **Статус:** in-progress, MVP-симулятор. Реальный солвер D(p)=0 не реализован.
+> **Статус:** in-progress. Solver, метрики, Market Data integration, отдельный
+> `fills` топик, PostgreSQL источник, multi-leg legs в схеме — все есть. Pending
+> зоны выделены ниже отдельно.
 
 ## Описание
 
@@ -18,8 +20,12 @@
 
 ## Реализация
 
-- [cpp/matching/src/app/matching_loop.cpp](../../../../cpp/matching/src/app/matching_loop.cpp)
-- [cpp/matching/src/domain/solver.hpp](../../../../cpp/matching/src/domain/solver.hpp) — placeholder интерфейс для будущего LP/QP
+- [cpp/matching/src/app/matching_loop.cpp](../../../../cpp/matching/src/app/matching_loop.cpp) — batch loop, fallback PG vs in-memory.
+- [cpp/matching/src/app/run_batch_uc.cpp](../../../../cpp/matching/src/app/run_batch_uc.cpp) — один прогон, `steady_clock` измерение `solve_time_ms`.
+- [cpp/matching/src/domain/solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp) — `ContinuousClearingSolver` на Eigen с расчётом `residual_norm` через дисбаланс по символам.
+- [cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp](../../../../cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp) — `LoadActiveFlowOrders()` фильтрует `status IN ('active','partially_filled')`, `filled_cum < q_max`, `time_in_force <> 'IOC'` и LEFT JOIN'ит `flow_order_legs`.
+- [cpp/matching/src/infra/kafka/batch_outputs_producer.cpp](../../../../cpp/matching/src/infra/kafka/batch_outputs_producer.cpp) — публикует `batch.outputs` и (отдельно по каждому fill) `fills`.
+- [cpp/matching/src/infra/market_data/market_data_client.cpp](../../../../cpp/matching/src/infra/market_data/market_data_client.cpp) — gRPC `MarketDataService.GetLastTicker` для reference price (`last` или mid(bid,ask)).
 
 ## Acceptance criteria
 
@@ -27,27 +33,30 @@
 
 ## Известные несоответствия спецификации
 
-См. [feature.yaml](feature.yaml) → `knownIssues`. Кратко:
+См. [feature.yaml](feature.yaml) → `knownIssues`.
 
-### Критические
+### Критические (denежные, не закрыты)
 
-1. **Утечка резерва при BUY** — после полного fill в reserved висит разница `(price_high - midpoint) * qty`.
-2. **Двойной учёт при cancel после partial fill** — ledger снимает оригинальную сумму резерва, а не остаток.
+1. **Утечка резерва при BUY** — после полного fill в reserved висит разница `(price_high - midpoint) * qty`. См. F-02 `buy-reserve-leak`.
+2. **Двойной учёт при cancel после partial fill** — ledger снимает оригинальную сумму резерва, а не остаток. См. F-02 `cancel-double-count`.
 
-### Архитектурные gap'ы
+### Открытые архитектурные gap'ы
 
-3. **Нет настоящего солвера** — каждый ордер обрабатывается независимо.
-4. **Цена fill — per-order midpoint**, а не единая клиринговая на инструмент.
-5. **`residualNorm = 0.0` захардкожен.**
-6. **`solveTimeMs = 1` захардкожен.**
-7. **`executed_rates` показывает `max_speed`**, а не фактическую скорость.
-8. **Источник данных — Kafka**, а не PostgreSQL `floworders`.
-9. **Нет интеграции с Market Data** за reference prices.
-10. **Один Kafka топик `batch.outputs` вместо двух (нет `fills`).**
-11. **Отсутствуют поля `liquidity_source`, `fees`, `fill_id`** в Fill.
-12. **Нет fallback** при non-convergence.
-13. **Нет SLA-метрик и алертов.**
-14. **Нет multi-leg / portfolio orders.**
+3. **ClickHouse ingestion для `batch.outputs`/`fills` ещё не подключён** — таблицы есть, но Kafka→CH консьюмер только в follow-up PR (см. `feature.yaml` → `clickhouse-ingestion-pending`). До этого `batchresults`/`fills` в CH пустые; UI «Батчи / Профиль» при отсутствии BATCHES_SIMULATE=1 покажет только статичный seed.
+4. **Solver fallback при non-convergence** — есть `degraded`-флаг в diagnostics, но reflex-стратегии (epsilon-MM / halt) ещё нет (TODO в `run_batch_uc.cpp`).
+5. **Multi-leg / portfolio orders** — domain (`FlowOrderLeg`, `weight`) и PG-схема (`flow_order_legs`) готовы; пользовательский ввод (F-02 single-leg) и solver для портфельных весов — следующий шаг (F-09).
+6. **SLA-метрики/алерты для p50/p95 solver'а** — `solve_time_ms` пишется в `BatchResult.diagnostics`, но prometheus-histogram и алерт-thresholds — TODO (см. NFR-EXEC-002).
+
+### Закрытые ранее заявленные gap'ы
+
+- ~~«Нет настоящего солвера»~~ — `ContinuousClearingSolver` (Eigen-based) активен ([solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp)).
+- ~~«residualNorm = 0.0 захардкожен»~~ — считается как max дисбаланса по символам.
+- ~~«solveTimeMs = 1 захардкожен»~~ — измеряется через `steady_clock` в `run_batch_uc.cpp`.
+- ~~«executed_rates показывает max_speed»~~ — `executed_rate = executed_qty * 1000 / batch_interval_ms`.
+- ~~«Источник — Kafka вместо PostgreSQL»~~ — при `MATCHING_POSTGRES_DSN` MatchingLoop использует `PostgresFlowOrderRepository`; PR-F02-001 добавил недостающий writer в `order_flow`, замкнув цикл.
+- ~~«Нет интеграции с Market Data»~~ — `MarketDataClient.GetLastTicker` подключён.
+- ~~«Один топик `batch.outputs` вместо двух (нет `fills`)»~~ — `fills` создаётся в `infra/kafka/create_topics.sh` и пишется в `BatchOutputsProducer`.
+- ~~«Нет `liquidity_source`/`fees`/`fill_id`»~~ — поля присутствуют в proto `FillEvent` и заполняются.
 
 ## Связанные фичи
 

@@ -139,6 +139,9 @@ services:
         condition: service_started
       ledger:
         condition: service_started
+      # PR-F02-001: PG writer needs postgres up for flow_orders inserts.
+      postgres:
+        condition: service_healthy
 
   matching:
     restart: unless-stopped

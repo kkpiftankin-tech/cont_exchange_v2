@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -9,6 +10,7 @@
 #include "infra/risk_client.hpp"
 #include "infra/ledger_client.hpp"
 #include "infra/orders_kafka_publisher.hpp"
+#include "infra/postgres/flow_order_repository_port.hpp"
 
 namespace cex::order_flow::app {
 
@@ -16,9 +18,16 @@ namespace cex::order_flow::app {
 // This is the "application layer" described in methodology.
 class OrderFlowUseCases {
  public:
+  // flow_order_repo may be nullptr — in that case CreateFlowOrder keeps the
+  // in-memory + Kafka path only (the historical MVP behaviour). When a
+  // PostgreSQL repository is wired (production / docker-dev with
+  // ORDER_FLOW_POSTGRES_DSN), the accepted FlowOrder is also persisted to
+  // flow_orders + flow_order_legs with status='active' so the F-04 matching
+  // loop's PG reader picks it up.
   OrderFlowUseCases(infra::RiskClient risk,
                     infra::LedgerClient ledger,
-                    infra::OrdersKafkaPublisher publisher);
+                    infra::OrdersKafkaPublisher publisher,
+                    std::shared_ptr<infra::IFlowOrderRepository> flow_order_repo = nullptr);
 
   fob::orders::v1::CreateFlowOrderResponse CreateFlowOrder(
       const fob::orders::v1::CreateFlowOrderRequest& req);
@@ -44,6 +53,7 @@ class OrderFlowUseCases {
   infra::RiskClient risk_;
   infra::LedgerClient ledger_;
   infra::OrdersKafkaPublisher publisher_;
+  std::shared_ptr<infra::IFlowOrderRepository> flow_order_repo_;
 
   // Minimal in-memory order store for MVP/dev.
   // orders_mu_ guards both maps; held across single-statement reads/writes only.

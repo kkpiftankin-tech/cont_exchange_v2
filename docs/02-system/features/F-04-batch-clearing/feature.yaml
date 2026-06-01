@@ -91,13 +91,15 @@ acceptanceCriteria:
 
 knownIssues:
   - id: order-flow-postgres-write-pending
-    severity: feature-gap
+    severity: resolved
     description: >
       Postgres схема для flow_orders/solver_config готова (init.sql),
-      matching читает её на старте. Однако order_flow сервис ещё не
-      пишет принимаемые FlowOrder в эту таблицу — записи появятся
-      только когда подключится postgres-writer в order_flow (отдельная
-      задача T-F04-002).
+      matching читает её на старте. Writer в order_flow подключён в
+      PR-F02-001 (cpp/order_flow/src/infra/postgres/
+      postgres_flow_order_repository.cpp). После успешного reserve
+      пишется flow_orders (status='active') + flow_order_legs
+      (single-leg weight=±1 по side). Без ORDER_FLOW_POSTGRES_DSN сервис
+      по-прежнему работает в режиме in-memory + Kafka-only.
   - id: clickhouse-ingestion-pending
     severity: feature-gap
     description: >

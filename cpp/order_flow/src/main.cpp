@@ -1,5 +1,9 @@
 #include <grpcpp/grpcpp.h>
 
+#include <exception>
+#include <memory>
+#include <string>
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -7,6 +11,7 @@
 #include "infra/batch_results_consumer.hpp"
 #include "infra/ledger_client.hpp"
 #include "infra/orders_kafka_publisher.hpp"
+#include "infra/postgres/postgres_flow_order_repository.hpp"
 #include "infra/risk_client.hpp"
 #include "transport/grpc_order_flow_service.hpp"
 
@@ -23,13 +28,43 @@ int main() {
   const std::string brokers =
       cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
 
+  // Optional: when set, FlowOrder is persisted to flow_orders + flow_order_legs
+  // so the F-04 batch clearing loop picks it up. When empty (legacy / dev
+  // compose without PG), order_flow keeps the in-memory + Kafka-only path.
+  const std::string pg_dsn =
+      cex::common::Env::get_string("ORDER_FLOW_POSTGRES_DSN", "");
+
   cex::common::KafkaProducer producer({.brokers = brokers, .client_id = "order_flow"});
   cex::order_flow::infra::OrdersKafkaPublisher publisher(std::move(producer));
 
   cex::order_flow::infra::RiskClient risk(risk_addr);
   cex::order_flow::infra::LedgerClient ledger(ledger_addr);
 
-  cex::order_flow::app::OrderFlowUseCases uc(std::move(risk), std::move(ledger), std::move(publisher));
+  std::shared_ptr<cex::order_flow::infra::IFlowOrderRepository> flow_order_repo;
+  if (!pg_dsn.empty()) {
+    try {
+      flow_order_repo =
+          std::make_shared<cex::order_flow::infra::PostgresFlowOrderRepository>(pg_dsn);
+      cex::common::log_json("INFO",
+                            "OrderFlow PostgreSQL writer enabled",
+                            {{"dsn_redacted", "set"}});
+    } catch (const std::exception& e) {
+      cex::common::log_json("ERROR",
+                            "OrderFlow failed to init PostgreSQL writer; "
+                            "continuing without PG persistence",
+                            {{"error", e.what()}});
+    }
+  } else {
+    cex::common::log_json("INFO",
+                          "OrderFlow PostgreSQL writer disabled "
+                          "(ORDER_FLOW_POSTGRES_DSN not set)",
+                          {});
+  }
+
+  cex::order_flow::app::OrderFlowUseCases uc(std::move(risk),
+                                             std::move(ledger),
+                                             std::move(publisher),
+                                             std::move(flow_order_repo));
   cex::order_flow::transport::GrpcOrderFlowService svc(&uc);
 
   // Subscribe to batch.outputs so fills from matching propagate to the

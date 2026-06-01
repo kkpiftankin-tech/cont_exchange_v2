@@ -1,6 +1,7 @@
 #include "app/order_flow_uc.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <vector>
 
 #include "cex/common/log.hpp"
@@ -42,10 +43,12 @@ static int64_t timestamp_to_unix_ms(const google::protobuf::Timestamp& ts) {
 
 OrderFlowUseCases::OrderFlowUseCases(infra::RiskClient risk,
                                      infra::LedgerClient ledger,
-                                     infra::OrdersKafkaPublisher publisher)
+                                     infra::OrdersKafkaPublisher publisher,
+                                     std::shared_ptr<infra::IFlowOrderRepository> flow_order_repo)
     : risk_(std::move(risk)),
       ledger_(std::move(ledger)),
-      publisher_(std::move(publisher)) {}
+      publisher_(std::move(publisher)),
+      flow_order_repo_(std::move(flow_order_repo)) {}
 
 fob::orders::v1::CreateFlowOrderResponse OrderFlowUseCases::CreateFlowOrder(
     const fob::orders::v1::CreateFlowOrderRequest& req) {
@@ -129,6 +132,46 @@ fob::orders::v1::CreateFlowOrderResponse OrderFlowUseCases::CreateFlowOrder(
   {
     std::lock_guard<std::mutex> lock(orders_mu_);
     orders_[stored.order_id()] = stored;
+  }
+
+  // 4b) Persist to PostgreSQL flow_orders so F-04 matching picks the order
+  // up. Without this, matching's PostgresFlowOrderRepository finds no rows
+  // and the order is silently dropped from batch clearing (IN-007 gap
+  // "order-flow-postgres-write-pending"). Status is written as 'active' to
+  // match matching's WHERE filter status IN ('active','partially_filled').
+  // When no DSN is configured (dev / legacy compose), flow_order_repo_ is
+  // null and we keep the in-memory + Kafka-only path.
+  if (flow_order_repo_) {
+    try {
+      flow_order_repo_->InsertFlowOrder(stored);
+    } catch (const std::exception& e) {
+      // Reservation already succeeded; rolling back here would require
+      // releasing the reserve, which the cancel path handles. For MVP, log
+      // and fail the request — caller retries with the same client order id.
+      cex::common::log_json("ERROR",
+                            "OrderFlow: failed to persist FlowOrder to PostgreSQL",
+                            {{"order_id", stored.order_id()},
+                             {"user_id", stored.user_id()},
+                             {"error", e.what()}});
+      // Release reserve to avoid leaking funds.
+      fob::ledger::v1::ReleaseFundsRequest rel;
+      *rel.mutable_meta() = req.meta();
+      rel.set_reservation_id(stored.order_id());
+      rel.set_user_id(stored.user_id());
+      rel.set_order_id(stored.order_id());
+      rel.set_reason("persist_failed");
+      ledger_.ReleaseFunds(rel);
+      // Drop the in-memory entry as well.
+      {
+        std::lock_guard<std::mutex> lock(orders_mu_);
+        orders_.erase(stored.order_id());
+      }
+      resp.set_accepted(false);
+      auto* re = resp.mutable_error();
+      re->set_code("PERSIST_ERROR");
+      re->set_message(e.what());
+      return resp;
+    }
   }
 
   // 5) Publish event to Kafka for matching engine
