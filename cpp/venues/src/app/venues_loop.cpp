@@ -1314,6 +1314,52 @@ void VenuesLoop::PublishSimExecution(
        {"report_id", out.report.report_id()},
        {"status", std::to_string(static_cast<int>(out.report.status()))},
        {"applied_latency_ms", std::to_string(delay_ms)}});
+
+  // F-20 DoD-5 — SimAlert emission. Map engine reject reasons (set by
+  // VenueSimulator) to fob.sim.v1.SimAlertType and publish to `sim.alerts`.
+  // STALE_LOB / SIM_TIMEOUT / SIM_NO_LIQUIDITY -> alert; non-rejected fills
+  // emit nothing. RANDOM_REJECT_SPIKE is rate-window observability and is
+  // not derivable from a single report — left for a future counter.
+  if (out.report.status() == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED &&
+      kafka_publisher_ != nullptr) {
+    fob::sim::v1::SimAlertType alert_type =
+        fob::sim::v1::SIM_ALERT_TYPE_UNSPECIFIED;
+    const std::string& reason = out.report.error().code();
+    if (reason == "SIM_STALE_LOB") {
+      alert_type = fob::sim::v1::SIM_ALERT_TYPE_STALE_LOB;
+    } else if (reason == "SIM_TIMEOUT") {
+      alert_type = fob::sim::v1::SIM_ALERT_TYPE_SIM_TIMEOUT;
+    } else if (reason == "SIM_NO_LIQUIDITY") {
+      alert_type = fob::sim::v1::SIM_ALERT_TYPE_LOB_SOURCE_DOWN;
+    }
+    if (alert_type != fob::sim::v1::SIM_ALERT_TYPE_UNSPECIFIED) {
+      fob::sim::v1::SimAlert alert;
+      auto* ameta = alert.mutable_meta();
+      ameta->set_event_id(cex::common::uuid_v4());
+      *ameta->mutable_ts_event() = cex::common::now_ts();
+      ameta->set_source("venue-simulator");
+      ameta->set_partition_key(decision.sim_session_id);
+      alert.set_alert_id(cex::common::uuid_v4());
+      alert.set_type(alert_type);
+      alert.set_sim_session_id(decision.sim_session_id);
+      alert.set_venue_id(intent.venue());
+      alert.set_symbol(RoutingSymbol(intent.instrument()));
+      alert.set_message(out.report.error().message());
+      *alert.mutable_ts() = cex::common::now_ts();
+      (void)kafka_publisher_->Publish("sim.alerts", decision.sim_session_id,
+                                      cex::common::to_bytes(alert));
+      cex::common::log_json(
+          "WARN", "Published sim alert",
+          {{"service", "venues"},
+           {"component", "venue_sim_router"},
+           {"stage", "publish_sim_alert"},
+           {"topic", "sim.alerts"},
+           {"alert_id", alert.alert_id()},
+           {"type", std::to_string(static_cast<int>(alert_type))},
+           {"sim_session_id", decision.sim_session_id},
+           {"reason", reason}});
+    }
+  }
 }
 
 void VenuesLoop::connect_and_subscribe_defaults() {
