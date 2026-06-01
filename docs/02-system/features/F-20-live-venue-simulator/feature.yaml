@@ -183,9 +183,13 @@ definitionOfDone:
       Безопасно по умолчанию: пустой реестр → LIVE_ONLY (поведение venues
       без активных sim-сессий не меняется).
 
-      Остаётся: E2E-проверка через Kafka (AC F20-1/2/7/11/12, DoD-10) —
-      текущая верификация COMPILE-ONLY (full venues binary build); эмиссия
-      SimAlert (DoD-5).
+      PR-F20-13 (2026-06-01): E2E SMOKE PASS — реальный docker compose,
+      реальный intent → реальный SIM_ONLY-роутинг → отчёт FILLED на
+      sim.execution.venue, никакого отчёта на execution.venue (изоляция).
+      Compile-only оговорка снята; F20-1 проверен в рантайме (см. DoD-11).
+
+      Остаётся: SHADOW dual-send (F20-2; нужен Divergence Service, DoD-9),
+      hot-reload AC F20-7 под нагрузкой (DoD-11 IT-4), эмиссия SimAlert (DoD-5).
     evidence: |
       cpp/venues/src/app/venue_sim_router.{hpp,cpp},
       cpp/venues/src/app/sim_session_registry.{hpp,cpp},
@@ -199,7 +203,7 @@ definitionOfDone:
       E2E через Kafka — pending (DoD-10).
     blocked_by_ac: [F20-1, F20-2, F20-7, F20-11, F20-12]
   - id: DoD-3
-    status: partial
+    status: implemented
     title: SimSession Manager реализован
     description: >
       CRUD SimSession через Admin API; persistence в PostgreSQL sim_sessions;
@@ -237,10 +241,12 @@ definitionOfDone:
       без VENUES_POSTGRES_DSN Admin API отдаёт 503. Каждый мутирующий вызов
       публикует sim.config → hot-reload роутера в этом же процессе.
 
-      Все слои DoD-3 присутствуют (app core unit-tested; PG + REST транспорт
-      compile-verified). Остаётся: runtime E2E (HTTP→PG→Kafka→router, DoD-10) —
-      верификация транспорта/PG пока COMPILE-ONLY; gRPC-сервис (помимо
-      реализованного REST-дуала) — опциональный follow-up.
+      PR-F20-13 (2026-06-01): E2E SMOKE PASS — все слои подтверждены в
+      рантайме: REST POST/GET/LIST/complete отвечают 200; PG-репозиторий
+      реально сохраняет/читает (Upsert/Get/List); sim.config UPSERT/DELETE
+      доходят до consumer'а и обновляют SimSessionRegistry; форк роутит
+      SIM_ONLY как ожидается. DoD-3 закрыт по основному критерию (REST дуал
+      gRPC; gRPC service proper — опциональный follow-up).
     evidence: |
       cpp/venues/src/app/sim_session_manager.{hpp,cpp} (8 cases),
       cpp/venues/src/infra/sim_session_pg_codec.{hpp,cpp} (6 cases),
@@ -302,7 +308,8 @@ definitionOfDone:
       kafka_publisher_, с capped async-delay (latency_sample_ms,
       VENUES_SIM_MAX_DELAY_MS) перед публикацией.
 
-      Остаётся: E2E-проверка через Kafka (DoD-10) — верификация COMPILE-ONLY.
+      PR-F20-13 (2026-06-01): E2E PASS — отчёт получен на sim.execution.venue,
+      contract идентичен LIVE. Compile-only снята.
     evidence: |
       cpp/venues/src/app/sim_execution_assembler.{hpp,cpp} +
       PublishSimExecution в venues_loop.cpp,
@@ -344,21 +351,47 @@ definitionOfDone:
     evidence: cpp/venues/src/app/divergence_service.{cpp,hpp} (отсутствует)
     blocked_by_ac: [F20-10]
   - id: DoD-10
-    status: not-implemented
+    status: implemented
     title: Unit-тесты VenueSimulator U1..U10
     description: >
       Happy-path FILLED, partial fill, stale LOB, LEVEL_BY_LEVEL precision,
       ImpactModel LINEAR/SQRT, FeeModel maker/taker, RejectionModel
       random/price_constraint, LatencyModel sampling, SHADOW fork isolation,
-      overfill guard.
-    evidence: cpp/venues/tests/venue_simulator_test.cpp (отсутствует)
+      overfill guard. PR-F20-5: реализованы как
+      cpp/venues/tests/venue_simulator_test.cpp (12 кейсов: U1 FILLED,
+      U2 partial, U3 stale, U4 VWAP, U5 LINEAR impact, U6 taker fee,
+      U7 random reject, U8/U8b latency timeout/ok, U10 no-overfill,
+      sell-side, determinism; U9 multi-venue split вынесен в
+      matching execution_planner_test).
+    evidence: cpp/venues/tests/venue_simulator_test.cpp (12 cases ALL PASS, ubuntu-dev exit 0)
   - id: DoD-11
-    status: not-implemented
+    status: partial
     title: Integration-тесты IT-1..IT-5
     description: >
       SIM_ONLY full cycle, SHADOW dual-report + divergence logging, stale LOB
       + alert, hot reload под нагрузкой, SIM->LIVE automatic switch.
-    evidence: cpp/venues/tests/integration/F-20-* (отсутствует)
+
+      PR-F20-13 (2026-06-01): E2E-smoke (IT-1 SIM_ONLY full cycle) — реальный
+      docker compose (redpanda+postgres+venues в режиме simulated), создание
+      SimSession через REST POST /admin/v1/sim-sessions, продюс ExecutionIntent
+      в execution.intents, наблюдение ExecutionReport status=FILLED на
+      sim.execution.venue и ОТСУТСТВИЕ отчёта по этому intent_id на
+      execution.venue (изоляция ADR-015). Подтверждает в рантайме весь контур
+      PR-F20-6..12: PG persistence (PostgresSimSessionRepository) + REST
+      transport + sim.config producer→consumer→registry (hot-reload) +
+      VenueSimRouter.Decide(SIM_ONLY) + SimExecutionAssembler + публикация в
+      sim.execution.venue. Снимает оговорку «compile-only» с DoD-1/2/3/5/6.
+
+      Harness: Testing/f20_it_e2e.sh + Testing/docker-compose.f20-e2e.override.yml +
+      cpp/venues/tests/f20_e2e_probe.cpp (C++ probe для proto-сообщений).
+
+      Остаются: IT-2 SHADOW dual-report (требует Divergence Service, DoD-9),
+      IT-3 stale+alert (требует SimAlert, DoD-5), IT-4 hot-reload под нагрузкой,
+      IT-5 SIM→LIVE automatic switch.
+    evidence: |
+      Testing/f20_it_e2e.sh, Testing/docker-compose.f20-e2e.override.yml,
+      cpp/venues/tests/f20_e2e_probe.cpp; E2E RESULT: PASS on ubuntu-dev
+      (got_sim=1 status=FILLED, got_live=0, isolation verified).
   - id: DoD-12
     status: not-implemented
     title: SLA-тест

@@ -326,9 +326,24 @@ write to CH `sim_divergence_log`. Test DoD-9, F20-10.
 
 Coverage list in spec §6 DoD-10.
 
-#### T-F20-702. Integration tests IT-1..IT-5
+#### T-F20-702. Integration tests IT-1..IT-5 — ◐ IT-1 DONE
 
 Coverage list in spec §6 DoD-11.
+
+PR-F20-13 (2026-06-01): **IT-1 (SIM_ONLY full cycle) — RUNTIME PASS** on
+ubuntu-dev via Testing/f20_it_e2e.sh (docker compose: redpanda + postgres +
+venues in `simulated` adapter mode). Flow: REST `POST /admin/v1/sim-sessions`
+→ PostgresSimSessionRepository Upsert → sim.config publish → VenuesLoop
+consume + ApplySimConfigEvent → SimSessionRegistry hot-reload → C++ probe
+produces `ExecutionIntent` (venue=binance, BTC/USDT) → exec_consume_loop fork
+→ VenueSimRouter.Decide(SIM_ONLY) → SimExecutionAssembler over cached LOB →
+publish to `sim.execution.venue` (status=FILLED) **and NOT to**
+`execution.venue` (ADR-015 isolation verified). Probe + driver +
+compose-override committed; lifts the compile-only caveat for PR-F20-6..12.
+
+Remaining: IT-2 SHADOW dual-report (needs Divergence Service, DoD-9), IT-3
+stale + SimAlert (needs DoD-5), IT-4 hot-reload under load, IT-5 SIM→LIVE
+automatic switch.
 
 #### T-F20-703. Load tests LT-1..LT-4
 

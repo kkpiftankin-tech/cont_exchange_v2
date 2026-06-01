@@ -490,6 +490,24 @@ if (BUILD_TESTING)
   target_compile_options(venues_sim_session_pg_codec_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_sim_session_pg_codec_test COMMAND venues_sim_session_pg_codec_test)
 
+  # F-20 DoD-10 data-plane E2E probe — produces an ExecutionIntent and asserts
+  # SIM_ONLY routing on sim.execution.venue. Needs a live stack, so it is built
+  # as an executable but NOT registered as a ctest (driven by Testing/f20_it_e2e.sh).
+  add_executable(venues_f20_e2e_probe
+    tests/f20_e2e_probe.cpp
+  )
+
+  target_include_directories(venues_f20_e2e_probe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_f20_e2e_probe PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_f20_e2e_probe PRIVATE -Wall -Wextra -Wpedantic)
+
   add_executable(venues_amm_pool_extractor_test
     tests/amm_pool_extractor_test.cpp
     src/domain/amm_pool_extractor.cpp
