@@ -6324,6 +6324,90 @@ const server = createServer(async (req, res) => {
       if (handled !== false) return;
     }
 
+    // F-20 SimSession Manager — REST proxy to venues:8087/admin/v1/sim-sessions.
+    // Exposed at /api/v1/sim-sessions for the browser; the React SimSessions
+    // page (frontend-web /sim-sessions) is the operator UI for activating
+    // SIM_ONLY / SHADOW / LIVE_ONLY routing per (venue, instrument).
+    if (pathname === "/api/v1/sim-sessions" || pathname === "/api/v1/sim-sessions/") {
+      if (req.method === "GET") {
+        const status = query?.status;
+        const limit = query?.limit;
+        const qsParts = [];
+        if (status) qsParts.push(`status=${encodeURIComponent(status)}`);
+        if (limit) qsParts.push(`limit=${encodeURIComponent(limit)}`);
+        const qs = qsParts.length ? `?${qsParts.join("&")}` : "";
+        try {
+          const data = await fetchVenuesJson(`/admin/v1/sim-sessions${qs}`);
+          return writeJson(res, 200, data);
+        } catch (err) {
+          return writeJson(res, err.status || 502, {
+            error: "sim_sessions_list_failed",
+            detail: err.body || err.message
+          });
+        }
+      }
+      if (req.method === "POST") {
+        const body = await parseBody(req);
+        try {
+          const data = await fetchVenuesJson(`/admin/v1/sim-sessions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          logStructuredEvent("INFO", "Admin UI created SimSession", {
+            participant: "Admin UI",
+            stage: "create_sim_session",
+            source_file: "frontend/api/server.js"
+          });
+          return writeJson(res, 201, data);
+        } catch (err) {
+          return writeJson(res, err.status || 502, {
+            error: "sim_sessions_create_failed",
+            detail: err.body || err.message
+          });
+        }
+      }
+    }
+    const simSessionCompleteMatch =
+      pathname.match(/^\/api\/v1\/sim-sessions\/([^/]+)\/complete\/?$/);
+    if (req.method === "POST" && simSessionCompleteMatch) {
+      const id = decodeURIComponent(simSessionCompleteMatch[1]);
+      try {
+        await fetchVenuesJson(
+          `/admin/v1/sim-sessions/${encodeURIComponent(id)}/complete`,
+          { method: "POST" }
+        );
+        logStructuredEvent("INFO", "Admin UI completed SimSession", {
+          participant: "Admin UI",
+          stage: "complete_sim_session",
+          sim_session_id: id,
+          source_file: "frontend/api/server.js"
+        });
+        return writeJson(res, 200, { completed: true, simSessionId: id });
+      } catch (err) {
+        return writeJson(res, err.status || 502, {
+          error: "sim_sessions_complete_failed",
+          detail: err.body || err.message
+        });
+      }
+    }
+    const simSessionGetMatch =
+      pathname.match(/^\/api\/v1\/sim-sessions\/([^/]+)\/?$/);
+    if (req.method === "GET" && simSessionGetMatch) {
+      const id = decodeURIComponent(simSessionGetMatch[1]);
+      try {
+        const data = await fetchVenuesJson(
+          `/admin/v1/sim-sessions/${encodeURIComponent(id)}`
+        );
+        return writeJson(res, 200, data);
+      } catch (err) {
+        return writeJson(res, err.status || 502, {
+          error: "sim_sessions_get_failed",
+          detail: err.body || err.message
+        });
+      }
+    }
+
     return writeJson(res, 404, { error: "Not found", path: pathname });
   } catch (err) {
     return writeJson(res, 500, { error: String(err.message || err) });
