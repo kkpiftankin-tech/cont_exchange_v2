@@ -62,6 +62,12 @@ const HedgeFlowMonitorLive = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [periodFilter, setPeriodFilter] = useState('24h');
   const [selectedFlowId, setSelectedFlowId] = useState(null);
+  // PR-F02-010: client-side substring filter over batch_id / hedge_flow_id /
+  // intent_id. Server endpoint already supports symbol/status/period query
+  // params but not a free-text search; doing this client-side keeps the UI
+  // change minimal and works for the common "I have a batch_id from the
+  // Profile page, show me its hedge flows" workflow.
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -109,7 +115,23 @@ const HedgeFlowMonitorLive = () => {
   }
 
   const summary = data.summary || {};
-  const items = data.items || [];
+  const rawItems = data.items || [];
+  const trimmedQuery = searchQuery.trim().toLowerCase();
+  const items = trimmedQuery
+    ? rawItems.filter((flow) => {
+        const haystack = [
+          flow.batchId,
+          flow.hedgeFlowId,
+          flow.intentId,
+          flow.providerId,
+          flow.symbol
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(trimmedQuery);
+      })
+    : rawItems;
 
   return (
     <div className="hedge-page">
@@ -205,14 +227,38 @@ const HedgeFlowMonitorLive = () => {
                 ))}
               </select>
             </label>
+            <label>
+              <span>Поиск</span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="batch_id / hedge_flow_id / provider"
+                style={{
+                  minWidth: '280px',
+                  padding: '6px 10px',
+                  fontFamily: 'monospace',
+                  fontSize: '12px'
+                }}
+              />
+            </label>
           </div>
         </section>
 
         <section className="hedge-list-panel">
           <div className="hedge-panel-title list-title">
             <div>
-              <h2>HedgeFlows ({items.length})</h2>
-              <p>Источник: {data.source || 'postgres:hedgeflows'}</p>
+              <h2>
+                HedgeFlows ({items.length}
+                {trimmedQuery && rawItems.length !== items.length
+                  ? ` / ${rawItems.length}`
+                  : ''}
+                )
+              </h2>
+              <p>
+                Источник: {data.source || 'postgres:hedgeflows'}
+                {trimmedQuery && ` · фильтр: "${searchQuery}"`}
+              </p>
             </div>
           </div>
 
