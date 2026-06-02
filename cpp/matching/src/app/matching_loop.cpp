@@ -880,17 +880,54 @@ void MatchingLoop::run_one_batch() {
     for (auto& [oid, snap] : order_index_) {
       auto it = active_orders->find(oid);
       if (it != active_orders->end()) {
+        // Order is present in this batch's active set — sync snap with
+        // authoritative domain status from PG/in-memory active_orders.
+        // PR-F02-003: must cover ALL incoming statuses (was kPartiallyFilled
+        // / kCancelled / kExpired only) so a stale snap.status="filled"
+        // from a prior racy batch — when the order momentarily fell out of
+        // active_orders during a PG load transition — resets back to the
+        // correct value when the order reappears. Without the kActive/kNew
+        // and kFilled branches the snapshot stays "filled, filled_qty=0"
+        // forever and the user-facing trade list shows "Завершено / 0/qty".
         snap.filled_qty = static_cast<double>(it->second.filled_cum);
-        if (it->second.status == domain::FlowOrderStatus::kPartiallyFilled) {
-          snap.status = "partial";
-        } else if (it->second.status == domain::FlowOrderStatus::kCancelled) {
-          snap.status = "cancelled";
-        } else if (it->second.status == domain::FlowOrderStatus::kExpired) {
-          snap.status = "expired";
+        switch (it->second.status) {
+          case domain::FlowOrderStatus::kPartiallyFilled:
+            snap.status = "partial";
+            break;
+          case domain::FlowOrderStatus::kCancelled:
+            snap.status = "cancelled";
+            break;
+          case domain::FlowOrderStatus::kExpired:
+            snap.status = "expired";
+            break;
+          case domain::FlowOrderStatus::kFilled:
+            snap.status = "filled";
+            break;
+          case domain::FlowOrderStatus::kActive:
+          case domain::FlowOrderStatus::kNew:
+            snap.status = "pending";
+            break;
+          case domain::FlowOrderStatus::kLiquidated:
+          default:
+            // leave snap.status untouched for statuses we don't have
+            // explicit UI mapping for (caller will treat unknown as terminal).
+            break;
         }
       } else if (snap.status == "pending" || snap.status == "partial") {
-        snap.filled_qty = snap.total_qty;
-        snap.status = "filled";
+        // PR-F02-003: previously this branch auto-promoted any tracked
+        // order missing from active_orders to status="filled",
+        // filled_qty=total_qty. That's wrong: an order can drop out of
+        // active_orders for many non-fill reasons (window expired, IOC
+        // excluded by query, transient PG load failure, order_index_
+        // populated from Kafka before PG row caught up). Only promote to
+        // "filled" when the snap's accumulated filled_qty actually reached
+        // total_qty; otherwise leave the prior state for the next batch
+        // to confirm (the order is likely to come back when active_orders
+        // refreshes).
+        if (snap.total_qty > 0.0 && snap.filled_qty >= snap.total_qty) {
+          snap.filled_qty = snap.total_qty;
+          snap.status = "filled";
+        }
       }
     }
   }
