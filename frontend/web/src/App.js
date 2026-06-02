@@ -41,7 +41,12 @@ function App() {
         <Route path="/profile/*" element={<AuthRoute><Profile /></AuthRoute>} />
         <Route path="/venues" element={<AuthRoute><ExternalVenuesList /></AuthRoute>} />
         <Route path="/venues/:venueId" element={<AuthRoute><ExternalVenueDetails /></AuthRoute>} />
-        <Route path="/hedgeflows" element={<AuthRoute><HedgeFlowMonitor /></AuthRoute>} />
+        {/* PR-F02-011: legacy /hedgeflows pointed at the mock-data variant
+            that confused users into thinking "Найдено flow: 0" meant the
+            system had no hedges. Redirect to the live PG-backed page.
+            Many other pages still link to /hedgeflows by tradition; this
+            redirect transparently routes them to real data. */}
+        <Route path="/hedgeflows" element={<Navigate to="/hedge-flows-live" replace />} />
         <Route path="/hedge-flows-live" element={<AuthRoute><HedgeFlowMonitorLive /></AuthRoute>} />
         <Route path="/hedge-pnl" element={<AuthRoute><HedgePnlDashboard /></AuthRoute>} />
         <Route path="/hedge-pnl-live" element={<AuthRoute><HedgePnlDashboardLive /></AuthRoute>} />

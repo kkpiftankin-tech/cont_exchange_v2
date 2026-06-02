@@ -144,8 +144,7 @@ const HedgeFlowMonitorLive = () => {
           <a href="/main">Торговля</a>
           <a href="/profile">Профиль</a>
           <a href="/venues">Площадки</a>
-          <a href="/hedgeflows">HedgeFlow (mock)</a>
-          <a href="/hedge-flows-live" className="active">HedgeFlow (live)</a>
+          <a href="/hedge-flows-live" className="active">HedgeFlow</a>
           <a href="/hedge-pnl">PnL</a>
           <a href="/execution-live">Execution feed</a>
           <a href="/reconciliation-alerts">Alerts</a>
