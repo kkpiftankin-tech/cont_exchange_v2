@@ -1,10 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { useTranslation } from 'react-i18next';
 import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
 import HedgeFlowDrillPanel from './HedgeFlowDrillPanel';
+// PR-F02-013: use the customer page chrome (Profile.css gives the same
+// radial-gradient dark background as Main/Profile) instead of the ops
+// monitor's standalone white-ish admin chrome. The hedge-table styling
+// from HedgeFlowMonitor.css/HedgeFlowMonitorLive.css is still imported
+// for the table cells, badges, drill panel — only the outer page shell
+// is swapped.
+import '../Profile/Profile.css';
 import './HedgeFlowMonitor.css';
 import './HedgeFlowMonitorLive.css';
 
@@ -54,6 +62,7 @@ function formatRatio(filled, target) {
 }
 
 const HedgeFlowMonitorLive = () => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [isAuth, setIsAuth] = useState(null);
   const [data, setData] = useState({ items: [], summary: {}, generatedAt: null, source: '' });
@@ -134,24 +143,29 @@ const HedgeFlowMonitorLive = () => {
     : rawItems;
 
   return (
-    <div className="hedge-page">
-      <nav className="navbar-main hedge-navbar">
+    // PR-F02-013: use Profile's customer chrome (same dark radial-gradient
+    // background, same top nav with all the trader+ops links the user
+    // expects from /main and /profile) instead of the standalone admin
+    // monitor look. Clicking "hedge" from anywhere lands here without
+    // visibly switching apps.
+    <div className="profile-container">
+      <nav className="navbar-main">
         <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple" />
-          <span>CEX</span>
+          <img src={logo} alt="Logo" className="logo-purple"/>
+          <span>{t('navbar.logo')}</span>
         </div>
         <div className="nav-links">
-          <a href="/main">Торговля</a>
-          <a href="/profile">Профиль</a>
-          <a href="/venues">Площадки</a>
-          <a href="/hedge-flows-live" className="active">HedgeFlow</a>
-          <a href="/hedge-pnl">PnL</a>
-          <a href="/execution-live">Execution feed</a>
-          <a href="/reconciliation-alerts">Alerts</a>
-          <a href="/manual-override">Manual override</a>
-          <a href="/policy-config">Policy</a>
-          <a href="/replay">Replay</a>
-          <button onClick={handleLogout} className="logout-btn">Выйти</button>
+          <a href="/main">{t('navbar.trade')}</a>
+          <a href="/profile">{t('navbar.profile')}</a>
+          <a href="/venues">{t('navbar.venues')}</a>
+          <a href="/hedge-flows-live" className="active">{t('navbar.hedgeflows')}</a>
+          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
+          <a href="/execution-live">{t('navbar.executionLive')}</a>
+          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
+          <a href="/manual-override">{t('navbar.manualOverride')}</a>
+          <a href="/policy-config">{t('navbar.policyConfig')}</a>
+          <a href="/replay">{t('navbar.replay')}</a>
+          <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>
 
