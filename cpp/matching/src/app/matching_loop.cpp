@@ -877,6 +877,54 @@ void MatchingLoop::run_one_batch() {
 
   {
     std::lock_guard<std::mutex> lock(order_index_mutex_);
+    // PR-F02-006: apply terminal OrderUpdates from THIS batch's solver
+    // output BEFORE the active_orders refresh below. The previous
+    // PR-F02-003 loop reads `snap.filled_qty` / `snap.status` from
+    // `active_orders`, but run_batch_uc.cpp:357-371 erases entries that
+    // hit a terminal state (FILLED/CANCELLED/EXPIRED) DURING this batch.
+    // By the time we get here, the entry that just became "filled" is
+    // gone from active_orders, so the existing in_active branch can't
+    // pick it up and the else-if guard (snap.filled_qty >= total_qty)
+    // sees the value from one batch ago and refuses to promote. Reading
+    // the proto OrderUpdates directly captures the just-set
+    // filled_qty_total and status, so /orders/<id> reports filled with
+    // the correct full quantity instead of stuck at "partial 0.004/0.005"
+    // as seen on the front-end ("Частично" badge on a fully-filled BUY).
+    for (const auto& update : batch_result.batch.order_updates()) {
+      auto it = order_index_.find(update.order_id());
+      if (it == order_index_.end()) continue;
+      auto& snap = it->second;
+      if (update.has_filled_qty_total()) {
+        snap.filled_qty = static_cast<double>(
+            cex::common::Decimal::from_proto(update.filled_qty_total()));
+      }
+      switch (update.status()) {
+        case fob::common::v1::ORDER_STATUS_FILLED:
+          snap.status = "filled";
+          // Defensive: if the proto carried no filled_qty_total field
+          // for some reason but reported FILLED, mirror total_qty so the
+          // UI doesn't show "filled 0/qty".
+          if (snap.total_qty > 0.0 && snap.filled_qty < snap.total_qty) {
+            snap.filled_qty = snap.total_qty;
+          }
+          break;
+        case fob::common::v1::ORDER_STATUS_PARTIALLY_FILLED:
+          snap.status = "partial";
+          break;
+        case fob::common::v1::ORDER_STATUS_CANCELED:
+          snap.status = "cancelled";
+          break;
+        case fob::common::v1::ORDER_STATUS_EXPIRED:
+          snap.status = "expired";
+          break;
+        case fob::common::v1::ORDER_STATUS_REJECTED:
+          snap.status = "rejected";
+          break;
+        default:
+          break;
+      }
+    }
+
     for (auto& [oid, snap] : order_index_) {
       auto it = active_orders->find(oid);
       if (it != active_orders->end()) {
