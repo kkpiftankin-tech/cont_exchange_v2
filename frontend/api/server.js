@@ -3522,25 +3522,148 @@ async function handleMatching(req, res, pathname, query) {
   return false;
 }
 
-function handleBatches(req, res, pathname) {
-  const currentBatches = BATCHES_SIMULATE ? getDynamicBatches(Date.now()) : batches;
+// PR-F02-008: read real F-04 batches from ClickHouse default.batchresults
+// (populated by cpp/market_data clickhouse_storage consumer of
+// `batch.outputs` Kafka topic). Previously /api/batches returned either
+// 3 stale rows from data/batches.json or simulator-generated rows when
+// BATCHES_SIMULATE=1 — neither reflected actual matching activity, so
+// users saw "sim-batch-0001" in the Profile UI's Батчи tab even after
+// real orders had been placed and filled. With this fix the UI surfaces
+// the real batch_ids matching emitted, plus the actual solve_time_ms,
+// residual_norm, num_active_orders, fills_count.
+async function fetchBatchesFromClickHouse(limit = 100) {
+  const query = [
+    "SELECT",
+    "  batch_id,",
+    "  event_time_ms,",
+    "  solve_time_ms,",
+    "  residual_norm,",
+    "  num_active_orders,",
+    "  fills_count",
+    `FROM ${CLICKHOUSE_DB}.batchresults`,
+    "ORDER BY event_time_ms DESC",
+    `LIMIT ${Math.max(1, Math.min(500, Number(limit) || 100))}`,
+    "FORMAT JSONEachRow"
+  ].join(" ");
+  const response = await fetch(`${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`clickhouse_http_${response.status}: ${text}`);
+  }
+  const lines = text.trim().split("\n").filter(Boolean);
+  return lines.map((line) => {
+    const row = JSON.parse(line);
+    const residual = parseNumeric(row.residual_norm, 0);
+    const fills = parseNumeric(row.fills_count, 0);
+    // Heuristic status mapping consistent with what the simulator emitted,
+    // so the existing UI badge styles keep working: residual_norm > 0.1
+    // signals solver instability (FAILED), 0.01–0.1 signals partial
+    // convergence (PARTIAL), and below that with at least one fill is
+    // SUCCESS. Empty batches (fills_count=0) are also SUCCESS — the
+    // solver just had nothing to do.
+    let status = "SUCCESS";
+    if (residual > 0.1) status = "FAILED";
+    else if (residual > 0.01) status = "PARTIAL";
+    return {
+      batchId: row.batch_id,
+      time: new Date(parseNumeric(row.event_time_ms, 0)).toISOString(),
+      status,
+      solveTimeMs: parseNumeric(row.solve_time_ms, 0),
+      residualNorm: residual,
+      numActiveOrders: parseNumeric(row.num_active_orders, 0),
+      fillsCount: fills
+    };
+  });
+}
 
+async function fetchBatchFromClickHouse(batchId) {
+  const query = [
+    "SELECT",
+    "  batch_id,",
+    "  event_time_ms,",
+    "  solve_time_ms,",
+    "  residual_norm,",
+    "  num_active_orders,",
+    "  fills_count,",
+    "  clear_prices_json,",
+    "  executed_rates_json,",
+    "  solver_diagnostics_json",
+    `FROM ${CLICKHOUSE_DB}.batchresults`,
+    `WHERE batch_id = '${escapeClickHouseString(batchId)}'`,
+    "LIMIT 1",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+  const response = await fetch(`${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`clickhouse_http_${response.status}: ${text}`);
+  }
+  const line = text.trim().split("\n").find(Boolean);
+  if (!line) return null;
+  const row = JSON.parse(line);
+  const residual = parseNumeric(row.residual_norm, 0);
+  let status = "SUCCESS";
+  if (residual > 0.1) status = "FAILED";
+  else if (residual > 0.01) status = "PARTIAL";
+  const parseJsonField = (raw) => {
+    if (!raw) return {};
+    try { return JSON.parse(raw); } catch (_) { return {}; }
+  };
+  return {
+    batchId: row.batch_id,
+    time: new Date(parseNumeric(row.event_time_ms, 0)).toISOString(),
+    status,
+    solveTimeMs: parseNumeric(row.solve_time_ms, 0),
+    residualNorm: residual,
+    numActiveOrders: parseNumeric(row.num_active_orders, 0),
+    fillsCount: parseNumeric(row.fills_count, 0),
+    clearPrices: parseJsonField(row.clear_prices_json),
+    executedRates: parseJsonField(row.executed_rates_json),
+    diagnostics: parseJsonField(row.solver_diagnostics_json)
+  };
+}
+
+async function handleBatches(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/requirements") {
     return writeJson(res, 200, REQUIRED_FIELDS);
   }
 
+  // PR-F02-008: prefer ClickHouse (real F-04 batches) over the simulator.
+  // Fall back to the prior path (sim or static JSON) if ClickHouse is
+  // unavailable so dev/demo still has something to show.
   if (req.method === "GET" && pathname === "/api/batches") {
-    return writeJson(res, 200, {
-      items: currentBatches.map(toBatchSummary),
-      total: currentBatches.length
-    });
+    try {
+      const items = await fetchBatchesFromClickHouse(100);
+      return writeJson(res, 200, { items, total: items.length, source: "clickhouse" });
+    } catch (err) {
+      console.error("[batches] clickhouse fetch failed, falling back:", err.message || err);
+      const fallback = BATCHES_SIMULATE ? getDynamicBatches(Date.now()) : batches;
+      return writeJson(res, 200, {
+        items: fallback.map(toBatchSummary),
+        total: fallback.length,
+        source: BATCHES_SIMULATE ? "simulator" : "static"
+      });
+    }
   }
 
   const batchId = parseBatchId(pathname);
   if (req.method === "GET" && batchId) {
-    const batch = currentBatches.find((item) => item.batchId === batchId);
-    if (!batch) return writeJson(res, 404, { error: "Batch not found", batchId });
-    return writeJson(res, 200, batch);
+    try {
+      const batch = await fetchBatchFromClickHouse(batchId);
+      if (batch) return writeJson(res, 200, batch);
+    } catch (err) {
+      console.error("[batches] clickhouse fetch by id failed:", err.message || err);
+    }
+    const fallback = BATCHES_SIMULATE ? getDynamicBatches(Date.now()) : batches;
+    const found = fallback.find((item) => item.batchId === batchId);
+    if (!found) return writeJson(res, 404, { error: "Batch not found", batchId });
+    return writeJson(res, 200, found);
   }
 
   return false;
@@ -6246,7 +6369,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === "/api/requirements" || pathname === "/api/batches" || pathname.startsWith("/api/batches/")) {
-      const handled = handleBatches(req, res, pathname);
+      const handled = await handleBatches(req, res, pathname);
       if (handled !== false) return;
     }
 
