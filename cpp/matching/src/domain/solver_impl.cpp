@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
 
 namespace cex::matching::domain {
@@ -509,6 +510,33 @@ fob::matching::v1::BatchResult ContinuousClearingSolver::Solve(
     auto [W, pi, d, qH, pH] = Init(active_orders, reference_prices, prices_map);
 
     Eigen::VectorXd x = SolveImpl(W, pi, d, qH, pH);
+
+    // PR-F02-004 dev diagnostic: log raw QP outputs so we can see when x
+    // collapses to zero despite active orders on both sides. Cheap (one
+    // log per batch), removable when fills land reliably.
+    if (!active_orders.empty()) {
+        const std::size_t order_count = active_orders.size();
+        const Eigen::VectorXd x_orders = x.head(order_count);
+        const double x_sum = x_orders.sum();
+        const double x_max = order_count > 0 ? x_orders.maxCoeff() : 0.0;
+        std::string pi_str;
+        for (const auto& [sym, idx] : prices_map) {
+            if (!pi_str.empty()) pi_str += ",";
+            pi_str += sym + "=" + std::to_string(pi(idx));
+        }
+        cex::common::log_json(
+            "INFO",
+            "Solver result raw",
+            {
+                {"orders", std::to_string(order_count)},
+                {"x_sum", std::to_string(x_sum)},
+                {"x_max", std::to_string(x_max)},
+                {"pi", pi_str},
+                {"eps_liquidity", std::to_string(cfg_.epsilon_liquidity)},
+                {"tolerance", std::to_string(cfg_.tolerance)},
+            });
+    }
+
     fob::matching::v1::BatchResult result;
     std::unordered_map<std::string, SymbolPlan> symbol_plans;
     std::unordered_map<std::string, double> symbol_total_qty;

@@ -250,6 +250,36 @@ std::vector<domain::FlowOrder> PostgresFlowOrderRepository::LoadActiveFlowOrders
 
   for (auto& order : orders) {
     order.sort_legs_by_symbol();
+    // PR-F02-005 boundary mapping: PG holds business-facing prices
+    // (p_low/p_high positive, constrained by `p_low > 0`), but the
+    // matching domain convention — used by ContinuousClearingSolver and
+    // ComputeInternalOverlapPrice — is signed by side: SELL legs carry
+    // domain.p_low = -orig.p_high, domain.p_high = -orig.p_low (see
+    // cpp/matching/src/domain/flow_order.hpp:127). The Kafka-fed path
+    // does this in `FlowOrder::from_proto`; the PG-fed path was missing
+    // it, so SELL orders loaded from PG broke the solver: pi was set
+    // off-axis (e.g. -4000) and SolveImpl produced NaN within a few
+    // iterations, collapsing fills to zero for ANY mixed BUY+SELL book.
+    // For single-leg orders the side is determined by leg weight sign
+    // (matches the writer in cpp/order_flow/.../postgres_flow_order_
+    // repository.cpp). For multi-leg portfolio orders the per-leg sign
+    // is more nuanced (F-09); we keep things consistent with the proto
+    // path which sees one global `side` per order, so we use the first
+    // leg's weight sign as the order-level side here. When F-09 lands,
+    // this boundary should be revisited together with per-leg sign
+    // handling in the solver.
+    if (!order.legs.empty()) {
+      const auto& first_leg = order.legs.front();
+      const auto zero = cex::common::Decimal::zero();
+      const bool is_sell =
+          cex::common::Decimal::cmp(first_leg.weight, zero) < 0;
+      if (is_sell) {
+        const auto orig_p_low = order.p_low;
+        const auto orig_p_high = order.p_high;
+        order.p_low = cex::common::Decimal::sub(zero, orig_p_high);
+        order.p_high = cex::common::Decimal::sub(zero, orig_p_low);
+      }
+    }
     validate_loaded_order(order);
   }
 
