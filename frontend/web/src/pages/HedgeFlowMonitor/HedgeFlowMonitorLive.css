@@ -1,3 +1,26 @@
+/* PR-F02-014: PR-F02-013 swapped the page wrapper from .hedge-page to
+ * .profile-container so the page picks up the customer-app radial
+ * gradient instead of standalone ops-monitor chrome. But
+ * .hedge-summary-card / .hedge-list-panel / .hedge-drilldown all read
+ * `background: var(--hedge-panel)` (defined originally in .hedge-page
+ * which is gone now). Without those vars they fell back to transparent,
+ * which over the bright gradient read as "white panels".
+ * Re-declare the same hedge-* variables on .hedge-shell so they cascade
+ * the same way they did before. .hedge-shell is now the local
+ * variable scope for everything F-12 specific.
+ */
+.hedge-shell {
+  --hedge-bg: #0a0514;
+  --hedge-panel: rgba(20, 10, 40, 0.86);
+  --hedge-panel-strong: rgba(27, 14, 50, 0.94);
+  --hedge-border: rgba(167, 74, 255, 0.26);
+  --hedge-border-strong: rgba(167, 74, 255, 0.45);
+  --hedge-text: #f6f2ff;
+  --hedge-muted: #a799bf;
+  --hedge-soft: #d6c2ff;
+  color: var(--hedge-text);
+}
+
 .hedge-live-table-wrap {
   overflow-x: auto;
   margin-top: 12px;
