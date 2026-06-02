@@ -27,6 +27,21 @@ cex::common::Decimal ParsePgNumeric(std::string_view text_value) {
     throw std::invalid_argument("NUMERIC text value is empty");
   }
 
+  // PR-F02-001 follow-up: PG returns NUMERIC(38, 18) columns padded to the
+  // declared scale, e.g. "60000.000000000000000000" — that's 60000 * 10^18
+  // which overflows int64. Strip trailing zeros (and the dot if all
+  // fractional digits were zero) so the scale only counts significant
+  // fractional digits. Non-zero fractional parts (e.g. "0.000123") are
+  // unaffected.
+  if (text_value.find('.') != std::string_view::npos) {
+    while (text_value.size() > 1 && text_value.back() == '0') {
+      text_value.remove_suffix(1);
+    }
+    if (!text_value.empty() && text_value.back() == '.') {
+      text_value.remove_suffix(1);
+    }
+  }
+
   bool negative = false;
   std::size_t idx = 0;
   if (text_value.front() == '+' || text_value.front() == '-') {
