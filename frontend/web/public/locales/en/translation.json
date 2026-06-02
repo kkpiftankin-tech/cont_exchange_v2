@@ -53,7 +53,7 @@
     "minPrice": "min price",
     "maxPrice": "max price",
     "amount": "amount BTC to {{action}}",
-    "speed": "buy speed (stocks/hour)",
+    "speed": "max execution speed (BTC/sec)",
     "proceed": "proceed",
     "withdraw": "withdraw",
     "deposit": "deposit",
@@ -122,7 +122,7 @@
     "table": {
       "minPrice": "Min Price",
       "maxPrice": "Max Price",
-      "buySpeed": "Buy Speed",
+      "buySpeed": "Execution Speed (BTC/sec)",
       "spentAmount": "Full Cost",
       "date": "Date",
       "type": "Type",
