@@ -508,8 +508,47 @@ fob::matching::v1::BatchResult ContinuousClearingSolver::Solve(
     }
 
     auto [W, pi, d, qH, pH] = Init(active_orders, reference_prices, prices_map);
+    // Save initial pi from Init (overlap-based or reference-price fallback)
+    // so we can restore it if SolveImpl diverges to NaN below.
+    const Eigen::VectorXd initial_pi = pi;
 
     Eigen::VectorXd x = SolveImpl(W, pi, d, qH, pH);
+
+    // PR-F02-007: numerical fallback when the QP solver diverges.
+    // SolveImpl uses an Eigen LLT-based interior-point loop that is
+    // numerically fragile around small remaining_qty / clustered identical
+    // orders / certain symmetric BUY+SELL combos — empirically it returns
+    // NaN for 3+ orders with identical (p_low, p_high, q_rate) on a single
+    // symbol, and for asymmetric remaining (BUY 0.0003 + SELL 0.001) after
+    // prior partial fills. In every case fills collapse to zero across the
+    // whole batch because downstream `clamp(NaN, 0, qH) = 0` and `pi=NaN`
+    // poisons every external-improvement comparison too.
+    //
+    // We don't want a single QP divergence to freeze the order book. Fall
+    // back to "full-speed planned target with reference-price clearing":
+    //   - x  := qH  (each order asks for its full per-batch capacity)
+    //   - pi := initial_pi from Init (overlap midpoint or reference price)
+    // The allocation phase below will then plan PlannedLegFill entries with
+    // finite targets and the three-phase external/internal/external loop
+    // clamps to actual feasibility (external curve depth, internal
+    // counter-side availability, per-leg price band). So the fallback
+    // produces sensible fills exactly when the QP would have, and just
+    // avoids the freeze.
+    // TODO(F-04): replace SolveImpl with a more stable QP (LDLT with
+    // regularization, or a different algorithm). The fallback below should
+    // become an alert path, not the default.
+    if (!x.allFinite() || !pi.allFinite()) {
+        cex::common::log_json(
+            "WARN",
+            "Solver diverged (NaN) — falling back to qH targets and initial pi",
+            {
+                {"orders", std::to_string(active_orders.size())},
+                {"x_finite", x.allFinite() ? "true" : "false"},
+                {"pi_finite", pi.allFinite() ? "true" : "false"},
+            });
+        x = qH;
+        pi = initial_pi;
+    }
 
     // PR-F02-004 dev diagnostic: log raw QP outputs so we can see when x
     // collapses to zero despite active orders on both sides. Cheap (one
