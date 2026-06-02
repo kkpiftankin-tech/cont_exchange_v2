@@ -308,16 +308,11 @@ const Main = () => {
           <span>{t('navbar.logo')}</span>
         </div>
         <div className="nav-links">
+          {/* PR-F02-012: customer-facing navbar — only trader-relevant
+              links. See Profile.js for full rationale. */}
           <a href="/main" className="active">{t('navbar.trade')}</a>
           <a href="/profile">{t('navbar.profile')}</a>
           <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedgeflows">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay">{t('navbar.replay')}</a>
           <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>

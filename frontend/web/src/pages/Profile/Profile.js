@@ -267,16 +267,16 @@ const Profile = () => {
           <span>{t('navbar.logo')}</span>
         </div>
         <div className="nav-links">
+          {/* PR-F02-012: customer-facing navbar — only trader-relevant links.
+              Hedge / PnL / Execution feed / Alerts / Manual override / Policy
+              / Replay are F-12 ops/admin pages (different chrome, different
+              audience). Clicking "hedge" from the customer side used to
+              dump the user into an admin-styled monitor with its own
+              navbar, which read as "another frontend appeared". Those
+              pages are still reachable directly by URL for ops. */}
           <a href="/main">{t('navbar.trade')}</a>
           <a href="/profile" className="active">{t('navbar.profile')}</a>
           <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedgeflows">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay">{t('navbar.replay')}</a>
           <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>
