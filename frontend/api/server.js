@@ -2931,7 +2931,82 @@ async function fetchFlowOrderSnapshot(orderId) {
   }
 }
 
+// PR-F02-015: prefer PostgreSQL as the source of truth for the user's
+// FlowOrder history. The previous implementation called the gateway,
+// which proxies to order_flow's in-memory `orders_` map. That map is
+// wiped on every order_flow restart (no persistence on the order_flow
+// side) and only contains orders that flowed through it after start —
+// so after any restart the Profile → Сделки tab went empty even though
+// PG (populated by PR-F02-001's writer) had everything.
+// Now we read from `flow_orders` + `flow_order_legs` and return rows
+// shaped like the gateway JSON the rest of buildTradeView already
+// expects. Gateway is kept as a fallback for the dev path where no
+// FRONTEND_POSTGRES_DSN is configured.
 async function fetchFlowOrdersForUser(userId) {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const sql = `
+        SELECT
+          fo.order_id::text AS order_id,
+          fo.user_id,
+          fo.p_low::text AS p_low,
+          fo.p_high::text AS p_high,
+          fo.q_rate::text AS q_rate,
+          fo.q_max::text AS q_max,
+          fo.filled_cum::text AS filled_cum,
+          fo.time_in_force,
+          fo.status,
+          (EXTRACT(EPOCH FROM fo.created_at) * 1000)::bigint AS created_at_ms,
+          (EXTRACT(EPOCH FROM fo.updated_at) * 1000)::bigint AS updated_at_ms,
+          (
+            SELECT instrument_symbol
+            FROM flow_order_legs fol
+            WHERE fol.order_id = fo.order_id
+            LIMIT 1
+          ) AS symbol,
+          (
+            SELECT CASE WHEN weight < 0 THEN 'sell' ELSE 'buy' END
+            FROM flow_order_legs fol
+            WHERE fol.order_id = fo.order_id
+            LIMIT 1
+          ) AS side
+        FROM flow_orders fo
+        WHERE fo.user_id = $1
+        ORDER BY fo.created_at DESC
+        LIMIT 500
+      `;
+      const result = await pool.query(sql, [userId]);
+      return result.rows.map((row) => {
+        const symbol = row.symbol || "";
+        const slashIdx = symbol.indexOf("/");
+        const base = slashIdx > 0 ? symbol.slice(0, slashIdx) : "";
+        const quote = slashIdx > 0 ? symbol.slice(slashIdx + 1) : "";
+        const qMax = Number(row.q_max || 0);
+        const filledCum = Number(row.filled_cum || 0);
+        const remaining = Math.max(0, qMax - filledCum);
+        return {
+          order_id: row.order_id,
+          user_id: row.user_id,
+          symbol,
+          base,
+          quote,
+          side: row.side || "buy",
+          total_qty: qMax,
+          remaining_qty: remaining,
+          price_low: Number(row.p_low || 0),
+          price_high: Number(row.p_high || 0),
+          max_speed: Number(row.q_rate || 0),
+          time_in_force: row.time_in_force || "GTC",
+          status: row.status || "new",
+          created_at_ms: Number(row.created_at_ms || 0),
+          updated_at_ms: Number(row.updated_at_ms || 0)
+        };
+      });
+    } catch (err) {
+      console.error("[pg] failed to list flow orders, falling back to gateway:", userId, err.message || err);
+    }
+  }
   try {
     const payload = await fetchJsonWithTimeout(
       `${GATEWAY_ADDR}/v1/flow-orders?user_id=${encodeURIComponent(userId)}`
