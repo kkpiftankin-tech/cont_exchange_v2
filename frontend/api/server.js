@@ -3072,7 +3072,56 @@ async function fetchOrderFillStats(orderId) {
   }
 }
 
-function buildTradeView(registryEntry, flowOrder, matchingSnapshot, fillStats) {
+// PR-F02-016: surface venue execution confirmations inline on the
+// customer-facing /profile → Сделки tab. Until now an order's
+// "binance подтвердил X BTC at Y" details lived only on the ops
+// /execution-live-feed-live page, which is non-obvious. Reads ClickHouse
+// default.execution_reports for any intent_id that contains the order
+// id and projects each report into a small UI-friendly shape.
+async function fetchVenueExecutionsForOrder(orderId) {
+  const safeOrderId = escapeClickHouseString(orderId);
+  const query = [
+    "SELECT",
+    "  report_id, venue_id, status,",
+    "  filled_qty, avg_price, slippage_bps,",
+    "  fee_amount, fee_currency,",
+    "  event_time_ms",
+    `FROM ${CLICKHOUSE_DB}.execution_reports`,
+    `WHERE intent_id LIKE '%${safeOrderId}%'`,
+    "ORDER BY event_time_ms",
+    "FORMAT JSONEachRow"
+  ].join(" ");
+  try {
+    const response = await fetch(`${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`clickhouse_http_${response.status}: ${text}`);
+    }
+    const lines = text.trim().split("\n").filter(Boolean);
+    return lines.map((line) => {
+      const row = JSON.parse(line);
+      return {
+        reportId: row.report_id,
+        venueId: row.venue_id,
+        status: row.status,
+        filledQty: parseNumeric(row.filled_qty, 0),
+        avgPrice: parseNumeric(row.avg_price, 0),
+        slippageBps: parseNumeric(row.slippage_bps, 0),
+        feeAmount: parseNumeric(row.fee_amount, 0),
+        feeCurrency: row.fee_currency || "",
+        eventTime: new Date(parseNumeric(row.event_time_ms, 0)).toISOString()
+      };
+    });
+  } catch (err) {
+    console.error("[clickhouse] failed to fetch venue executions:", orderId, err.message || err);
+    return [];
+  }
+}
+
+function buildTradeView(registryEntry, flowOrder, matchingSnapshot, fillStats, venueExecutions = []) {
   const totalQty = Math.max(parseNumeric(flowOrder?.total_qty, 0), parseNumeric(registryEntry?.amount_to_buy, 0));
   const remainingQty = Math.max(parseNumeric(flowOrder?.remaining_qty, totalQty), 0);
   const gatewayFilledQty = Math.max(0, totalQty - remainingQty);
@@ -3106,7 +3155,8 @@ function buildTradeView(registryEntry, flowOrder, matchingSnapshot, fillStats) {
     max_price: parseNumeric(flowOrder?.price_high, registryEntry?.max_price || 0),
     buy_speed: parseNumeric(flowOrder?.max_speed, registryEntry?.buy_speed || 0),
     avg_price: fillStats.avgPrice,
-    side: String(flowOrder?.side || registryEntry?.requested_side || "buy").toLowerCase()
+    side: String(flowOrder?.side || registryEntry?.requested_side || "buy").toLowerCase(),
+    venue_executions: venueExecutions
   };
 }
 
@@ -3134,11 +3184,12 @@ async function hydrateTrades() {
     const listedFlowOrder = flowOrdersById.get(orderId);
     const flowOrder = listedFlowOrder || await fetchFlowOrderSnapshot(orderId);
     if (!flowOrder) return null;
-    const [matchingSnapshot, fillStats] = await Promise.all([
+    const [matchingSnapshot, fillStats, venueExecutions] = await Promise.all([
       fetchMatchingOrderSnapshot(orderId),
-      fetchOrderFillStats(orderId)
+      fetchOrderFillStats(orderId),
+      fetchVenueExecutionsForOrder(orderId)
     ]);
-    return buildTradeView(registryEntry, flowOrder, matchingSnapshot, fillStats);
+    return buildTradeView(registryEntry, flowOrder, matchingSnapshot, fillStats, venueExecutions);
   }));
   return items
     .filter(Boolean)

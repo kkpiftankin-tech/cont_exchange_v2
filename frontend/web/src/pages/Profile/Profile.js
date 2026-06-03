@@ -130,7 +130,11 @@ const Profile = () => {
     maxPrice: item.max_price,
     buySpeed: item.buy_speed,
     avgPrice: item.avg_price,
-    spentAmount: item.avg_price && item.bought_amount ? item.avg_price * item.bought_amount : 0
+    spentAmount: item.avg_price && item.bought_amount ? item.avg_price * item.bought_amount : 0,
+    // PR-F02-016: per-trade venue confirmations from ClickHouse
+    // execution_reports — surfaced in expanded-row table so user sees
+    // "binance подтвердил X BTC @ Y" without leaving Profile.
+    venueExecutions: Array.isArray(item.venue_executions) ? item.venue_executions : []
   });
 
   const mapOperation = (op) => {
@@ -470,6 +474,54 @@ const Profile = () => {
                             )}
                             {item.cancelledDate && item.cancelledDate.getFullYear() > 1 && (
                               <div><strong>{t('profile.table.completedDate')}</strong> {formatDate(item.cancelledDate)}</div>
+                            )}
+                            {/* PR-F02-016: venue confirmations inline */}
+                            {item.venueExecutions && item.venueExecutions.length > 0 && (
+                              <div className="venue-executions" style={{ marginTop: '12px', width: '100%' }}>
+                                <strong>Подтверждения от внешних бирж ({item.venueExecutions.length}):</strong>
+                                <table style={{
+                                  width: '100%', marginTop: '6px', fontSize: '12px',
+                                  borderCollapse: 'collapse', fontFamily: 'monospace'
+                                }}>
+                                  <thead>
+                                    <tr style={{ opacity: 0.7, borderBottom: '1px solid rgba(255,255,255,0.15)' }}>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>Время</th>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>Биржа</th>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>Статус</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Кол-во (BTC)</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Цена (USDT)</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Slippage bps</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Комиссия</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {item.venueExecutions.map((ve, idx) => (
+                                      <tr key={ve.reportId || idx} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                        <td style={{ padding: '4px 8px' }}>{new Date(ve.eventTime).toLocaleTimeString()}</td>
+                                        <td style={{ padding: '4px 8px' }}>{ve.venueId}</td>
+                                        <td style={{ padding: '4px 8px',
+                                          color: ve.status === 'FILLED' ? '#4caf50'
+                                               : ve.status === 'REJECTED' ? '#f44336'
+                                               : '#ffb400' }}>{ve.status}</td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                                          {Number(ve.filledQty).toFixed(6)}
+                                        </td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                                          {Number(ve.avgPrice).toFixed(2)}
+                                        </td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                                          {Number(ve.slippageBps).toFixed(0)}
+                                        </td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                                          {Number(ve.feeAmount) > 0
+                                            ? `${Number(ve.feeAmount).toFixed(4)} ${ve.feeCurrency || ''}`
+                                            : '—'}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             )}
                           </div>
                         )}
