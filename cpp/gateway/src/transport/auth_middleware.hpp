@@ -47,6 +47,11 @@ class AuthMiddleware {
   GatewayUserContext ParseJwt(const std::string& token);
 
   std::shared_ptr<cex::backtest::app::RbacEngine> rbac_engine_;
+
+  // RBAC enforcement toggle. Defaults to true (secure). Set env
+  // REPLAY_RBAC_ENFORCEMENT=false to bypass authorization in dev/demo
+  // until per-user roles are seeded. See docs/06-api/rest/replay.md.
+  bool enforcement_enabled_ = true;
 };
 
 }  // namespace cex::gateway::transport

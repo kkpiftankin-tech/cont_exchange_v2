@@ -6,12 +6,15 @@
 #include <utility>
 #include <string>
 
+#include "cex/common/env.hpp"
 #include "cex/common/uuid.hpp"
 
 namespace cex::gateway::transport {
 
 AuthMiddleware::AuthMiddleware(std::shared_ptr<cex::backtest::app::RbacEngine> rbac_engine)
-    : rbac_engine_(std::move(rbac_engine)) {}
+    : rbac_engine_(std::move(rbac_engine)),
+      enforcement_enabled_(
+          cex::common::Env::get_bool("REPLAY_RBAC_ENFORCEMENT", true)) {}
 
 std::string AuthMiddleware::ExtractJwtFromHeader(const crow::request& req) {
   auto auth_header = req.get_header_value("Authorization");
@@ -81,6 +84,12 @@ bool AuthMiddleware::Authorize(const GatewayUserContext& user,
                                const std::string& resource_type,
                                const std::string& resource_id,
                                std::string* error_reason) {
+  // Dev/demo bypass: when enforcement is disabled, allow any extracted user.
+  // Roles will be introduced later (REPLAY_RBAC_ENFORCEMENT=true re-enables).
+  if (!enforcement_enabled_) {
+    return true;
+  }
+
   if (!rbac_engine_) {
     if (error_reason) *error_reason = "RBAC engine not available";
     return false;
