@@ -236,6 +236,7 @@ function buildPayload(formValues, parsedStrategy) {
     risklimits: riskOverride,
     feemodel: feeModel,
     rewardmode: formValues.reward,
+    persist: Boolean(formValues.persist),
     sessionconfigsnapshot: {
       solverconfig: solverOverride || formValues.solverConfig,
       risklimits: riskOverride || formValues.riskLimits,
@@ -319,8 +320,8 @@ const BacktestReplay = () => {
   const [formValues, setFormValues] = useState({
     name: 'BTC replay validation',
     instruments: ['BTCUSDT'],
-    dateFrom: '2026-04-01',
-    dateTo: '2026-04-07',
+    dateFrom: '2026-05-25',
+    dateTo: '2026-05-26',
     solverConfigMode: 'production',
     solverConfig: 'solver-prod-v4',
     solverConfigJson: DEFAULT_SOLVER_OVERRIDE,
@@ -332,7 +333,11 @@ const BacktestReplay = () => {
     reward: 'incrementalPnL',
     randomSeed: '42',
     tolerance: '0.0001',
+    persist: false,
   });
+  const [ephemeralSession, setEphemeralSession] = useState(null);
+  const [ephemeralSummary, setEphemeralSummary] = useState(null);
+  const [ephemeralRunState, setEphemeralRunState] = useState({ status: 'idle', error: '' });
   const [errors, setErrors] = useState({});
   const [submitState, setSubmitState] = useState({ loading: false, message: '', error: '' });
   const [sessions, setSessions] = useState([]);
@@ -571,6 +576,59 @@ const BacktestReplay = () => {
   }, [sessions]);
 
   useEffect(() => {
+    if (!ephemeralSession?.sessionid) return undefined;
+
+    const unsubscribeEphemeral = subscribeReplayResults({
+      sessionid: ephemeralSession.sessionid,
+      onOpen: () => {},
+      onError: () => {
+        setEphemeralRunState((current) => {
+          if (current.status === 'running') {
+            return { status: 'failed', error: t('replay.states.ephemeralStreamLost') };
+          }
+          return current;
+        });
+      },
+      onEvent: (event) => {
+        const eventSessionId = event.sessionid || event.session?.sessionid;
+        if (eventSessionId && eventSessionId !== ephemeralSession.sessionid) return;
+
+        if (event.status === 'running' || event.type === 'replay.progress') {
+          setEphemeralSession((current) => {
+            if (!current) return current;
+            const progressbatches = event.progressbatches ?? current.progressbatches;
+            const totalbatches = event.totalbatches ?? current.totalbatches;
+            return {
+              ...current,
+              progressbatches,
+              totalbatches,
+              progress: totalbatches > 0 ? (progressbatches / totalbatches) * 100 : 0,
+            };
+          });
+          return;
+        }
+
+        if (event.status === 'completed' || event.type === 'replay.completed') {
+          if (event.summary) {
+            setEphemeralSummary(event.summary);
+          }
+          setEphemeralRunState({ status: 'completed', error: '' });
+          return;
+        }
+
+        if (event.status === 'failed' || event.type === 'replay.failed') {
+          setEphemeralRunState({
+            status: 'failed',
+            error: event.errordetails || t('replay.states.ephemeralStreamLost'),
+          });
+        }
+      },
+    });
+
+    return unsubscribeEphemeral;
+  }, [ephemeralSession?.sessionid, t]);
+
+  useEffect(() => {
     const unsubscribe = subscribeReplayResults({
       sessionid: selectedSession?.sessionid || '',
       onOpen: ({ transport }) => {
@@ -632,6 +690,10 @@ const BacktestReplay = () => {
     if (submitState.error) {
       setSubmitState((current) => ({ ...current, error: '' }));
     }
+  };
+
+  const handlePersistChange = (event) => {
+    setFormValues((current) => ({ ...current, persist: event.target.checked }));
   };
 
   const handleInstrumentChange = (event) => {
@@ -751,6 +813,27 @@ const BacktestReplay = () => {
     if (!isValid) return;
 
     setSubmitState({ loading: true, message: '', error: '' });
+
+    if (!formValues.persist) {
+      // Ephemeral mode: do NOT add to the sessions list
+      try {
+        const created = await createReplaySession(buildPayload(formValues, parsedStrategy));
+        const createdSession = created.session || created;
+        setEphemeralSession(createdSession);
+        setEphemeralSummary(null);
+        setEphemeralRunState({ status: 'running', error: '' });
+        setSubmitState({ loading: false, message: t('replay.states.ephemeralStarted'), error: '' });
+      } catch (error) {
+        setSubmitState({
+          loading: false,
+          message: '',
+          error: getErrorMessage(error, t, 'replay.states.createError'),
+        });
+      }
+      return;
+    }
+
+    // Persisted mode: existing behavior
     try {
       const created = await createReplaySession(buildPayload(formValues, parsedStrategy));
       const createdSession = created.session || created;
@@ -1029,6 +1112,24 @@ const BacktestReplay = () => {
               </label>
             </div>
 
+            <div className="replay-persist-row">
+              <label className="replay-persist-label">
+                <input
+                  type="checkbox"
+                  name="persist"
+                  checked={formValues.persist}
+                  onChange={handlePersistChange}
+                  aria-describedby="persist-helper"
+                />
+                {t('replay.form.persist')}
+              </label>
+              <small id="persist-helper" className="replay-persist-helper">
+                {formValues.persist
+                  ? t('replay.form.persistHelperSaved')
+                  : t('replay.form.persistHelperEphemeral')}
+              </small>
+            </div>
+
             <div className="replay-actions">
               <button type="submit" disabled={submitState.loading || !isFormSubmittable}>
                 {submitState.loading ? t('replay.form.creating') : t('replay.form.run')}
@@ -1120,6 +1221,105 @@ const BacktestReplay = () => {
             )}
           </section>
         </section>
+
+        {ephemeralSession !== null && (() => {
+          const progressPct = ephemeralSession.totalbatches > 0
+            ? Math.min(100, (ephemeralSession.progressbatches / ephemeralSession.totalbatches) * 100)
+            : 0;
+          const ephemeralSummaryCards = ephemeralSummary ? [
+            { key: 'avgIs', value: formatNumber(ephemeralSummary.avgis, '', 2) },
+            { key: 'totalPnl', value: formatPnl(ephemeralSummary.totalpnl) },
+            { key: 'sharpe', value: formatNumber(ephemeralSummary.sharpe, '', 2) },
+            { key: 'fillRate', value: formatNumber(ephemeralSummary.fillrate, '%', 1) },
+            { key: 'maxDrawdown', value: formatNumber(ephemeralSummary.maxdrawdown, ' USDT', 2) },
+            { key: 'avgSolveTime', value: formatNumber(ephemeralSummary.avgsolvetime, ' ms', 0) },
+            { key: 'totalBatches', value: formatNumber(ephemeralSummary.totalbatches, '', 0) },
+            { key: 'totalFillEvents', value: formatNumber(ephemeralSummary.totalfillevents, '', 0) },
+          ] : [];
+
+          return (
+            <section className="replay-ephemeral-panel" aria-label={t('replay.ephemeral.panelTitle')}>
+              <div className="replay-panel-header">
+                <span>
+                  <span className="replay-ephemeral-badge">{t('replay.ephemeral.badge')}</span>
+                </span>
+                <h2>{t('replay.ephemeral.panelTitle')}</h2>
+              </div>
+
+              <div className="replay-ephemeral-status-row">
+                <span className={`replay-status replay-status-${ephemeralRunState.status === 'idle' ? 'pending' : ephemeralRunState.status}`}>
+                  {ephemeralRunState.status === 'running' && t('replay.status.running')}
+                  {ephemeralRunState.status === 'completed' && t('replay.status.completed')}
+                  {ephemeralRunState.status === 'failed' && t('replay.status.failed')}
+                  {ephemeralRunState.status === 'idle' && t('replay.status.pending')}
+                </span>
+                {ephemeralRunState.status === 'running' && (
+                  <div className="replay-ephemeral-progress">
+                    <i className="replay-progress-track">
+                      <i style={{ width: `${progressPct}%` }} />
+                    </i>
+                    <em>{ephemeralSession.progressbatches} / {ephemeralSession.totalbatches || '-'}</em>
+                  </div>
+                )}
+              </div>
+
+              {ephemeralRunState.status === 'running' && (
+                <div className="replay-inline-state tone-info-panel replay-ephemeral-notice">
+                  {t('replay.states.ephemeralStarted')}
+                </div>
+              )}
+
+              {ephemeralRunState.status === 'completed' && (
+                <>
+                  <div className="replay-inline-state tone-info-panel replay-ephemeral-notice">
+                    {t('replay.states.ephemeralCompleted')}
+                  </div>
+                  {ephemeralSummaryCards.length > 0 ? (
+                    <div className="replay-summary-grid replay-ephemeral-summary-grid">
+                      {ephemeralSummaryCards.map((card) => (
+                        <div className="replay-summary-card" key={card.key}>
+                          <span>{t(`replay.summary.${card.key}`)}</span>
+                          <strong>{card.value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="replay-ephemeral-empty-states">
+                    <div className="replay-empty-state">{t('replay.states.ephemeralNoAgentLogs')}</div>
+                    <div className="replay-empty-state">{t('replay.states.ephemeralNoEquity')}</div>
+                    <div className="replay-empty-state">{t('replay.states.ephemeralNoCompare')}</div>
+                    <div className="replay-empty-state">{t('replay.states.ephemeralNoAudit')}</div>
+                  </div>
+                </>
+              )}
+
+              {ephemeralRunState.status === 'failed' && (
+                <>
+                  <div className="replay-inline-state tone-bad-panel">
+                    {ephemeralRunState.error || t('replay.states.ephemeralStreamLost')}
+                  </div>
+                  <div className="replay-empty-state">
+                    {t('replay.ephemeral.retryHint')}
+                  </div>
+                </>
+              )}
+
+              <div className="replay-ephemeral-footer">
+                <button
+                  type="button"
+                  className="replay-ephemeral-dismiss"
+                  onClick={() => {
+                    setEphemeralSession(null);
+                    setEphemeralSummary(null);
+                    setEphemeralRunState({ status: 'idle', error: '' });
+                  }}
+                >
+                  {t('replay.ephemeral.dismiss')}
+                </button>
+              </div>
+            </section>
+          );
+        })()}
 
         <section className="replay-results">
           <div className="replay-results-header">

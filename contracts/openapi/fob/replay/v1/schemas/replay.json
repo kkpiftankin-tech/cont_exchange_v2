@@ -149,7 +149,12 @@
         "created_at": { "type": "string", "format": "date-time" },
         "started_at": { "type": ["string", "null"], "format": "date-time" },
         "completed_at": { "type": ["string", "null"], "format": "date-time" },
-        "error_details": { "type": "string" }
+        "error_details": { "type": "string" },
+        "persist": {
+          "type": "boolean",
+          "default": true,
+          "description": "F15-PERSIST: false = ephemeral session (no PG/CH writes). Absent ⇒ true (backward-compat)."
+        }
       }
     },
     "ReplaySummary": {

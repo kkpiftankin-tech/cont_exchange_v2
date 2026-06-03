@@ -105,6 +105,11 @@ set(BACKTEST_LIB_SOURCES
         src/infra/postgres/postgres_replay_session_repository.cpp
         src/infra/postgres/postgres_replay_config_repository.cpp
         src/infra/postgres/postgres_rbac_repository.cpp
+        # F15-PERSIST: ephemeral registry + routing wrappers
+        src/infra/ephemeral_session_registry.cpp
+        src/infra/routing_replay_session_repository.cpp
+        src/infra/routing_summary_store.cpp
+        src/infra/routing_agent_log_writer.cpp
         ${CMAKE_SOURCE_DIR}/cpp/ledger/src/app/ledger_uc.cpp
         # Venues domain sources needed by F11-BACKTEST-2 replay pipeline.
         ${CMAKE_SOURCE_DIR}/cpp/venues/src/domain/depth_canonicalizer.cpp
@@ -755,5 +760,84 @@ if (BUILD_TESTING)
 
     add_test(NAME backtest_cancel_replay_session_test
             COMMAND backtest_cancel_replay_session_test)
+
+    # ============================================================
+    # F15-PERSIST: ephemeral registry + routing wrappers tests
+    # ============================================================
+
+    add_executable(backtest_ephemeral_session_registry_test
+            tests/ephemeral_session_registry_test.cpp
+            src/infra/ephemeral_session_registry.cpp
+    )
+    target_include_directories(backtest_ephemeral_session_registry_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/cpp/common/include
+            ${CMAKE_BINARY_DIR}
+            ${CMAKE_BINARY_DIR}/contracts/gen
+    )
+    target_link_libraries(backtest_ephemeral_session_registry_test PRIVATE
+            backtest_lib
+    )
+    target_compile_options(backtest_ephemeral_session_registry_test PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME backtest_ephemeral_session_registry_test
+            COMMAND backtest_ephemeral_session_registry_test)
+
+    add_executable(backtest_routing_replay_session_repository_test
+            tests/routing_replay_session_repository_test.cpp
+            src/infra/ephemeral_session_registry.cpp
+            src/infra/routing_replay_session_repository.cpp
+    )
+    target_include_directories(backtest_routing_replay_session_repository_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/cpp/common/include
+            ${CMAKE_BINARY_DIR}
+            ${CMAKE_BINARY_DIR}/contracts/gen
+    )
+    target_link_libraries(backtest_routing_replay_session_repository_test PRIVATE
+            backtest_lib
+    )
+    target_compile_options(backtest_routing_replay_session_repository_test PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME backtest_routing_replay_session_repository_test
+            COMMAND backtest_routing_replay_session_repository_test)
+
+    add_executable(backtest_routing_summary_store_test
+            tests/routing_summary_store_test.cpp
+            src/infra/ephemeral_session_registry.cpp
+            src/infra/routing_summary_store.cpp
+    )
+    target_include_directories(backtest_routing_summary_store_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/cpp/common/include
+            ${CMAKE_BINARY_DIR}
+            ${CMAKE_BINARY_DIR}/contracts/gen
+    )
+    target_link_libraries(backtest_routing_summary_store_test PRIVATE
+            backtest_lib
+    )
+    target_compile_options(backtest_routing_summary_store_test PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME backtest_routing_summary_store_test
+            COMMAND backtest_routing_summary_store_test)
+
+    add_executable(backtest_routing_agent_log_writer_test
+            tests/routing_agent_log_writer_test.cpp
+            src/infra/ephemeral_session_registry.cpp
+            src/infra/routing_agent_log_writer.cpp
+    )
+    target_include_directories(backtest_routing_agent_log_writer_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/cpp/common/include
+            ${CMAKE_BINARY_DIR}
+            ${CMAKE_BINARY_DIR}/contracts/gen
+    )
+    target_link_libraries(backtest_routing_agent_log_writer_test PRIVATE
+            backtest_lib
+    )
+    target_compile_options(backtest_routing_agent_log_writer_test PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME backtest_routing_agent_log_writer_test
+            COMMAND backtest_routing_agent_log_writer_test)
 
 endif ()

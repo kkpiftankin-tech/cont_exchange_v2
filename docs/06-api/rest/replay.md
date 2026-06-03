@@ -41,6 +41,17 @@ JWT извлекается `UserContext` (см. [audit_types.hpp](../../../cpp/b
 
 Создаёт ReplaySession в статусе `pending`.
 
+### Поле `persist` (F15-PERSIST)
+
+Опциональное булево поле. Умолчание: `true`.
+
+| Значение | Поведение |
+| -------- | --------- |
+| `true` (или отсутствует) | Стандартное поведение: сессия пишется в PostgreSQL `replay_sessions`/`replay_summaries`, AgentLog — в ClickHouse `replay_agentlogs`. |
+| `false` | Ephemeral-режим: сессия живёт только в памяти процесса + в живом Kafka-потоке `replay.results`. Ничего не записывается в PostgreSQL или ClickHouse. GET /sessions/{id}, /summary, /agentlogs, retry возвращают 404/no-data для ephemeral id. Сессия не возвращается в GET /sessions (listing). |
+
+Frontend по умолчанию отправляет `persist: false` для обычных интерактивных запусков; существующие скрипты/тесты, не передающие `persist`, получают поведение `persist: true` без изменений.
+
 ### Request
 
 ```json
@@ -67,7 +78,8 @@ JWT извлекается `UserContext` (см. [audit_types.hpp](../../../cpp/b
     "takerfeerate": 0.0005
   },
   "reward_mode": "pnl",
-  "random_seed": 42
+  "random_seed": 42,
+  "persist": false
 }
 ```
 

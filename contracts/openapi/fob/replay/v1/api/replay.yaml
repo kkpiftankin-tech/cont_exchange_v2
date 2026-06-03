@@ -265,6 +265,14 @@ components:
         risk_limits_id: { type: string, format: uuid }
         fee_model: { $ref: 'schemas/replay-dtos.json#/definitions/FeeModel' }
         session_config_snapshot_json: { type: object }
+        persist:
+          type: boolean
+          default: true
+          description: >
+            F15-PERSIST — если false, сессия ephemeral: живёт только в памяти
+            процесса и Kafka-потоке replay.results. Ничего не записывается в
+            PostgreSQL или ClickHouse. Отсутствие поля эквивалентно true
+            (backward-compat). Frontend по умолчанию отправляет false.
 
     ReplaySessionCreated:
       type: object

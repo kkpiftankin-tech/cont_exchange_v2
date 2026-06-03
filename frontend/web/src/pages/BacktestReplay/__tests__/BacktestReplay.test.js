@@ -429,6 +429,127 @@ describe('BacktestReplay UI', () => {
     expect(runButton).toBeDisabled();
   });
 
+  test('persist toggle is OFF by default', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const { container } = renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    const persistCheckbox = container.querySelector('input[name="persist"]');
+    expect(persistCheckbox).toBeInTheDocument();
+    expect(persistCheckbox.checked).toBe(false);
+  });
+
+  test('payload contains persist:false by default and persist:true when checked', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const { container } = renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    // Default: persist=false => ephemeral create
+    fireEvent.click(await screen.findByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+    expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({ persist: false });
+
+    mockCreateReplaySession.mockClear();
+
+    // Check the persist checkbox => persist:true
+    const persistCheckbox = container.querySelector('input[name="persist"]');
+    fireEvent.click(persistCheckbox);
+    expect(persistCheckbox.checked).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+    expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({ persist: true });
+  });
+
+  test('ephemeral run does not add to sessions list and renders summary from stream event', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const ephemeralCreatedSession = makeSession({
+      sessionid: 'eph-001',
+      name: 'Ephemeral run',
+      status: 'running',
+    });
+    mockCreateReplaySession.mockResolvedValue({ session: ephemeralCreatedSession });
+
+    let ephemeralSubscription = null;
+    mockSubscribeReplayResults.mockImplementation((callbacks) => {
+      // Track only the ephemeral subscription (sessionid = eph-001)
+      if (callbacks.sessionid === 'eph-001') {
+        ephemeralSubscription = callbacks;
+      } else {
+        lastSubscription = callbacks;
+        callbacks.onOpen?.({ transport: 'sse' });
+      }
+      return jest.fn();
+    });
+
+    renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    // persist is OFF by default: run the form
+    fireEvent.click(await screen.findByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+
+    // The session must NOT appear in the sessions list
+    expect(screen.queryByText('eph-001')).not.toBeInTheDocument();
+
+    // The ephemeral panel should appear
+    expect(await screen.findByText('replay.ephemeral.panelTitle')).toBeInTheDocument();
+    expect(screen.getAllByText('replay.states.ephemeralStarted').length).toBeGreaterThan(0);
+
+    // Simulate stream completion event with summary
+    const streamSummary = {
+      totalpnl: 42.5,
+      avgis: -1.1,
+      sharpe: 1.3,
+      fillrate: 88,
+      maxdrawdown: 0.5,
+      avgsolvetime: 25,
+      totalbatches: 10,
+      totalfillevents: 55,
+      processedbatches: 10,
+      failedbatches: 0,
+      partial: false,
+      nodata: false,
+    };
+    await act(async () => {
+      ephemeralSubscription?.onEvent({
+        type: 'replay.completed',
+        sessionid: 'eph-001',
+        status: 'completed',
+        summary: streamSummary,
+      });
+    });
+
+    expect(await screen.findByText('replay.states.ephemeralCompleted')).toBeInTheDocument();
+    // No REST call for loadResults (getReplaySummary should NOT be called for eph-001)
+    expect(mockGetReplaySummary).not.toHaveBeenCalledWith('eph-001');
+
+    // Dismiss button closes the panel
+    fireEvent.click(screen.getByRole('button', { name: 'replay.ephemeral.dismiss' }));
+    expect(screen.queryByText('replay.ephemeral.panelTitle')).not.toBeInTheDocument();
+  });
+
   test('requests AgentLog pagination and filters from backend', async () => {
     mockListReplaySessions.mockResolvedValue({ items: [makeSession({ status: 'completed', cancancel: false })], total: 1 });
     mockGetReplaySummary.mockResolvedValue({

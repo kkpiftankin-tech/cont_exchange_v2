@@ -288,3 +288,50 @@ CREATE TABLE IF NOT EXISTS sim_hedge_pnl (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (sim_session_id, venue_id, instrument_symbol)
 );
+
+-- ===========================================================================
+-- F-15 Backtest / Replay: config registries (solver / risk / fee / reward).
+-- Schema mirrors PostgresReplayConfigRepository::EnsureSchema (id, version,
+-- body_json) so these CREATE TABLE IF NOT EXISTS are no-ops when the backtest
+-- service has already created them at runtime. Seeded with the production
+-- config ids referenced by the BacktestReplay create form defaults
+-- (solver-prod-v4, risk-standard) so the page works out of the box.
+-- See docs/06-api/rest/replay.md and feature.yaml F-15.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS replay_solver_configs (
+  id         TEXT PRIMARY KEY,
+  version    INTEGER NOT NULL DEFAULT 0,
+  body_json  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replay_risk_limits (
+  id         TEXT PRIMARY KEY,
+  version    INTEGER NOT NULL DEFAULT 0,
+  body_json  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replay_fee_models (
+  id         TEXT PRIMARY KEY,
+  version    INTEGER NOT NULL DEFAULT 0,
+  body_json  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replay_reward_configs (
+  id         TEXT PRIMARY KEY,
+  version    INTEGER NOT NULL DEFAULT 0,
+  body_json  TEXT NOT NULL
+);
+
+INSERT INTO replay_solver_configs (id, version, body_json) VALUES (
+  'solver-prod-v4', 1,
+  '{"batchintervalms":1000,"maxiterations":128,"tolerance":0.0001,"epsilonliquidity":0.00001,"feemodel":{"makerfeerate":0.0002,"takerfeerate":0.0005}}'
+) ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO replay_risk_limits (id, version, body_json) VALUES (
+  'risk-standard', 1,
+  '{"maxnotional":1000000,"maxposition":100,"maxleverage":3,"maxorderrate":20,"whitelist":["BTCUSDT"]}'
+) ON CONFLICT (id) DO NOTHING;
+
+-- Fee model id 'production' is the id the create form sends as feemodel
+-- {"production": true}; the config resolver looks it up by id="production".
+INSERT INTO replay_fee_models (id, version, body_json) VALUES (
+  'production', 1,
+  '{"makerfeerate":0.0002,"takerfeerate":0.0005}'
+) ON CONFLICT (id) DO NOTHING;
