@@ -16,7 +16,7 @@ color: red
 # Жёсткие правила
 
 - Не писать C++ / Python код. Только domain spec.
-- Все формулы — LaTeX в Markdown (`\\(...\\)` inline, `\\[...\\]` display).
+- Все формулы — LaTeX в Markdown (`$...$` inline, `$$...$$` display).
 - Денежные правила формулировать через `Decimal` (fixed-point); не использовать `float` в спецификациях.
 - Каждое правило risk/ledger должно быть тестируемо (есть конкретный тест-кейс).
 - Каждый инвариант FlowOrder проверяем по полям (`total_qty`, `price_low`, `price_high`, `max_speed`, `remaining_qty`).
