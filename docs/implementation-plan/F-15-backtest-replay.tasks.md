@@ -132,9 +132,19 @@ References: AC-N5 в [acceptance-criteria.md](../02-system/features/F-15-backtes
 
 ### T-F15-007. Лимит/таймаут на SSE-стримы replay в gateway
 
-**Status:** ❌ открыт (обнаружено 2026-06-03 при E2E persist-фичи).
+**Status:** ✅ реализовано 2026-06-04 (gateway + frontend).
 
-Проблема: эндпоинт `GET /api/v1/replay/results/stream` (SSE) в `cpp/gateway/src/transport/http_gateway.cpp`
+Сделано:
+- Gateway (`cpp/gateway/src/transport/http_gateway.cpp`): `/results/stream`
+  переведён в bounded long-poll — `res.is_alive()` рвёт цикл при дисконнекте,
+  `REPLAY_SSE_MAX_DURATION_S` (30s) ограничивает удержание треда, кап
+  `REPLAY_SSE_MAX_STREAMS` (32) на одновременные стримы (503 + Retry-After),
+  резюм по `Last-Event-ID`. Пул Crow поднят до `REPLAY_GW_THREADS` (64).
+- Frontend (`38342b67`): SSE открывается только для активных (pending/running)
+  сессий.
+- Env задокументированы в `infra/env/.env-example`.
+
+Изначальная проблема (для истории): эндпоинт `GET /api/v1/replay/results/stream` (SSE) в `cpp/gateway/src/transport/http_gateway.cpp`
 держит соединение открытым без idle/max-duration таймаута и без лимита на число
 одновременных стримов. Долгоживущие SSE-соединения (проксируются `frontend-api` для
 каждой открытой вкладки `/replay`, плюс реконнекты) накапливаются и исчерпывают пул
