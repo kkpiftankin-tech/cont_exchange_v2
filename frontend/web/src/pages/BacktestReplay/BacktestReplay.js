@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useTranslation } from 'react-i18next';
@@ -56,12 +56,14 @@ const DEFAULT_FEE_MODEL = `{
 
 const STATUS_FILTERS = ['all', 'pending', 'running', 'completed', 'failed', 'cancelled'];
 const AUDIT_MODE_ENABLED = process.env.REACT_APP_REPLAY_AUDIT_ENABLED === 'true';
-const RESULT_TABS = AUDIT_MODE_ENABLED
+const RESULT_TABS_BASE = AUDIT_MODE_ENABLED
   ? ['summary', 'equity', 'batches', 'compare', 'audit']
   : ['summary', 'equity', 'batches', 'compare'];
 const PAGE_SIZE = 5;
 const BATCH_PAGE_SIZE = 20;
 const EQUITY_LOG_LIMIT = 10000;
+const PLAYBACK_PAGE_SIZE = 200;
+const PLAYBACK_MAX_BATCHES = 5000;
 const COMPARE_METRIC_VIEW = {
   avgis: { digits: 2, suffix: '' },
   totalpnl: { type: 'pnl' },
@@ -248,6 +250,14 @@ function buildPayload(formValues, parsedStrategy) {
   };
 }
 
+function resolveStartTime(session) {
+  return session?.startedat || session?.daterangefrom || session?.createdat || null;
+}
+
+function resolveEndTime(session) {
+  return session?.completedat || session?.daterangeto || session?.updatedat || null;
+}
+
 function sortSessions(items) {
   return [...items].sort((left, right) => {
     const leftTs = Date.parse(left.createdat || 0) || 0;
@@ -371,9 +381,27 @@ const BacktestReplay = () => {
   const [batchPage, setBatchPage] = useState(1);
   const [selectedLog, setSelectedLog] = useState(null);
 
+  // --- Playback state ---
+  const [playbackStatus, setPlaybackStatus] = useState('idle');
+  const [playbackCursor, setPlaybackCursor] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [playbackBufferProgress, setPlaybackBufferProgress] = useState({ loaded: 0, total: 0 });
+  const [playbackBufferCapped, setPlaybackBufferCapped] = useState(false);
+  const [playbackBatchList, setPlaybackBatchList] = useState([]);
+  const playbackBufferRef = useRef(new Map());
+  const playbackTimerRef = useRef(null);
+  const playbackIsDisabled = playbackStatus === 'buffering' || playbackStatus === 'error';
+
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionid === selectedSessionId) || sessions[0] || null,
     [sessions, selectedSessionId]
+  );
+
+  const RESULT_TABS = useMemo(
+    () => (selectedSession?.status === 'completed'
+      ? [...RESULT_TABS_BASE, 'playback']
+      : RESULT_TABS_BASE),
+    [selectedSession?.status]
   );
 
   const filteredSessions = useMemo(() => {
@@ -677,6 +705,154 @@ const BacktestReplay = () => {
 
     return unsubscribe;
   }, [loadResults, loadSessions, selectedSession?.sessionid]);
+
+  // --- Playback: clear timer on unmount ---
+  useEffect(() => () => {
+    if (playbackTimerRef.current) clearInterval(playbackTimerRef.current);
+  }, []);
+
+  // --- Playback: reset state when selected session changes ---
+  useEffect(() => {
+    if (playbackTimerRef.current) clearInterval(playbackTimerRef.current);
+    setPlaybackStatus('idle');
+    setPlaybackCursor(0);
+    setPlaybackSpeed(1);
+    setPlaybackBufferProgress({ loaded: 0, total: 0 });
+    setPlaybackBufferCapped(false);
+    setPlaybackBatchList([]);
+  }, [selectedSession?.sessionid]);
+
+  // --- Playback: pause when user navigates away from playback tab ---
+  useEffect(() => {
+    if (activeTab !== 'playback') {
+      if (playbackTimerRef.current) {
+        clearInterval(playbackTimerRef.current);
+        playbackTimerRef.current = null;
+        setPlaybackStatus((current) => (current === 'playing' ? 'paused' : current));
+      }
+    }
+  }, [activeTab]);
+
+  const loadPlaybackBuffer = useCallback(async (sessionid) => {
+    if (!sessionid) return;
+    if (playbackBufferRef.current.has(sessionid)) {
+      const cached = playbackBufferRef.current.get(sessionid);
+      setPlaybackBatchList(cached);
+      setPlaybackBufferProgress({ loaded: cached.length, total: cached.length });
+      setPlaybackBufferCapped(false);
+      setPlaybackStatus('idle');
+      return;
+    }
+
+    setPlaybackStatus('buffering');
+    setPlaybackBufferProgress({ loaded: 0, total: 0 });
+    setPlaybackBufferCapped(false);
+
+    try {
+      let allItems = [];
+      let offset = 0;
+      let total = null;
+      let capped = false;
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        // eslint-disable-next-line no-await-in-loop
+        const response = await getReplayAgentLogs(sessionid, { limit: PLAYBACK_PAGE_SIZE, offset });
+        const items = response.items || [];
+        if (total === null) total = Number(response.total || 0);
+        allItems = allItems.concat(items);
+        offset += PLAYBACK_PAGE_SIZE;
+        setPlaybackBufferProgress({ loaded: allItems.length, total });
+        if (offset >= total) break;
+        if (offset >= PLAYBACK_MAX_BATCHES) {
+          capped = true;
+          break;
+        }
+      }
+
+      allItems.sort((a, b) => Number(a.batchseq || 0) - Number(b.batchseq || 0));
+      if (total > PLAYBACK_MAX_BATCHES) capped = true;
+      setPlaybackBufferCapped(capped);
+      playbackBufferRef.current.set(sessionid, allItems);
+      setPlaybackBatchList(allItems);
+      setPlaybackStatus('idle');
+      setPlaybackCursor(0);
+    } catch (_err) {
+      setPlaybackStatus('error');
+    }
+  }, []);
+
+  const playbackPlay = useCallback(() => {
+    setPlaybackStatus((current) => {
+      if (current === 'ended') setPlaybackCursor(0);
+      return 'playing';
+    });
+  }, []);
+
+  const playbackPause = useCallback(() => {
+    if (playbackTimerRef.current) {
+      clearInterval(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+    }
+    setPlaybackStatus('paused');
+  }, []);
+
+  const playbackStop = useCallback(() => {
+    if (playbackTimerRef.current) {
+      clearInterval(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+    }
+    setPlaybackStatus('idle');
+    setPlaybackCursor(0);
+  }, []);
+
+  const playbackSeek = useCallback((index) => {
+    setPlaybackCursor((current) => {
+      const maxIdx = playbackBatchList.length - 1;
+      if (maxIdx < 0) return current;
+      return Math.max(0, Math.min(index, maxIdx));
+    });
+    setPlaybackStatus((current) => (current === 'ended' ? 'paused' : current));
+  }, [playbackBatchList.length]);
+
+  // --- Playback: manage interval timer ---
+  useEffect(() => {
+    if (playbackTimerRef.current) {
+      clearInterval(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+    }
+    if (playbackStatus !== 'playing') return undefined;
+
+    if (playbackBatchList.length === 0) return undefined;
+
+    const interval = Math.round(1000 / playbackSpeed);
+    const maxIdx = playbackBatchList.length - 1;
+    playbackTimerRef.current = setInterval(() => {
+      setPlaybackCursor((current) => {
+        if (current >= maxIdx) {
+          clearInterval(playbackTimerRef.current);
+          playbackTimerRef.current = null;
+          setPlaybackStatus('ended');
+          return current;
+        }
+        return current + 1;
+      });
+    }, interval);
+
+    return () => {
+      if (playbackTimerRef.current) {
+        clearInterval(playbackTimerRef.current);
+        playbackTimerRef.current = null;
+      }
+    };
+  }, [playbackStatus, playbackSpeed, playbackBatchList.length]);
+
+  // --- Playback: load buffer when tab opens ---
+  useEffect(() => {
+    if (activeTab === 'playback' && selectedSession?.sessionid && selectedSession?.status === 'completed') {
+      loadPlaybackBuffer(selectedSession.sessionid);
+    }
+  }, [activeTab, selectedSession?.sessionid, selectedSession?.status, loadPlaybackBuffer]);
 
   const handleLogout = () => {
     logout();
@@ -1181,7 +1357,7 @@ const BacktestReplay = () => {
                     <span>{t('replay.sessions.sessionid')}</span>
                     <span>{t('replay.sessions.status')}</span>
                     <span>{t('replay.sessions.progress')}</span>
-                    <span>{t('replay.sessions.created')}</span>
+                    <span>{t('replay.sessions.range')}</span>
                   </div>
                   {pagedSessions.map((session) => (
                     <button
@@ -1204,7 +1380,10 @@ const BacktestReplay = () => {
                         <em>{session.progressbatches} / {session.totalbatches || '-'}</em>
                         <small>{formatNumber(session.progress, '%', 1)}</small>
                       </span>
-                      <span>{formatDateTime(session.createdat)}</span>
+                      <span>
+                        <small>{formatDateTime(resolveStartTime(session))}</small>
+                        <small>{' → '}{formatDateTime(resolveEndTime(session))}</small>
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -1741,6 +1920,217 @@ const BacktestReplay = () => {
                   </div>
                 )}
               </section>
+              )}
+
+              {activeTab === 'playback' && (
+                  <section className="replay-playback-panel" aria-label={t('replay.tabs.playback')}>
+                    {playbackStatus === 'buffering' && (
+                      <div className="replay-inline-state tone-info-panel">
+                        {t('replay.playback.buffering', {
+                          loaded: playbackBufferProgress.loaded,
+                          total: playbackBufferProgress.total,
+                        })}
+                        <i className="replay-progress-track" style={{ display: 'block', marginTop: '8px' }}>
+                          <i style={{
+                            width: playbackBufferProgress.total > 0
+                              ? `${Math.round((playbackBufferProgress.loaded / playbackBufferProgress.total) * 100)}%`
+                              : '0%',
+                          }} />
+                        </i>
+                      </div>
+                    )}
+
+                    {playbackStatus === 'error' && (
+                      <div className="replay-inline-state tone-bad-panel">
+                        {t('replay.playback.loadError')}
+                        <button
+                          type="button"
+                          className="replay-playback-retry-btn"
+                          onClick={() => {
+                            playbackBufferRef.current.delete(selectedSession?.sessionid);
+                            loadPlaybackBuffer(selectedSession?.sessionid);
+                          }}
+                        >
+                          {t('replay.playback.retry')}
+                        </button>
+                      </div>
+                    )}
+
+                    {playbackStatus !== 'buffering' && playbackStatus !== 'error' && playbackBatchList.length === 0 && (
+                      <div className="replay-empty-state">{t('replay.playback.noData')}</div>
+                    )}
+
+                    {playbackBufferCapped && playbackBatchList.length > 0 && (
+                      <div className="replay-inline-state tone-warn-panel">
+                        {t('replay.playback.cappedNotice', {
+                          cap: PLAYBACK_MAX_BATCHES,
+                          total: playbackBufferProgress.total,
+                        })}
+                      </div>
+                    )}
+
+                    {playbackStatus === 'ended' && (
+                      <div className="replay-inline-state tone-info-panel">{t('replay.playback.ended')}</div>
+                    )}
+
+                    {playbackBatchList.length > 0 && (
+                      <div className="replay-player-controls">
+                        <div className="replay-player-btns">
+                          {(playbackStatus === 'idle' || playbackStatus === 'paused') && (
+                            <button type="button" disabled={playbackIsDisabled} onClick={playbackPlay}>
+                              {playbackStatus === 'paused'
+                                ? t('replay.playback.resume')
+                                : t('replay.playback.play')}
+                            </button>
+                          )}
+                          {playbackStatus === 'playing' && (
+                            <button type="button" disabled={playbackIsDisabled} onClick={playbackPause}>
+                              {t('replay.playback.pause')}
+                            </button>
+                          )}
+                          {playbackStatus === 'ended' && (
+                            <button type="button" disabled={playbackIsDisabled} onClick={playbackPlay}>
+                              {t('replay.playback.replay')}
+                            </button>
+                          )}
+                          {(playbackStatus === 'playing' || playbackStatus === 'paused') && (
+                            <button type="button" disabled={playbackIsDisabled} onClick={playbackStop}>
+                              {t('replay.playback.stop')}
+                            </button>
+                          )}
+                          {playbackStatus === 'ended' && (
+                            <button type="button" disabled={playbackIsDisabled} onClick={playbackStop}>
+                              {t('replay.playback.stop')}
+                            </button>
+                          )}
+                          <label className="replay-player-speed-label">
+                            {t('replay.playback.speed')}
+                            <select
+                              value={playbackSpeed}
+                              onChange={(ev) => setPlaybackSpeed(Number(ev.target.value))}
+                              disabled={playbackIsDisabled}
+                            >
+                              <option value={1}>1×</option>
+                              <option value={2}>2×</option>
+                              <option value={5}>5×</option>
+                              <option value={10}>10×</option>
+                            </select>
+                          </label>
+                        </div>
+
+                        <div className="replay-scrubber">
+                          <input
+                            aria-label={t('replay.playback.seek')}
+                            type="range"
+                            min={0}
+                            max={Math.max(0, playbackBatchList.length - 1)}
+                            value={playbackCursor}
+                            disabled={playbackIsDisabled}
+                            onChange={(ev) => playbackSeek(Number(ev.target.value))}
+                          />
+                          <div className="replay-scrubber-labels">
+                            <small>{formatDateTime(resolveStartTime(selectedSession))}</small>
+                            <small>{formatDateTime(resolveEndTime(selectedSession))}</small>
+                          </div>
+                        </div>
+
+                        <div className="replay-player-position">
+                          {t('replay.playback.batchOf', {
+                            current: playbackBatchList[playbackCursor]?.batchseq ?? 0,
+                            total: playbackBatchList.length,
+                          })}
+                          {playbackBatchList[playbackCursor]?.timestamp && (
+                            <small>{' — '}{formatDateTime(playbackBatchList[playbackCursor].timestamp)}</small>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {playbackBatchList[playbackCursor] && (
+                      <div className="replay-frame-grid">
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.clearPrices')}</span>
+                          {playbackBatchList[playbackCursor].batchresult?.clearprices
+                            ? Object.entries(playbackBatchList[playbackCursor].batchresult.clearprices).map(([sym, price]) => (
+                              <div className="replay-clearprices-row" key={sym}>
+                                <strong>{sym}</strong>
+                                <span>{formatNumber(price, '', 4)}</span>
+                              </div>
+                            ))
+                            : <em>—</em>}
+                        </div>
+
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.runningPnl')}</span>
+                          <strong className={(() => { const r = playbackBatchList.slice(0, playbackCursor + 1).reduce((s, l) => s + Number(l.pnl || 0), 0); return r > 0 ? 'tone-good-text' : r < 0 ? 'tone-bad-text' : ''; })()}>
+                            {formatPnl(playbackBatchList.slice(0, playbackCursor + 1).reduce((s, l) => s + Number(l.pnl || 0), 0))}
+                          </strong>
+                        </div>
+
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.fillRate')}</span>
+                          <strong>{formatNumber(playbackBatchList[playbackCursor].fillrate, '%', 1)}</strong>
+                        </div>
+
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.residualNorm')}</span>
+                          <strong>{formatNumber(playbackBatchList[playbackCursor].residualnorm, '', 6)}</strong>
+                        </div>
+
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.solveTime')}</span>
+                          <strong>{formatNumber(playbackBatchList[playbackCursor].solvetime_ms, ' ms', 0)}</strong>
+                        </div>
+
+                        <div className="replay-frame-card">
+                          <span>{t('replay.playback.riskStatus')}</span>
+                          <strong className={
+                            playbackBatchList[playbackCursor].solvererrorflag
+                              ? 'tone-bad-text'
+                              : playbackBatchList[playbackCursor].riskstatus === 'OK'
+                                ? 'tone-good-text'
+                                : 'tone-warn-text'
+                          }>
+                            {playbackBatchList[playbackCursor].solvererrorflag ? 'solver_error' : playbackBatchList[playbackCursor].riskstatus || '-'}
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+
+                    {playbackBatchList.length > 0 && playbackCursor > 0 && (
+                      <div className="replay-playback-equity">
+                        <div className="replay-section-title">
+                          <h4>{t('replay.playback.equityTitle')}</h4>
+                        </div>
+                        <div className="replay-equity-chart">
+                          <ResponsiveContainer width="100%" height={200}>
+                            <LineChart
+                              data={playbackBatchList.slice(0, playbackCursor + 1).reduce((acc, log) => {
+                              const prev = acc.length > 0 ? acc[acc.length - 1].equity : 0;
+                              acc.push({ batchseq: log.batchseq, equity: Number((prev + Number(log.pnl || 0)).toFixed(2)) });
+                              return acc;
+                            }, [])}
+                              margin={{ top: 14, right: 14, bottom: 8, left: 0 }}
+                            >
+                              <XAxis dataKey="batchseq" stroke="#b8accd" tick={{ fill: '#b8accd', fontSize: 11 }} />
+                              <YAxis stroke="#b8accd" tick={{ fill: '#b8accd', fontSize: 11 }} />
+                              <Tooltip
+                                contentStyle={{ background: '#0f081c', border: '1px solid rgba(167, 74, 255, 0.3)' }}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="equity"
+                                stroke="#a74aff"
+                                strokeWidth={3}
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    )}
+                  </section>
               )}
             </>
           )}

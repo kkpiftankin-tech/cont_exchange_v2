@@ -19,6 +19,9 @@ const translate = (key, options = {}) => {
   if (key === 'replay.sessions.liveConnected') return `live:${options.transport}`;
   if (key === 'replay.sessions.liveUpdated') return `updated:${options.time}`;
   if (key === 'replay.audit.loaded') return `audit:${options.count}`;
+  if (key === 'replay.playback.batchOf') return `batch:${options.current}/${options.total}`;
+  if (key === 'replay.playback.buffering') return `buffering:${options.loaded}/${options.total}`;
+  if (key === 'replay.playback.cappedNotice') return `capped:${options.cap}/${options.total}`;
   return key;
 };
 
@@ -390,8 +393,8 @@ describe('BacktestReplay UI', () => {
     expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({
       name: 'BTC replay validation',
       instruments: ['BTCUSDT'],
-      daterangefrom: '2026-04-01',
-      daterangeto: '2026-04-07',
+      daterangefrom: '2026-05-25',
+      daterangeto: '2026-05-26',
       solverconfigid: 'solver-prod-v4',
       risklimitsid: 'risk-standard',
       feemodel: { production: true },
@@ -616,6 +619,181 @@ describe('BacktestReplay UI', () => {
         batchseq: '5',
         offset: 0,
       }));
+    });
+  });
+
+  // ===== Playback tests =====
+
+  test('playback tab appears only for completed sessions and advances frames on Play', async () => {
+    jest.useFakeTimers();
+
+    const completedSession = makeSession({
+      sessionid: 'rpl-pb-1',
+      name: 'Playback Session',
+      status: 'completed',
+      progressbatches: 3,
+      totalbatches: 3,
+      progress: 100,
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-pb-1', totalpnl: 10 });
+    mockGetReplayAgentLogs.mockImplementation(async (_sessionid, opts) => {
+      if (opts && opts.limit === 200) {
+        // Playback buffer fetch
+        return {
+          items: [
+            { batchseq: 1, pnl: 1, fillrate: 80, solvetime_ms: 10, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60000 } } },
+            { batchseq: 2, pnl: 2, fillrate: 85, solvetime_ms: 12, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60100 } } },
+            { batchseq: 3, pnl: 3, fillrate: 90, solvetime_ms: 15, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60200 } } },
+          ],
+          total: 3,
+        };
+      }
+      // Normal batch page fetch
+      return { items: [], total: 0 };
+    });
+
+    renderReplayPage();
+
+    // Wait for sessions to load
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    // Playback tab should be present for completed session
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    expect(playbackTab).toBeInTheDocument();
+
+    // Open Playback tab — triggers buffer load
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    // Wait for buffer to finish loading (status goes idle)
+    await waitFor(() => {
+      expect(mockGetReplayAgentLogs).toHaveBeenCalledWith(
+        'rpl-pb-1',
+        expect.objectContaining({ limit: 200, offset: 0 })
+      );
+    });
+
+    // Play button should be visible
+    const playBtn = await screen.findByRole('button', { name: 'replay.playback.play' });
+    expect(playBtn).toBeInTheDocument();
+
+    // batch:1/3 should be shown (cursor=0 means first batch)
+    expect(await screen.findByText('batch:1/3')).toBeInTheDocument();
+
+    // Click Play
+    await act(async () => {
+      fireEvent.click(playBtn);
+    });
+
+    // Advance one tick (1 second at 1x speed)
+    await act(async () => {
+      jest.advanceTimersByTime(1100);
+    });
+
+    // cursor should have advanced to batch 2
+    await waitFor(() => {
+      expect(screen.getByText('batch:2/3')).toBeInTheDocument();
+    });
+
+    jest.useRealTimers();
+  });
+
+  test('playback tab is hidden for non-completed sessions', async () => {
+    const pendingSession = makeSession({ sessionid: 'rpl-pending-1', status: 'pending' });
+    mockListReplaySessions.mockResolvedValue({ items: [pendingSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-pending-1' });
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    // Should NOT have a playback tab
+    await waitFor(() => {
+      expect(screen.queryByRole('tab', { name: 'replay.tabs.playback' })).not.toBeInTheDocument();
+    });
+  });
+
+  test('playback shows noData message when agent logs are empty', async () => {
+    const completedSession = makeSession({
+      sessionid: 'rpl-empty-1',
+      status: 'completed',
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-empty-1' });
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('replay.playback.noData')).toBeInTheDocument();
+    });
+  });
+
+  test('playback scrubber seek updates the displayed frame', async () => {
+    const completedSession = makeSession({
+      sessionid: 'rpl-seek-1',
+      status: 'completed',
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-seek-1' });
+    mockGetReplayAgentLogs.mockImplementation(async (_sessionid, opts) => {
+      if (opts && opts.limit === 200) {
+        return {
+          items: [
+            { batchseq: 1, pnl: 1, fillrate: 80, solvetime_ms: 10, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+            { batchseq: 2, pnl: 2, fillrate: 85, solvetime_ms: 12, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+            { batchseq: 3, pnl: 3, fillrate: 90, solvetime_ms: 15, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+          ],
+          total: 3,
+        };
+      }
+      return { items: [], total: 0 };
+    });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    // Wait for buffer loaded (idle state, play button visible)
+    const playBtn = await screen.findByRole('button', { name: 'replay.playback.play' });
+    expect(playBtn).toBeInTheDocument();
+
+    // Initially at batch 1
+    expect(screen.getByText('batch:1/3')).toBeInTheDocument();
+
+    // Seek to index 2 (batch 3)
+    const scrubber = screen.getByLabelText('replay.playback.seek');
+    await act(async () => {
+      fireEvent.change(scrubber, { target: { value: '2' } });
+    });
+
+    // Should show batch 3
+    await waitFor(() => {
+      expect(screen.getByText('batch:3/3')).toBeInTheDocument();
     });
   });
 });
