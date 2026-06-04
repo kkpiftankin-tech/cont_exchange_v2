@@ -142,7 +142,9 @@ describe('BacktestReplay UI', () => {
 
     expect(await screen.findByText('replay.states.pending')).toBeInTheDocument();
     expect(screen.getAllByText('0 / 10').length).toBeGreaterThan(0);
-    expect(screen.getByText('live:sse')).toBeInTheDocument();
+    // Live SSE subscription now activates once the (active) session is selected,
+    // not eagerly on mount, so await the connection indicator.
+    expect(await screen.findByText('live:sse')).toBeInTheDocument();
 
     phase = 'running';
     await act(async () => {

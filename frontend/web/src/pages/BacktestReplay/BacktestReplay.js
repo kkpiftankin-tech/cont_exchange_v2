@@ -657,8 +657,18 @@ const BacktestReplay = () => {
   }, [ephemeralSession?.sessionid, t]);
 
   useEffect(() => {
+    const sid = selectedSession?.sessionid;
+    const status = selectedSession?.status;
+    // Only hold a live SSE stream for an actively-running session. A completed/
+    // failed/cancelled session (or no selection) never emits new events, and
+    // every open SSE connection pins a gateway worker thread (see T-F15-007),
+    // so subscribing for them exhausts the gateway. Saved sessions are loaded
+    // and played back over REST instead.
+    if (!sid || (status !== 'pending' && status !== 'running')) {
+      return undefined;
+    }
     const unsubscribe = subscribeReplayResults({
-      sessionid: selectedSession?.sessionid || '',
+      sessionid: sid,
       onOpen: ({ transport }) => {
         setLiveState({ transport, connected: true, lastEventAt: new Date().toISOString() });
       },
@@ -704,7 +714,7 @@ const BacktestReplay = () => {
     });
 
     return unsubscribe;
-  }, [loadResults, loadSessions, selectedSession?.sessionid]);
+  }, [loadResults, loadSessions, selectedSession?.sessionid, selectedSession?.status]);
 
   // --- Playback: clear timer on unmount ---
   useEffect(() => () => {
