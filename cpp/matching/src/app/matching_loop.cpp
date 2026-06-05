@@ -1,3 +1,43 @@
+// ============================================================================
+// matching_loop.cpp — orchestration ядро F-04: запускает batch cycle и
+// поддерживает Kafka consumer для входящих заявок / venue.liquidity / venue.health.
+//
+// Назначение и физический смысл:
+//   MatchingLoop — главный класс matching-сервиса. Управляет:
+//     * двумя background threads: consume_orders_loop (Kafka consumer) и
+//       batch_timer_loop (periodic ticker, по умолчанию 5 сек);
+//     * глобальным state: active_ (in-memory FlowOrder map), order_index_
+//       (UI-friendly snapshot для /orders/<id> endpoint), planner_inputs_cache_
+//       (external venue liquidity + health);
+//     * вызывает RunBatchUseCase → solver → publish → ledger;
+//     * F-12: hedge trigger evaluation + multi-venue routing (DoD-2 PR-F12-15) +
+//       execution intent publication.
+//
+// Архитектура thread'ов:
+//   * consume_orders_loop: poll Kafka 500ms, маршрутизирует topic → handler.
+//     Topics: "orders.normalized", "venue.liquidity.fob", "venue.health".
+//   * batch_timer_loop: sleep(batch_interval_ms_) → run_one_batch().
+//     Interval может hot-reload'иться через solver_config_repo_.
+//
+// Источник flow_orders:
+//   * Если flow_order_repository_ задан (MATCHING_POSTGRES_DSN) → PG (canonical).
+//   * Иначе → in-memory active_ (Kafka-fed legacy path).
+//
+// Ключевые исторические фиксы:
+//   * PR-F02-003: order_index_ status sync с расширением switch на все
+//     7 FlowOrderStatus значений + guard на filled_qty >= total_qty.
+//   * PR-F02-006: order_updates pre-pass читает batch.order_updates() ДО
+//     refresh active_orders — иначе race теряет terminal updates.
+//   * PR-F12-5: HedgeTriggerConfig / HedgeExecutionIntentConfig из env.
+//   * PR-F12-15 (F-12 DoD-2): multi-venue routing — split target_qty
+//     proportionally to L(v) между allowed_venues.
+//
+// CRITICAL: ВСЁ что mutate state требует locking. order_index_mutex_ — для
+// order_index_; planner_inputs_cache_mutex_ — для planner_inputs_cache_.
+// active_ — НЕ под mutex'ом (single-thread access из batch loop + consumer
+// гарантирует исключаемость через design).
+// ============================================================================
+
 #include "app/matching_loop.hpp"
 
 #include <algorithm>
@@ -28,6 +68,8 @@ namespace cex::matching::app {
 
 namespace {
 
+/// Преобразование vector<FlowOrder> → map<order_id, FlowOrder> для быстрого
+/// lookup'а. Reserve для O(1) bucket allocation.
 std::unordered_map<std::string, domain::FlowOrder> MapRepoOrders(
     const std::vector<domain::FlowOrder>& repo_orders) {
   std::unordered_map<std::string, domain::FlowOrder> result;
@@ -38,6 +80,9 @@ std::unordered_map<std::string, domain::FlowOrder> MapRepoOrders(
   return result;
 }
 
+/// Snapshot map → vector — для передачи в solver / market_data_client.
+/// Copy-by-value (FlowOrder copyable) — изменения в snapshot'е не влияют
+/// на исходную map.
 std::vector<domain::FlowOrder> SnapshotActiveOrders(
     const std::unordered_map<std::string, domain::FlowOrder>& active_orders) {
   std::vector<domain::FlowOrder> snapshot;
@@ -49,11 +94,15 @@ std::vector<domain::FlowOrder> SnapshotActiveOrders(
   return snapshot;
 }
 
+/// Normalized price limits для planner-forecast. nullopt = side disabled.
 struct NormalizedOrderPriceLimits {
   std::optional<double> buy_limit_price;
   std::optional<double> sell_limit_price;
 };
 
+/// Извлекает [normalized_low, normalized_high] с учётом legacy signed-by-side
+/// convention (PR-F02-005): для SELL заявок p_low/p_high stored as negated,
+/// здесь возвращаем business-facing positive values.
 NormalizedOrderPriceLimits NormalizeOrderPriceLimits(
     const domain::FlowOrder& order) {
   const double raw_low = static_cast<double>(order.p_low);
@@ -90,6 +139,10 @@ NormalizedOrderPriceLimits NormalizeOrderPriceLimits(
 // F-12 / PR-F12-5: parse a numeric string like "0.05" or "50000" into a
 // fixed-point Decimal{units, scale}. Empty / unparseable / non-finite input
 // returns zero (which the policy treats as "threshold disabled").
+//
+/// Дубликат ParseDecimalString из cpp/risk/src/app/risk_uc.cpp — намеренно
+/// не вынесен в common чтобы избежать cross-service refactor на PR-F12-5.
+/// При будущем cleanup'е стоит вынести в cex::common.
 cex::common::Decimal ParseDecimalString(const std::string& raw) {
   if (raw.empty()) return cex::common::Decimal::zero();
   std::string s = raw;
@@ -126,6 +179,9 @@ cex::common::Decimal ParseDecimalString(const std::string& raw) {
 }
 
 // F-12 / PR-F12-5: convert "BTC/USDT" → "BTC_USDT" for env-var suffix.
+//
+/// Env vars не могут содержать '/' или '-'. Конвертируем для построения
+/// per-symbol env var names типа HEDGE_TRIGGER_QTY_BTC_USDT.
 std::string SymbolToEnvSuffix(const std::string& symbol) {
   std::string out = symbol;
   for (auto& c : out) {
@@ -138,6 +194,9 @@ std::string SymbolToEnvSuffix(const std::string& symbol) {
 // disables the trigger entirely (matches pre-PR behaviour). Active deployments
 // set HEDGE_TRIGGER_QTY_DEFAULT / HEDGE_TRIGGER_NOTIONAL_DEFAULT, or per-symbol
 // HEDGE_TRIGGER_QTY_BTC_USDT etc., and list active symbols in HEDGE_TRIGGER_SYMBOLS.
+//
+/// Per-symbol thresholds OVERRIDE default. Если HEDGE_TRIGGER_SYMBOLS пуст —
+/// per_symbol_thresholds пустой, и применяется только default (если он > 0).
 HedgeTriggerConfig LoadHedgeTriggerConfig() {
   HedgeTriggerConfig config;
   config.default_thresholds.threshold_qty = ParseDecimalString(
@@ -266,6 +325,20 @@ std::string CurveIdForLog(const fob::venue::v1::VenueLiquidityCurve& curve) {
 }
 }  // namespace
 
+// ============================================================================
+// MatchingLoop конструктор.
+//
+// Принимает зависимости через DI:
+//   brokers              — Kafka broker list "host1:9092,host2:9092".
+//   batch_interval_ms    — interval между batch tick'ами (5000 default).
+//   flow_order_repository — nullable, для PG-режима чтения flow_orders.
+//   solver_config_repo   — для hot-reload solver config из PG (nullable).
+//   market_data_client   — для reference prices fetch (nullable).
+//   metrics              — Prometheus metrics обёртка.
+//
+// run_batch_uc_ инициализируется с lambda как publish_batch callback —
+// она и пишет в Kafka, и записывает metrics.
+// ============================================================================
 MatchingLoop::MatchingLoop(
     const std::string& brokers,
     int batch_interval_ms,
@@ -293,6 +366,17 @@ MatchingLoop::MatchingLoop(
       flow_order_repository_(std::move(flow_order_repository)),
       planner_inputs_cache_(LoadVenueHealthThresholds()) {}
 
+// ============================================================================
+// start — запуск consumer + batch loop threads.
+//
+// Шаги:
+//   1. Log effective F-12 config (для operator confirmation).
+//   2. running_ → true.
+//   3. consumer_.subscribe три topic.
+//   4. Spawn 2 threads: consume_orders_loop, batch_timer_loop.
+//
+// CRITICAL: вызывать только один раз. Повторный start без stop() leak'нет threads.
+// ============================================================================
 void MatchingLoop::start() {
   // F-12 / PR-F12-5: log effective hedge trigger config + intent config so
   // operators can confirm thresholds without restarting the service.
@@ -329,6 +413,9 @@ void MatchingLoop::start() {
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
 
+/// Graceful shutdown: clear running_ flag, ждём threads.
+/// join() — блокирующий, но threads должны завершиться в течение 500ms
+/// (один Kafka poll cycle) или batch_interval_ms_ (sleep period).
 void MatchingLoop::stop() {
   running_.store(false);
   if (t_consume_.joinable()) {
@@ -339,6 +426,16 @@ void MatchingLoop::stop() {
   }
 }
 
+// ============================================================================
+// consume_orders_loop — Kafka consumer thread.
+//
+// Polls 500ms за раз. Маршрутизирует payload в handler по topic:
+//   "orders.normalized" → on_order_event (create/cancel/amend).
+//   "venue.liquidity.fob" → on_liquidity_curve (F-11 LOB→FOB curves).
+//   "venue.health" → on_venue_health (F-11 venue circuit-breaker state).
+//
+// poll_once возвращает false при transport-level fail → break.
+// ============================================================================
 void MatchingLoop::consume_orders_loop() {
   while (running_.load()) {
     bool ok = consumer_.poll_once(
@@ -386,6 +483,14 @@ void MatchingLoop::consume_orders_loop() {
   }
 }
 
+// ============================================================================
+// batch_timer_loop — periodic batch ticker thread.
+//
+// sleep(batch_interval_ms_) → run_one_batch() → repeat.
+// batch_interval_ms_ может hot-reload'иться внутри refresh_batch_interval_ms()
+// из solver_config_repo_ — это позволяет operator изменять interval без
+// рестарта сервиса.
+// ============================================================================
 void MatchingLoop::batch_timer_loop() {
   using namespace std::chrono;
   while (running_.load()) {
@@ -397,6 +502,9 @@ void MatchingLoop::batch_timer_loop() {
   }
 }
 
+/// Hot-reload solver config + batch_interval из PG.
+/// Если solver_config_repo_ не задан — fallback на батч-interval из конструктора.
+/// При ошибке — log + сохраняем текущее значение (не паника, не падаем).
 int MatchingLoop::refresh_batch_interval_ms() {
   if (!solver_config_repo_) {
     return batch_interval_ms_;
@@ -428,6 +536,19 @@ int MatchingLoop::refresh_batch_interval_ms() {
   return batch_interval_ms_;
 }
 
+// ============================================================================
+// on_order_event — handler для orders.normalized Kafka.
+//
+// Три типа event'ов:
+//   create  → FlowOrder.from_proto + index_order + active_[id] = order.
+//   cancel  → erase из active_ + index_terminal(filled_qty, "cancelled").
+//   amend   → in-place update полей q_max / p_low / p_high / q_rate.
+//
+// Запись в active_ без mutex'а — single-thread access из consumer thread.
+// batch_timer_loop читает active_ для snapshot — потенциальный race,
+// но FlowOrder copy безопасен (это просто struct), worst case: solver
+// видит stale view одной заявки.
+// ============================================================================
 void MatchingLoop::on_order_event(
     const fob::orders::v1::OrdersNormalized& evt) {
   if (evt.has_create()) {
@@ -485,6 +606,13 @@ void MatchingLoop::on_order_event(
   }
 }
 
+// ============================================================================
+// on_liquidity_curve — handler для venue.liquidity.fob Kafka (F-11).
+//
+// Обновляет planner_inputs_cache_ (under mutex) — это shared state между
+// run_one_batch() и этим handler'ом.
+// usable=false означает venue health или confidence слишком низкие.
+// ============================================================================
 void MatchingLoop::on_liquidity_curve(
     const fob::venue::v1::VenueLiquidityCurve& curve) {
   PlannerVenueInput input;
@@ -547,6 +675,13 @@ void MatchingLoop::on_liquidity_curve(
   });
 }
 
+// ============================================================================
+// on_venue_health — handler для venue.health Kafka (F-11).
+//
+// Обновляет venue health state в cache. Может deactivate venue для последующих
+// batches. affected_inputs — list curves, чья usability изменилась из-за
+// этого health update.
+// ============================================================================
 void MatchingLoop::on_venue_health(const fob::venue::v1::VenueHealth& health) {
   HealthUpsertResult update;
   std::size_t cached_curves = 0;
@@ -616,12 +751,19 @@ void MatchingLoop::on_venue_health(const fob::venue::v1::VenueHealth& health) {
   }
 }
 
+/// Filter cached venue curves через венозные health gates.
+/// Public wrapper с lock. Используется в legacy paths / tests.
 domain::ExternalLiquidityBySymbol MatchingLoop::filtered_external_liquidity()
     const {
   std::lock_guard<std::mutex> lock(planner_inputs_cache_mutex_);
   return filtered_external_liquidity_unlocked();
 }
 
+/// Internal version — caller обязан удерживать planner_inputs_cache_mutex_.
+/// Также проверяет env override MATCHING_DISABLE_EXTERNAL_VENUES (kill-switch
+/// для external routing на случай incident'а).
+/// static const local — Meyers singleton pattern, инициализируется один раз
+/// при первом вызове (thread-safe в C++11+).
 domain::ExternalLiquidityBySymbol
 MatchingLoop::filtered_external_liquidity_unlocked() const {
   static const bool external_disabled = []() {
@@ -639,6 +781,27 @@ MatchingLoop::filtered_external_liquidity_unlocked() const {
   return planner_inputs_cache_.LegacyBestProjection();
 }
 
+// ============================================================================
+// run_one_batch — главный batch cycle. Вызывается batch_timer_loop'ом.
+//
+// Шаги:
+//   1. Generate batch_id (UUID v4) + текущее время.
+//   2. Source flow orders: PG (если flow_order_repository_) ИЛИ in-memory active_.
+//   3. Fetch reference prices через MarketData (для solver Init initial π).
+//   4. Per-order planner forecast (F-11 venue comparisons).
+//   5. Filter usable external liquidity по health gates.
+//   6. RunBatchUseCase.Execute → BatchResult (solver + cap + publish).
+//   7. PR-F02-006 pre-pass: apply batch.order_updates() к order_index_.
+//   8. order_index_ sync с active_orders (для UI snapshot).
+//   9. Persist fill_deltas в PG через UpdateFilledVolumes (если репо есть).
+//  10. Log position snapshots (F-06).
+//  11. F-12 multi-venue routing fan-out (PR-F12-15 / DoD-2).
+//  12. Publish hedge_execution_intents.
+//  13. Build + publish execution intents для external fills.
+//  14. Summary log.
+//
+// Heavy method ~600+ строк — кандидат на decomposition в future refactor.
+// ============================================================================
 void MatchingLoop::run_one_batch() {
   using namespace std::chrono;
 
@@ -1269,12 +1432,26 @@ void MatchingLoop::run_one_batch() {
   });
 }
 
+/// Тонкая обёртка для Kafka publish — делегирует BatchOutputsProducer.
+/// Закомментированный код выше — legacy direct-call вариант.
 bool MatchingLoop::publish_batch(const fob::matching::v1::BatchResult& batch) {
   return infra::BatchOutputsProducer(producer_).produce(batch);
   // return producer_.produce("batch.outputs", batch.batch_id(),
   // cex::common::to_bytes(batch));
 }
 
+// ============================================================================
+// index_order / index_terminal / snapshot_order — UI-friendly snapshot
+// поддержка для /orders/<id> endpoint.
+//
+// order_index_ — отдельная map от active_, оптимизированная для read API
+// (включает terminal заявки которые уже не в active_). Обновляется
+// inline в нескольких местах: on_order_event (create/cancel), run_one_batch
+// (после batch_result через PR-F02-006 pre-pass), и через index_terminal.
+// ============================================================================
+
+/// Add/update OrderSnapshot для заявки. Status — UI-facing string
+/// ("pending"/"partial"/"filled"/"cancelled"/...).
 void MatchingLoop::index_order(const domain::FlowOrder& order,
                                const std::string& status) {
   std::lock_guard<std::mutex> lock(order_index_mutex_);
@@ -1285,6 +1462,9 @@ void MatchingLoop::index_order(const domain::FlowOrder& order,
   snap.filled_qty = static_cast<double>(order.filled_cum);
 }
 
+/// Mark заявку как terminal (cancelled/expired/...) с финальным filled_qty.
+/// No-op если заявка не была в index_ (мы не отслеживаем заявки которые
+/// никогда не приходили через on_order_event).
 void MatchingLoop::index_terminal(const std::string& order_id,
                                   const std::string& status,
                                   double filled_qty) {
@@ -1297,6 +1477,8 @@ void MatchingLoop::index_terminal(const std::string& order_id,
   it->second.filled_qty = filled_qty;
 }
 
+/// Lookup snapshot заявки по order_id. std::nullopt если не найдена.
+/// Используется HTTP /orders/<id> endpoint для отдачи UI-friendly data.
 std::optional<MatchingLoop::OrderSnapshot> MatchingLoop::snapshot_order(
     const std::string& order_id) const {
   std::lock_guard<std::mutex> lock(order_index_mutex_);
