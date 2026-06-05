@@ -1,9 +1,40 @@
+// ============================================================================
+// risk_uc.cpp — application use cases сервиса risk.
+//
+// Назначение и физический смысл:
+//   Risk Manager — gate перед активацией заявок и хеджей. Реализует pre-trade
+//   проверки (CheckNewOrder), pre-hedge проверки (PreHedgeCheck, F-12 DoD-3),
+//   kill-switch (SetKillSwitch), и асинхронные observers (OnBatchResult,
+//   OnExecutionReport, OnSyntheticOrder, CurveChecks, HealthChecks).
+//
+//   Решения risk выражаются enum RiskDecision: ACCEPT, REJECT, RESIZE, HALT.
+//   См. CLAUDE.md §16 — принципы risk policy.
+//
+// Concurrency model:
+//   * Один mutex mu_ защищает: global_halt_, instrument_halt_,
+//     venue_health_gate_, exposures_.
+//   * Lock-and-snapshot pattern: захватываем lock → читаем нужное →
+//     отпускаем → дальше pure compute против snapshot'а.
+//   * Венозный venue_health_gate обновляется HealthChecks() из Kafka
+//     venue.health consumer.
+//
+// F-12 DoD-3 (PR-F12-13) гейты в PreHedgeCheck выполняются в строгом порядке:
+//   1. PROVIDER_HALTED       (kill-switch)
+//   2. NOTIONAL_EXCEEDED     (target_qty × reference_mid > limit)
+//   3. EXPOSURE_EXCEEDED     (current + target > limit)
+//   4. SLIPPAGE_EXCEEDED     (expected_bps > urgency-specific limit)
+//   5. VENUES_UNAVAILABLE    (все allowed_venues OPEN или BLOCKED)
+//
+//   Порядок важен: ранние reject'ы — самые дешёвые и важные (kill-switch
+//   всегда первый — operator override). Слишком дорогие проверки идут после.
+// ============================================================================
+
 #include "app/risk_uc.hpp"
 
-#include <algorithm>
+#include <algorithm>           // std::max для severity escalation
 
 #include "cex/common/decimal.hpp"
-#include "cex/common/env.hpp"
+#include "cex/common/env.hpp"   // env vars для конфигов RISK_*
 #include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
@@ -13,12 +44,18 @@ namespace cex::risk::app {
 
 using cex::common::Decimal;
 
+/// Конструктор: принимает publisher для risk.alerts Kafka topic.
 RiskUseCases::RiskUseCases(infra::RiskAlertsPublisher publisher)
     : publisher_(std::move(publisher)) {}
 
+// ----------------------------------------------------------------------------
+// is_halted_locked — проверка kill-switch ДОЛЖНА вызываться под mu_.
+// Суффикс _locked — конвенция: caller обязан удерживать lock.
+// global_halt_ override инструмент-специфичные настройки.
+// ----------------------------------------------------------------------------
 bool RiskUseCases::is_halted_locked(const std::string& symbol) const {
   if (global_halt_) {
-    return true;
+    return true;   // глобальный kill — все инструменты заблокированы
   }
   auto it = instrument_halt_.find(symbol);
   if (it == instrument_halt_.end()) {
@@ -27,6 +64,22 @@ bool RiskUseCases::is_halted_locked(const std::string& symbol) const {
   return it->second;
 }
 
+// ============================================================================
+// EvaluateVenueHealthGateLocked — агрегированное решение по venue health.
+//
+// Физический смысл:
+//   matching пользуется external venues для хеджирования. Если все venue
+//   мертвы — нет смысла принимать новые заявки (нечего будет хеджировать).
+//   Если часть деградирована — резайзим (RESIZE) до меньшего speed.
+//
+// Алгоритм:
+//   * Идём по всем известным venue, классифицируем: allow/caution/blocked.
+//   * Hard block: breaker OPEN, routing BLOCK, status DISCONNECTED/STALE/RATE_LIMIT.
+//   * Caution: routing CAUTION/AVOID, status DEGRADED.
+//   * Иначе — allow.
+//   * Решение: REJECT если все blocked, RESIZE если есть caution или
+//     avg_health_score < 0.65, ACCEPT иначе.
+// ============================================================================
 RiskUseCases::VenueHealthDecision RiskUseCases::EvaluateVenueHealthGateLocked() const {
   if (venue_health_gate_.empty()) {
     // No external venue signal yet: do not block trading by default.
@@ -41,6 +94,7 @@ RiskUseCases::VenueHealthDecision RiskUseCases::EvaluateVenueHealthGateLocked() 
   for (const auto& [venue, state] : venue_health_gate_) {
     (void)venue;
     health_score_sum += state.health_score;
+    // Hard block: 5 разных причин, всех означающих "лучше не торговать".
     const bool hard_block =
         state.breaker == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN ||
         state.routing == fob::venue::v1::ROUTING_RECOMMENDATION_BLOCK ||
@@ -53,6 +107,7 @@ RiskUseCases::VenueHealthDecision RiskUseCases::EvaluateVenueHealthGateLocked() 
       continue;
     }
 
+    // Soft warning: можно торговать, но осторожно.
     if (state.routing == fob::venue::v1::ROUTING_RECOMMENDATION_CAUTION ||
         state.routing == fob::venue::v1::ROUTING_RECOMMENDATION_AVOID ||
         state.status == fob::venue::v1::VENUE_HEALTH_STATUS_DEGRADED) {
@@ -63,10 +118,13 @@ RiskUseCases::VenueHealthDecision RiskUseCases::EvaluateVenueHealthGateLocked() 
     ++allow_count;
   }
 
+  // Все blocked — REJECT (некуда хеджировать).
   if (allow_count == 0 && caution_count == 0 && blocked_count > 0) {
     return VenueHealthDecision::kReject;
   }
 
+  // Avg health < 0.65 → RESIZE: рекомендуем уменьшить агрессивность.
+  // 0.65 — empirically выбран как граница "деградации".
   const double avg_health_score = health_score_sum / static_cast<double>(venue_health_gate_.size());
   if (allow_count == 0 || caution_count > 0 || avg_health_score < 0.65) {
     return VenueHealthDecision::kResize;
@@ -74,12 +132,25 @@ RiskUseCases::VenueHealthDecision RiskUseCases::EvaluateVenueHealthGateLocked() 
   return VenueHealthDecision::kAccept;
 }
 
+// ============================================================================
+// CheckNewOrder — pre-trade проверки (вызывается из order_flow.CreateFlowOrder).
+//
+// Шаги:
+//   1. Kill-switch check (HALT если активен).
+//   2. Venue health gate (REJECT/RESIZE/ACCEPT).
+//   3. Sanity check полей (BAD_QTY, BAD_PRICE_RANGE).
+//   4. Margin estimate (10% от notional как placeholder).
+//
+// Decision возвращается в response, order_flow.uc применяет: HALT/REJECT →
+// failure, RESIZE → использует resized_order, ACCEPT → продолжает.
+// ============================================================================
 fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
     const fob::risk::v1::PreTradeCheckRequest& req) {
   fob::risk::v1::PreTradeCheckResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("risk");
 
+  // Lock-scope: все state-checks под одним lock'ом, минимизируем удержание.
   {
     std::lock_guard<std::mutex> lg(mu_);
     if (is_halted_locked(req.order().instrument().symbol())) {
@@ -99,6 +170,8 @@ fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
       return resp;
     }
     if (venue_gate == VenueHealthDecision::kResize) {
+      // RESIZE без модификации заявки: signal клиенту что ситуация
+      // нестабильная, но пропускаем заявку как есть.
       resp.set_decision(fob::risk::v1::RISK_DECISION_RESIZE);
       *resp.mutable_resized_order() = req.order();
       auto* e = resp.mutable_error();
@@ -128,11 +201,14 @@ fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
 
   // Placeholder margin estimate: required_initial_margin = notional * 10%
   // Notional approximated as total_qty * reference_price.
+  // Production: должно использовать SPAN/portfolio margin модель.
   Decimal qty = Decimal::from_proto(req.order().total_qty());
   Decimal ref = Decimal::from_proto(req.reference_price());
   Decimal notional = Decimal::mul(qty, ref);
 
-  // Multiply by 0.1 => units/10 (keep scale)
+  // Multiply by 0.1 => units/10 (keep scale).
+  // Integer division для odd-units теряет 1 unit precision — приемлемо
+  // для placeholder.
   Decimal margin = notional;
   margin.units /= 10;
 
@@ -141,6 +217,14 @@ fob::risk::v1::PreTradeCheckResponse RiskUseCases::CheckNewOrder(
   return resp;
 }
 
+// ============================================================================
+// SetKillSwitch — operator action: halt/resume торговлю.
+//
+// Глобальный (instrument_symbol пуст) или per-symbol. Эмитит RiskAlert
+// в Kafka risk.alerts для observability и operator UI.
+//
+// CRITICAL severity при halt, INFO при resume.
+// ============================================================================
 fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
     const fob::risk::v1::KillSwitchRequest& req) {
   fob::risk::v1::KillSwitchResponse resp;
@@ -150,6 +234,7 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
   {
     std::lock_guard<std::mutex> lg(mu_);
     if (req.instrument_symbol().empty()) {
+      // Глобальный halt — override per-instrument.
       global_halt_ = req.halt();
       resp.set_effective_halt(global_halt_);
     } else {
@@ -165,6 +250,8 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
   *meta->mutable_ts_event() = cex::common::now_ts();
   meta->set_source("risk");
   meta->set_correlation_id(req.meta().correlation_id());
+  // partition_key = "GLOBAL" для глобального halt'а — все consumers
+  // одной partition увидят его в одном порядке.
   meta->set_partition_key(
       req.instrument_symbol().empty() ? "GLOBAL" : req.instrument_symbol());
 
@@ -184,6 +271,9 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
   return resp;
 }
 
+/// OnBatchResult — observer Kafka batch.outputs. MVP: только логирует
+/// solver diagnostics. Production: должно вычислять post-trade risk
+/// (positions, margin requirements, liquidations).
 void RiskUseCases::OnBatchResult(
     const fob::risk::v1::PostTradeUpdateRequest& req) {
   // MVP: just log diagnostics from the batch solver.
@@ -198,6 +288,16 @@ void RiskUseCases::OnBatchResult(
   });
 }
 
+// ============================================================================
+// CurveChecks — observer venue.liquidity.fob (F-11).
+//
+// Проверяет:
+//   * curve.confidence >= RISK_MIN_CONFIDENCE (default 0.5)
+//   * total_volume <= RISK_MAX_VOLUME (default 10000 USD)
+//
+// При failure эмитит WARN RiskAlert. NOTE: TODO в коде — нет проверки slippage
+// (помечено комментарием "Where slippage?" в оригинале).
+// ============================================================================
 void RiskUseCases::CurveChecks(
     const fob::venue::v1::VenueLiquidityCurve& curve) {
   auto bid_curve = curve.bid_curve();
@@ -207,6 +307,8 @@ void RiskUseCases::CurveChecks(
   std::string reason = "";
 
   // wtf why don;t we have configs
+  // (TODO: оригинальный комментарий — конфиги должны быть централизованы,
+  //  не разбросаны по env vars per-call).
 
   std::string min_confidence_str =
       cex::common::Env::get_string("RISK_MIN_CONFIDENCE", "0.5");
@@ -221,6 +323,8 @@ void RiskUseCases::CurveChecks(
       cex::common::Env::get_string("RISK_MAX_VOLUME", "10000");  // USD
   double max_volume = std::strtod(max_volume_str.data(), NULL);
 
+  // Aggregate volume: max(первая, последняя точка) bid + max ask.
+  // Грубая оценка total liquidity на кривой — не интеграл, а sup.
   double total_volume = 0;
   if (bid_curve.s_of_q_size() > 0) {
     total_volume += std::max(
@@ -238,9 +342,10 @@ void RiskUseCases::CurveChecks(
   }
 
   // Where slippage?
+  // (TODO в оригинале: slippage-check не реализован.)
 
   if (success) {
-    return;
+    return;   // ничего не делаем при OK
   }
 
   cex::common::log_json("INFO",
@@ -269,11 +374,22 @@ void RiskUseCases::CurveChecks(
   publisher_.publish(alert);
 }
 
+// ============================================================================
+// HealthChecks — observer venue.health.
+//
+// Обновляет venue_health_gate_ state для всех venues. При наличии проблем —
+// эмитит WARN/CRITICAL alert. Severity escalates через std::max — gripping
+// pattern для агрегации severity over multiple conditions.
+//
+// Обновление gate происходит ВСЕГДА (даже на success), потому что
+// venue_health_gate_ — это snapshot текущего состояния, не лог инцидентов.
+// ============================================================================
 void RiskUseCases::HealthChecks(const fob::venue::v1::VenueHealth& health) {
   bool success = true;
   std::string reason = "";
   auto severity = fob::risk::v1::RISK_SEVERITY_WARN;
 
+  // Status checks: разная severity по разным причинам.
   if (health.status() == fob::venue::v1::VENUE_HEALTH_STATUS_RATE_LIMIT ||
       health.status() == fob::venue::v1::VENUE_HEALTH_STATUS_UNSPECIFIED) {
     success = false;
@@ -285,6 +401,7 @@ void RiskUseCases::HealthChecks(const fob::venue::v1::VenueHealth& health) {
     reason += "very bad venue status;";
   }
 
+  // Routing recommendation checks.
   if (health.routing_recommendation() ==
       fob::venue::v1::ROUTING_RECOMMENDATION_CAUTION) {
     success = false;
@@ -297,8 +414,10 @@ void RiskUseCases::HealthChecks(const fob::venue::v1::VenueHealth& health) {
     reason += "very bad venue recommendation;";
   }
 
+  // Success path: только обновляем gate, alert не эмитим.
   if (success) {
     std::lock_guard<std::mutex> lk(mu_);
+    // C++20 designated initializer для VenueHealthGateState.
     venue_health_gate_[health.venue()] = VenueHealthGateState{
         .status = health.status(),
         .routing = health.routing_recommendation(),
@@ -308,6 +427,8 @@ void RiskUseCases::HealthChecks(const fob::venue::v1::VenueHealth& health) {
     return;
   }
 
+  // Failure path: обновляем gate (current state), потом эмитим alert.
+  // Двойное обновление было бы дублированием — отдельный scope для lock'а.
   {
     std::lock_guard<std::mutex> lk(mu_);
     venue_health_gate_[health.venue()] = VenueHealthGateState{
@@ -341,13 +462,20 @@ void RiskUseCases::HealthChecks(const fob::venue::v1::VenueHealth& health) {
   publisher_.publish(alert);
 }
 
+// ============================================================================
+// OnExecutionReport — observer execution.reports / execution.venue.
+//
+// Реагирует на REJECTED статус или наличие error code/message.
+// CRITICAL severity для REJECTED, WARN для просто error.
+// ============================================================================
 void RiskUseCases::OnExecutionReport(
     const fob::execution::v1::ExecutionReport& report) {
+  // Условие на error: либо явная code, либо message.
   const bool has_error = report.has_error() &&
       (!report.error().code().empty() || !report.error().message().empty());
   const bool is_rejected = report.status() == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED;
   if (!has_error && !is_rejected) {
-    return;
+    return;   // healthy report — ничего не делаем
   }
 
   std::string reason;
@@ -390,6 +518,18 @@ void RiskUseCases::OnExecutionReport(
   publisher_.publish(alert);
 }
 
+// ============================================================================
+// OnSyntheticOrder — F-09/F-10 entrypoint для market-maker / portfolio cost
+// accounting. Аккумулирует exposure per-venue и проверяет лимит RISK_MAX_EXPOSURE.
+//
+// Семантика cost:
+//   notional = p_h * q_max (worst-case).
+//   BUY: cost.units *= -1 (отнимает от exposure baseline).
+//   SELL: cost остаётся положительной.
+//
+// Если |new_exposure| ≤ max — обновляем. Иначе — alert (НО state не обновляем,
+// потому что превышение).
+// ============================================================================
 void RiskUseCases::OnSyntheticOrder(
     const fob::orders::v1::SyntheticFlowOrder& order) {
 
@@ -399,6 +539,7 @@ void RiskUseCases::OnSyntheticOrder(
   auto cost = cex::common::Decimal::mul(ph, qmax);
 
   if (order.side() == fob::common::v1::SIDE_BUY) {
+    // BUY — отрицательная exposure (мы платим, не получаем).
     cost.units *= -1;
   }
 
@@ -406,16 +547,21 @@ void RiskUseCases::OnSyntheticOrder(
       cex::common::Env::get_string("RISK_MAX_EXPOSURE", "10000");  // USD
   double max_exposure = std::strtod(max_exposure_str.data(), NULL);
 
+  // C++17 CTAD для lock_guard (без явного <std::mutex>).
   std::lock_guard lk(mu_);
 
-  auto exposure = exposures_[venue];
+  auto exposure = exposures_[venue];   // default = Decimal::zero() для новой venue
   auto new_exposure = cex::common::Decimal::add(exposure, cost);
 
+  // |new_exposure| через explicit cast к double — допустимо для metrics,
+  // не для money math (см. CLAUDE.md §9 — здесь это проверка лимита, не settlement).
   if (std::abs(static_cast<double>(new_exposure)) <= max_exposure) {
     exposures_[venue] = new_exposure;
     return;
   }
 
+  // Превышение — alert. NOTE: exposures_[venue] остаётся прежним (не commit),
+  // т.е. синтетика отвергается.
   fob::risk::v1::RiskAlert alert;
   auto* meta = alert.mutable_meta();
   meta->set_event_id(cex::common::uuid_v4());
@@ -444,6 +590,10 @@ namespace {
 // Mirrors the parser added in cpp/matching/src/app/matching_loop.cpp
 // (PR-F12-5); duplicated here to avoid a cross-service common-utils
 // refactor while DoD-3 is a focused PR.
+//
+/// Простой parser env-string → Decimal. Меньше corner-cases чем
+/// ParsePgNumeric (нет PG-padding), но та же базовая идея: digit-аккумулятор
+/// + scale = длина дробной части (после strip trailing zeros).
 Decimal ParseDecimalString(const std::string& raw) {
   if (raw.empty()) return Decimal::zero();
   std::string s = raw;
@@ -461,9 +611,12 @@ Decimal ParseDecimalString(const std::string& raw) {
     int_part = s.substr(0, dot);
     frac_part = s.substr(dot + 1);
   }
+  // Strip trailing zeros для канонического scale.
   while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
   if (int_part.empty()) int_part = "0";
 
+  // Combined string "[-]int+frac" парсится через stoll. try/catch на случай
+  // невалидного ввода (RISK_HEDGE_* env vars могут быть пользовательскими).
   const std::string combined = int_part + frac_part;
   try {
     int64_t units = std::stoll(combined);
@@ -474,10 +627,13 @@ Decimal ParseDecimalString(const std::string& raw) {
   }
 }
 
+/// 0 = disabled (см. RISK_HEDGE_* defaults в .env-example).
+/// Threshold "включён" если > 0.
 bool ThresholdEnabled(const Decimal& threshold) {
   return Decimal::cmp(threshold, Decimal::zero()) > 0;
 }
 
+/// Конфиг hedge-risk, загружается per-call из env. POD-структура.
 struct HedgeRiskConfig {
   Decimal max_notional_per_hedge{Decimal::zero()};   // 0 = disabled
   Decimal hedge_exposure_limit{Decimal::zero()};     // 0 = disabled
@@ -486,6 +642,8 @@ struct HedgeRiskConfig {
   int32_t max_slippage_bps_high{0};
 };
 
+/// Читает env vars и возвращает структуру. Per-call (не cache) — env может
+/// измениться без рестарта сервиса через operator UI (future).
 HedgeRiskConfig LoadHedgeRiskConfig() {
   HedgeRiskConfig cfg;
   cfg.max_notional_per_hedge = ParseDecimalString(
@@ -501,6 +659,8 @@ HedgeRiskConfig LoadHedgeRiskConfig() {
   return cfg;
 }
 
+/// Выбор лимита slippage по urgency hedge intent.
+/// MEDIUM — default (если URGENCY_UNSPECIFIED).
 int32_t MaxSlippageBpsForUrgency(const HedgeRiskConfig& cfg,
                                  fob::execution::v1::ExecutionUrgency urgency) {
   switch (urgency) {
@@ -512,6 +672,8 @@ int32_t MaxSlippageBpsForUrgency(const HedgeRiskConfig& cfg,
   }
 }
 
+/// DRY-helper: заполняет REJECT-решение с кодом/сообщением.
+/// Используется во всех 5 checks PreHedgeCheck.
 void FillRejectError(fob::risk::v1::PreHedgeCheckResponse* resp,
                      const std::string& code,
                      const std::string& message) {
@@ -523,6 +685,17 @@ void FillRejectError(fob::risk::v1::PreHedgeCheckResponse* resp,
 
 }  // namespace
 
+// ============================================================================
+// PreHedgeCheck — F-12 DoD-3 gate для ExecutionIntent.
+//
+// Вызывается venues-сервисом перед отправкой hedge-ордера на внешнюю биржу.
+// 5 проверок в фиксированном порядке (см. file header). При любом
+// REJECT — short-circuit с указанием причины. Финальный ACCEPT возвращается
+// только если все 5 прошли.
+//
+// Details заполняются ВСЕГДА (даже на REJECT и ACCEPT) — для observability
+// и operator UI (показать "лимит X = Y, использовано Z").
+// ============================================================================
 fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
     const fob::risk::v1::PreHedgeCheckRequest& req) {
   fob::risk::v1::PreHedgeCheckResponse resp;
@@ -539,6 +712,7 @@ fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
   *details->mutable_notional_limit() = cfg.max_notional_per_hedge.to_proto();
   *details->mutable_exposure_limit() = cfg.hedge_exposure_limit.to_proto();
 
+  // Pre-compute notional и exposure_after для details И для check 2,3.
   const Decimal target_qty = Decimal::from_proto(intent.target_qty());
   const Decimal reference_mid = Decimal::from_proto(intent.reference_mid());
   const Decimal notional = Decimal::mul(target_qty, reference_mid);
@@ -549,11 +723,13 @@ fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
   *details->mutable_exposure_after() = exposure_after.to_proto();
 
   // Snapshot venue health gates for details.venues — copy what we know.
+  // Lock-scope: только копирование, потом drop lock.
   {
     std::lock_guard<std::mutex> lg(mu_);
     for (const auto& [venue_id, state] : venue_health_gate_) {
       auto* vh = details->add_venues();
       vh->set_venue_id(venue_id);
+      // Proto-name lookup: VenueHealthStatus_Name(enum) → string label.
       vh->set_status(fob::venue::v1::VenueHealthStatus_Name(state.status));
       vh->set_circuit_breaker_open(
           state.breaker == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN);
@@ -588,6 +764,7 @@ fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
         }
       }
       any_allowed_venue_known = (known_count > 0);
+      // ALL known venues заблокированы (если знаем хотя бы одну).
       all_venues_blocked = (known_count > 0 && blocked_count == known_count);
     }
   }
@@ -603,6 +780,7 @@ fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
   }
 
   // Check 2: NOTIONAL_EXCEEDED.
+  // Если threshold>0 и notional > threshold → reject.
   if (ThresholdEnabled(cfg.max_notional_per_hedge) &&
       Decimal::cmp(notional, cfg.max_notional_per_hedge) > 0) {
     FillRejectError(&resp, "NOTIONAL_EXCEEDED",
