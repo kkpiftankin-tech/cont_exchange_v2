@@ -24,12 +24,17 @@ color: blue
 
 # Источники
 
-Прочитай:
+Прочитай **в этом порядке** (первичный источник — сам архивный документ, не его meta):
 
-- `incoming-docs/index.md`, `incoming-docs/IN-NNN.meta.md`, `IN-NNN.fragment-map.md`
-- `docs/01-business/vision.md`, `goals.md`, `stakeholders.md`, `constraints.md`, `glossary.md`
-- `docs/02-system/features/F-XX-*/feature.yaml` (для понимания статуса уже-в-работе фичей)
-- `CLAUDE.md` §1 (идентичность проекта)
+1. **Исходный архивный документ фичи** — `incoming-docs/YYYY-MM-DD-<slug>.md` (например `incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md`). Это **первичный источник истины** по фиче: бизнес-цель, требования, user stories, доменная модель. Путь к файлу бери из поля **Source File** в `IN-NNN.meta.md`.
+2. `incoming-docs/index.md` — найти строку нужного `IN-NNN` (ID, статус, ссылку на архивный файл).
+3. `incoming-docs/IN-NNN.meta.md` — тип документа, статус обработки, целевые области.
+4. `incoming-docs/IN-NNN.fragment-map.md` — карта фрагментов → классификация → целевой артефакт (навигация по уже разнесённому контенту; **не заменяет** чтение архивного документа из п.1).
+5. `docs/01-business/vision.md`, `goals.md`, `stakeholders.md`, `constraints.md`, `glossary.md`
+6. `docs/02-system/features/F-XX-*/feature.yaml` (для понимания статуса уже-в-работе фичей)
+7. `CLAUDE.md` §1 (идентичность проекта)
+
+Если архивного документа в `incoming-docs/` ещё нет — значит исходник не сохранён; запросить его у пользователя / через UserPromptSubmit auto-archive, не выдумывать бизнес-требования.
 
 # Выходы
 

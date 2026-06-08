@@ -13,6 +13,7 @@ logs/
 .obsidian/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+.claude/worktrees/
 
 # Python (validators run locally + in CI)
 __pycache__/
