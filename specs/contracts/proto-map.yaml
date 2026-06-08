@@ -322,3 +322,30 @@ protoContracts:
       - ReplayCompletedEvent
       - ReplayFailedEvent
       - ReplayCancelledEvent
+
+  # AUDIT-001 follow-up (2026-06-08): sim.proto was unmapped despite being
+  # used by F-20 venues simulator. Surfaced by proto-contract-auditor.
+  sim:
+    files:
+      - contracts/proto/fob/sim/v1/sim.proto
+    features:
+      - F-20
+    components:
+      - venues
+      - observability
+    entities:
+      - RoutingMode
+      - SimSessionStatus
+      - LatencyDistribution
+      - ImpactModelType
+      - PartialFillMode
+      - SimAlertType
+      - SimConfigEventType
+      - LatencyModel
+      - ImpactModel
+      - FeeModel
+      - RejectionModel
+      - SimSession
+      - SimConfigEvent
+      - SimAlert
+      - SimExecutionAnnotation

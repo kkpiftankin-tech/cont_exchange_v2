@@ -176,22 +176,44 @@ def check_feature(
             errors.append(f"{fid}: feature-component-map protoContracts missing: {p}")
 
     # ----- Check 5: kafka topics ---------------------------------------------
+    # Bundled-doc support: accept either a dedicated <topic-with-dash>.md OR
+    # any docs/06-api/messaging/*-topics.md that mentions the topic name in
+    # backtick form. Same convention as kafka-contract-auditor.
     topics_block = fdata.get("kafkaTopics") or {}
     produces = topics_block.get("produces") or []
     consumes = topics_block.get("consumes") or []
     all_topics = list(produces) + list(consumes)
     messaging_dir = ROOT / "docs" / "06-api" / "messaging"
+    bundled_docs: dict[Path, str] = {}
+    if messaging_dir.exists():
+        for f in messaging_dir.glob("*-topics.md"):
+            if f.name == "topics.md":  # catalog
+                continue
+            try:
+                bundled_docs[f] = f.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+    def topic_documented(topic: str) -> bool:
+        if (messaging_dir / topic_doc_filename(topic)).exists():
+            return True
+        token = f"`{topic}`"
+        for content in bundled_docs.values():
+            if token in content:
+                return True
+        return False
+
     for topic in all_topics:
         if topic not in topics_in_script:
             errors.append(
                 f"{fid}: kafka topic '{topic}' in feature.yaml but missing "
                 f"in infra/kafka/create_topics.sh"
             )
-        doc_file = messaging_dir / topic_doc_filename(topic)
-        if not doc_file.exists():
+        if not topic_documented(topic):
             errors.append(
-                f"{fid}: kafka topic '{topic}' has no doc: "
-                f"docs/06-api/messaging/{topic_doc_filename(topic)}"
+                f"{fid}: kafka topic '{topic}' has no doc "
+                f"(neither docs/06-api/messaging/{topic_doc_filename(topic)} "
+                f"nor a *-topics.md bundle mentions it)"
             )
 
 

@@ -172,10 +172,11 @@ traceability:
     storageTables: [risk_limits, risk_events]
 
   F-17:
-    status: partially-implemented
+    status: partially-implemented-mvp
     components: [observability, risk]
     codePaths:
-      - cpp/observability/src/app/obs_loop.cpp
+      # AUDIT-001 follow-up (2026-06-08): was obs_loop.cpp — renamed to service.cpp.
+      - cpp/observability/src/app/service.cpp
     kafkaTopics:
       - risk.alerts
       - batch.outputs

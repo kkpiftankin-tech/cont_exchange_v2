@@ -13,6 +13,7 @@ features:
   F-02:
     name: Create FlowOrder
     docsPath: docs/02-system/features/F-02-create-floworder
+    status: in-progress-mvp
     primaryComponents:
       - gateway
       - order-flow
@@ -35,6 +36,7 @@ features:
   F-03:
     name: FlowOrder Lifecycle (Amend / Cancel)
     docsPath: docs/02-system/features/F-03-order-lifecycle
+    status: in-progress-mvp
     primaryComponents:
       - gateway
       - order-flow
@@ -51,6 +53,7 @@ features:
   F-04:
     name: Batch Clearing
     docsPath: docs/02-system/features/F-04-batch-clearing
+    status: in-progress-mvp
     primaryComponents:
       - matching
       - ledger
@@ -71,6 +74,7 @@ features:
   F-05:
     name: Live Market Data
     docsPath: docs/02-system/features/F-05-live-market-data
+    status: in-progress-mvp
     primaryComponents:
       - market-data
       - venues
@@ -87,6 +91,7 @@ features:
   F-06:
     name: Positions / PnL / Margin
     docsPath: docs/02-system/features/F-06-positions-pnl-margin
+    status: in-progress-mvp
     primaryComponents:
       - ledger
       - risk
@@ -104,6 +109,7 @@ features:
   F-07:
     name: Pre-trade Risk Control
     docsPath: docs/02-system/features/F-07-pretrade-risk
+    status: in-progress-mvp
     primaryComponents:
       - risk
       - order-flow
@@ -158,7 +164,7 @@ features:
   F-11:
     name: External Venues LOB to FOB
     docsPath: docs/02-system/features/F-11-external-venues-lob-to-fob
-    status: not-implemented
+    status: in-progress-mvp
     primaryComponents:
       - venues
       - market-data
@@ -172,7 +178,7 @@ features:
   F-12:
     name: Execution Hedge
     docsPath: docs/02-system/features/F-12-execution-hedge
-    status: not-implemented
+    status: doc-complete-impl-partial
     primaryComponents:
       - venues
       - risk
@@ -248,7 +254,7 @@ features:
   F-16:
     name: Operator Console & Kill-Switch
     docsPath: docs/02-system/features/F-16-operator-console
-    status: partially-implemented
+    status: partially-implemented-in-risk
     primaryComponents:
       - gateway
       - risk
@@ -263,7 +269,7 @@ features:
   F-17:
     name: Monitoring & Alerting
     docsPath: docs/02-system/features/F-17-monitoring-and-alerts
-    status: partially-implemented
+    status: partially-implemented-mvp
     primaryComponents:
       - observability
       - risk
@@ -271,4 +277,5 @@ features:
       - contracts/proto/fob/observability/v1/observability.proto
       - contracts/proto/fob/risk/v1/risk.proto
     codePaths:
-      - cpp/observability/src/app/obs_loop.cpp
+      # AUDIT-001 follow-up (2026-06-08): was obs_loop.cpp — renamed to service.cpp.
+      - cpp/observability/src/app/service.cpp
