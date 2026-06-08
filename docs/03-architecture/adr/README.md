@@ -43,5 +43,8 @@
 | ADR-028 | Backtest/replay parity and audit mode | [accepted](ADR-028-backtest-replay-parity.md) |
 | ADR-029 | LLM-assisted development governance | [accepted](ADR-029-llm-assisted-development-governance.md) |
 | ADR-030 | Legacy MVP migration policy | [accepted](ADR-030-legacy-mvp-migration-policy.md) |
+| ADR-031 | F-09 multi-leg execution modes & atomicity policies | [accepted](ADR-031-multileg-execution-modes-atomicity.md) |
+| ADR-032 | F-09 parent/child (BatchOrder→ComboOrder→Leg) order model | [accepted](ADR-032-parent-child-order-model.md) |
+| ADR-033 | F-09 `execution.groups` Kafka topic | [accepted](ADR-033-execution-groups-topic.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

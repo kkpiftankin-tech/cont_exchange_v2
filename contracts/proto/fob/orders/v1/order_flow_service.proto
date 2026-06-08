@@ -5,6 +5,7 @@ package fob.orders.v1;
 import "google/protobuf/empty.proto";
 import "fob/common/v1/common.proto";
 import "fob/orders/v1/orders.proto";
+import "fob/orders/v1/combo.proto";  // F-09: Batch/Combo/Multi-leg order types (ADR-031, ADR-032)
 
 message CreateFlowOrderRequest {
   fob.common.v1.EventMeta meta = 1;
@@ -58,4 +59,12 @@ service OrderFlowService {
   rpc CancelFlowOrder(CancelFlowOrderRequest) returns (CancelFlowOrderResponse);
   rpc GetFlowOrder(GetFlowOrderRequest) returns (GetFlowOrderResponse);
   rpc ListFlowOrders(ListFlowOrdersRequest) returns (ListFlowOrdersResponse);
+
+  // F-09: Batch/Combo/Multi-leg orders (ADR-031, ADR-032, ADR-033).
+  // Backward-compatible additions — existing rpc above are NOT modified.
+  rpc CreateBatchOrder(CreateBatchOrderRequest) returns (CreateBatchOrderResponse);
+  rpc CreateComboOrder(CreateComboOrderRequest) returns (CreateComboOrderResponse);
+  rpc PreviewComboOrder(PreviewComboOrderRequest) returns (PreviewComboOrderResponse);
+  rpc CancelComboOrder(CancelComboOrderRequest) returns (CancelComboOrderResponse);
+  rpc GetComboOrder(GetComboOrderRequest) returns (GetComboOrderResponse);
 }

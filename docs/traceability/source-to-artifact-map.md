@@ -74,3 +74,14 @@ Machine-readable source-of-truth for components and features lives in [`specs/do
 | IN-003 | IN-003-FR-024 | NON_FUNCTIONAL_REQUIREMENT | `docs/02-system/non-functional-requirements.md` (Таблица 6) | merged | complete |
 | IN-003 | IN-003-FR-025 | TEST_REQUIREMENT | `docs/10-testing/features/F-04-test-plan.md` | created | complete |
 | IN-003 | IN-003-FR-026 | IMPLEMENTATION_HINT | `docs/implementation-plan/F-04-batch-clearing.tasks.md` (Definition of Done IN-003) | merged | complete |
+| IN-011 | IN-011-ARCH-001..004 | BUSINESS_RULE, FEATURE | `docs/03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md`, `docs/02-system/features/F-09-batch-combo-orders/feature.yaml` | created | complete |
+| IN-011 | IN-011-DM-001..009 | DOMAIN_ENTITY, DATA_MODEL | `docs/04-domain/entities.md`, `docs/07-data/oltp-schema.md` | merged | complete |
+| IN-011 | IN-011-BR-001..008 | BUSINESS_REQUIREMENT | `docs/02-system/features/F-09-batch-combo-orders/acceptance-criteria.md`, `docs/03-architecture/adr/ADR-031..032` | created | complete |
+| IN-011 | IN-011-UC-001..003 | USE_CASE, SEQUENCE_HINT | `docs/02-system/use-cases/UC-F09-0{1,2,3}-*`, `docs/05-components/sequences/SEQ-F09-UC-F09-0{1,2,3}-services.md` | created | complete |
+| IN-011 | IN-011-MATH-001..006, POL-001..005, INV | DOMAIN_FORMULAS, BUSINESS_RULE | `docs/04-domain/business-rules.md` §F-09 | created | complete |
+| IN-011 | IN-011-EVT-002, DATA-001..002 | KAFKA_TOPIC, DATA_MODEL | `docs/06-api/messaging/execution-groups.md`, `docs/06-api/messaging/topics.md`, `docs/07-data/oltp-schema.md`, `docs/07-data/olap-schema.md`, ADR-033 | created | complete |
+| IN-011 | IN-011-ALG-002, CONTRACT | GRPC_CONTRACT | `docs/06-api/grpc/order-flow-create-combo-order.md` (+5 TODO contracts) | created | complete |
+| IN-011 | IN-011-T-001..028 | TEST_REQUIREMENT | `docs/10-testing/features/F-09-test-plan.md` | created | complete |
+| IN-011 | IN-011-FINAL, OOS | IMPLEMENTATION_HINT | `docs/implementation-plan/F-09-batch-combo-orders.tasks.md` | created | complete |
+
+> Полная карта фрагментов IN-011 (все §1–§21 + Доп. пояснения) — в [`incoming-docs/IN-011.fragment-map.md`](../../incoming-docs/IN-011.fragment-map.md).

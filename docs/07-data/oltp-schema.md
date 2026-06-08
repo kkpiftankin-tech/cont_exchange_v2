@@ -247,6 +247,141 @@ Seed (init.sql): version=1 со значениями `batchintervalms=1000, maxi
 - **Matching Backend** (R) — чтение active config перед каждым batch.
 - **Backtest & Replay** (R) — подстановка альтернативных конфигов (через replay_solver_configs из cpp/backtest, future PR).
 
+## F-09: Batch/Combo/Multi-leg Orders (OLTP)
+
+> Source: IN-011 (F-09 v2 corrected §8, §14.1, §15), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md).
+> Owner-сервис: `order_flow` (создание/нормализация), `matching` (execution_groups, group_state_transitions).
+> Полный DDL — в `infra/postgres/init.sql` (блок F-09, пишет devops #14). Здесь — описание полей.
+
+Семь таблиц образуют трёхуровневую иерархию `batch_orders` → `combo_orders` → `combo_order_legs`, плюс поперечные таблицы ограничений, графа состояний и аудита: `combo_constraints`, `conditional_links`, `execution_groups`, `group_state_transitions`.
+
+### Таблица `batch_orders`
+
+Клиентский parent-объект, объединяющий несколько `ComboOrder`/conditional-ветвей/`FlowOrder`. **Не путать** с `Batch` (цикл клиринга F-04).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `batch_order_id` | `UUID PK` | Идентификатор BatchOrder |
+| `user_id` | `TEXT NOT NULL` | Владелец |
+| `account_id` | `TEXT NOT NULL` | Счёт |
+| `order_type` | `TEXT` | `batch\|combo\|basket\|spread\|conditional\|oco\|bracket` |
+| `execution_mode` | `TEXT` | `orchestration_only\|multileg_vector_solver` |
+| `status` | `TEXT` | §15.1: draft/risk_pending/active/waiting_for_trigger/partially_filled/filled/cancelled/expired/degraded/rollback_pending/rolledback/rejected |
+| `time_window_start/end` | `TIMESTAMPTZ` | Окно активности (CHECK end>start) |
+| `created_at/updated_at` | `TIMESTAMPTZ` | |
+
+Индексы: `(user_id)`; partial `(status, created_at DESC)` для активных. **Writers:** order_flow, matching. **Readers:** order_flow, matching, risk, gateway.
+
+### Таблица `combo_orders`
+
+Многоногая заявка с общим `executionMode`, `atomicityPolicy`, политиками.
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `combo_order_id` | `UUID PK` | Идентификатор ComboOrder |
+| `batch_order_id` | `UUID FK→batch_orders` | Родитель (NULL = автономный) |
+| `combo_type` | `TEXT` | pair/basket/spread/conditional/oco/bracket/factor/budget |
+| `execution_mode` | `TEXT` | orchestration_only/multileg_vector_solver |
+| `status` | `TEXT` | §15.1 |
+| `ratio_basis` | `TEXT` | notional_weight/quantity_ratio/NULL |
+| `atomicity_policy` | `TEXT` | strict_atomic/scalable_atomic/best_effort/sequential_fallback/external_compensating |
+| `atomicity_scope` | `TEXT` | internal_batch/venue_native/external_compensating/none |
+| `fallback_policy` | `TEXT` | scale_down/wait_next_batch/cancel/degrade/compensate |
+| `min_execution_scale` | `NUMERIC(38,18)` | 0..1, NULL = нет |
+| `max_ratio_deviation_bps` | `INTEGER` | NULL = нет |
+
+Индексы: `(batch_order_id)`; partial `(status, updated_at DESC)`. **Writers:** order_flow, matching.
+
+### Таблица `combo_order_legs`
+
+Параметры одной ноги ComboOrder с полным CSLO-профилем. **Отдельная** таблица (не расширение `flow_order_legs`, см. рекомендацию ниже / ADR-032).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `leg_id` | `UUID PK` | Идентификатор ноги |
+| `parent_order_id` | `UUID FK→combo_orders` | Родительский ComboOrder |
+| `instrument_symbol` | `TEXT NOT NULL` | Инструмент |
+| `side` | `TEXT` | buy/sell |
+| `ratio` / `weight` | `NUMERIC(38,18)` | одно из двух NOT NULL (CHECK) |
+| `ratio_basis` | `TEXT` | переопределение базы веса |
+| `p_low` / `p_high` | `NUMERIC(38,18)` | CHECK p_low>0, p_high≥p_low |
+| `q_rate` / `q_max` | `NUMERIC(38,18)` | CHECK >0 |
+| `filled_cum` | `NUMERIC(38,18)` | CHECK 0≤filled_cum≤q_max |
+| `venue_preferences` | `TEXT[]` | источники ликвидности |
+| `status` | `TEXT` | §15.2: inactive/active/waiting_for_trigger/partially_filled/filled/cancelled/blocked_by_group/blocked_by_atomicity/failed_external/compensated |
+
+Индексы: `(parent_order_id)`, `(instrument_symbol)`, partial `(status)`.
+
+### Таблица `combo_constraints`
+
+Общие ограничения (ratio/spread/budget/factor/margin/risk).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `constraint_id` | `UUID PK` | |
+| `parent_order_id` | `UUID FK→combo_orders` | |
+| `constraint_type` | `TEXT` | max_weight_deviation/max_total_notional/spread_range/factor_neutrality/max_leverage/max_margin/risk_limit/ratio_equality |
+| `coefficients` | `JSONB` | `{symbol: coeff}` для spread/factor |
+| `lower_bound` / `upper_bound` | `NUMERIC(38,18)` | NULL = ∞ |
+| `value` / `value_bps` | `NUMERIC(38,18)` / `INTEGER` | абсолютный лимит / в bps |
+| `severity` | `TEXT` | hard/soft |
+
+### Таблица `conditional_links`
+
+Рёбра графа активации/отмены (OCO/bracket/conditional).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `link_id` | `UUID PK` | |
+| `parent_order_id` | `UUID FK→combo_orders` | |
+| `from_leg_id` / `to_leg_id` | `UUID FK→combo_order_legs` | CHECK from≠to |
+| `link_type` | `TEXT` | oco/bracket/conditional |
+| `condition` | `JSONB` | условие перехода (NULL = безусловная OCO-отмена) |
+
+### Таблица `execution_groups`
+
+Результат grouped solve одного batch cycle для одного ComboOrder. `execution_group_id` — idempotency key для ledger (ADR-033).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `execution_group_id` | `UUID PK` | idempotency key |
+| `batch_id` | `TEXT NOT NULL` | цикл клиринга |
+| `parent_order_id` | `UUID FK→combo_orders` | |
+| `execution_mode` | `TEXT` | |
+| `group_status` | `TEXT` | §15.3: filled/partial/waiting_next_batch/cancelled_by_atomicity/degraded/compensating/rollback_pending/rolledback/failed |
+| `execution_scale` | `NUMERIC(38,18)` | α, CHECK 0..1 |
+| `atomicity_policy` / `atomicity_scope` | `TEXT` | применённые в цикле |
+| `fallback_action` | `TEXT` | NULL если не применялось |
+| `ratio_deviation_bps` | `INTEGER` | фактическое отклонение |
+| `leg_results` | `JSONB` | `[{legId, execQty, execPrice, fillId}]` |
+| `violated_constraints` | `JSONB` | нарушенные constraint_id |
+| `solver_diagnostics` | `JSONB` | `{groupSolveTimeMs, bindingLegs[], bindingConstraints[]}` |
+
+**Writer:** только `matching`. **Readers:** ledger (idempotent by `execution_group_id`), order_flow, risk, observability, backtest.
+
+### Таблица `group_state_transitions`
+
+Аудит переходов состояния + идемпотентность повторных Kafka-событий (ADR-032, ADR-020).
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `id` | `UUID PK` | |
+| `group_id` | `UUID FK→execution_groups` | |
+| `from_status` / `to_status` | `TEXT` | |
+| `batch_id` | `TEXT` | NULL для ручных переходов |
+| `reason` | `TEXT` | код перехода |
+| `idempotency_key` | `TEXT UNIQUE` | dedup повторных доставок |
+| `created_at` | `TIMESTAMPTZ` | |
+
+### Рекомендация: `combo_order_legs` vs `flow_order_legs`
+
+ADR-032 оставлял open question. **Рекомендация — отдельная таблица `combo_order_legs`** (не расширение `flow_order_legs`):
+
+1. `flow_order_legs` имеет PK `(order_id, instrument_symbol)` и только `weight`; добавление NOT NULL CSLO-полей сломало бы CHECK F-02 и `PostgresFlowOrderRepository`.
+2. В `multileg_vector_solver` ноги combo **не** самостоятельные FlowOrder (ADR-031) — FK на `flow_orders` семантически неверен.
+3. В `orchestration_only` каждая нога **создаёт** отдельную FlowOrder, и `flow_order_legs` заполняется естественно; `combo_order_legs` хранит исходное намерение для parent-reporting.
+4. Допустимое дублирование данных в `orchestration_only` — приемлемая цена изоляции уровней.
+
 ## Связанные документы
 
 - [data-overview.md](data-overview.md) — карта хранилищ.
@@ -257,3 +392,4 @@ Seed (init.sql): version=1 со значениями `batchintervalms=1000, maxi
 ## Source Fragments
 
 - IN-001-FR-029
+- IN-011 §8, §14.1, §15 (F-09 batch/combo/multi-leg tables)

@@ -1,31 +1,94 @@
-# F-09 — Batch and Combo Orders
+# F-09 — Batch, Combo and Multi-leg Orders
 
-> **Статус:** Not implemented. Заглушка для traceability и планирования.
+> **Статус:** `planned`. Документация по IN-011 (F-09 v2 corrected) готова; код не реализован.
+> Источник: [incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md](../../../../incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md) (IN-011).
 
 ## Описание
 
-Multi-leg FlowOrder: одна заявка задаётся не одним инструментом, а корзиной с весами `w_i` по активам. Использование: спред-торговля, портфельные ребалансировки, корзинная ликвидация.
+F-09 вводит заявки, где торговый intent относится не к одному инструменту, а к
+**связанной группе ног**: `BatchOrder`, `ComboOrder`, `pair`, `basket`,
+`spread`, `OCO`, `bracket`, а также factor-/budget-/risk-constrained заявки.
+Группа исполняется как **единый бизнес-объект** с общей логикой жизненного
+цикла, pre-trade риска, клиринга, исполнения, отчётности, статусов и replay.
 
-## Что нужно сделать
+## Ключевое архитектурное решение — два режима
 
-1. Расширить proto `FlowOrder` полем `repeated OrderLeg legs = N;` где `OrderLeg { string asset; Decimal weight; }`.
-2. matching solver должен поддержать многомерные ограничения по корзине.
-3. ledger ApplyBatchResult должен корректно применять mirror legs.
-4. risk должен оценивать корреляции внутри корзины.
+| Режим | Что гарантирует | ADR |
+| --- | --- | --- |
+| `orchestration_only` | Удобный parent object для группы независимых ног. **Не** сохраняет weights/ratio/spread/portfolio exposure. Только при явном выборе + предупреждение. | [ADR-031](../../../03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md) |
+| `multileg_vector_solver` | Настоящее многоногое исполнение: matching выбирает **согласованный вектор** \(e_g\); результат — один `ExecutionGroup`. **Обязателен** для weights/ratio/spread/factor/budget/leverage/margin/portfolio-risk. | [ADR-031](../../../03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md) |
 
-Подробности — в [feature.yaml](feature.yaml).
+**Правило (IN-011 §21):** нельзя реализовать «настоящую F-09» через набор
+независимых `FlowOrder` с общим `parentId` — это допустимо только как
+`orchestration_only` и не обещает multi-leg guarantees.
 
-## Acceptance Criteria (IN-001)
+## Политики атомарности
 
-Система должна поддерживать заявки, затрагивающие несколько активов с заданными весами (корзины, спреды, парные), и исполнять их согласованно (all-or-nothing на уровне batch).
+`strict_atomic` · `scalable_atomic` · `best_effort` · `sequential_fallback` ·
+`external_compensating`. Область — `atomicityScope`: `internal_batch` /
+`venue_native` / `external_compensating` / `none`. Подробности и инварианты —
+[business-rules.md §F-09](../../../04-domain/business-rules.md).
 
-- `portfolio_weights` в `flow_orders` определяет legs.
-- Risk Manager проверяет совокупный exposure портфеля.
-- Ledger резервирует net-position по quote-валюте.
-- Все legs закрываются одним `combo_id` для трассировки.
+## Таксономия типов заявок (единая модель)
 
-Источник: IN-001 §6 FR-ORDER-001 (тип 3), §5.1 пример портфельной заявки.
+Все типы — частные спецификации одной модели `MultiLegVectorOrder + Legs +
+Constraints + StateGraph + ExecutionPolicy`:
+
+| Тип | Что фиксируем | comboType |
+| --- | --- | --- |
+| Basket | веса \(w_i\) | `basket` |
+| Pair | ratio \(Q_1 = kQ_2\) | `pair` |
+| Spread | \(L \le c^T P \le U\) | `spread` |
+| Factor | \(F Q = 0\) (нейтральность) | `basket` + `factor_neutrality` |
+| Budget | \(P^T Q \le N\) | `basket` + `max_total_notional` |
+| Risk | \(R(Q) \le R_{max}\) | `*` + risk constraints |
+| OCO | граф переходов состояний | `oco` |
+| Bracket | граф + зависимость объёмов \(Q_{tp}=Q_{sl}=Q_{entry}^{filled}\) | `bracket` |
+
+## User Stories (IN-011 §6)
+
+- US-F09-001 Pair order (buy BTC / sell ETH в заданном ratio).
+- US-F09-002 Basket order (целевые веса портфеля).
+- US-F09-003 Spread order (исполнение только при допустимой цене комбинации).
+- US-F09-004 OCO (исполнение одной ветви отменяет другую).
+- US-F09-005 Bracket (entry + TP + SL на фактический объём входа).
+- US-F09-006 Контролируемый fallback (видеть degraded/compensating).
+
+## Use Cases
+
+- [UC-F09-01 — Создание combo/multi-leg заявки](../../use-cases/UC-F09-01-create-combo-order/use-case.md)
+- [UC-F09-02 — Grouped matching внутри batch cycle](../../use-cases/UC-F09-02-grouped-matching/use-case.md)
+- [UC-F09-03 — External leg execution / compensating](../../use-cases/UC-F09-03-external-leg-execution/use-case.md)
+
+## Frontend Scope
+
+Редактор parent/legs/constraints; grouped preview (expected scale, leg fills,
+combined VWAP/IS, ratio/spread deviation, binding leg/constraints); отображение
+group/leg status и fallback/degraded/rollback состояний (IN-011 §12.1).
+
+## Контракты и данные
+
+- gRPC: [order-flow-create-combo-order.md](../../../06-api/grpc/order-flow-create-combo-order.md)
+- Kafka: [execution-groups.md](../../../06-api/messaging/execution-groups.md) ([topics.md](../../../06-api/messaging/topics.md))
+- OLTP/OLAP: [oltp-schema.md](../../../07-data/oltp-schema.md) (combo_*), [olap-schema.md](../../../07-data/olap-schema.md) (grouped_*)
+- Домен: [entities.md](../../../04-domain/entities.md), [business-rules.md §F-09](../../../04-domain/business-rules.md)
+
+## Acceptance Criteria
+
+См. [acceptance-criteria.md](acceptance-criteria.md) (AC-F09-001..010) и
+[feature.yaml](feature.yaml).
+
+## Out of scope (MVP)
+
+Cross-venue true atomic без native support, options solver, нелинейные Greeks,
+RL-routing, полный rollback внешних сделок, prime-broker netting.
+
+## Implementation
+
+Код не реализован. План задач:
+[implementation-plan/F-09-batch-combo-orders.tasks.md](../../../implementation-plan/F-09-batch-combo-orders.tasks.md).
 
 ## Source Fragments
 
-- IN-001-FR-027, IN-001-FR-028
+- IN-011 (полностью; карта — [IN-011.fragment-map.md](../../../../incoming-docs/IN-011.fragment-map.md))
+- Historical: IN-001-FR-027, IN-001-FR-028 (исходная упрощённая модель, переформулирована ADR-031/032).

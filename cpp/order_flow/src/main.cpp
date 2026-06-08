@@ -2,16 +2,21 @@
 
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
+#include "app/cancel_combo_order_use_case.hpp"
+#include "app/create_combo_order_use_case.hpp"
 #include "app/order_flow_uc.hpp"
 #include "infra/batch_results_consumer.hpp"
 #include "infra/ledger_client.hpp"
 #include "infra/orders_kafka_publisher.hpp"
+#include "infra/orders_normalized_grouped_producer.hpp"
 #include "infra/postgres/postgres_flow_order_repository.hpp"
+#include "infra/postgres_combo_order_repository.hpp"
 #include "infra/risk_client.hpp"
 #include "transport/grpc_order_flow_service.hpp"
 
@@ -65,7 +70,31 @@ int main() {
                                              std::move(ledger),
                                              std::move(publisher),
                                              std::move(flow_order_repo));
-  cex::order_flow::transport::GrpcOrderFlowService svc(&uc);
+  // F-09 (T-F09-036): combo orders. Требуют PG (parent/legs/constraints в 5
+  // таблицах). Отдельный Kafka producer для grouped orders.normalized.
+  std::optional<cex::order_flow::infra::PostgresComboOrderRepository> combo_repo;
+  std::optional<cex::order_flow::infra::OrdersKafkaPublisher> combo_publisher;
+  std::optional<cex::order_flow::infra::OrdersNormalizedGroupedProducer> grouped_producer;
+  std::optional<cex::order_flow::app::CreateComboOrderUseCase> create_combo_uc;
+  std::optional<cex::order_flow::app::CancelComboOrderUseCase> cancel_combo_uc;
+  if (!pg_dsn.empty()) {
+    combo_repo.emplace(pg_dsn);
+    combo_publisher.emplace(
+        cex::common::KafkaProducer({.brokers = brokers, .client_id = "order_flow_combo"}));
+    grouped_producer.emplace([&combo_publisher](const fob::orders::v1::OrdersNormalized& e) {
+      return combo_publisher->publish(e);
+    });
+    create_combo_uc.emplace(
+        *combo_repo, *grouped_producer,
+        // MVP-1 risk-заглушка (approve). Реальный RiskService/PreTradeCheckGroup — фаза E.
+        [](const cex::order_flow::domain::ComboOrder&, std::string&) { return true; });
+    cancel_combo_uc.emplace(*combo_repo, *grouped_producer);
+    cex::common::log_json("INFO", "OrderFlow F-09 combo orders enabled", {});
+  }
+
+  cex::order_flow::transport::GrpcOrderFlowService svc(
+      &uc, create_combo_uc ? &*create_combo_uc : nullptr,
+      cancel_combo_uc ? &*cancel_combo_uc : nullptr);
 
   // Subscribe to batch.outputs so fills from matching propagate to the
   // in-memory FlowOrder store. Without this, gateway/UI would forever see

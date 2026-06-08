@@ -21,6 +21,9 @@ related:
 | `execution.intents` | matching (planned) | venues | `fob.execution.v1.ExecutionIntent` | 1 d | intent_id |
 | `execution.reports` | venues | ledger, observability | `fob.execution.v1.ExecutionReport` | 7 d | intent_id |
 | `risk.alerts` | risk | observability | `fob.risk.v1.RiskAlert` | 30 d | user_id или alert_id |
+| `execution.groups` | matching | ledger, risk, order-flow, observability, backtest | `fob.matching.v1.ExecutionGroup` | 7 d | parentOrderId |
+
+> F-09 (IN-011, ADR-033): grouped execution envelope. Per-leg `LegFill` дублируется в `fills` (расширенные поля `parentOrderId`/`executionGroupId`/`legId`). Регистрация в `infra/kafka/create_topics.sh` — devops #14. Расширение схемы `fills` для F-09 — потенциальный breaking change (см. F-09 tasks open question).
 
 ## Принципы
 
@@ -36,6 +39,7 @@ related:
 - [execution-intents.md](execution-intents.md)
 - [execution-reports.md](execution-reports.md)
 - [risk-alerts.md](risk-alerts.md)
+- [execution-groups.md](execution-groups.md) (F-09, ADR-033)
 - (planned) `agent-logs.md`
 - (planned, см. Conflict Note C-1 ниже) `fills.md`
 

@@ -114,6 +114,171 @@ ALTER TABLE execution_reports
   );
 
 -- ===========================================================================
+-- F-09: Batch/Combo/Multi-leg Orders (OLAP)
+-- Sources: IN-011 §14.2; docs/07-data/olap-schema.md §F-09.
+-- ADRs: ADR-032 (parent-child model), ADR-033 (execution.groups topic).
+-- Ingestion:
+--   execution.groups        → grouped_execution_events, grouped_ratio_deviation
+--   fills (extended)        → grouped_leg_fills
+--   computed / MV           → grouped_quality_metrics
+--   backtest.execution.groups → grouped_replay_results
+-- Monetary / qty fields: Decimal128(18) per CLAUDE.md §9.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- grouped_execution_events: one row per ExecutionGroup event.
+-- Source topic: execution.groups (producer: matching, key: parentOrderId).
+-- ReplacingMergeTree deduplicates by (parent_order_id, execution_group_id,
+-- event_time_ms) on compaction — idempotent re-ingestion safe.
+-- Retention: 365 days (audit trail; same class as fills).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grouped_execution_events (
+    execution_group_id   String,
+    batch_id             String,
+    parent_order_id      String,
+    user_id              String,
+    combo_type           LowCardinality(String),
+    execution_mode       LowCardinality(String),
+    group_status         LowCardinality(String),
+    atomicity_policy     LowCardinality(String),
+    atomicity_scope      LowCardinality(String),
+    fallback_action      LowCardinality(String),
+    execution_scale      Decimal128(18),
+    ratio_deviation_bps  Nullable(Int32),
+    violated_constraints String,   -- JSON
+    solver_diagnostics   String,   -- JSON: groupSolveTimeMs, bindingLegs[], bindingConstraints[]
+    leg_count            UInt16,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+
+-- ---------------------------------------------------------------------------
+-- grouped_leg_fills: per-leg fill with group context.
+-- Source: extended fills topic (fields parentOrderId/executionGroupId/legId).
+-- ReplacingMergeTree for idempotent re-ingestion.
+-- Retention: 365 days.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grouped_leg_fills (
+    fill_id              String,
+    execution_group_id   String,
+    parent_order_id      String,
+    leg_id               String,
+    batch_id             String,
+    user_id              String,
+    instrument_symbol    LowCardinality(String),
+    side                 LowCardinality(String),
+    exec_qty             Decimal128(18),
+    exec_price           Decimal128(18),
+    exec_notional        Decimal128(18),
+    group_policy         LowCardinality(String),
+    liquidity_source     LowCardinality(String),
+    venue_id             String,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (execution_group_id, leg_id, fill_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+
+-- ---------------------------------------------------------------------------
+-- grouped_quality_metrics: quality aggregates per ExecutionGroup.
+-- Populated via a Materialized View from grouped_execution_events +
+-- grouped_leg_fills (combined VWAP, IS, ratio deviation).
+-- ReplacingMergeTree for idempotent compaction.
+-- Retention: 365 days.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grouped_quality_metrics (
+    execution_group_id        String,
+    parent_order_id           String,
+    batch_id                  String,
+    user_id                   String,
+    combo_type                LowCardinality(String),
+    atomicity_policy          LowCardinality(String),
+    group_status              LowCardinality(String),
+    execution_scale           Decimal128(18),
+    combined_vwap             Decimal128(18),
+    combined_notional         Decimal128(18),
+    combined_is_bps           Nullable(Int64),
+    ratio_deviation_bps       Nullable(Int32),
+    fallback_action           LowCardinality(String),
+    leg_count                 UInt16,
+    violated_constraint_count UInt16,
+    solve_time_ms             UInt32,
+    event_time_ms             Int64,
+    ingested_at               DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+
+-- ---------------------------------------------------------------------------
+-- grouped_ratio_deviation: per-leg per-batch ratio/weight deviation history.
+-- Used to identify binding legs (AC-F09-002) and for risk/quality analytics.
+-- MergeTree (no dedup needed; each (group, leg, time) triple is unique).
+-- Retention: 180 days (shorter than events; deviation is less critical).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grouped_ratio_deviation (
+    execution_group_id    String,
+    parent_order_id       String,
+    batch_id              String,
+    user_id               String,
+    leg_id                String,
+    instrument_symbol     LowCardinality(String),
+    target_weight         Nullable(Decimal128(18)),
+    target_ratio          Nullable(Decimal128(18)),
+    actual_exec_qty       Decimal128(18),
+    actual_exec_notional  Decimal128(18),
+    deviation_bps         Int32,
+    is_binding_leg        UInt8,
+    event_time_ms         Int64,
+    ingested_at           DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, event_time_ms, leg_id)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
+
+-- ---------------------------------------------------------------------------
+-- grouped_replay_results: F-15 backtest/replay results for multi-leg orders.
+-- Source: isolated topic backtest.execution.groups (ADR-015 isolation pattern,
+-- analogous to backtest.execution.venue). NEVER mixed with live data.
+-- Replay determinism: same replay_session_id + parent_order_id + group =>
+-- same execution_scale (AC-F09-010).
+-- ReplacingMergeTree for idempotent replay re-runs.
+-- Retention: 90 days (replay data is transient vs live audit trail).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grouped_replay_results (
+    replay_session_id    String,
+    execution_group_id   String,
+    batch_id             String,
+    parent_order_id      String,
+    user_id              String,
+    combo_type           LowCardinality(String),
+    execution_mode       LowCardinality(String),
+    group_status         LowCardinality(String),
+    atomicity_policy     LowCardinality(String),
+    execution_scale      Decimal128(18),
+    ratio_deviation_bps  Nullable(Int32),
+    combined_vwap        Nullable(Decimal128(18)),
+    combined_notional    Nullable(Decimal128(18)),
+    violated_constraints String,
+    solver_diagnostics   String,
+    leg_results          String,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (replay_session_id, parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 90 DAY;
+
+-- ===========================================================================
 -- F-20 Live Venue Simulator (PR-F20-4). OLAP history for sim execution +
 -- SHADOW divergence. ADR-015: this is fed from `sim.execution.venue` (sim
 -- ExecutionReport, identical to the live contract) plus the

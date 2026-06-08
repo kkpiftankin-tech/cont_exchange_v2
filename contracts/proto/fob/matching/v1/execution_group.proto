@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+// T-F09-011: ExecutionGroup — Kafka envelope для топика execution.groups.
+// Авторизованный контракт (ADR-033). Partition key = parentOrderId.
+// Теги полей зафиксированы; изменение — breaking change, требует ADR.
+package fob.matching.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/orders/v1/combo.proto";  // ExecutionMode, AtomicityPolicy, AtomicityScope
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Статус группового исполнения в одном batch cycle (ADR-033).
+enum GroupStatus {
+  GROUP_STATUS_UNSPECIFIED            = 0;
+  // Все ноги исполнены полностью в этом batch cycle.
+  GROUP_STATUS_FILLED                 = 1;
+  // Ноги исполнены частично; ожидается исполнение в следующих batch cycles.
+  GROUP_STATUS_PARTIAL                = 2;
+  // Ноги не исполнены в этом batch cycle; попытка повторится в следующем.
+  GROUP_STATUS_WAITING_NEXT_BATCH     = 3;
+  // Исполнение отменено из-за нарушения политики атомарности (strict_atomic).
+  GROUP_STATUS_CANCELLED_BY_ATOMICITY = 4;
+  // Исполнение деградировано: нарушены мягкие ограничения, зафиксированы violations.
+  GROUP_STATUS_DEGRADED               = 5;
+  // Запущена компенсирующая внешняя транзакция.
+  GROUP_STATUS_COMPENSATING           = 6;
+  // Ожидает завершения отката внешних ног.
+  GROUP_STATUS_ROLLBACK_PENDING       = 7;
+  // Откат завершён.
+  GROUP_STATUS_ROLLEDBACK             = 8;
+  // Критическая ошибка: не удалось применить ни одну политику fallback.
+  GROUP_STATUS_FAILED                 = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+// Диагностика группового решателя.
+// double допустим для solver diagnostics (CLAUDE.md §9 — не попадает в ledger).
+message GroupSolverDiagnostics {
+  // Время решения групповой задачи, мс.
+  uint32 group_solve_time_ms        = 1;
+  // Leg_id-ы, ограничившие общий масштаб (binding legs).
+  repeated string binding_leg_ids   = 2;
+  // Constraint_id-ы, ставшие активными при решении (binding constraints).
+  repeated string binding_constraint_ids = 3;
+  // Остаточная норма по группе (diagnostic only; double допустим по CLAUDE.md §9).
+  double group_residual_norm        = 4;
+  // JSON-дамп внутренних параметров решателя (для воспроизводимости и отладки).
+  string solver_params_json         = 5;
+}
+
+// Результат исполнения одной ноги в составе ExecutionGroup.
+// Все финансовые поля — fob.common.v1.Decimal (CLAUDE.md §9).
+message LegResult {
+  // Идентификатор ноги (соответствует Leg.leg_id из combo.proto).
+  string leg_id                       = 1;
+  // Исполненный объём ноги (base units). Decimal, не double.
+  fob.common.v1.Decimal exec_qty      = 2;
+  // Цена исполнения (quote per base). Decimal, не double.
+  fob.common.v1.Decimal exec_price    = 3;
+  // Исполненный номинал (exec_qty * exec_price) в quote currency. Decimal.
+  fob.common.v1.Decimal exec_notional = 4;
+  // Ссылка на fill_id в топике fills (для cross-topic traceability).
+  string fill_id                      = 5;
+  // Источник ликвидности (internal / cex_hedge / dex_hedge / ...).
+  string liquidity_source             = 6;
+}
+
+// Kafka envelope топика execution.groups.
+// Публикуется matching backend после завершения grouped solve в каждом batch cycle.
+// Partition key = parentOrderId (ADR-033).
+// Idempotency key для consumers: execution_group_id.
+message ExecutionGroup {
+  // EventMeta обязателен (CLAUDE.md §7, partition_key = parentOrderId).
+  fob.common.v1.EventMeta meta            = 1;
+
+  // Уникальный идентификатор группы исполнения (idempotency key для consumers).
+  // UUID, уникален per batch cycle per parent.
+  string execution_group_id               = 2;
+
+  // Идентификатор batch cycle (F-04), в котором произошло исполнение.
+  string batch_id                         = 3;
+
+  // Идентификатор родительской ComboOrder или BatchOrder.
+  string parent_order_id                  = 4;
+
+  // Режим исполнения (из combo.proto).
+  fob.orders.v1.ExecutionMode execution_mode    = 5;
+
+  // Политика атомарности (из combo.proto).
+  fob.orders.v1.AtomicityPolicy atomicity_policy = 6;
+
+  // Область атомарности (из combo.proto).
+  fob.orders.v1.AtomicityScope atomicity_scope   = 7;
+
+  // Статус группы.
+  GroupStatus group_status                = 8;
+
+  // Масштаб исполнения группы (0.0–1.0). Decimal для финансовой точности.
+  fob.common.v1.Decimal execution_scale   = 9;
+
+  // Фактическое отклонение соотношения, в базисных пунктах.
+  uint32 ratio_deviation_bps              = 10;
+
+  // Результаты по ногам. Пустой при GROUP_STATUS_CANCELLED_BY_ATOMICITY.
+  repeated LegResult leg_results          = 11;
+
+  // Нарушенные ограничения (constraint_id-ы).
+  repeated string violated_constraints    = 12;
+
+  // Применённое резервное действие (пусто если не применялось).
+  // "scale_down" | "skip_batch" | "best_effort" | "cancel_group".
+  string fallback_action                  = 13;
+
+  // Диагностика решателя.
+  GroupSolverDiagnostics solver_diagnostics = 14;
+
+  google.protobuf.Timestamp created_at    = 15;
+}

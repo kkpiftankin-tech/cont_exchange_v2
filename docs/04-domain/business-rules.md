@@ -427,8 +427,108 @@ production Collateral Ledger.
 7. `partial=true` ⇔ статус сессии в `{cancelled, failed}` и хотя бы один
    батч обработан.
 
+## F-09 — Batch / Combo / Multi-leg Orders
+
+Источники: IN-011 §2, §9, §10, §11, §20; [ADR-031](../03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md). Деньги — `Decimal`; `double` только для `solver_diagnostics`.
+
+### F-09.1 Математика группового исполнения
+
+Вектор исполнений группы \(g\) и отображение в активы:
+
+\[
+e_g = (e_{g,1},\dots,e_{g,L_g})^T,\qquad \Delta x_g = B_g\,e_g,\qquad v_g = \frac{B_g\,e_g}{\Delta t}
+\]
+
+Ratio/basket — общий масштаб:
+
+\[
+e_g = \alpha_g\,\rho_g
+\]
+
+Пересчёт цели по notional weight и остаток:
+
+\[
+Q^{target}_{g,\ell}(t) = \frac{w_{g,\ell}\,N_g}{P^{ref}_{\ell}(t)},\qquad
+Q^{remaining}_{g,\ell} = \max\!\left(Q^{target}_{g,\ell}-Q^{filled}_{g,\ell},\,0\right)
+\]
+
+Feasible caps и итоговый масштаб:
+
+\[
+Q^{feasible}_{g,\ell} = \min\!\left(Q^{remaining}_{g,\ell},Q^{rate}_{g,\ell},Q^{liq}_{g,\ell},Q^{risk}_{g,\ell},Q^{venue}_{g,\ell}\right)
+\]
+
+\[
+\alpha_g^{liq} = \min_{\ell}\frac{Q^{feasible}_{g,\ell}}{Q^{target}_{g,\ell}},\qquad
+\alpha_g^* = \min\!\left(\alpha_g^{solver},\alpha_g^{liq},\alpha_g^{risk},\alpha_g^{venue},1\right)
+\]
+
+Общие линейные ограничения и spread:
+
+\[
+A_g\,e_g = b_g\,\alpha_g,\qquad G_g\,e_g \le h_g,\qquad L_g \le c_g^T P \le U_g
+\]
+
+Встраивание в клиринг непрерывной биржи (рядом с обычными FlowOrder):
+
+\[
+\sum_i v_i + \sum_g \frac{B_g\,e_g}{\Delta t} = 0
+\]
+
+\[
+\min_{\{v_i\},\{e_g\}}\left[\sum_i L_i(Q_i,v_i)+\sum_g \Phi_g(e_g,\alpha_g)+\sum_g \mathrm{Penalty}_g(e_g)\right]
+\]
+
+Группы `orchestration_only` в joint solver не участвуют — каждая нога как независимая FlowOrder.
+
+### F-09.2 Политики исполнения
+
+- **strict_atomic:** все обязательные ноги в пропорции или ничего; \(\alpha_g<\alpha_g^{min}\Rightarrow\alpha_g=0\); orphan legs запрещены; для внешних площадок только при `venue_native` или internal_batch.
+- **scalable_atomic:** \(e_g^*=\alpha_g^*\rho_g\); ratio/weights в пределах `max_ratio_deviation_bps`; иначе `waiting_next_batch` (не молчаливая деградация).
+- **best_effort:** \(e_{g,\ell}^*=\alpha_g^*\rho_{g,\ell}+\delta_{g,\ell},\;|\delta_{g,\ell}|\le\varepsilon_{g,\ell}\); обязательна фиксация `violatedConstraints`, `fallbackAction`, `ratioDeviation`, `degraded`.
+- **sequential_fallback:** только по явному разрешению user/Risk/policy; молчаливый перевод strict/scalable запрещён.
+- **external_compensating:** без strict-гарантии; при нарушении структуры — compensating action; статусы `degraded/compensating/rollback_pending/rolledback`; \(\text{external\_compensating}\ne\text{strict\_atomic}\).
+
+### F-09.3 Ключевые инварианты (§20)
+
+1. \(Q^{remaining}_{g,\ell}=\max(Q^{target}-Q^{filled},0)\ge 0\).
+2. \(\text{strict\_atomic}\Rightarrow \text{orphanLegs}=0\).
+3. \(\text{scalable\_atomic}\Rightarrow e_g=\alpha_g^*\rho_g\) (в пределах tolerance).
+4. \(\text{best\_effort}\wedge\exists\,\text{нарушение}\Rightarrow \text{violatedConstraints}\ne\varnothing\).
+5. \(\text{external\_compensating}\ne\text{strict\_atomic}\).
+6. `ExecutionGroup` фиксируется в `group_state_transitions` до публикации `LegFill`; ledger идемпотентен по `execution_group_id`.
+7. \(p^{low}_{\ell}\le \text{exec\_price}\le p^{high}_{\ell}\) (наследие F-04).
+8. \(\sum_{\text{batches}}\text{exec\_qty}_{g,\ell}\le Q^{max}_{g,\ell}\).
+
+### F-09.4 Child graph transitions (§11.6)
+
+- **OCO:** исполнение ветви ⇒ siblings → `cancelled`, идемпотентно (`group_state_transitions`).
+- **Bracket:** \(Q_{tp}^{max}=Q_{sl}^{max}=Q_{entry}^{filled}\); при частичном entry exits resize инкрементально; TP↔SL взаимная отмена.
+- Все переходы идемпотентны по `(executionGroupId, legId)`; зависимости от wall-clock/thread scheduling запрещены (replay determinism, AC-F09-010).
+
+### F-09.5 Таксономия как единая модель
+
+`MultiLegVectorOrder = Legs + Constraints + StateGraph + ExecutionPolicy`. Специализации:
+
+| Тип | Ограничение |
+| --- | --- |
+| Basket | \(\sum_i w_i=1;\ Q_i^{target}=w_i N/P_i^{ref}\) (строки \(A_g\)) |
+| Pair | \(Q_1=kQ_2\) (строка \(A_g\)) |
+| Spread | \(L_g\le c_g^T P\le U_g\) (строки \(G_g\)) |
+| Factor | \(FQ=0\) (строки \(A_g\)) |
+| Budget | \(\sum_i P_iQ_i\le N\) (строка \(G_g\)) |
+| Risk | \(R(Q)\le R_{max}\) (строки \(G_g\)) |
+| OCO / Bracket | `ConditionalLink` граф (не линейные ограничения) |
+
+Комбинации допустимы (`Basket+Factor+Budget` → несколько строк \(A_g\)/\(G_g\)).
+
+### F-09.6 Связи
+
+F-04 (grouped solver встроен в batch cycle; `batch_id` связывает `ExecutionGroup`↔`BatchResult`); F-06 (leg-level positions/PnL, combined PnL); F-07/F-08 (pre/post-trade grouped checks); F-11 (`venue.liquidity.fob` → \(Q^{liq}\)); F-12 (`external_compensating` через ExecutionIntent/Report); F-15 (replay determinism, AC-F09-010). MVP-рекомендация: decoupled solver (F-04 даёт clearPrices как reference) — см. open question в [implementation-plan/F-09](../implementation-plan/F-09-batch-combo-orders.tasks.md).
+
 ## Source Fragments
 
 - IN-005 §6 «Формулы расчётов» (все 15 формул F-12)
 - IN-005 §1 (термины ExecutionIntent, HedgeFlow, ChildOrder, ExecutionReport, Urgency)
 - IN-006 § Канонические сущности и термины, Метрики качества исполнения (F-15)
+- IN-011 §2, §9, §10, §11, §20 — F-09 vector solver math, политики, инварианты
