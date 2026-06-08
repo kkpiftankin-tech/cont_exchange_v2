@@ -118,3 +118,26 @@ Notes:
 ## 7) Legacy MVP reference
 
 The original MVP from `repo.zip` is copied into `legacy_mvp/` **for code reuse/reference**.
+
+## 8) Claude Code settings (optional)
+
+The repository ships with shared `.claude/settings.json` (committed) — it registers two hooks
+that work out of the box for every contributor:
+
+- `UserPromptSubmit` → `tools/auto-archive-attachments.py` (auto-archives chat attachments
+  to `incoming-docs/`; see [CLAUDE.md §0a](CLAUDE.md));
+- `PostToolUse` → `scripts/hooks/post_edit_hint.sh` (post-edit reminders).
+
+For personal preferences (rsync to dev host, pre-approved bash commands, extra hooks),
+copy [`.claude/settings.example.json`](.claude/settings.example.json) to
+`.claude/settings.local.json` (gitignored) and edit:
+
+```bash
+cp .claude/settings.example.json .claude/settings.local.json
+```
+
+Smoke-test the auto-archive parser (CI runs this on every PR):
+
+```bash
+python3 tools/auto-archive-attachments.py --self-test
+```

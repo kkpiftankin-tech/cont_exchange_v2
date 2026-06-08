@@ -212,17 +212,38 @@ features:
   F-15:
     name: Backtest Replay
     docsPath: docs/02-system/features/F-15-backtest-replay
-    status: not-implemented
+    # Status sync per AUDIT-001 T-AUDIT-001 (2026-06-08): feature.yaml уже
+    # in-progress-impl с большим cpp/backtest codebase + RBAC, replay
+    # sessions, parity checks. До PR-AUDIT-001 этот файл показывал
+    # not-implemented + codePaths: [] — drift, который ловил traceability.
+    status: in-progress-impl
     primaryComponents:
-      - matching
-      - risk
-      - ledger
-      - observability
+      - backtest               # cpp/backtest — оркестратор (alias: backtest-service)
+      - matching               # shadow-вызов SolveBatch (alias: matching-fob-core)
+      - risk                   # shadow-вызов CheckPostTrade (alias: risk-manager)
+      - ledger                 # shadow namespace, in-memory изоляция (alias: settlement-ledger)
+      - market-data            # historical batchresults/marketdata через ClickHouse
     protoContracts:
-      - contracts/proto/fob/agent/v1/agent.proto
-      - contracts/proto/fob/matching/v1/batch.proto
+      - contracts/proto/fob/replay/v1/replay.proto             # ReplaySession, Commands, Events
+      - contracts/proto/fob/matching/v1/solver.proto           # SolveBatch (isolation gRPC)
+      - contracts/proto/fob/matching/v1/batch.proto            # BatchResult
+      - contracts/proto/fob/matching/v1/fill_event.proto       # FillEvent
+      - contracts/proto/fob/orders/v1/orders.proto             # FlowOrder
+      - contracts/proto/fob/risk/v1/risk.proto                 # CheckPostTrade
+      - contracts/proto/fob/ledger/v1/ledger.proto             # ApplyFills (shadow)
+      - contracts/proto/fob/common/v1/common.proto             # Decimal, EventMeta
+      - contracts/proto/fob/agent/v1/agent.proto               # legacy retained
       - contracts/proto/fob/observability/v1/observability.proto
-    codePaths: []
+    # Canonical service root + OpenAPI (full file-by-file list in feature.yaml.codePaths).
+    codePaths:
+      - cpp/backtest
+      - contracts/openapi/fob/replay/v1/api/replay.yaml
+    kafkaTopics:
+      produces:
+        - replay.results       # ReplayProgressEvent / ReplayCompletedEvent / ReplayFailedEvent / ReplayCancelledEvent
+      consumes:
+        - replay.commands      # CreateReplayCommand / CancelReplayCommand / RetryReplayCommand
+        - batch.outputs        # parity checks с production
 
   F-16:
     name: Operator Console & Kill-Switch

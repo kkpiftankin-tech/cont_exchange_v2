@@ -14,3 +14,8 @@ logs/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 
+# Python (validators run locally + in CI)
+__pycache__/
+*.pyc
+*.pyo
+

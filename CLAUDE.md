@@ -41,7 +41,7 @@ Pipeline: register → segment → classify → map → normalize → insert/mer
 
 ### Auto-archive of chat attachments
 
-A `UserPromptSubmit` hook ([tools/auto-archive-attachments.py](tools/auto-archive-attachments.py), registered in [.claude/settings.local.json](.claude/settings.local.json)) парсит `<document>` блоки в каждом пользовательском промте и сохраняет их в `incoming-docs/YYYY-MM-DD-<slug>-<sha8>.md` **до** того, как ассистент увидит сообщение. Хук эмиттит `additionalContext` с отчётом, какие файлы были сохранены.
+A `UserPromptSubmit` hook ([tools/auto-archive-attachments.py](tools/auto-archive-attachments.py), registered in [.claude/settings.json](.claude/settings.json) — shared, committed, AUDIT-001 T-AUDIT-004) парсит `<document>` блоки в каждом пользовательском промте и сохраняет их в `incoming-docs/YYYY-MM-DD-<slug>-<sha8>.md` **до** того, как ассистент увидит сообщение. Хук эмиттит `additionalContext` с отчётом, какие файлы были сохранены. Smoke-тест: `python3 tools/auto-archive-attachments.py --self-test` (CI запускает на каждый PR).
 
 Поведение ассистента:
 
@@ -79,6 +79,8 @@ Before modifying files, show a plan. After modifying files, report: created / up
 
 - `incoming-docs/` — immutable archive of incoming source documents. Index: [`incoming-docs/index.md`](incoming-docs/index.md).
 - `docs/00-methodology/` — methodology, repository rules, ingestion workflow, templates.
+  - `docs/00-methodology/audits/` — process audits (AUDIT-NNN). See [AUDIT-001](docs/00-methodology/audits/AUDIT-001-feature-development-process.md).
+  - `docs/00-methodology/postmortems/` — process post-mortems (PM-NNN). See [PM-001..004](docs/00-methodology/postmortems/README.md).
 - `docs/01-business/` — vision, goals, stakeholders, glossary, business constraints.
 - `docs/02-system/` — system behavior, actors, requirements, features, use cases.
 - `docs/03-architecture/` — C4/C1/C2, architecture overview, ADR.

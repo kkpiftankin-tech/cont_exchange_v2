@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": [
+    "Example PERSONAL settings for cont_exchange_v2.0 — copy to",
+    ".claude/settings.local.json (gitignored) and edit under your own",
+    "preferences.",
+    "",
+    "Shared rules (deny + UserPromptSubmit auto-archive + PostToolUse hint)",
+    "live in .claude/settings.json — committed, applies to everyone.",
+    "",
+    "What this example shows:",
+    "  - permissions.allow: typical project-specific commands you'll want",
+    "    pre-approved (rsync to dev host, docker compose, validators,",
+    "    diff tools). Each line bypasses the per-command permission prompt.",
+    "  - hooks: usually empty here — shared settings.json already covers",
+    "    UserPromptSubmit auto-archive and PostToolUse post-edit hints.",
+    "    Add personal hooks ONLY if you want extra automation.",
+    "",
+    "Important:",
+    "  - permissions.deny in shared settings.json CANNOT be overridden here.",
+    "  - settings.local.json is gitignored — your edits stay on your machine.",
+    "  - If a command is too broad to safely allow, leave it out and accept",
+    "    the per-call permission prompt.",
+    "",
+    "Reference: AUDIT-001 T-AUDIT-005,",
+    "docs/00-methodology/audits/AUDIT-001-feature-development-process.md."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(python3 tools/traceability-checker/check.py)",
+      "Bash(python3 tools/proto-contract-auditor/check_proto_map.py)",
+      "Bash(python3 tools/auto-archive-attachments.py --self-test)",
+      "Bash(python3 tools/code-map-generator/generate.py)",
+      "Bash(python3 tools/link-audit.py)",
+      "Bash(make build)",
+      "Bash(make test-ci)",
+      "Bash(make governance-check)",
+      "Bash(git add *)",
+      "Bash(git commit -m *)",
+      "Bash(git checkout *)",
+      "Bash(docker compose *)",
+      "Bash(ssh -o ConnectTimeout=* nik@ubuntu-dev *)",
+      "Bash(rsync -avz cpp/* nik@ubuntu-dev:/home/nik/cont_exchange_v2/cpp/*)",
+      "Bash(rsync -avz frontend/* nik@ubuntu-dev:/home/nik/cont_exchange_v2/frontend/*)",
+      "Bash(rsync -avz infra/* nik@ubuntu-dev:/home/nik/cont_exchange_v2/infra/*)",
+      "Bash(rsync -avz contracts/* nik@ubuntu-dev:/home/nik/cont_exchange_v2/contracts/*)",
+      "Bash(awk *)",
+      "Bash(bash scripts/hooks/post_edit_hint.sh)"
+    ]
+  }
+}
