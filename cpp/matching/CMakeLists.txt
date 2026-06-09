@@ -52,6 +52,7 @@ add_executable(matching
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
   src/infra/postgres/postgres_solver_config_repository.cpp
+  src/infra/postgres_execution_groups_repository.cpp
   src/infra/kafka/batch_outputs_producer.cpp
   src/infra/kafka/execution_intents_producer.cpp
   src/infra/execution_groups_producer.cpp
@@ -184,6 +185,23 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_execution_groups_producer_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_execution_groups_producer_test COMMAND matching_execution_groups_producer_test)
+
+  # F-09 (T-F09-047): execution_groups repository (PG integration; skips w/o TEST_PG_DSN).
+  add_executable(matching_execution_groups_repo_test
+    tests/infra/postgres_execution_groups_repository_test.cpp
+    src/infra/postgres_execution_groups_repository.cpp
+  )
+  target_include_directories(matching_execution_groups_repo_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_execution_groups_repo_test PRIVATE
+    cex_common
+    contracts_proto
+    ${MATCHING_PQXX_TARGET}
+    PostgreSQL::PostgreSQL
+  )
+  target_compile_options(matching_execution_groups_repo_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_execution_groups_repo_test COMMAND matching_execution_groups_repo_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp
