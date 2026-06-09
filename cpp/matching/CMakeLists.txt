@@ -54,6 +54,7 @@ add_executable(matching
   src/infra/postgres/postgres_solver_config_repository.cpp
   src/infra/kafka/batch_outputs_producer.cpp
   src/infra/kafka/execution_intents_producer.cpp
+  src/infra/execution_groups_producer.cpp
   src/transport/grpc_isolation_matching_service.cpp
 )
 
@@ -166,6 +167,23 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_solve_grouped_batch_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_solve_grouped_batch_test COMMAND matching_solve_grouped_batch_test)
+
+  # F-09 (T-F09-046): ExecutionGroup producer (pure BuildExecutionGroup mapping).
+  add_executable(matching_execution_groups_producer_test
+    tests/infra/execution_groups_producer_test.cpp
+    src/infra/execution_groups_producer.cpp
+    src/domain/grouped_solver_bisection.cpp
+    src/domain/multileg_feasible_caps.cpp
+  )
+  target_include_directories(matching_execution_groups_producer_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_execution_groups_producer_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(matching_execution_groups_producer_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_execution_groups_producer_test COMMAND matching_execution_groups_producer_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp

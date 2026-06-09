@@ -40,6 +40,7 @@ enum class GroupFallbackPolicy {
 
 /// Нога группы для векторного солвера.
 struct VectorLeg {
+  std::string leg_id;  ///< UUID ноги (combo_order_legs.leg_id); для LegResult/трассировки
   std::string instrument_symbol;
 
   /// Знаковый целевой коэффициент ρ_g (signed): >0 — buy base, <0 — sell base.

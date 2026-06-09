@@ -105,7 +105,8 @@ GroupedSolveResult GroupedSolverBisection::Solve(const GroupedSolveInput& input)
   if (order.atomicity_policy == GroupAtomicityPolicy::kBestEffort) {
     for (const auto& leg : order.legs) {
       if (Decimal::cmp(leg.abs_ratio(), kZero) == 0) continue;
-      res.leg_execs.push_back(LegExec{leg.instrument_symbol, cap_of(leg), leg.target_ratio});
+      res.leg_execs.push_back(
+          LegExec{leg.leg_id, leg.instrument_symbol, cap_of(leg), leg.target_ratio});
     }
     // Непропорциональность капов → нарушение соотношения.
     if (Decimal::cmp(g_feas, g_feas_max) != 0) {
@@ -151,7 +152,7 @@ GroupedSolveResult GroupedSolverBisection::Solve(const GroupedSolveInput& input)
       if (Decimal::cmp(rho, kZero) == 0) continue;
       // e_i = G_exec · ρ_i, зажато капом (страховка от округления).
       Decimal e = Decimal::min(Decimal::mul(g_exec, rho), cap_of(leg));
-      res.leg_execs.push_back(LegExec{leg.instrument_symbol, e, leg.target_ratio});
+      res.leg_execs.push_back(LegExec{leg.leg_id, leg.instrument_symbol, e, leg.target_ratio});
     }
   } else {
     // Блокировка → ничего не исполнено (scale=0) + fallback action из политики.

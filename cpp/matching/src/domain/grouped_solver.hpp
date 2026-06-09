@@ -18,6 +18,7 @@ namespace cex::matching::domain {
 
 /// Исполнение одной ноги в результате solve.
 struct LegExec {
+  std::string leg_id;                   ///< UUID ноги (для LegResult.leg_id)
   std::string instrument_symbol;
   cex::common::Decimal executed_qty{};  ///< base qty, >= 0
   cex::common::Decimal target_ratio{};  ///< знаковый ρ (для side/знака downstream)
