@@ -1,3 +1,14 @@
+// ============================================================================
+// market_data/main.cpp — entry point сервиса market_data (F-05).
+//
+// Что делает:
+//   - Инициализирует ClickHouse-схему для batchresults, fills, execution_venue,
+//     execution_reports, marketdata, liquidity_curves.
+//   - Запускает Kafka consumer для marketdata.raw, batch.outputs, и др.
+//     Persists records в ClickHouse для analytics / replay (F-15).
+//   - Запускает gRPC MarketDataService (GetLastTicker, GetLiquidityCurve, ...).
+//   - In-memory кэш текущих liquidity curves для fast access из solver/matching.
+// ============================================================================
 #include <grpcpp/grpcpp.h>
 #include <algorithm>
 
@@ -20,6 +31,8 @@ int main() {
 
   const std::string brokers = cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
 
+  // ClickHouse config — все таблицы overridable env-vars для разделения
+  // sample/replay namespaces (BACKTEST_CLICKHOUSE_* vs CLICKHOUSE_* в F-15).
   cex::market_data::infra::ClickHouseConfig ch_cfg;
   ch_cfg.host = cex::common::Env::get_string("CLICKHOUSE_HOST", "clickhouse");
   ch_cfg.port = cex::common::Env::get_int("CLICKHOUSE_PORT", 8123);
@@ -53,7 +66,11 @@ int main() {
   cex::market_data::infra::clickhouse::ClickHouseLiquidityCurveStorage ch_curve_storage(ch_cfg);
   ch_curve_storage.EnsureSchema();
 
+  // OrderBookChannel — in-memory pub-sub между consumer и WS-subscribers
+  // (для real-time stream UI).
   cex::market_data::infra::OrderBookChannel channel;
+  // Defer гарантирует Close() при normal exit OR exception
+  // (RAII pattern, аналог Go's defer).
   auto _ = cex::common::Defer([&channel] { channel.Close(); });
 
   // Create in-memory liquidity curve storage for fast access

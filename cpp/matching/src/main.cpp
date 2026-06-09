@@ -1,3 +1,16 @@
+// ============================================================================
+// matching/main.cpp — entry point сервиса matching (F-04, F-09, F-12).
+//
+// Что делает:
+//   - Опционально PG repos для flow_orders (читает заявки на каждый тик)
+//     и solver_config (hot-reload параметров без рестарта).
+//   - gRPC-клиент к market_data для reference prices.
+//   - Запускает MatchingLoop (background threads: orders Kafka consumer,
+//     venue.liquidity.fob consumer, venue.health consumer, batch timer).
+//   - Запускает gRPC IsolationMatching для F-15 backtest replay (отдельный
+//     solver instance, не trogает live state).
+//   - HTTP /healthz + /metrics (Prometheus) + /orders/<id> для UI.
+// ============================================================================
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -111,7 +124,8 @@ int main() {
   [[maybe_unused]] auto metrics_server =
       metrics_app.port(metrics_port).run_async();
 
-  // run forever
+  // run forever — все важное работает в background threads (MatchingLoop,
+  // metrics HTTP, isolation gRPC). main thread просто блокирует.
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(60));
   }

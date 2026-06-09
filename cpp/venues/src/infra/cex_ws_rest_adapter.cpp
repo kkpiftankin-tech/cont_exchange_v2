@@ -1,3 +1,38 @@
+// ============================================================================
+// cex_ws_rest_adapter.cpp — generic CEX (CEntralized EXchange) adapter
+// поверх WebSocket-feed (market data) + REST (orders/account).
+//
+// Назначение и физический смысл:
+//   Один class CexWsRestAdapter имплементит venue interface для нескольких
+//   CEX венюов: Binance, Coinbase, OKX, и т.д. Венюо-специфичная логика
+//   выделена в utility-функции (SideToBinanceString, coinbase_product_id_*).
+//   Это позволяет один codepath для всех CEX без duplicate'ов.
+//
+//   Каналы:
+//     - WebSocket для market data: trades, BBO updates, partial book, snapshots.
+//       Через nlohmann::json парсинг + venue-specific normalization.
+//     - REST для execution: place/cancel orders, query balances, query orders.
+//       Через libcurl с JSON payload (см. include <curl/curl.h>).
+//
+// Circuit breaker:
+//   Адаптер ведёт circuit-breaker state per-venue. На N consecutive errors
+//   за окно T переходит OPEN → блокирует REST-вызовы на cooldown C.
+//   После cooldown → HALF_OPEN (single probe). Success → CLOSED.
+//   См. CIRCUIT_BREAKER_* env vars в .env-example.
+//
+//   Зачем: защита от cascade-failures (один глючный venue не должен
+//   полностью отрубить hedge для всех остальных).
+//
+// Финансовая дисциплина:
+//   Все qty/price/notional через cex::common::Decimal с явным conversion в/из
+//   venue API strings. Никаких float math для money.
+//
+// Ключевые исторические PR'ы:
+//   - F-11 PR-серии: первоначальный CEX adapter + WS feed parser.
+//   - F-12 PR-F12-3a: VenueExecutionAdapter execution paths (place/cancel).
+//   - Многочисленные PR'ы добавляли venues: Binance, Coinbase, OKX, ...
+// ============================================================================
+
 #include "infra/cex_ws_rest_adapter.hpp"
 
 #include <algorithm>
@@ -417,6 +452,15 @@ void CexWsRestAdapter::evict_circuit_errors_locked(const SteadyClock::time_point
   }
 }
 
+// ============================================================================
+// Circuit breaker state machine. Trio: CLOSED → OPEN → HALF_OPEN → CLOSED.
+//   CLOSED:    normal operation; errors counted in window.
+//   OPEN:      blocking all external calls; transitions to HALF_OPEN after cooldown.
+//   HALF_OPEN: single probe; success → CLOSED, failure → OPEN.
+// ============================================================================
+
+/// True если circuit-breaker позволяет внешний вызов (CLOSED или HALF_OPEN probe).
+/// _locked: caller обязан удерживать circuit_mutex_.
 bool CexWsRestAdapter::circuit_allows_external_call_locked(
     const SteadyClock::time_point now,
     const char* action) {
@@ -476,6 +520,8 @@ void CexWsRestAdapter::record_external_error_locked(
   }
 }
 
+/// Trip circuit-breaker в OPEN. Запускает cooldown timer
+/// (CIRCUIT_BREAKER_COOLDOWN_S env, default 10 sec).
 void CexWsRestAdapter::open_circuit_locked(
     const SteadyClock::time_point now,
     const char* reason) {
@@ -506,6 +552,18 @@ domain::VenueType CexWsRestAdapter::Type() const {
   return domain::VenueType::kCex;
 }
 
+// ============================================================================
+// Connect — устанавливает WebSocket соединение с venue feed endpoint.
+//
+// Шаги:
+//   1. URL формируется из VenueConfig (env-overridable BINANCE_WS_URL и т.п.).
+//   2. WS handshake с auth headers (для private channels).
+//   3. Запуск reader-thread'а (cпорадически приём JSON frames).
+//   4. Heartbeat-loop (ping/pong) с CEX_HEARTBEAT_PONG_TIMEOUT_MS.
+//
+// На fail — circuit-breaker увеличивается, возвращает false.
+// На success — circuit-breaker resets.
+// ============================================================================
 bool CexWsRestAdapter::Connect() {
   std::lock_guard<std::mutex> lock(mu_);
   const SteadyClock::time_point now = now_fn_();
@@ -582,6 +640,10 @@ bool CexWsRestAdapter::Connect() {
   return true;
 }
 
+/// Subscribe на venue feed channels (BBO/trades/partial book/depth).
+/// VenueSubscription содержит instrument + channel set. Адаптер формирует
+/// venue-specific subscription message (JSON для Binance, plain text для
+/// некоторых OKX endpoints) и шлёт через WS.
 bool CexWsRestAdapter::Subscribe(const std::vector<domain::VenueSubscription>& subscriptions) {
   std::lock_guard<std::mutex> lock(mu_);
   subscriptions_ = subscriptions;
@@ -627,6 +689,9 @@ bool CexWsRestAdapter::Subscribe(const std::vector<domain::VenueSubscription>& s
   return true;
 }
 
+/// Force reconnect: closes existing WS, разбирает state, и заново Connect+Subscribe.
+/// CEX_RECONNECT_COOLDOWN_MS (default 10000) задержка перед attempt.
+/// Используется при stale-feed detection и operator ForceReconnect API.
 bool CexWsRestAdapter::Reconnect() {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -721,6 +786,9 @@ bool CexWsRestAdapter::Reconnect() {
   return false;
 }
 
+/// Возвращает текущее health-состояние venue: ms since last frame, circuit
+/// breaker state, error count, и т.п. Используется md_publish_loop для
+/// формирования venue.health Kafka message.
 domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
   std::lock_guard<std::mutex> lock(mu_);
   const SteadyClock::time_point now = now_fn_();
@@ -803,6 +871,9 @@ domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
   };
 }
 
+/// Запрашивает полный snapshot order book через REST. Используется на
+/// initial connect и при skew detection. nullopt при failure (circuit
+/// breaker может блокировать вызов).
 std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     const domain::VenueSnapshotRequest& request) {
   const SteadyClock::time_point now = now_fn_();
@@ -1594,6 +1665,10 @@ bool CexWsRestAdapter::apply_rest_ticker_volume_locked(
   return true;
 }
 
+/// Applies WebSocket depth/orderbook update event к локальному state.
+/// Депт-снапшоты могут быть incremental (only deltas) — мы re-construct
+/// full book путём накопления deltas с последнего snapshot.
+/// _locked: caller обязан удерживать book_mutex_.
 bool CexWsRestAdapter::apply_ws_depth_event_locked(
     const std::string& payload,
     const SteadyClock::time_point now) {
@@ -1725,6 +1800,8 @@ bool CexWsRestAdapter::apply_ws_depth_event_locked(
   return false;
 }
 
+/// Applies trade event (matched fill в venue's book). Используется для
+/// VWAP estimate, last-trade-price cache, volume tracking.
 bool CexWsRestAdapter::apply_ws_trade_event_locked(
     const std::string& payload,
     const SteadyClock::time_point now) {

@@ -1,3 +1,17 @@
+// ============================================================================
+// order_flow/main.cpp — entry point сервиса order_flow (F-02 + F-03 + F-09).
+//
+// Что делает:
+//   - Инициализирует gRPC clients для risk и ledger (downstream).
+//   - Опционально PG repository для flow_orders + flow_order_legs (PR-F02-001
+//     gap closure — matching видит активные заявки в PG).
+//   - F-09 (T-F09-036) combo orders: PG repo для combo_*/grouped_*/legs/constraints
+//     + grouped Kafka producer.
+//   - Запускает gRPC OrderFlowService (CreateFlowOrder, CancelFlowOrder,
+//     CreateComboOrder, CancelComboOrder).
+//   - Subscribes на batch.outputs чтобы fills из matching отражались в
+//     in-memory FlowOrder state (IN-007 BUG-1 fix).
+// ============================================================================
 #include <grpcpp/grpcpp.h>
 
 #include <exception>
