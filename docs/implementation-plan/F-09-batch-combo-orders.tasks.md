@@ -32,6 +32,68 @@ end-to-end** (gRPC CreateComboOrder multileg → matching load→solve→Executi
 
 ---
 
+## Корректировки плана по System-Impact Analysis (F-09 v2, 2026-06-09)
+
+Прислан системный impact-анализ F-09. Он **подтверждает** фазовую стратегию
+(MVP-1…5 ≈ Phases 0–7 документа): orchestration_only → scalable_atomic
+pair/basket → spread/OCO/bracket → external → replay/observability. Структуру
+MVP менять не нужно. Формула scale документа `α_g = min_ℓ(Q_feasible/Q_target)`
+совпадает с реализованным `GroupedSolverBisection`. Ниже — дополнения (gaps),
+которых не хватало явно.
+
+### Добавления к плану
+
+1. **T-F09-002 (Phase 0, НОВАЯ, высокий приоритет): feature flags + grouped policy.**
+   Документ §6 ставит это ПЕРВЫМ шагом. Сейчас multileg gated неявно на
+   `MATCHING_POSTGRES_DSN`. Нужно явно: флаги `f09_grouped_orders_enabled`,
+   `f09_orchestration_only_enabled`, `f09_multileg_vector_solver_enabled`,
+   `f09_external_compensating_enabled` + policy `maxLegsPerGroup`,
+   `maxChildrenPerGraph`, `allowedComboTypes`, `allowedAtomicityPolicies`,
+   `ratioToleranceBps`, `maxWeightDeviationBps`, `requirePreviewBeforeSubmit`,
+   `maxGroupedSolveTimeMs`. order_flow/risk читают policy.
+
+2. **AC-F09-011 (НОВАЯ, hard AC): честные гарантии режима.** Главный риск
+   (документ §9) — выдать `orchestration_only` за настоящий multi-leg. Каждый
+   grouped order в API-ответе и UI ОБЯЗАН показывать `executionMode` + фактические
+   гарантии: orchestration_only → нет гарантии ratio/weights/spread;
+   multileg_vector_solver → гарантии в пределах policy/tolerance;
+   external_compensating → не атомарно. (Сейчас есть только WARN-лог — поднять до
+   контракта API/UI.)
+
+3. **T-F09-062 (НОВАЯ, prereq для T-F09-060): обогащение `ExecutionGroup` proto.**
+   Для ledger-постинга в позиции и цепочки трассировки нужны: `user_id` на уровне
+   группы, `instrument_symbol` + `side` в `LegResult`, связь `fill_id →
+   ledgerPostingId`. Producer (`BuildExecutionGroup`) уже имеет эти данные.
+   Аддитивно, backward-compat (ADR-033). **Делать ДО T-F09-060.**
+
+4. **Traceability AC:** сквозная цепочка `parentOrderId → executionGroupId →
+   legFillId → ledgerPostingId` (документ §3.2) — обеспечить в 046/047/060.
+
+5. **Расширенный scope (MVP-4+), зафиксировать как ориентир:**
+   - Frontend grouped — не 2 задачи (080/081), а surface по вкладкам
+     trade/profile/pnl/live/alerts/override/policy/replay (документ §3).
+   - Alert taxonomy (T-F09-070): `orphan_leg_prevented`, `strict_atomic_rejected`,
+     `scalable_scaled_down`, `best_effort_degraded`, `external_compensation_required`,
+     `spread_constraint_failed`, `stale_reference_price`, `duplicate_group_event`,
+     `grouped_ledger_apply_failed` (документ §3.7).
+   - Operator grouped override (F-16): force cancel parent/branch, approve
+     degradation, trigger compensation, retry (идемпотентно), freeze group
+     (документ §3.8). Правило: override НЕ превращает partial external в strict atomic.
+   - Hierarchical PnL: leg/group/parent/strategy + ratio_deviation_cost +
+     compensation_pnl + margin_impact (документ §3.5).
+
+### Уточнённый порядок остатков MVP-2
+
+1. **T-F09-002** feature flags + policy (быстро; разблокирует честное gating).
+2. **T-F09-062** ExecutionGroup enrichment (prereq для ledger).
+3. **T-F09-060** ledger grouped postings + traceability chain.
+4. **T-F09-040** risk `PreTradeCheckGroup` (читает policy из T-F09-002).
+5. **T-F09-090** E2E basket до ledger postings.
+
+> Документ как источник можно формально заингестить как IN-012 (сейчас не в
+> `incoming-docs/` — хук не сработал на mojibake). Для полной traceability —
+> по отдельному запросу.
+
 ## Source Artifacts
 
 | Тип | Путь |
