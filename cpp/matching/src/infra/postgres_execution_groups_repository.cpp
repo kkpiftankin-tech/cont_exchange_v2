@@ -63,15 +63,6 @@ std::string ScopeDb(ov1::AtomicityScope s) {
   }
 }
 
-// Статус combo_orders, в который переводим parent по group_status (или "" — без апдейта).
-std::string ComboStatusFromGroup(mv1::GroupStatus s) {
-  switch (s) {
-    case mv1::GROUP_STATUS_FILLED: return "filled";
-    case mv1::GROUP_STATUS_PARTIAL: return "partially_filled";
-    case mv1::GROUP_STATUS_DEGRADED: return "degraded";
-    default: return "";  // blocked/waiting/... — combo остаётся active (ретрай)
-  }
-}
 
 std::string LegResultsJson(const mv1::ExecutionGroup& eg) {
   std::ostringstream os;
@@ -127,8 +118,9 @@ void PostgresExecutionGroupsRepository::PersistExecutionGroup(
   }
   pqxx::work tx(*conn);
 
-  // 1) execution_groups (идемпотентно по PK).
-  tx.exec_params(
+  // 1) execution_groups (идемпотентно по PK). affected_rows() == 0 → дубликат
+  //    at-least-once доставки: НЕ применяем fills повторно (иначе double-count).
+  const pqxx::result inserted = tx.exec_params(
       R"SQL(
 INSERT INTO execution_groups
   (execution_group_id, batch_id, parent_order_id, execution_mode, group_status,
@@ -146,6 +138,11 @@ ON CONFLICT (execution_group_id) DO NOTHING
       LegResultsJson(eg), StringArrayJson(eg.violated_constraints()),
       DiagnosticsJson(eg));
 
+  if (inserted.affected_rows() == 0) {
+    tx.commit();  // дубликат группы → идемпотентно, без побочных эффектов
+    return;
+  }
+
   // 2) group_state_transitions (идемпотентно по idempotency_key = execution_group_id).
   tx.exec_params(
       R"SQL(
@@ -156,13 +153,29 @@ ON CONFLICT (idempotency_key) DO NOTHING
       eg.execution_group_id(), GroupStatusDb(eg.group_status()), eg.batch_id(),
       "grouped_solve", eg.execution_group_id());
 
-  // 3) UPDATE статуса combo_orders (только для filled/partial/degraded).
-  const std::string combo_status = ComboStatusFromGroup(eg.group_status());
-  if (!combo_status.empty()) {
+  // 3) Применяем fills к ногам и пересчитываем статус combo — только если группа
+  //    реально исполнилась (есть leg_results). Накопление filled_cum между batch-
+  //    циклами устраняет переисполнение partial-групп (Known Gap MVP-2).
+  if (eg.leg_results_size() > 0) {
+    for (const auto& lr : eg.leg_results()) {
+      tx.exec_params(
+          "UPDATE combo_order_legs "
+          "SET filled_cum = LEAST(filled_cum + $3::numeric, q_max) "
+          "WHERE parent_order_id = $1::uuid AND leg_id = $2::uuid",
+          eg.parent_order_id(), lr.leg_id(),
+          Decimal::from_proto(lr.exec_qty()).to_string());
+    }
+    // combo → filled, когда все ноги заполнены; иначе partially_filled.
     tx.exec_params(
-        "UPDATE combo_orders SET status = $2, updated_at = NOW() "
-        "WHERE combo_order_id = $1::uuid",
-        eg.parent_order_id(), combo_status);
+        R"SQL(
+UPDATE combo_orders SET status = CASE
+    WHEN NOT EXISTS (SELECT 1 FROM combo_order_legs
+                     WHERE parent_order_id = $1::uuid AND filled_cum < q_max)
+      THEN 'filled' ELSE 'partially_filled' END,
+    updated_at = NOW()
+WHERE combo_order_id = $1::uuid AND status NOT IN ('filled','cancelled')
+)SQL",
+        eg.parent_order_id());
   }
 
   tx.commit();

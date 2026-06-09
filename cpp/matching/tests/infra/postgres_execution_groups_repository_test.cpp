@@ -69,6 +69,16 @@ VALUES ($1::uuid,'basket','multileg_vector_solver','active','notional_weight',
 ON CONFLICT (combo_order_id) DO NOTHING
 )SQL",
           parent_id);
+      // Нога, на которую ссылается leg_result (для проверки накопления filled_cum).
+      tx.exec_params(R"SQL(
+INSERT INTO combo_order_legs
+  (leg_id, parent_order_id, instrument_symbol, side, weight, ratio_basis,
+   p_low, p_high, q_rate, q_max, filled_cum, status)
+VALUES ($1::uuid,$2::uuid,'BTCUSDT','buy',0.6,'notional_weight',
+        100,200,1,10,0,'active')
+ON CONFLICT (leg_id) DO NOTHING
+)SQL",
+                     "00000000-0000-0000-0000-0000000000aa", parent_id);
       tx.commit();
     }
 
@@ -89,15 +99,21 @@ ON CONFLICT (combo_order_id) DO NOTHING
       const std::string combo_status =
           tx.exec_params("SELECT status FROM combo_orders WHERE combo_order_id=$1::uuid",
                          parent_id)[0][0].as<std::string>();
+      // exec_qty=6 применён один раз (два persist идемпотентны) → filled_cum=6, не 12.
+      const bool leg_six = tx.exec_params(
+          "SELECT filled_cum = 6 FROM combo_order_legs WHERE leg_id=$1::uuid",
+          "00000000-0000-0000-0000-0000000000aa")[0][0].as<bool>();
       ok = expect(eg_rows == 1, "execution_group persisted exactly once (idempotent)") && ok;
       ok = expect(tr_rows == 1, "one transition (idempotent by idempotency_key)") && ok;
-      ok = expect(combo_status == "partially_filled", "combo status → partially_filled (scale<1)") && ok;
+      ok = expect(leg_six, "leg filled_cum = 6 (fill applied once, not double-counted)") && ok;
+      ok = expect(combo_status == "partially_filled", "combo → partially_filled (6 < q_max 10)") && ok;
       tx.commit();
     }
 
-    {  // cleanup: execution_groups (cascade transitions) → combo_orders.
+    {  // cleanup: execution_groups (cascade transitions) → legs → combo_orders.
       pqxx::work tx{conn};
       tx.exec_params("DELETE FROM execution_groups WHERE parent_order_id=$1::uuid", parent_id);
+      tx.exec_params("DELETE FROM combo_order_legs WHERE parent_order_id=$1::uuid", parent_id);
       tx.exec_params("DELETE FROM combo_orders WHERE combo_order_id=$1::uuid", parent_id);
       tx.commit();
     }
