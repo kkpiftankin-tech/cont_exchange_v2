@@ -71,7 +71,9 @@ int main() {
 
   cex::matching::app::SolverMetrics metrics;
   cex::matching::app::MatchingLoop loop(brokers, interval_ms,
-    flow_order_repository, std::move(solver_config_repo), market_data_client, metrics);
+    flow_order_repository, std::move(solver_config_repo), market_data_client, metrics,
+    // F-09 (T-F09-048): тот же DSN включает grouped combo-цикл.
+    postgres_dsn.value_or(std::string()));
   loop.start();
 
   const std::string isolation_listen =

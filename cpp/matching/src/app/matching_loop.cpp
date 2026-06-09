@@ -345,7 +345,8 @@ MatchingLoop::MatchingLoop(
     std::shared_ptr<domain::IFlowOrderRepository> flow_order_repository,
     std::unique_ptr<domain::SolverConfigRepositoryPort> solver_config_repo,
     std::shared_ptr<infra::MarketDataClient> market_data_client,
-    SolverMetrics& metrics)
+    SolverMetrics& metrics,
+    const std::string& postgres_dsn)
     : brokers_(brokers),
       batch_interval_ms_(batch_interval_ms),
       producer_({.brokers = brokers, .client_id = "matching"}),
@@ -364,7 +365,26 @@ MatchingLoop::MatchingLoop(
       solver_config_repo_(std::move(solver_config_repo)),
       market_data_client_(std::move(market_data_client)),
       flow_order_repository_(std::move(flow_order_repository)),
-      planner_inputs_cache_(LoadVenueHealthThresholds()) {}
+      planner_inputs_cache_(LoadVenueHealthThresholds()) {
+  // F-09 (T-F09-048): включаем grouped combo-цикл при заданном PG DSN.
+  // Любая ошибка инициализации → grouped выключен, single-leg F-04 не затронут.
+  if (!postgres_dsn.empty()) {
+    try {
+      active_groups_loader_ =
+          std::make_unique<infra::PostgresActiveGroupsLoader>(postgres_dsn);
+      eg_repo_ = std::make_unique<infra::PostgresExecutionGroupsRepository>(postgres_dsn);
+      eg_producer_.emplace(producer_);
+      solve_grouped_uc_.emplace(grouped_solver_);
+      grouped_enabled_ = true;
+      cex::common::log_json("INFO", "Matching F-09 grouped execution enabled", {});
+    } catch (const std::exception& ex) {
+      grouped_enabled_ = false;
+      cex::common::log_json("ERROR",
+                            "Failed to enable F-09 grouped execution; staying single-leg only",
+                            {{"error", ex.what()}});
+    }
+  }
+}
 
 // ============================================================================
 // start — запуск consumer + batch loop threads.
@@ -802,12 +822,104 @@ MatchingLoop::filtered_external_liquidity_unlocked() const {
 //
 // Heavy method ~600+ строк — кандидат на decomposition в future refactor.
 // ============================================================================
+// ============================================================================
+// run_grouped_batch — F-09 (T-F09-048). Аддитивный grouped combo-цикл.
+//
+// Полностью независим от single-leg F-04: gated (grouped_enabled_), вся работа
+// в try/catch, при пустом наборе групп — мгновенный выход без накладных.
+//   load active groups (PG) → reference prices символов групп (market_data) →
+//   SolveGroupedBatch → per группа: build ExecutionGroup → publish (Kafka) →
+//   persist (PG, идемпотентно). ADR-033: publish раньше/вместе с persist.
+// ============================================================================
+void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
+  if (!grouped_enabled_ || !active_groups_loader_ || !solve_grouped_uc_ ||
+      !eg_producer_.has_value() || !eg_repo_) {
+    return;
+  }
+  try {
+    const auto groups = active_groups_loader_->LoadActiveGroups();
+    if (groups.empty()) {
+      return;  // нет grouped-combo — выходим без накладных (типовой случай)
+    }
+
+    // Reference prices для символов групп (синтетические FlowOrder-пробы).
+    domain::ReferencePrices reference_prices;
+    if (market_data_client_) {
+      std::vector<domain::FlowOrder> probes;
+      probes.reserve(groups.size());
+      for (const auto& g : groups) {
+        domain::FlowOrder fo;
+        fo.order_id = g.parent_order_id;
+        for (const auto& leg : g.legs) {
+          domain::FlowOrderLeg fl;
+          fl.instrument_symbol = leg.instrument_symbol;
+          fl.weight = cex::common::Decimal{1, 0};
+          fo.legs.push_back(std::move(fl));
+        }
+        probes.push_back(std::move(fo));
+      }
+      try {
+        for (const auto& [sym, dec] : market_data_client_->GetReferencePrices(probes)) {
+          reference_prices[sym] = cex::common::Decimal::from_proto(dec);
+        }
+      } catch (const std::exception& ex) {
+        cex::common::log_json("WARN", "Grouped batch: reference prices unavailable",
+                              {{"batch_id", batch_id}, {"error", ex.what()}});
+      }
+    }
+
+    const auto results = solve_grouped_uc_->Execute(groups, reference_prices);
+
+    std::size_t produced = 0;
+    for (const auto& r : results) {
+      const domain::MultiLegVectorOrder* order = nullptr;
+      for (const auto& g : groups) {
+        if (g.parent_order_id == r.parent_order_id) order = &g;
+      }
+      if (order == nullptr) continue;
+
+      infra::ExecutionGroupRecord rec;
+      rec.execution_group_id = cex::common::uuid_v4();
+      rec.batch_id = batch_id;
+      rec.order = *order;
+      rec.result = r.solve;
+      rec.reference_prices = reference_prices;
+
+      // Один proto и в Kafka, и в PG (ADR-033: publish перед persist).
+      const auto eg = infra::BuildExecutionGroup(rec);
+      eg_producer_->ProduceBuilt(eg);
+      try {
+        eg_repo_->PersistExecutionGroup(eg);
+      } catch (const std::exception& ex) {
+        cex::common::log_json("ERROR", "Grouped batch: persist failed",
+                              {{"batch_id", batch_id},
+                               {"parent_order_id", r.parent_order_id},
+                               {"error", ex.what()}});
+      }
+      ++produced;
+    }
+
+    cex::common::log_json("INFO", "Grouped batch executed",
+                          {{"batch_id", batch_id},
+                           {"groups", std::to_string(groups.size())},
+                           {"execution_groups", std::to_string(produced)}});
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Grouped batch failed (single-leg unaffected)",
+                          {{"batch_id", batch_id}, {"error", ex.what()}});
+  }
+}
+
 void MatchingLoop::run_one_batch() {
   using namespace std::chrono;
 
   const auto cycle_started_at = steady_clock::now();
   const auto batch_time = std::chrono::system_clock::now();
   const auto batch_id = cex::common::uuid_v4();
+
+  // F-09 (T-F09-048): grouped combo-цикл — аддитивный шаг до single-leg F-04.
+  // Независим, gated и в try/catch внутри; на single-leg не влияет.
+  run_grouped_batch(batch_id);
+
   infra::ExecutionIntentsProducer execution_intents_producer(producer_);
   std::vector<fob::execution::v1::ExecutionIntent> pending_execution_intents;
 

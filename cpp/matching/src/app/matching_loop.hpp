@@ -12,10 +12,15 @@
 #include "app/execution_intent_builder.hpp"
 #include "app/external_venue_filter.hpp"
 #include "app/planner_inputs_cache.hpp"
+#include "app/solve_grouped_batch_use_case.hpp"
 #include "app/solver_metrics.hpp"
 #include "cex/common/kafka.hpp"
 #include "domain/flow_order_repository.hpp"
+#include "domain/grouped_solver_bisection.hpp"
 #include "domain/solver_impl.hpp"
+#include "infra/active_grouped_orders_loader.hpp"
+#include "infra/execution_groups_producer.hpp"
+#include "infra/postgres_execution_groups_repository.hpp"
 #include "infra/market_data/market_data_client.hpp"
 #include "fob/matching/v1/batch.pb.h"
 #include "infra/market_data/market_data_client.hpp"
@@ -38,7 +43,10 @@ class MatchingLoop {
                std::shared_ptr<domain::IFlowOrderRepository> flow_order_repository,
                std::unique_ptr<domain::SolverConfigRepositoryPort> solver_config_repo,
                std::shared_ptr<infra::MarketDataClient> market_data_client,
-               SolverMetrics& metrics);
+               SolverMetrics& metrics,
+               // F-09 (T-F09-048): при непустом DSN включается grouped-цикл
+               // (combo multileg_vector_solver). Пусто → grouped выключен.
+               const std::string& postgres_dsn = std::string());
 
   void start();
   void stop();
@@ -62,6 +70,9 @@ class MatchingLoop {
   domain::ExternalLiquidityBySymbol filtered_external_liquidity() const;
   domain::ExternalLiquidityBySymbol filtered_external_liquidity_unlocked() const;
   void run_one_batch();
+  // F-09 (T-F09-048): grouped combo-цикл. Аддитивный, gated (grouped_enabled_),
+  // обёрнут в try/catch — никогда не влияет на single-leg F-04 batch.
+  void run_grouped_batch(const std::string& batch_id);
   bool publish_batch(const fob::matching::v1::BatchResult& batch);
 
   std::string brokers_;
@@ -93,6 +104,15 @@ class MatchingLoop {
   mutable std::mutex planner_inputs_cache_mutex_;
   PlannerInputsCache planner_inputs_cache_;
   ExecutionIntentBuilder execution_intent_builder_;
+
+  // F-09 (T-F09-048): grouped combo execution (gated on postgres_dsn).
+  // grouped_solver_ объявлен до solve_grouped_uc_ (тот держит на него ссылку).
+  bool grouped_enabled_{false};
+  domain::GroupedSolverBisection grouped_solver_;
+  std::optional<SolveGroupedBatchUseCase> solve_grouped_uc_;
+  std::optional<infra::ExecutionGroupsProducer> eg_producer_;  // обёртка над producer_
+  std::unique_ptr<infra::PostgresActiveGroupsLoader> active_groups_loader_;
+  std::unique_ptr<infra::PostgresExecutionGroupsRepository> eg_repo_;
 };
 
 }  // namespace cex::matching::app

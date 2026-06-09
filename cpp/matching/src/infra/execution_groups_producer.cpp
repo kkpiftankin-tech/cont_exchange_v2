@@ -92,7 +92,10 @@ ExecutionGroupsProducer::ExecutionGroupsProducer(cex::common::KafkaProducer& pro
     : producer_(producer) {}
 
 bool ExecutionGroupsProducer::Produce(const ExecutionGroupRecord& rec) {
-  const mv1::ExecutionGroup eg = BuildExecutionGroup(rec);
+  return ProduceBuilt(BuildExecutionGroup(rec));
+}
+
+bool ExecutionGroupsProducer::ProduceBuilt(const mv1::ExecutionGroup& eg) {
   const std::string topic = "execution.groups";
   const std::string key = eg.meta().partition_key();
   const std::string payload = cex::common::to_bytes(eg);

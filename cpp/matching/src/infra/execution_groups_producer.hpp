@@ -37,6 +37,10 @@ class ExecutionGroupsProducer {
   /// Строит ExecutionGroup и публикует в execution.groups (key = parentOrderId).
   bool Produce(const ExecutionGroupRecord& rec);
 
+  /// Публикует уже построенный ExecutionGroup (когда тот же proto нужно и
+  /// опубликовать, и персистить — см. matching_loop grouped-шаг).
+  bool ProduceBuilt(const fob::matching::v1::ExecutionGroup& eg);
+
  private:
   cex::common::KafkaProducer& producer_;
 };
