@@ -98,12 +98,30 @@ int main() {
     grouped_producer.emplace([&combo_publisher](const fob::orders::v1::OrdersNormalized& e) {
       return combo_publisher->publish(e);
     });
+    // F-09 (T-F09-002): feature flags + лимиты из env (честный gate режимов).
+    cex::order_flow::domain::ComboPolicy combo_policy;
+    combo_policy.grouped_orders_enabled =
+        cex::common::Env::get_bool("F09_GROUPED_ORDERS_ENABLED", true);
+    combo_policy.multileg_vector_solver_enabled =
+        cex::common::Env::get_bool("F09_MULTILEG_VECTOR_SOLVER_ENABLED", true);
+    combo_policy.external_compensating_enabled =
+        cex::common::Env::get_bool("F09_EXTERNAL_COMPENSATING_ENABLED", false);
+    combo_policy.max_legs_per_group = cex::common::Env::get_int("F09_MAX_LEGS_PER_GROUP", 8);
+    combo_policy.ratio_tolerance_bps = cex::common::Env::get_int("F09_RATIO_TOLERANCE_BPS", 50);
+    combo_policy.max_grouped_solve_time_ms =
+        cex::common::Env::get_int("F09_MAX_GROUPED_SOLVE_TIME_MS", 100);
+
     create_combo_uc.emplace(
         *combo_repo, *grouped_producer,
         // MVP-1 risk-заглушка (approve). Реальный RiskService/PreTradeCheckGroup — фаза E.
-        [](const cex::order_flow::domain::ComboOrder&, std::string&) { return true; });
+        [](const cex::order_flow::domain::ComboOrder&, std::string&) { return true; },
+        combo_policy);
     cancel_combo_uc.emplace(*combo_repo, *grouped_producer);
-    cex::common::log_json("INFO", "OrderFlow F-09 combo orders enabled", {});
+    cex::common::log_json(
+        "INFO", "OrderFlow F-09 combo orders enabled",
+        {{"multileg_solver", combo_policy.multileg_vector_solver_enabled ? "on" : "off"},
+         {"external_compensating", combo_policy.external_compensating_enabled ? "on" : "off"},
+         {"max_legs", std::to_string(combo_policy.max_legs_per_group)}});
   }
 
   cex::order_flow::transport::GrpcOrderFlowService svc(

@@ -34,6 +34,7 @@ add_executable(order_flow
   src/infra/batch_results_consumer.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
   src/domain/combo_order.cpp
+  src/domain/combo_policy.cpp
   src/infra/postgres_combo_order_repository.cpp
   src/infra/orders_normalized_grouped_producer.cpp
   src/app/create_combo_order_use_case.cpp
@@ -113,6 +114,7 @@ if(BUILD_TESTING)
     src/app/create_combo_order_use_case.cpp
     src/infra/orders_normalized_grouped_producer.cpp
     src/domain/combo_order.cpp
+    src/domain/combo_policy.cpp
   )
   target_include_directories(order_flow_combo_uc_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

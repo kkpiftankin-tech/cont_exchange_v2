@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include "domain/combo_order.hpp"
+#include "domain/combo_policy.hpp"
 #include "fob/orders/v1/combo.pb.h"
 #include "infra/orders_normalized_grouped_producer.hpp"
 #include "infra/postgres_combo_order_repository.hpp"
@@ -29,7 +30,10 @@ class CreateComboOrderUseCase {
 
   CreateComboOrderUseCase(infra::IComboOrderRepository& repository,
                           infra::OrdersNormalizedGroupedProducer& producer,
-                          RiskCheckFn risk_check);
+                          RiskCheckFn risk_check,
+                          // F-09 (T-F09-002): feature flags + лимиты. По умолчанию
+                          // разрешающая — поведение прежних вызовов не меняется.
+                          domain::ComboPolicy policy = domain::ComboPolicy::Permissive());
 
   fob::orders::v1::CreateComboOrderResponse Execute(
       const fob::orders::v1::CreateComboOrderRequest& req);
@@ -38,6 +42,7 @@ class CreateComboOrderUseCase {
   infra::IComboOrderRepository& repository_;
   infra::OrdersNormalizedGroupedProducer& producer_;
   RiskCheckFn risk_check_;
+  domain::ComboPolicy policy_;
 
   std::mutex idempotency_mu_;
   std::unordered_map<std::string, std::string> idempotency_;  // client_combo_id → combo_id

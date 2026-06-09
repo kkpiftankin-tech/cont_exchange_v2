@@ -184,8 +184,12 @@ d::ComboOrder BuildDomain(const pv1::CreateComboOrderRequest& req, const std::st
 
 CreateComboOrderUseCase::CreateComboOrderUseCase(infra::IComboOrderRepository& repository,
                                                  infra::OrdersNormalizedGroupedProducer& producer,
-                                                 RiskCheckFn risk_check)
-    : repository_(repository), producer_(producer), risk_check_(std::move(risk_check)) {}
+                                                 RiskCheckFn risk_check,
+                                                 domain::ComboPolicy policy)
+    : repository_(repository),
+      producer_(producer),
+      risk_check_(std::move(risk_check)),
+      policy_(std::move(policy)) {}
 
 fob::orders::v1::CreateComboOrderResponse CreateComboOrderUseCase::Execute(
     const fob::orders::v1::CreateComboOrderRequest& req) {
@@ -211,6 +215,16 @@ fob::orders::v1::CreateComboOrderResponse CreateComboOrderUseCase::Execute(
 
   // Валидация инвариантов + ADR-031 (multileg требует policy; strict ≠ external scope).
   if (auto err = combo.validate()) {
+    resp.set_accepted(false);
+    resp.set_status(fob::orders::v1::PARENT_ORDER_STATUS_REJECTED);
+    auto* e = resp.mutable_error();
+    e->set_code(err->code);
+    e->set_message(err->message);
+    return resp;
+  }
+
+  // Feature flags + лимиты (T-F09-002): честный gate режимов/типов/лимитов.
+  if (auto err = policy_.CheckCreate(combo)) {
     resp.set_accepted(false);
     resp.set_status(fob::orders::v1::PARENT_ORDER_STATUS_REJECTED);
     auto* e = resp.mutable_error();

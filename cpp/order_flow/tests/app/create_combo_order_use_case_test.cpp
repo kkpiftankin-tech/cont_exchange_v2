@@ -11,6 +11,7 @@
 
 #include "app/create_combo_order_use_case.hpp"
 #include "domain/combo_order.hpp"
+#include "domain/combo_policy.hpp"
 #include "fob/orders/v1/combo.pb.h"
 
 namespace {
@@ -142,6 +143,53 @@ int main() {
     const auto resp = uc.Execute(req);
     ok = expect(!resp.accepted() && resp.error().code() == "RISK_REJECTED", "risk reject") && ok;
     ok = expect(repo.inserted.empty(), "risk-rejected combo not persisted") && ok;
+  }
+
+  // 5) Policy (T-F09-002): grouped orders disabled → reject.
+  {
+    FakeRepo repo;
+    cex::order_flow::infra::OrdersNormalizedGroupedProducer producer{
+        [](const fob::orders::v1::OrdersNormalized&) { return true; }};
+    d::ComboPolicy policy = d::ComboPolicy::Permissive();
+    policy.grouped_orders_enabled = false;
+    cex::order_flow::app::CreateComboOrderUseCase uc{repo, producer, approve, policy};
+    const auto req = MakeReq(pv1::EXECUTION_MODE_ORCHESTRATION_ONLY,
+                             pv1::ATOMICITY_POLICY_UNSPECIFIED, pv1::ATOMICITY_SCOPE_NONE, "cli-p1");
+    const auto resp = uc.Execute(req);
+    ok = expect(!resp.accepted() && resp.error().code() == "COMBO_DISABLED",
+                "policy: grouped disabled → reject") && ok;
+    ok = expect(repo.inserted.empty(), "policy-rejected not persisted") && ok;
+  }
+
+  // 6) Policy: multileg solver disabled + multileg combo → reject.
+  {
+    FakeRepo repo;
+    cex::order_flow::infra::OrdersNormalizedGroupedProducer producer{
+        [](const fob::orders::v1::OrdersNormalized&) { return true; }};
+    d::ComboPolicy policy = d::ComboPolicy::Permissive();
+    policy.multileg_vector_solver_enabled = false;
+    cex::order_flow::app::CreateComboOrderUseCase uc{repo, producer, approve, policy};
+    const auto req = MakeReq(pv1::EXECUTION_MODE_MULTILEG_VECTOR_SOLVER,
+                             pv1::ATOMICITY_POLICY_SCALABLE_ATOMIC,
+                             pv1::ATOMICITY_SCOPE_INTERNAL_BATCH, "cli-p2");
+    const auto resp = uc.Execute(req);
+    ok = expect(!resp.accepted() && resp.error().code() == "COMBO_MULTILEG_DISABLED",
+                "policy: multileg disabled → reject") && ok;
+  }
+
+  // 7) Policy: max_legs_per_group=1, combo has 2 legs → reject.
+  {
+    FakeRepo repo;
+    cex::order_flow::infra::OrdersNormalizedGroupedProducer producer{
+        [](const fob::orders::v1::OrdersNormalized&) { return true; }};
+    d::ComboPolicy policy = d::ComboPolicy::Permissive();
+    policy.max_legs_per_group = 1;
+    cex::order_flow::app::CreateComboOrderUseCase uc{repo, producer, approve, policy};
+    const auto req = MakeReq(pv1::EXECUTION_MODE_ORCHESTRATION_ONLY,
+                             pv1::ATOMICITY_POLICY_UNSPECIFIED, pv1::ATOMICITY_SCOPE_NONE, "cli-p3");
+    const auto resp = uc.Execute(req);
+    ok = expect(!resp.accepted() && resp.error().code() == "COMBO_TOO_MANY_LEGS",
+                "policy: too many legs → reject") && ok;
   }
 
   if (ok) { std::cout << "create_combo_order_use_case_test: ALL PASSED\n"; return 0; }
