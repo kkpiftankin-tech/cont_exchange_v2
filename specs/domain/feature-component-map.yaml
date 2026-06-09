@@ -24,7 +24,14 @@ features:
       - contracts/proto/fob/orders/v1/order_flow_service.proto
       - contracts/proto/fob/risk/v1/risk.proto
       - contracts/proto/fob/ledger/v1/ledger.proto
+    # Canonical roots cover entire services; individual files below are hints for
+    # readers (AUDIT-001 follow-up 2026-06-08).
     codePaths:
+      - cpp/gateway
+      - cpp/order_flow
+      - cpp/risk
+      - cpp/ledger
+      # ----- Highlight files (subset of the roots above) -----
       - cpp/gateway/src/transport/http_gateway.cpp
       - cpp/gateway/src/infra/order_flow_client.cpp
       - cpp/order_flow/src/app/order_flow_uc.cpp
@@ -65,9 +72,13 @@ features:
       - contracts/proto/fob/orders/v1/orders.proto
       - contracts/proto/fob/ledger/v1/ledger.proto
       - contracts/proto/fob/observability/v1/observability.proto
+    # Canonical roots (AUDIT-001 follow-up 2026-06-08).
     codePaths:
+      - cpp/matching
+      - cpp/ledger
+      # ----- Highlight files -----
       - cpp/matching/src/app/matching_loop.cpp
-      - cpp/matching/src/domain/solver.hpp
+      - cpp/matching/src/domain/solver_impl.cpp
       - cpp/ledger/src/infra/kafka_consumers.cpp
       - cpp/ledger/src/app/ledger_uc.cpp
 
@@ -172,7 +183,13 @@ features:
     protoContracts:
       - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
       - contracts/proto/fob/execution/v1/execution.proto
+    # Canonical roots (AUDIT-001 follow-up 2026-06-08).
+    # cpp/venue_health is the dedicated venue-health processor — separate service
+    # from cpp/venues even though they share the F-11 surface.
     codePaths:
+      - cpp/venues
+      - cpp/venue_health
+      # ----- Highlight files -----
       - cpp/venues/src/app/venues_loop.cpp
 
   F-12:
@@ -188,7 +205,15 @@ features:
       - contracts/proto/fob/execution/v1/execution.proto
       - contracts/proto/fob/risk/v1/risk.proto
       - contracts/proto/fob/ledger/v1/ledger.proto
+    # Canonical roots (AUDIT-001 follow-up 2026-06-08). F-12 spans venues
+    # (Venue Execution Adapter), ledger (hedge PnL sink), matching (hedge intent
+    # producer + execution planner), risk (PreHedgeCheck).
     codePaths:
+      - cpp/venues
+      - cpp/ledger
+      - cpp/matching
+      - cpp/risk
+      # ----- Highlight files -----
       - cpp/venues/src/app/venues_loop.cpp
 
   F-13:
