@@ -129,8 +129,111 @@ FillEvent по ноге, часть grouped execution (не самостояте
 
 Доменная математика, политики и инварианты — [business-rules.md §F-09](business-rules.md#f-09--batch--combo--multi-leg-orders).
 
+## Continuous-Order Market Primitives (IN-012)
+
+> Математическая основа matching engine. Canonical reference:
+> [`incoming-docs/2026-04-15-continuous-order-market-academic-v1.md`](../../incoming-docs/2026-04-15-continuous-order-market-academic-v1.md)
+> (PDF в чате, 44 страницы). См. также
+> [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
+> и [solver-foundation.md](../09-implementation/solver-foundation.md).
+
+### State variables (IN-012 §3.1)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `Q_i` | `ℝ^n` | Текущая позиция агента `i` по `n` активам. |
+| `Q̇_i` | `ℝ^n` | Мгновенная скорость изменения позиции. |
+| `P` | `ℝ^n` | Рыночная цена (вектор по активам). |
+
+Знаковая конвенция: линейный член `−aq̇` — **signed external anchor**.
+Все формулы invariant к "buy/sell" переименованию при последовательном
+использовании одной конвенции.
+
+### Four equivalent curve representations (IN-012 §3.2)
+
+```text
+CurveRepresentation = enum {
+  V_form  — прямая «цена → скорость»: V_i(Q_i, P) = arg max_v {⟨P, v⟩ − L_i(Q_i, v)}
+  P_form  — обратная «скорость → цена»: P ∈ ∂_{Q̇_i} L_i(Q_i, Q̇_i)
+  L_form  — лагранжиан L_i(Q_i, Q̇_i)
+  H_form  — гамильтониан H_i(Q_i, P) = sup_v {⟨P, v⟩ − L_i(Q_i, v)}
+}
+```
+
+**Invariant**: при strict convexity `L_i(Q_i, ·)` все четыре формы
+эквивалентны (Предложение 3.2 IN-012), `V_i = ∇_P H_i`,
+`P_i = ∇_{Q̇_i} L_i`, кривые `V` и `P` взаимно обратны.
+
+### Standard agent classes
+
+Каждый "класс агента" — конкретная параметризация `L_i`. Используется
+matching engine при построении aggregated `H(Q, P)`.
+
+#### 1D agents (IN-012 §5.1)
+
+| Class | `L(q̇)` | `H(p)` | Use case |
+| --- | --- | --- | --- |
+| **StandardAgent** | `(m/2)q̇² + a q̇`, `m > 0` | `(p − a)² / 2m` | Базовый flow. Используется F-04. |
+| **InfiniteInertiaAgent** | `I_{0}(q̇)` | `0` | Холдер; m → ∞ предел. |
+| **PerfectLiquidityAgent** | `a q̇` | `0 if p=a, +∞ else` | Infinite-depth market-maker; m → 0. |
+| **LinearFeeAgent** | `(m/2)q̇² + a q̇ + c\|q̇\|`, `c > 0` | `(max{\|p−a\|−c, 0})² / 2m` | Агент с комиссией → no-trade region `[a−c, a+c]`. |
+
+#### 2D agents (IN-012 §5.2)
+
+Матрица инерции `M_ρ` с корреляцией `ρ ∈ [−1, 1]`:
+
+```text
+M_ρ = | m_1                 ρ √(m_1 m_2) |
+      | ρ √(m_1 m_2)        m_2          |
+```
+
+| Class | Constraint | Use case |
+| --- | --- | --- |
+| **StandardAgent2D** | `\|ρ\| < 1` | Двумерная книга со взаимной liquidity. |
+| **DegenerateInPrice2D** | `m_2 = ∞`, `ρ = 0` | Торгует только активом 1. |
+| **DegenerateInSpeed2D** | `m_2 = 0`, `ρ = 0` | Идеально ликвиден по активу 2 при `p_2 = a_2`. |
+| **IndependentAgent2D** | `ρ = 0` | Две независимые книги. |
+| **AbsoluteComplementAgent2D** | `ρ ↑ 1` | Совместное движение активов. |
+| **AbsoluteSubstituteAgent2D** | `ρ ↓ −1` | Маркетит relative price / spread. |
+| **LinearFeeAgent2D** | + `c_1\|q̇_1\| + c_2\|q̇_2\|` | No-trade region — прямоугольник. |
+| **PortfolioAgent** | `H(P) = (1/2μ)(w^⊤ P − a)²` | **MM по индексу / спреду / корзине** с factor `w`. F-10 canonical. |
+
+### Aggregate market (IN-012 §4)
+
+```text
+H(Q, P)  = Σ_i H_i(Q_i, P)                          (canonical sum)
+L(Q, Q̇) = inf_{Σ_i v_i = Q̇}  Σ_i L_i(Q_i, v_i)   (infimal convolution)
+V(Q, P)  = Σ_i V_i(Q_i, P)
+```
+
+**Clearing price** `P*(Q)` — три эквивалентных характеристики:
+
+1. **Flow conservation**: `Σ_i Q̇_i(Q_i, P*) = 0`.
+2. **Lagrange multiplier**: `P* ∈ ∂_Q̇ L(Q, 0)`.
+3. **Hamiltonian minimum**: `P*(Q) ∈ arg min_P H(Q, P)`.
+
+См. формализацию инвариантов в
+[business-rules.md §Clearing Mechanics](business-rules.md#clearing-mechanics-in-012).
+
+### Multi-asset replication theorem (IN-012 §6.3.1)
+
+Любой quadratic market `H(P) = (1/2)(P − A)^⊤ Λ (P − A)`, `Λ ≻ 0`,
+реализуется `n + r` агентами:
+
+- `n` одноактивных `StandardAgent`-ов: `H_k(P) = (d_k/2)(p_k − A_k)²`.
+- `r` факторных `PortfolioAgent`-ов: `H_{n+ℓ}(P) = (1/2)((u^(ℓ))^⊤(P − A))²`.
+
+через разложение `Λ = D + UU^⊤`, `D = diag(d_1,…,d_n) ⪰ 0`. Минимальный
+`r*(Λ) = min rank(Λ − D)`. В 2D `r*(Λ) ≤ 1` ⇒ **3 агента достаточно**.
+
+Conceptual foundation для F-10 (MM curves через `PortfolioAgent`) и
+N-leg combo solver F-09.
+
 ## Source Fragments
 
 - IN-001-FR-008 — структуры данных и сервисы
 - IN-001-FR-007 — risk/ledger сущности
 - IN-011 §4, §8, §15 — F-09 batch/combo/multi-leg entities
+- IN-012 §3, §5, §6 — Continuous-Order Market Primitives (fragments
+  F-01, F-02, F-12..F-17, F-20 в
+  [IN-012.fragment-map.md](../../incoming-docs/IN-012.fragment-map.md))

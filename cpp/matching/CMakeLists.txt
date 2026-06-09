@@ -365,6 +365,21 @@ if(BUILD_TESTING)
   target_compile_options(matching_f04_solver_u1_u10_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_f04_solver_u1_u10_test COMMAND matching_f04_solver_u1_u10_test)
 
+  # IN-012 closed-form replication tests (ADR-035 / solver-foundation.md).
+  add_executable(matching_continuous_market_replica_test
+    tests/domain/continuous_market_replica_test.cpp
+    src/domain/solver_impl.cpp
+  )
+  target_include_directories(matching_continuous_market_replica_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_continuous_market_replica_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(matching_continuous_market_replica_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_continuous_market_replica_test COMMAND matching_continuous_market_replica_test)
+
   add_executable(matching_f04_full_cycle_test
     tests/domain/f04_full_cycle_test.cpp
     src/app/execution_intent_builder.cpp

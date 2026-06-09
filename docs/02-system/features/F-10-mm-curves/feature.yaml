@@ -4,6 +4,16 @@ feature:
   status: not-implemented
   owner: core-team
 
+# Theoretical foundation (IN-012, 2026-04-15) — Portfolio Agent (§5.2.8)
+# как canonical model для MM-кривых на индексе/спреде/корзине.
+# См. ADR-035, entities.md §Continuous-Order Primitives.
+theoreticalFoundation:
+  source: IN-012
+  ref: incoming-docs/2026-04-15-continuous-order-market-academic-v1.md
+  sections: ["§5.2.8", "§6.2.3"]
+  adr: ADR-035
+  primitives: [PortfolioAgent, MultiAssetReplication]
+
 description: >
   Маркет-мейкер публикует двухсторонние CSLO-кривые (цена-скорость) с
   параметрами p_low, p_high, slope, max speed, inventory caps. Кривые

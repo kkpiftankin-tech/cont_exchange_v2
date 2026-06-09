@@ -83,5 +83,14 @@ Machine-readable source-of-truth for components and features lives in [`specs/do
 | IN-011 | IN-011-ALG-002, CONTRACT | GRPC_CONTRACT | `docs/06-api/grpc/order-flow-create-combo-order.md` (+5 TODO contracts) | created | complete |
 | IN-011 | IN-011-T-001..028 | TEST_REQUIREMENT | `docs/10-testing/features/F-09-test-plan.md` | created | complete |
 | IN-011 | IN-011-FINAL, OOS | IMPLEMENTATION_HINT | `docs/implementation-plan/F-09-batch-combo-orders.tasks.md` | created | complete |
+| IN-012 | F-01, F-02 | DOMAIN_ENTITY | `docs/04-domain/entities.md` §Continuous-Order Primitives (state variables, CurveRepresentation enum) | merged | complete |
+| IN-012 | F-03, F-05..F-10 | BUSINESS_RULE | `docs/04-domain/business-rules.md` §Clearing Mechanics (R-CLR-001..008) | merged | complete |
+| IN-012 | F-04 | GLOSSARY | `docs/01-business/glossary.md` (12 терминов), `docs/04-domain/ubiquitous-language.md` (mapping table) | merged | complete |
+| IN-012 | F-11, F-18, F-20, F-22 | IMPLEMENTATION_HINT | `docs/09-implementation/solver-foundation.md` (new), `cpp/matching/src/domain/solver_impl.cpp` header reference | created | complete |
+| IN-012 | F-12..F-17 | DOMAIN_ENTITY | `docs/04-domain/entities.md` §1D agents (4 classes), §2D agents (8 classes) | merged | complete |
+| IN-012 | F-19 | TEST_REQUIREMENT | `cpp/matching/tests/domain/continuous_market_replica_test.cpp` (new) + CMake registration | created | complete |
+| IN-012 | F-21 (5 conclusions) | METHODOLOGY | `docs/03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md` (new) — context + decision + alternatives + 3 open questions | created | complete |
+| IN-012 | (cross-feature linking) | FEATURE_LINK | `docs/02-system/features/F-04-batch-clearing/feature.yaml` §theoreticalFoundation, `F-10-mm-curves` §theoreticalFoundation, `F-11-external-venues-lob-to-fob` §theoreticalFoundation | merged | complete |
 
 > Полная карта фрагментов IN-011 (все §1–§21 + Доп. пояснения) — в [`incoming-docs/IN-011.fragment-map.md`](../../incoming-docs/IN-011.fragment-map.md).
+> Полная карта фрагментов IN-012 (все F-01..F-24) — в [`incoming-docs/IN-012.fragment-map.md`](../../incoming-docs/IN-012.fragment-map.md).

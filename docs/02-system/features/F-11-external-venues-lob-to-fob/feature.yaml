@@ -4,6 +4,16 @@ feature:
   status: in-progress-mvp
   owner: core-team
 
+# Theoretical foundation (IN-012, 2026-04-15) — типология 1D/2D агентов
+# для калибровки depth_curve_builder (LOB→FOB conversion).
+# См. ADR-035, entities.md §Continuous-Order Primitives, depth_curve_builder.cpp.
+theoreticalFoundation:
+  source: IN-012
+  ref: incoming-docs/2026-04-15-continuous-order-market-academic-v1.md
+  sections: ["§5.1", "§5.2", "§A"]
+  adr: ADR-035
+  primitives: [StandardAgent, LinearFeeAgent, IndependentAgent2D, PortfolioAgent]
+
 description: >
   Подключение внешних торговых площадок (CEX/DEX/AMM), нормализация их
   ордербуков в VenueSnapshot и непрерывное преобразование LOB → FOB в

@@ -12,6 +12,28 @@
 //   которую мы решаем interior-point методом (predictor-corrector) с
 //   разложением Холесского (LLT) для нормальной системы.
 //
+// Canonical mathematical foundation:
+//   - IN-012 (academic note 2026-04-15, 44 pages) — Lagrangian/Hamiltonian
+//     description, 4 equivalent curve forms, clearing as Lagrange
+//     multiplier for flow balance constraint.
+//   - ADR-035 (docs/03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
+//     — fixes Hamiltonian-based formulation as canonical choice;
+//     Mehrotra interior-point — numerical implementation, not alternative.
+//   - solver-foundation.md (docs/09-implementation/) — full mapping
+//     IN-012 objects ↔ C++ variables в этом файле + test vectors.
+//   - business-rules.md §Clearing Mechanics (R-CLR-001..008) — invariants.
+//   - entities.md §Continuous-Order Primitives — agent typology
+//     (StandardAgent, PortfolioAgent, LinearFeeAgent, etc).
+//
+// Mapping в этот код:
+//   - π (Eigen::VectorXd) ≡ P* clearing price (Lagrange multiplier for
+//     W·x = 0 constraint, IN-012 §4.3).
+//   - W matrix ≡ asset/order incidence (Σ_i Q̇_i = 0 across asset rows).
+//   - d diagonal ≡ Σ_i M_i^(-1) inertias inverse, после rescaling.
+//   - pH vector ≡ external anchors a_i (IN-012 §4.5).
+//   - x[i] ≡ V_i(Q_i, P*) — желаемая скорость агента i.
+//   - Convergence test: ‖W·x‖_∞ < tol (clearing constraint, IN-012 4.2).
+//
 // Структура файла:
 //   1. anonymous namespace — helper-структуры PlannedLegFill / SymbolPlan,
 //      ExternalPriceAtQty / MaxTradableExternalQtyForOrder и т.д.

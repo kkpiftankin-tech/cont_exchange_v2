@@ -526,9 +526,135 @@ A_g\,e_g = b_g\,\alpha_g,\qquad G_g\,e_g \le h_g,\qquad L_g \le c_g^T P \le U_g
 
 F-04 (grouped solver встроен в batch cycle; `batch_id` связывает `ExecutionGroup`↔`BatchResult`); F-06 (leg-level positions/PnL, combined PnL); F-07/F-08 (pre/post-trade grouped checks); F-11 (`venue.liquidity.fob` → \(Q^{liq}\)); F-12 (`external_compensating` через ExecutionIntent/Report); F-15 (replay determinism, AC-F09-010). MVP-рекомендация: decoupled solver (F-04 даёт clearPrices как reference) — см. open question в [implementation-plan/F-09](../implementation-plan/F-09-batch-combo-orders.tasks.md).
 
+## Clearing Mechanics (IN-012)
+
+> Математическая основа matching engine. Canonical reference —
+> [`incoming-docs/2026-04-15-continuous-order-market-academic-v1.md`](../../incoming-docs/2026-04-15-continuous-order-market-academic-v1.md)
+> (IN-012). См. также
+> [entities.md §Continuous-Order Market Primitives](entities.md#continuous-order-market-primitives-in-012)
+> и [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md).
+
+### R-CLR-001 Curve Forms Equivalence
+
+**Правило**: пусть `L_i(Q_i, ·)` собственна, замкнута и строго выпукла.
+Тогда четыре представления кривой агента эквивалентны:
+`V_form ⟺ P_form ⟺ L_form ⟺ H_form` (IN-012 Предложение 3.2).
+
+**Следствие**: solver внутренне работает в `H_form` (гамильтониан → QP),
+пользовательский API — `L_form` (`FlowOrder` параметры). Конвертация
+валидна тогда и только тогда, когда выполнено strict convexity.
+
+### R-CLR-002 Market Aggregation
+
+Совокупный рынок задаётся канонически (IN-012 Предложение 4.1):
+
+```text
+H(Q, P)  = Σ_i H_i(Q_i, P)                          (canonical sum)
+L(Q, Q̇) = inf_{Σ_i v_i = Q̇}  Σ_i L_i(Q_i, v_i)   (infimal convolution)
+V(Q, P)  = Σ_i V_i(Q_i, P)
+```
+
+**Дуальная эквивалентность** (R-CLR-002a):
+`Q̇ ∈ ∂_P H(Q, P)  ⟺  P ∈ ∂_Q̇ L(Q, Q̇)`.
+
+### R-CLR-003 Clearing Price Semantics
+
+**Определение**: рыночная цена клиринга `P*(Q)` — **общий множитель
+Лагранжа** для ограничения баланса потоков `Σ_i Q̇_i = 0` (IN-012 §4.3).
+
+**Три эквивалентные характеристики**:
+
+1. **Flow conservation**: `Σ_i Q̇_i(Q_i, P*) = 0` (4.2).
+2. **Lagrange multiplier**: `P* ∈ ∂_Q̇ L(Q, 0)` (4.7).
+3. **Hamiltonian minimum**: `P*(Q) ∈ arg min_P H(Q, P)` (4.15).
+
+Все три используются как corectness invariants в determinism tests F-15.
+
+### R-CLR-004 Solver Preconditions
+
+Достаточные условия существования и единственности клиринга (IN-012
+Предложение 4.3):
+
+1. `L_i(Q_i, ·)` собственна, полунепрерывна снизу, **суперлинейна**.
+2. `μ_i`-сильно выпукла по скорости, `μ_i > 0`.
+
+Тогда `H(Q, ·)` строго выпукл и коэрцитивен, цена клиринга существует
+и единственна.
+
+**Инвариант** (R-CLR-004a): все агенты, попадающие в matching solver,
+должны иметь `M_i ≻ 0` (positive-definite inertia matrix). Сингулярные
+классы (`InfiniteInertiaAgent`, `PerfectLiquidityAgent`) — предельные
+случаи, обрабатываемые регуляризацией (R-CLR-008).
+
+### R-CLR-005 Quadratic Closed-Form
+
+Для класса `L_i(Q_i, Q̇_i) = (1/2) Q̇_i^⊤ M_i Q̇_i + ψ_i(Q_i) − a_i^⊤ Q̇_i`,
+`M_i ≻ 0`, цена клиринга в замкнутом виде (IN-012 §4.5):
+
+```text
+B := Σ_i M_i^(-1)
+b := Σ_i M_i^(-1) a_i
+
+P*(Q) = − B^(-1) b
+V(Q, P) = B P + b
+H(Q, P) = (1/2) P^⊤ B P + b^⊤ P + const
+```
+
+Цена клиринга = взвешенный средний внешний якорь, веса обратно
+пропорциональны "инерциям" агентов. Используется как **reference vector**
+в unit-тестах solver'а
+([continuous_market_replica_test.cpp](../../cpp/matching/tests/domain/)).
+
+### R-CLR-006 N-Agent Aggregation
+
+Для N стандартных одномерных агентов (IN-012 Предложение 6.1):
+
+```text
+m* = (Σ_i 1/m_i)^(-1)
+a* = m* · Σ_i (a_i / m_i)
+p* = a*
+```
+
+Вес каждого внешнего якоря **обратно пропорционален индивидуальной
+инерции**. Closed-form check в determinism tests.
+
+### R-CLR-007 Multi-Asset Replication
+
+Любой quadratic market `H(P) = (1/2)(P − A)^⊤ Λ (P − A)`, `Λ ≻ 0`,
+реализуется `n + r*(Λ)` агентами через `Λ = D + UU^⊤` (IN-012 §6.3.1).
+В 2D `r*(Λ) ≤ 1` ⇒ **всегда достаточно 3 агентов**.
+
+**Реализационная импликация**: N-asset solver должен поддерживать
+произвольную `Λ ≻ 0`, не делая diagonal assumption. Текущая реализация
+`solver_impl.cpp` это делает через sparse `W` matrix.
+
+### R-CLR-008 Singular Regularization
+
+Сингулярные предельные случаи (IN-012 §A) обрабатываются регуляризацией:
+
+- Идеально ликвидный агент (`m → 0`) → добавляем `ε q̇² / 2` к `L_i`.
+- Бесконечная инерция (`m → ∞`) → клампируем `M_i ≼ M_max·I`.
+- Чистый позиционный штраф без скорости → малый `ε q̇²` для численной
+  стабильности.
+
+Текущий `solver_impl.cpp` использует `reg = 1e-12 * diag_max` в normal
+equation `W · diag(η) · W^⊤` — согласовано с рекомендацией IN-012 §A.
+
+### Использование Continuous-Order Primitives по features
+
+| Feature | Primitives | IN-012 § |
+| --- | --- | --- |
+| F-04 (Batch Clearing) | StandardAgent, LinearFeeAgent, Aggregation, Clearing | §4, §5.1, §6.1 |
+| F-09 (Combo / Multi-leg) | PortfolioAgent, Multi-Asset Replication | §5.2.8, §6.3.1 |
+| F-10 (MM Curves) | PortfolioAgent (factor `w`) | §5.2.8 |
+| F-11 (LOB → FOB) | 1D + 2D agent typology для curve calibration | §5.1, §5.2 |
+
 ## Source Fragments
 
 - IN-005 §6 «Формулы расчётов» (все 15 формул F-12)
 - IN-005 §1 (термины ExecutionIntent, HedgeFlow, ChildOrder, ExecutionReport, Urgency)
 - IN-006 § Канонические сущности и термины, Метрики качества исполнения (F-15)
 - IN-011 §2, §9, §10, §11, §20 — F-09 vector solver math, политики, инварианты
+- IN-012 §3, §4, §5, §6, §A — Continuous-Order Market clearing mechanics
+  (fragments F-03, F-05..F-11, F-18, F-20, F-22 в
+  [IN-012.fragment-map.md](../../incoming-docs/IN-012.fragment-map.md))

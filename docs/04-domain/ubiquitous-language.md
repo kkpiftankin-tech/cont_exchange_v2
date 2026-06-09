@@ -73,3 +73,31 @@ related:
 | `risk.alerts` | risk | `fob.risk.v1.RiskAlert` |
 
 См. также [docs/06-api/messaging/topics.md](../06-api/messaging/topics.md).
+
+## Continuous-Order Market terms (IN-012)
+
+Каноническая математическая лексика matching engine. Полное описание —
+[entities.md §Continuous-Order Primitives](entities.md#continuous-order-market-primitives-in-012);
+правила использования — [business-rules.md §Clearing Mechanics](business-rules.md#clearing-mechanics-in-012).
+
+| Term | Code identifier | Mathematical notation |
+| --- | --- | --- |
+| Position vector | `Q_i` | `Q_i ∈ ℝ^n` |
+| Speed vector | `Q_dot_i` | `Q̇_i ∈ ℝ^n` |
+| Market price | `P` | `P ∈ ℝ^n` |
+| Instant loss / Lagrangian | `L_i` | `L_i(Q_i, Q̇_i)` |
+| Hamiltonian | `H_i` | `H_i(Q_i, P) = sup_v {⟨P, v⟩ − L_i(Q_i, v)}` |
+| Forward curve (V-form) | `V_i` | `V_i(Q_i, P) = arg max_v {⟨P, v⟩ − L_i(Q_i, v)}` |
+| Inverse curve (P-form) | `P_i` | `P ∈ ∂_{Q̇_i} L_i(Q_i, Q̇_i)` |
+| Inertia matrix | `M_i` | `M_i ≻ 0` |
+| External anchor | `a_i` | `a_i ∈ ℝ^n` |
+| Aggregated Hamiltonian | `H` | `H(Q, P) = Σ_i H_i(Q_i, P)` |
+| Aggregated Lagrangian | `L` | `L(Q, Q̇) = inf_{Σ v_i = Q̇} Σ L_i(Q_i, v_i)` |
+| Clearing price | `P_star` | `P*(Q) ∈ arg min_P H(Q, P)` |
+| Portfolio factor | `w` | `w ∈ ℝ^n` |
+| No-trade band (1D) | — | `[a − c, a + c]` |
+| Replication rank | `r_star` | `r*(Λ) = min rank(Λ − D)` |
+
+C++ identifiers: `H_i`, `L_i`, `M_i` транслитерируются как
+`hamiltonian_i`, `lagrangian_i`, `inertia_i`; mathematical notation
+остаётся в comments как ground-truth (см. `solver_impl.cpp` header).
