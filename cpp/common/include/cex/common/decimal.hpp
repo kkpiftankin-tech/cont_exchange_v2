@@ -85,6 +85,14 @@ struct Decimal {
   /// reservation release, position adjustments.
   static Decimal sub(const Decimal& a, const Decimal& b);
 
+  // Divide a/b with an explicit result scale (half-up, round away from zero).
+  /// Делит a/b и округляет до result_scale знаков после точки (half-up,
+  /// округление от нуля). result_scale обязателен и явный — у деления нет
+  /// «естественного» scale (в отличие от mul/add). Бросает std::invalid_argument
+  /// при делении на ноль. Нужен для grouped vector solver (F-09): пропорции ног
+  /// e_i = Q_binding · ρ_i / ρ_binding. Не использовать double для денег (§9).
+  static Decimal div(const Decimal& a, const Decimal& b, int32_t result_scale);
+
   // min(a,b) with same scale alignment
   /// Возвращает меньшее из двух чисел с учётом разного scale.
   /// Используется для clamp executed_qty не выше remaining_qty в matching/ledger.

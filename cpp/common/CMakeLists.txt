@@ -52,3 +52,12 @@ target_link_libraries(cex_common PUBLIC
 )
 
 target_compile_options(cex_common PRIVATE -Wall -Wextra -Wpedantic)
+
+# F-09 (T-F09-044 prereq): unit-тест Decimal::div (деньги — §9, покрываем тестом).
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(cex_common_decimal_test tests/decimal_test.cpp)
+  target_link_libraries(cex_common_decimal_test PRIVATE cex_common)
+  target_compile_options(cex_common_decimal_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME cex_common_decimal_test COMMAND cex_common_decimal_test)
+endif()
