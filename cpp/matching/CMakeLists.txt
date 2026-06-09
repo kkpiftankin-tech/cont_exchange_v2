@@ -44,6 +44,8 @@ add_executable(matching
   src/app/solver_metrics.cpp
   src/domain/solver_impl.cpp
   src/domain/batch_result_to_fill_events.cpp
+  src/domain/multileg_feasible_caps.cpp
+  src/domain/grouped_solver_bisection.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -103,6 +105,35 @@ if(BUILD_TESTING)
   
   target_compile_options(matching_br_to_fe_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_br_to_fe_test COMMAND matching_br_to_fe_test)
+
+  # F-09 (T-F09-043): grouped solver feasible caps (pure domain, Decimal only).
+  add_executable(matching_multileg_feasible_caps_test
+    tests/domain/multileg_feasible_caps_test.cpp
+    src/domain/multileg_feasible_caps.cpp
+  )
+  target_include_directories(matching_multileg_feasible_caps_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_multileg_feasible_caps_test PRIVATE
+    cex_common
+  )
+  target_compile_options(matching_multileg_feasible_caps_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_multileg_feasible_caps_test COMMAND matching_multileg_feasible_caps_test)
+
+  # F-09 (T-F09-044): grouped vector solver (strict/scalable/best_effort).
+  add_executable(matching_grouped_solver_test
+    tests/domain/grouped_solver_test.cpp
+    src/domain/grouped_solver_bisection.cpp
+    src/domain/multileg_feasible_caps.cpp
+  )
+  target_include_directories(matching_grouped_solver_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_grouped_solver_test PRIVATE
+    cex_common
+  )
+  target_compile_options(matching_grouped_solver_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_grouped_solver_test COMMAND matching_grouped_solver_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp
