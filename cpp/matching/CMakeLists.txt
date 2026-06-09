@@ -42,6 +42,7 @@ add_executable(matching
   src/app/position_snapshot_calculator.cpp
   src/app/run_batch_uc.cpp
   src/app/solver_metrics.cpp
+  src/app/solve_grouped_batch_use_case.cpp
   src/domain/solver_impl.cpp
   src/domain/batch_result_to_fill_events.cpp
   src/domain/multileg_feasible_caps.cpp
@@ -149,6 +150,22 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_child_graph_transitions_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_child_graph_transitions_test COMMAND matching_child_graph_transitions_test)
+
+  # F-09 (T-F09-045): SolveGroupedBatch use case (solve loop over active groups).
+  add_executable(matching_solve_grouped_batch_test
+    tests/app/solve_grouped_batch_use_case_test.cpp
+    src/app/solve_grouped_batch_use_case.cpp
+    src/domain/grouped_solver_bisection.cpp
+    src/domain/multileg_feasible_caps.cpp
+  )
+  target_include_directories(matching_solve_grouped_batch_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_solve_grouped_batch_test PRIVATE
+    cex_common
+  )
+  target_compile_options(matching_solve_grouped_batch_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_solve_grouped_batch_test COMMAND matching_solve_grouped_batch_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp
