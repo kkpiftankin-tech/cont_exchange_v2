@@ -877,6 +877,9 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
         if (g.parent_order_id == r.parent_order_id) order = &g;
       }
       if (order == nullptr) continue;
+      // Ничего не исполнено в этом batch (blocked / G=0) → не плодим пустые
+      // ExecutionGroup. Группа остаётся активной и попробует на след. цикле.
+      if (r.solve.leg_execs.empty()) continue;
 
       infra::ExecutionGroupRecord rec;
       rec.execution_group_id = cex::common::uuid_v4();

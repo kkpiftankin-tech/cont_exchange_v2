@@ -165,12 +165,16 @@ ON CONFLICT (idempotency_key) DO NOTHING
           eg.parent_order_id(), lr.leg_id(),
           Decimal::from_proto(lr.exec_qty()).to_string());
     }
-    // combo → filled, когда все ноги заполнены; иначе partially_filled.
+    // combo → filled, когда ЛЮБАЯ нога достигла q_max. Для ratio-locked группы
+    // (scalable/strict) исчерпание binding-ноги = максимум группы: остальные
+    // ноги уже на своей ratio-доле и больше исполнить нельзя (иначе ломается
+    // соотношение). Без этого группа застревала бы в partially_filled и
+    // переисполнялась каждый batch (G_feasible=0). Иначе — partially_filled.
     tx.exec_params(
         R"SQL(
 UPDATE combo_orders SET status = CASE
-    WHEN NOT EXISTS (SELECT 1 FROM combo_order_legs
-                     WHERE parent_order_id = $1::uuid AND filled_cum < q_max)
+    WHEN EXISTS (SELECT 1 FROM combo_order_legs
+                 WHERE parent_order_id = $1::uuid AND filled_cum >= q_max)
       THEN 'filled' ELSE 'partially_filled' END,
     updated_at = NOW()
 WHERE combo_order_id = $1::uuid AND status NOT IN ('filled','cancelled')
