@@ -1,3 +1,25 @@
+// ============================================================================
+// backtest/main.cpp — entry point сервиса backtest (F-15 backtest/replay).
+//
+// Что делает:
+//   - PG repositories: replay sessions, RBAC, replay configs.
+//   - ClickHouse читает historical batchresults/marketdata для replay input.
+//   - Запускает Kafka consumers для replay.commands (operator-driven) и
+//     venue events (для parity check'ов).
+//   - Publisher для replay.results (progress/completed/failed/cancelled).
+//   - In-memory shadow ledger (in_memory_shadow_ledger.cpp) — изолирует
+//     replay PnL от live ledger state (ADR-015 sim/live isolation pattern).
+//   - gRPC ReplayBatchExecutor (для isolation matching service).
+//   - HTTP routes (Crow):
+//       * /healthz                 — liveness probe.
+//       * /metrics                  — Prometheus.
+//       * Replay retry session API.
+//
+// CLAUDE.md §15 §17: replay должен deterministic — тот же input даёт
+// тот же output. Replay использует isolation matching solver (cpp/matching
+// GrpcIsolationSolverService) чтобы не trogать live state.
+// ============================================================================
+
 #include <chrono>
 #include <exception>
 #include <memory>

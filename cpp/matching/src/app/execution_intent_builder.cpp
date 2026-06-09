@@ -1,3 +1,31 @@
+// ============================================================================
+// execution_intent_builder.cpp — F-12 ExecutionIntent generator.
+//
+// Назначение:
+//   Делает три типа intent'ов:
+//
+//   1. Build (ленивый, legacy) — из forecast'а planner'а: per-leg intents с
+//      target_qty равной forecast качеству. Используется на этапе планирования
+//      (см. matching_loop.cpp run_one_batch §planner).
+//
+//   2. BuildFromExternalFills — после фактических fills через external venue:
+//      создаёт post-trade intent с реальным executed_qty/price для audit
+//      (consistency с ledger ApplyExecutionReport).
+//
+//   3. BuildFromHedgeTriggerDecisions — главный production path (PR-F12-5):
+//      когда hedge_trigger_policy решил triggered=true, эта функция строит
+//      ExecutionIntent с target_qty = abs(net_qty), urgency/strategy/tif из
+//      HedgeExecutionIntentConfig (env-driven), allowed_venues, slippage_bps.
+//
+// IntentId convention:
+//   - "{batch_id}|{order_id}|{symbol}" для legs.
+//   - "{batch_id}|{order_id}|{leg_id}|fill_{fill_index}" для external fills.
+//   - "{symbol}|{snapshot_hash}" для hedge_flow_id из triggers.
+//
+// Pure compute: nothing goes к Kafka здесь — caller (matching_loop)
+// публикует через hedge_execution_intents_publisher.
+// ============================================================================
+
 #include "app/execution_intent_builder.hpp"
 
 #include <cmath>
@@ -192,6 +220,9 @@ std::optional<fob::execution::v1::ExecutionIntent> BuildIntentForExternalFill(
 
 }  // namespace
 
+/// Build (legacy planner-driven path): для каждого forecast'а planner'а
+/// делает per-leg intent. Используется legacy ExecutionPlanning flow до
+/// PR-F12-5; новый code-path — BuildFromHedgeTriggerDecisions.
 ExecutionIntentBuildResult ExecutionIntentBuilder::Build(
     const ExecutionIntentBuildRequest& request) const {
   ExecutionIntentBuildResult result;
@@ -261,6 +292,10 @@ ExecutionIntentBuildResult ExecutionIntentBuilder::Build(
   return result;
 }
 
+/// Post-trade audit intent'ы: после фактических fills через external venue
+/// строит intent с реальным executed_qty/price. Это нужно для consistency
+/// с ledger ApplyExecutionReport: один intent_id → один ExecutionReport
+/// → одно balance update. Без этого external fills "висели бы в воздухе".
 ExecutionIntentBuildResult ExecutionIntentBuilder::BuildFromExternalFills(
     const fob::matching::v1::BatchResult& batch) const {
   ExecutionIntentBuildResult result;
@@ -276,6 +311,27 @@ ExecutionIntentBuildResult ExecutionIntentBuilder::BuildFromExternalFills(
   return result;
 }
 
+// ============================================================================
+// BuildFromHedgeTriggerDecisions — F-12 production path (PR-F12-5).
+//
+// Принимает hedge_trigger_decisions от HedgeTriggerPolicy и конфиг
+// (HedgeExecutionIntentConfig: urgency/strategy/tif/timeout_ms/
+// max_slippage_bps/allowed_venues — все из env, см. .env-example).
+//
+// Для каждого triggered decision строит ExecutionIntent:
+//   - hedge_flow_id = uuid (canonical), либо composite из snapshot для dedup.
+//   - target_qty = decision.abs_qty (то что нужно хеджировать).
+//   - reference_mid = decision.snapshot.clearing_price.
+//   - side: BUY если net_qty < 0 (мы должны купить чтобы покрыть short),
+//           SELL если net_qty > 0 (нужно продать чтобы покрыть long).
+//   - allowed_venues / urgency / strategy / tif / timeout / slippage из config.
+//
+// Возвращает HedgeExecutionIntentBuildResult { intents, decisions } — decisions
+// для observability (почему intent был построен / пропущен).
+//
+// Dedup: hedge_flow_id stable per (symbol, snapshot_hash) — повторное
+// триггерование того же symbol не плодит duplicate intents.
+// ============================================================================
 HedgeExecutionIntentBuildResult ExecutionIntentBuilder::BuildFromHedgeTriggerDecisions(
     const std::vector<HedgeTriggerDecision>& decisions,
     const HedgeExecutionIntentConfig& config) const {

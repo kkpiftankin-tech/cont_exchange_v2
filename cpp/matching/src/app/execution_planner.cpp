@@ -1,3 +1,32 @@
+// ============================================================================
+// execution_planner.cpp — F-12 DoD-2 multi-venue routing planner (PR-F12-15).
+//
+// Назначение и физический смысл:
+//   Принимает hedge intent target_qty + список allowed_venues + planner
+//   snapshot (LOB curves + health states per venue). Решает, как разделить
+//   target_qty между venues пропорционально:
+//
+//     qty[v] = (L(v) / Σ L(v')) * target_qty
+//
+//   где L(v) — likelihood-weight для venue (зависит от health_score и
+//   max_qty на side). Healthy + deep venue получит больше; degraded или
+//   stale — меньше или ноль.
+//
+//   Result: PlanResult со списком VenueAllocation. matching_loop затем
+//   "разрезает" исходный ExecutionIntent на N children — по одному на
+//   venue из плана (FanOutIntentByPlan, см. matching_loop.cpp).
+//
+// Когда применяется:
+//   * Если plan.allocations.size() >= 2 → fan-out (multi-venue routing).
+//   * Если 1 или 0 → keep original intent (no-op fallback).
+//
+// Контракт:
+//   * НЕ ходит в Kafka/PG — pure compute. snapshot подаётся caller'ом.
+//   * НЕ имеет state — каждый вызов независим.
+//   * Decimal для qty, double для health_score (CLAUDE.md §9: double OK
+//     для metrics, не для money settlement).
+// ============================================================================
+
 #include "app/execution_planner.hpp"
 
 #include <algorithm>
@@ -14,6 +43,8 @@ namespace {
 
 // Largest quantity grid point on the side, i.e. how much volume we can
 // absorb from this venue's curve at the worst price tier.
+/// Максимальный qty на side curve = последняя точка q_grid (cum quantity).
+/// 0 если кривая пустая. Используется для L(v) weight calculation.
 double MaxQtyOnSide(const fob::venue::v1::SideLiquidityCurve& side) {
   double max_q = 0.0;
   for (double q : side.q_grid()) {
@@ -24,12 +55,15 @@ double MaxQtyOnSide(const fob::venue::v1::SideLiquidityCurve& side) {
 
 // Pick the side relevant to executing a BUY (we hit asks) vs SELL
 // (we hit bids).
+/// Выбор bid/ask side: BUY → ask (мы покупаем у venue), SELL → bid.
 const fob::venue::v1::SideLiquidityCurve& SideCurveForIntent(
     const fob::venue::v1::VenueLiquidityCurve& curve,
     fob::common::v1::Side side) {
   return side == fob::common::v1::SIDE_BUY ? curve.ask_curve() : curve.bid_curve();
 }
 
+/// True если venue в "зелёном" health state: OK status + ALLOW routing +
+/// CLOSED circuit-breaker. Только зелёные venues получают allocations.
 bool VenueHealthGreen(const fob::venue::v1::VenueHealth& health) {
   if (health.routing_recommendation() == fob::venue::v1::ROUTING_RECOMMENDATION_BLOCK) return false;
   if (health.breaker_state() == fob::venue::v1::CIRCUIT_BREAKER_STATE_OPEN) return false;
@@ -51,6 +85,19 @@ double DecimalToDouble(const cex::common::Decimal& d) {
 
 }  // namespace
 
+// ============================================================================
+// BuildMultiVenuePlan — главный entry point.
+//
+// Алгоритм:
+//   1. Фильтр allowed_venues по health (только GREEN venues пропускаются).
+//   2. Для каждого пропущенного venue: weight = MaxQtyOnSide * health_score.
+//   3. Σ weights → ratio[v] = weight[v] / Σ weights.
+//   4. qty[v] = ratio[v] * target_qty (с проверкой на min qty / dust).
+//   5. Если ≥2 venues получили non-trivial allocation → feasible=true.
+//      Если 0 или 1 → feasible=false (single-venue routing, no fan-out).
+//
+// Возвращает PlanResult с allocations + diagnostics (reject_reason).
+// ============================================================================
 PlanResult BuildMultiVenuePlan(const PlanRequest& request,
                                const PlanConfig& config) {
   PlanResult out;

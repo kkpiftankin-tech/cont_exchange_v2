@@ -1,3 +1,38 @@
+// ============================================================================
+// http_gateway.cpp — HTTP REST endpoints для gateway сервиса.
+//
+// Назначение:
+//   Внешний REST API для UI и операторов. Routes:
+//
+//   F-02 (Create FlowOrder):
+//     POST /v1/flow-orders                — proxy → order_flow gRPC.
+//     POST /v1/flow-orders/:id/cancel     — proxy → order_flow gRPC.
+//     GET  /v1/flow-orders/:id             — proxy → order_flow gRPC.
+//     GET  /v1/flow-orders                  — list (по user_id из auth).
+//
+//   F-09 (Combo Orders):
+//     POST /v1/combo-orders                  — proxy → order_flow CreateCombo.
+//     POST /v1/combo-orders/:id/cancel       — proxy → order_flow CancelCombo.
+//
+//   F-15 (Backtest / Replay):
+//     POST /v1/replay/sessions               — create replay session.
+//     POST /v1/replay/sessions/:id/cancel    — cancel.
+//     POST /v1/replay/sessions/:id/retry     — retry failed session.
+//     GET  /v1/replay/sessions/:id           — get session info.
+//     GET  /v1/replay/sessions/:id/compare   — compare 2 sessions (parity).
+//     SSE/long-poll /v1/replay/sessions/:id/results — streaming events.
+//
+//   Health:
+//     GET /healthz                            — liveness probe.
+//
+// Auth middleware:
+//   transport/auth_middleware.hpp — JWT / header-based. CLAUDE.md §22:
+//   production требует mTLS termination перед gateway.
+//
+// CLAUDE.md §10 layering: gateway не имеет бизнес-логики — только marshalling
+// HTTP/JSON ↔ gRPC. Все use cases живут в order_flow/backtest/etc.
+// ============================================================================
+
 #include "transport/http_gateway.hpp"
 
 #include <algorithm>
@@ -28,12 +63,16 @@ namespace {
 
 using json = nlohmann::json;
 
+/// Текущее время в epoch milliseconds — используется в audit JSON-полях
+/// (created_at_ms и т.п.).
 int64_t now_millis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
 
+/// Canonical error response: {"error":{"code":...,"message":...}}.
+/// HTTP status + JSON body — оба согласованы. Используется во всех handler'ах.
 crow::response json_error(int status,
                           const std::string& code,
                           const std::string& message) {
@@ -128,6 +167,8 @@ bool is_supported_reward_mode(const std::string& raw) {
          mode == "shortfall";
 }
 
+/// Валидация reward_mode из replay session create payload.
+/// Допустимые: "pnl", "vwap", "fill_rate". CASE-insensitive, normalized.
 bool validate_reward_mode_payload(const json& body, std::string* error) {
   for (const char* key : {"rewardmode", "reward_mode"}) {
     if (body.contains(key) && !body[key].is_null() && !body[key].is_string()) {
@@ -181,6 +222,8 @@ bool require_number(const json& object,
   return true;
 }
 
+/// Generic JSON validator: field в body должен быть числом > 0.
+/// Используется для валидации qty/price/notional полей.
 bool validate_positive_number(const json& object,
                               const char* key,
                               const std::string& field,

@@ -1,3 +1,17 @@
+// ============================================================================
+// grpc_order_flow_service.cpp — gRPC transport layer для OrderFlowService.
+//
+// Тонкий wrapper над OrderFlowUseCases (app/order_flow_uc.cpp) +
+// CreateComboOrderUseCase + CancelComboOrderUseCase (F-09).
+//
+// Не содержит бизнес-логики — только marshalling proto ↔ use cases
+// (CLAUDE.md §10 layering).
+//
+// Combo methods (CreateComboOrder/CancelComboOrder) требуют PG repository
+// (combo_orders + combo_legs + combo_constraints + grouped_links + status_log).
+// Если ORDER_FLOW_POSTGRES_DSN не задан → FAILED_PRECONDITION.
+// ============================================================================
+
 #include "transport/grpc_order_flow_service.hpp"
 
 namespace cex::order_flow::transport {
@@ -35,6 +49,9 @@ grpc::Status GrpcOrderFlowService::ListFlowOrders(
 }
 
 // --- F-09 combo methods (T-F09-036) -----------------------------------------
+// FAILED_PRECONDITION при отсутствии PG DSN — без PG нельзя записать combo
+// orders (parent + legs + constraints в 5 таблиц атомарно).
+// ---------------------------------------------------------------------------
 
 grpc::Status GrpcOrderFlowService::CreateComboOrder(
     grpc::ServerContext*,

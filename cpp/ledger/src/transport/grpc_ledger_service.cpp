@@ -1,3 +1,22 @@
+// ============================================================================
+// grpc_ledger_service.cpp — gRPC transport layer для LedgerService.
+//
+// Тонкий wrapper над LedgerUseCases (app/ledger_uc.cpp). Бизнес-логика
+// (idempotency, FSM, balance invariants — CLAUDE.md §17) живёт в UC.
+//
+// Группы методов:
+//   * User balances:    GetBalances / ReserveFunds / ReleaseFunds
+//                       (F-02 reservations, F-04 fills applying).
+//   * Fills application: ApplyBatchResult (F-04 / F-09 if grouped).
+//   * Execution:        ApplyExecutionReport (F-12 hedge reconciliation).
+//   * PnL:              GetUnrealisedPnL / GetRealisedPnL (F-06).
+//   * Venue balances:   GetVenueBalances / UpdateVenueBalance (F-12 admin).
+//   * Hedge PnL:        RecordHedgeExecution / GetHedgePnL (F-12 DoD-6).
+//
+// Note: production должен fetch'ить current_prices из market_data сервиса
+// для GetUnrealisedPnL — сейчас MVP fallback на avg_entry_price (PnL = 0).
+// ============================================================================
+
 #include "transport/grpc_ledger_service.hpp"
 
 namespace cex::ledger::transport {

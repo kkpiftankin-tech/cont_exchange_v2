@@ -1,3 +1,31 @@
+// ============================================================================
+// run_replay_session_uc.cpp — F-15 главный backtest/replay runner.
+//
+// Назначение:
+//   Запускает one-shot replay session: берёт historical batches из ClickHouse,
+//   прогоняет каждый через isolation matching solver (отдельный instance,
+//   не touches live state), сравнивает результат с production stored
+//   batchresults, считает diagnostics (parity, reward).
+//
+// Жизненный цикл session:
+//   CREATED → RUNNING → COMPLETED / FAILED / CANCELLED.
+//   На каждом шаге публикуется ReplayProgressEvent в Kafka replay.results.
+//
+// Reward modes:
+//   - "pnl"     — diff between replay PnL и production PnL.
+//   - "vwap"    — VWAP improvement vs production.
+//   - "fill_rate" — % fills relative production.
+//   Mode задаётся в session config snapshot (JSON).
+//
+// CLAUDE.md §15: replay должен быть deterministic. Solver config snapshot
+// фиксируется при start, не может меняться during run.
+//
+// Связанные artifacts:
+//   - In-memory shadow ledger (in_memory_shadow_ledger.cpp).
+//   - GrpcReplayBatchExecutor (grpc_replay_batch_executor.cpp).
+//   - ReplayStepJournal (replay_step_journal.hpp) — per-batch audit trail.
+// ============================================================================
+
 #include "app/run_replay_session_uc.hpp"
 
 #include <algorithm>
@@ -207,6 +235,28 @@ RunReplaySession::Result RunReplaySession::FailFromInit(
   return result;
 }
 
+// ============================================================================
+// Run — главный entrypoint.
+//
+// Шаги:
+//   1. Validate request (RBAC, session config, time range).
+//   2. Load historical batches из ClickHouse по time range.
+//   3. ValidateBatchInputs — detect missing/corrupt batches.
+//   4. Initialise shadow ledger (per-session in-memory state).
+//   5. Foreach batch:
+//        - Convert input → SolveBatchRequest.
+//        - gRPC call в isolation matching solver.
+//        - Apply fills в shadow ledger.
+//        - Compute reward / parity diff vs production.
+//        - Emit ReplayProgressEvent в Kafka.
+//        - Append ReplayStepJournal entry.
+//   6. Finalize: emit ReplayCompletedEvent или ReplayFailedEvent.
+//
+// Возвращает Result со всем aggregate metrics + status.
+//
+// Cancellation: проверяет flag в каждой итерации batch loop'а. На cancel
+// эмиттит ReplayCancelledEvent.
+// ============================================================================
 RunReplaySession::Result RunReplaySession::Run(const Request& request) {
   ICancellationToken* token =
       deps_.cancellation_token != nullptr ? deps_.cancellation_token : &default_token_;
