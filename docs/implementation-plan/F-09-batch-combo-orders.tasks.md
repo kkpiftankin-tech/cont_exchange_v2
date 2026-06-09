@@ -2,7 +2,13 @@
 
 ## Progress
 
-F-09 is not implemented. All documentation is complete; code implementation has not started.
+**MVP-1 (`orchestration_only`) + MVP-2 grouped vector solver — реализованы и проверены (PR #13).**
+MVP-1: order_flow combo create/cancel, e2e + unit 5/5 зелёные. MVP-2: grouped
+solver (strict/scalable/best_effort) собран в `matching_loop` и работает **live
+end-to-end** (gRPC CreateComboOrder multileg → matching load→solve→ExecutionGroup
+→ Kafka `execution.groups` + PG `execution_groups`), single-leg F-04 не затронут.
+Осталось: ledger grouped postings (060), risk group (040), полный E2E до ledger
+(090) и фидбэк `filled_cum` для partial-групп (см. Known Gaps в feature README).
 
 | Артефакт | Статус |
 | --- | --- |
@@ -21,7 +27,8 @@ F-09 is not implemented. All documentation is complete; code implementation has 
 | Kafka topic execution.groups + backtest.execution.groups | ✅ T-F09-020/023 (bash -n green) |
 | DDL tables infra/postgres/init.sql (7) + clickhouse/init.sql (5) | ✅ T-F09-021/022 |
 | Application code (order_flow MVP-1) | ✅ T-F09-030/031/033/034/035/036 — order_flow собирается+линкуется на dev-хосте (exit 0). Runtime combo gated on `ORDER_FLOW_POSTGRES_DSN`. Unit-тесты компилируются под `BUILD_TESTING` (не в docker-деплое). |
-| Application code (matching/risk/ledger grouped) | ❌ MVP-2+ (Phase E–K) |
+| Application code (matching grouped, MVP-2) | ✅ T-F09-043/044/045/046/047/048 + `Decimal::div` — feasible caps, grouped solver, child graph, SolveGroupedBatch, ExecutionGroups producer(Kafka)/repo(PG), active groups loader, **интеграция в `matching_loop`**. 9 unit/integration сьютов green (3 против live PG) + **live end-to-end** (execution_groups: filled, scale=1.0). |
+| Application code (ledger grouped / risk group / full E2E) | ❌ T-F09-060 (ledger consume execution.groups), T-F09-040 (risk PreTradeCheckGroup), T-F09-090 (E2E до ledger). + GAP: `filled_cum` feedback для partial-групп. |
 
 ---
 

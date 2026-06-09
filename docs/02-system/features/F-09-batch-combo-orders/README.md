@@ -1,6 +1,10 @@
 # F-09 — Batch, Combo and Multi-leg Orders
 
-> **Статус:** `planned`. Документация по IN-011 (F-09 v2 corrected) готова; код не реализован.
+> **Статус:** `in-progress` (PR #13). MVP-1 (`orchestration_only`) реализован;
+> MVP-2 grouped vector solver работает **live end-to-end** до `execution_groups`
+> (order_flow → matching → Kafka `execution.groups` + PG). Осталось: ledger
+> grouped postings (060), risk group (040), полный E2E (090), фидбэк `filled_cum`
+> для partial-групп (см. Known Gaps ниже).
 > Источник: [incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md](../../../../incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md) (IN-011).
 
 ## Описание
@@ -83,9 +87,31 @@ group/leg status и fallback/degraded/rollback состояний (IN-011 §12.1
 Cross-venue true atomic без native support, options solver, нелинейные Greeks,
 RL-routing, полный rollback внешних сделок, prime-broker netting.
 
+## Known Gaps (MVP-2)
+
+Зафиксированный техдолг grouped-исполнения (на момент MVP-2, PR #13):
+
+1. **Partial-группы не накапливают `filled_cum` между batch-циклами.** После
+   grouped solve `PostgresExecutionGroupsRepository` обновляет
+   `combo_orders.status` (`partially_filled`/`filled`), но **не** обновляет
+   `combo_order_legs.filled_cum` по `LegResult.exec_qty`. Поэтому группа со
+   статусом `partially_filled` остаётся в активном наборе loader-а и
+   **переисполняется на каждом batch** (remaining не уменьшается). `filled`
+   группа уходит из активного набора и исполняется один раз — корректно.
+   *Фикс:* применять `LegResult` к `combo_order_legs.filled_cum` (и переводить
+   combo в `filled`, когда все ноги заполнены) в той же транзакции persist.
+2. **`exec_price`** берётся из market_data reference prices; для не котируемых
+   на стенде символов = 0 (qty/scale считаются корректно, notional = 0).
+3. **Risk:** групповой pre-trade в `CreateComboOrderUseCase` — заглушка-approve;
+   реальный `RiskService.PreTradeCheckGroup` — T-F09-040.
+4. **Downstream:** ledger пока не потребляет `execution.groups` (T-F09-060) —
+   баланс по grouped fills не применяется до реализации.
+
 ## Implementation
 
-Код не реализован. План задач:
+**MVP-1 (`orchestration_only`) + MVP-2 grouped solver реализованы (PR #13).**
+MVP-2 grouped-исполнение работает live end-to-end до `execution_groups`
+(PG + Kafka). Прогресс и оставшиеся задачи (060 ledger, 040 risk, 090 E2E):
 [implementation-plan/F-09-batch-combo-orders.tasks.md](../../../implementation-plan/F-09-batch-combo-orders.tasks.md).
 
 ## Source Fragments

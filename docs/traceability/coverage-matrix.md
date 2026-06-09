@@ -38,7 +38,7 @@ Status values:
 | [F-06](../02-system/features/F-06-positions-pnl-margin/) | ✅ UC-F06-01 | ✅ | ✅ | ⚠️ GetBalances/Snapshot TODO | ✅ positions/accounts DDL | ✅ | ❌ | needs-contracts |
 | [F-07](../02-system/features/F-07-pretrade-risk/) | ✅ UC-F07-01 | ✅ | ✅ | ✅ risk gRPC + alerts | ✅ risk_limits DDL | ✅ | ⚠️ unit | partial |
 | [F-08](../02-system/features/F-08-posttrade-risk-and-liquidations/) | ✅ UC-F08-01 | ✅ | ✅ | ✅ batch.outputs + alerts | ✅ positions/risk_snapshots DDL | ✅ | ❌ | needs-tests |
-| [F-09](../02-system/features/F-09-batch-combo-orders/) | ✅ UC-F09-01/02/03 | ✅ | ✅ | ✅ combo grpc + execution.groups (⚠️ 5 TODO, proto sketch) | ✅ combo_*/execution_groups + grouped_* CH (⚠️ DDL→devops) | ✅ | ✅ test plan (planned) | docs-complete; code planned |
+| [F-09](../02-system/features/F-09-batch-combo-orders/) | ✅ UC-F09-01/02/03 | ✅ | ✅ | ✅ combo grpc + execution.groups (⚠️ 5 TODO, proto sketch) | ✅ combo_*/execution_groups + grouped_* CH (⚠️ DDL→devops) | ✅ | ✅ test plan + 9 unit/integration suites green | MVP-1 + MVP-2 grouped реализованы и LIVE (PR #13); ledger/risk/E2E pending |
 | [F-10](../02-system/features/F-10-mm-curves/) | ✅ UC-F10-01 | ✅ | ✅ | ⚠️ UpsertCurve TODO | ⚠️ flow_orders+mm tag | ✅ | ❌ | needs-contracts |
 | [F-11](../02-system/features/F-11-external-venues-lob-to-fob/) | ✅ UC-F11-01 | ✅ | ✅ | ✅ marketdata.raw + planned orders.normalized venue | ✅ marketdata CH DDL | ✅ | ❌ | needs-tests |
 | [F-12](../02-system/features/F-12-execution-hedge/) | ✅ UC-F12-01 | ✅ | ✅ | ✅ execution.intents/reports | ✅ execution_reports CH DDL | ✅ | ❌ | needs-tests |
