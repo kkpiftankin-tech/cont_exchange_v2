@@ -91,15 +91,14 @@ RL-routing, полный rollback внешних сделок, prime-broker nett
 
 Зафиксированный техдолг grouped-исполнения (на момент MVP-2, PR #13):
 
-1. **Partial-группы не накапливают `filled_cum` между batch-циклами.** После
-   grouped solve `PostgresExecutionGroupsRepository` обновляет
-   `combo_orders.status` (`partially_filled`/`filled`), но **не** обновляет
-   `combo_order_legs.filled_cum` по `LegResult.exec_qty`. Поэтому группа со
-   статусом `partially_filled` остаётся в активном наборе loader-а и
-   **переисполняется на каждом batch** (remaining не уменьшается). `filled`
-   группа уходит из активного набора и исполняется один раз — корректно.
-   *Фикс:* применять `LegResult` к `combo_order_legs.filled_cum` (и переводить
-   combo в `filled`, когда все ноги заполнены) в той же транзакции persist.
+1. ✅ **РЕШЕНО** (коммиты e9f9b8bf, fc253dd0). Partial-группы накапливают
+   `filled_cum` между batch-циклами: `PostgresExecutionGroupsRepository`
+   применяет `LegResult.exec_qty` к `combo_order_legs.filled_cum`
+   (`LEAST(... , q_max)`), идемпотентно по `execution_group_id` (gate на
+   `affected_rows`). Combo → `filled`, когда **любая** нога достигла `q_max`
+   (для ratio-locked группы это её максимум). `matching_loop` не публикует
+   пустые ExecutionGroup (no-op batch). Проверено live: basket BTC(0.6)/ETH(0.4),
+   q_rate=3 сходится за 4 batch'а (соотношение сохранено) → combo filled.
 2. **`exec_price`** берётся из market_data reference prices; для не котируемых
    на стенде символов = 0 (qty/scale считаются корректно, notional = 0).
 3. **Risk:** групповой pre-trade в `CreateComboOrderUseCase` — заглушка-approve;
