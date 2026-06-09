@@ -82,12 +82,15 @@ int main() {
 
     pqxx::connection conn{std::string(dsn)};
     pqxx::work tx{conn};
+    // exec_params + .as<int>() — тот же линк-безопасный паттерн, что в прод-репо.
+    // (query_value<> тянет pqxx::usage_error(std::source_location), которого нет
+    // в установленной libpqxx → undefined reference при линковке.)
     const auto combo_rows =
-        tx.query_value<int>("SELECT count(*) FROM combo_orders WHERE combo_order_id = " +
-                            tx.quote(combo_id) + "::uuid");
+        tx.exec_params("SELECT count(*) FROM combo_orders WHERE combo_order_id = $1::uuid",
+                       combo_id)[0][0].as<int>();
     const auto leg_rows =
-        tx.query_value<int>("SELECT count(*) FROM combo_order_legs WHERE parent_order_id = " +
-                            tx.quote(combo_id) + "::uuid");
+        tx.exec_params("SELECT count(*) FROM combo_order_legs WHERE parent_order_id = $1::uuid",
+                       combo_id)[0][0].as<int>();
     ok = expect(combo_rows == 1, "combo persisted exactly once (idempotent)") && ok;
     ok = expect(leg_rows == 2, "two legs persisted") && ok;
 
