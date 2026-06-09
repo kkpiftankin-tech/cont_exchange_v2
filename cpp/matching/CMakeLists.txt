@@ -46,6 +46,7 @@ add_executable(matching
   src/domain/batch_result_to_fill_events.cpp
   src/domain/multileg_feasible_caps.cpp
   src/domain/grouped_solver_bisection.cpp
+  src/domain/child_graph_transitions.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -134,6 +135,20 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_grouped_solver_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_grouped_solver_test COMMAND matching_grouped_solver_test)
+
+  # F-09 (T-F09-045): child graph transitions (OCO cancel / bracket resize).
+  add_executable(matching_child_graph_transitions_test
+    tests/domain/child_graph_transitions_test.cpp
+    src/domain/child_graph_transitions.cpp
+  )
+  target_include_directories(matching_child_graph_transitions_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_child_graph_transitions_test PRIVATE
+    cex_common
+  )
+  target_compile_options(matching_child_graph_transitions_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_child_graph_transitions_test COMMAND matching_child_graph_transitions_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp
