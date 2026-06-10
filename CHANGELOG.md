@@ -38,6 +38,12 @@
   consumer (идемпотентно по `execution_group_id`).
 - **Полный E2E (090) проверен LIVE:** multileg combo → matching → `execution.groups`
   → ledger position владельца.
+- **Risk grouped (040):** `GroupPreTradeCheck` domain (AC-F09-006 + notional/legs/
+  external лимиты) + `PreTradeCheckGroup` gRPC + order_flow `RiskClient` wiring
+  (заменил stub-approve, fail-closed). Verified live (accept + fail-closed proof).
 
-**Остаток MVP-2:** risk `PreTradeCheckGroup` (040, сейчас stub-approve).
-**Известные нюансы (feature README):** `exec_price=0` для не котируемых символов.
+**MVP-2 завершён.** Полная вертикаль: order_flow (policy+risk) → matching (solver)
+→ execution.groups → ledger positions. Дальше — MVP-3+ (spread/factor QP,
+OCO/bracket, external legs, frontend/observability).
+**Известные нюансы (feature README):** `exec_price=0` для не котируемых символов;
+Kafka `risk.alerts` publish для grouped reject — небольшой follow-up (сейчас лог).

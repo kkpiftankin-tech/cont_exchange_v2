@@ -29,7 +29,8 @@ end-to-end** (gRPC CreateComboOrder multileg → matching load→solve→Executi
 | Application code (order_flow MVP-1) | ✅ T-F09-030/031/033/034/035/036 — order_flow собирается+линкуется на dev-хосте (exit 0). Runtime combo gated on `ORDER_FLOW_POSTGRES_DSN`. Unit-тесты компилируются под `BUILD_TESTING` (не в docker-деплое). |
 | Application code (matching grouped, MVP-2) | ✅ T-F09-043/044/045/046/047/048 + `Decimal::div` — feasible caps, grouped solver, child graph, SolveGroupedBatch, ExecutionGroups producer(Kafka)/repo(PG), active groups loader, **интеграция в `matching_loop`**. 9 unit/integration сьютов green (3 против live PG) + **live end-to-end** (execution_groups: filled, scale=1.0). |
 | Application code (flags / proto enrich / ledger / E2E) | ✅ T-F09-002 (ComboPolicy флаги+лимиты, create-gate), T-F09-062 (ExecutionGroup += user_id + LegResult symbol/side; combo_orders += user_id/account_id), T-F09-060 (ledger ApplyExecutionGroup, идемпотентно). **GAP-1 `filled_cum` — закрыт.** Полный путь **combo → matching → execution.groups → ledger position проверен LIVE** (T-F09-090). |
-| Application code (risk grouped) | ❌ T-F09-040 (risk `PreTradeCheckGroup`; сейчас stub-approve в CreateComboOrderUseCase) — единственный остаток MVP-2. |
+| Application code (risk grouped) | ✅ T-F09-040 — `GroupPreTradeCheck` domain (AC-F09-006 + notional/legs/external лимиты) + `PreTradeCheckGroup` gRPC + order_flow `RiskClient` wiring (заменил stub-approve, fail-closed). Verified live (accept + fail-closed proof) + 5 unit-кейсов. |
+| **MVP-2 итог** | ✅ **ЗАВЕРШЁН.** Полная вертикаль grouped combo: order_flow (policy+risk gate) → matching (grouped solver) → execution.groups (Kafka+PG) → ledger positions. Остаётся MVP-3+ (spread/factor QP, OCO/bracket, external legs, frontend/observability). |
 
 ---
 
