@@ -113,6 +113,7 @@ grpc::Status GrpcRiskService::PreTradeCheckGroup(
                           {{"user_id", request->user_id()},
                            {"reason", result.reason},
                            {"legs", std::to_string(request->legs_size())}});
+    uc_->PublishGroupedRejectAlert(request->user_id(), result.reason);  // → risk.alerts
   } else {
     response->set_decision(fob::risk::v1::RISK_DECISION_ACCEPT);
   }

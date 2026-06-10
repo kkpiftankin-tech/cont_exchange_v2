@@ -848,4 +848,24 @@ fob::risk::v1::PreHedgeCheckResponse RiskUseCases::PreHedgeCheck(
   return resp;
 }
 
+void RiskUseCases::PublishGroupedRejectAlert(const std::string &user_id,
+                                             const std::string &reason) {
+  fob::risk::v1::RiskAlert alert;
+  auto *meta = alert.mutable_meta();
+  meta->set_event_id(cex::common::uuid_v4());
+  *meta->mutable_ts_event() = cex::common::now_ts();
+  meta->set_source("risk");
+  meta->set_partition_key(user_id.empty() ? "GLOBAL" : user_id);
+
+  alert.set_alert_id(cex::common::uuid_v4());
+  alert.set_severity(fob::risk::v1::RISK_SEVERITY_WARN);
+  alert.set_user_id(user_id);
+  alert.set_alert_type("GROUPED_PRE_TRADE_REJECTED");
+  alert.mutable_error()->set_code("GROUPED_PRE_TRADE_REJECTED");
+  alert.mutable_error()->set_message(reason);
+  *alert.mutable_timestamp() = cex::common::now_ts();
+
+  publisher_.publish(alert);
+}
+
 }  // namespace cex::risk::app
