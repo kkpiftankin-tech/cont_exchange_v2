@@ -70,6 +70,18 @@ Ledger применяет grouped execution: по каждой ноге, по pa
 одинаковом входе.
 Тесты: `ReplayDeterministicGroupedExecution`.
 
+### AC-F09-011. Honest-mode гарантии (F-09 v2 system-impact §9)
+
+API-ответ создания combo и UI **обязаны** показывать `executionMode` и
+**фактические гарантии** — нельзя выдавать `orchestration_only` за настоящий
+multi-leg. `CreateComboOrderResponse` несёт `execution_guarantees`
+(human-readable) и `ratio_guaranteed` (флаг): `orchestration_only` →
+`ratio_guaranteed=false` (нет гарантии ratio/weights/spread);
+`multileg_vector_solver` → `true` (в пределах policy/tolerance);
+`external_compensating` → `false` (не атомарно). **Реализовано** в
+`CreateComboOrderUseCase`. Тест: `order_flow_combo_uc_tests` (orchestration_only
+→ ratio NOT guaranteed).
+
 ## Итоговое правило (gate)
 
 F-09 считается реализованной корректно только если поддержаны **оба** режима
@@ -91,3 +103,4 @@ weights/ratio/spread/factor/budget/leverage/margin/portfolio-risk идёт че�
 | AC-F09-008 | §17 AC-8, §11.6 | unit+int | T-F09-045 |
 | AC-F09-009 | §17 AC-9, §11.5, §12.9 | int | T-F09-060..061 |
 | AC-F09-010 | §17 AC-10, §3 | int | T-F09-046, F-15 parity |
+| AC-F09-011 | F-09 v2 system-impact §9 | unit | order_flow combo create (honest-mode) |

@@ -94,6 +94,9 @@ int main() {
     ok = expect(repo.inserted.size() == 1, "persisted once") && ok;
     ok = expect(published.size() == 2, "two legs published") && ok;
     ok = expect(resp.leg_order_ids_size() == 2, "leg_order_ids returned") && ok;
+    // AC-F09-011 honest-mode: orchestration_only НЕ гарантирует ratio.
+    ok = expect(!resp.ratio_guaranteed(), "orchestration_only: ratio NOT guaranteed") && ok;
+    ok = expect(!resp.execution_guarantees().empty(), "execution_guarantees surfaced") && ok;
   }
 
   // 2) Idempotency by client_combo_id.

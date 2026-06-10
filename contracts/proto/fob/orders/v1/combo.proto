@@ -372,6 +372,14 @@ message CreateComboOrderResponse {
   map<string, string> leg_order_ids = 4;
   ParentOrderStatus status       = 5;
   fob.common.v1.Error error     = 6;
+
+  // AC-F09-011 (honest-mode): фактические гарантии исполнения по executionMode.
+  // UI/клиент ОБЯЗАН показывать — нельзя выдавать orchestration_only за настоящий
+  // multi-leg. orchestration_only → нет гарантии ratio/weights/spread;
+  // multileg_vector_solver → гарантии в пределах policy/tolerance;
+  // external_compensating → не атомарно.
+  string execution_guarantees    = 7;  // human-readable
+  bool ratio_guaranteed          = 8;  // false для orchestration_only
 }
 
 // --- PreviewComboOrder ---
