@@ -195,6 +195,23 @@ int main() {
                 "policy: too many legs → reject") && ok;
   }
 
+  // 8) AC-F09-011 + ADR-035: OCO combo → honest eventual (best_effort) guarantee.
+  {
+    FakeRepo repo;
+    cex::order_flow::infra::OrdersNormalizedGroupedProducer producer{
+        [](const fob::orders::v1::OrdersNormalized&) { return true; }};
+    cex::order_flow::app::CreateComboOrderUseCase uc{repo, producer, approve};
+    auto req = MakeReq(pv1::EXECUTION_MODE_MULTILEG_VECTOR_SOLVER,
+                       pv1::ATOMICITY_POLICY_SCALABLE_ATOMIC,
+                       pv1::ATOMICITY_SCOPE_INTERNAL_BATCH, "cli-oco");
+    req.set_combo_type(pv1::COMBO_TYPE_OCO);
+    const auto resp = uc.Execute(req);
+    ok = expect(resp.accepted(), "OCO combo accepted") && ok;
+    ok = expect(!resp.ratio_guaranteed(), "OCO: ratio NOT guaranteed (eventual)") && ok;
+    ok = expect(resp.execution_guarantees().find("OCO") != std::string::npos,
+                "OCO eventual guarantee surfaced") && ok;
+  }
+
   if (ok) { std::cout << "create_combo_order_use_case_test: ALL PASSED\n"; return 0; }
   return 1;
 }

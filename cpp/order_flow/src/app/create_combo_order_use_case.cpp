@@ -182,13 +182,27 @@ d::ComboOrder BuildDomain(const pv1::CreateComboOrderRequest& req, const std::st
   return combo;
 }
 
-// AC-F09-011 (honest-mode): фактические гарантии исполнения по режиму.
+// AC-F09-011 (honest-mode): фактические гарантии исполнения по режиму + типу combo.
 void SetGuarantees(fob::orders::v1::CreateComboOrderResponse& resp, pv1::ExecutionMode mode,
-                   pv1::AtomicityScope scope) {
+                   pv1::AtomicityScope scope, pv1::ComboType combo_type) {
   if (mode == pv1::EXECUTION_MODE_ORCHESTRATION_ONLY) {
     resp.set_ratio_guaranteed(false);
     resp.set_execution_guarantees(
         "orchestration_only: ноги исполняются независимо; ratio/weights/spread НЕ гарантируются");
+  } else if (combo_type == pv1::COMBO_TYPE_OCO) {
+    // ADR-035: OCO в MVP — eventual (best_effort), не атомарный one-branch.
+    resp.set_ratio_guaranteed(false);
+    resp.set_execution_guarantees(
+        "OCO eventual: исполняется одна ветвь, сиблинги отменяются; возможно частичное "
+        "исполнение нескольких ветвей до отмены (best_effort)");
+  } else if (combo_type == pv1::COMBO_TYPE_BRACKET) {
+    resp.set_ratio_guaranteed(false);
+    resp.set_execution_guarantees(
+        "bracket: TP/SL exits активируются после заполнения entry; не ratio-locked");
+  } else if (combo_type == pv1::COMBO_TYPE_CONDITIONAL) {
+    resp.set_ratio_guaranteed(false);
+    resp.set_execution_guarantees(
+        "conditional: активация по триггеру; гарантии зависят от условия (MVP)");
   } else if (scope == pv1::ATOMICITY_SCOPE_EXTERNAL_COMPENSATING) {
     resp.set_ratio_guaranteed(false);
     resp.set_execution_guarantees(
@@ -226,7 +240,7 @@ fob::orders::v1::CreateComboOrderResponse CreateComboOrderUseCase::Execute(
       resp.set_accepted(true);
       resp.set_combo_id(it->second);
       resp.set_status(fob::orders::v1::PARENT_ORDER_STATUS_ACTIVE);
-      SetGuarantees(resp, req.execution_mode(), req.atomicity_scope());
+      SetGuarantees(resp, req.execution_mode(), req.atomicity_scope(), req.combo_type());
       return resp;
     }
   }
@@ -289,7 +303,7 @@ fob::orders::v1::CreateComboOrderResponse CreateComboOrderUseCase::Execute(
   for (const auto& leg : combo.legs) {
     leg_ids[leg.leg_id] = leg.leg_id;  // orchestration_only: child FlowOrder order_id == leg_id
   }
-  SetGuarantees(resp, req.execution_mode(), req.atomicity_scope());  // AC-F09-011
+  SetGuarantees(resp, req.execution_mode(), req.atomicity_scope(), req.combo_type());  // AC-F09-011
   return resp;
 }
 
