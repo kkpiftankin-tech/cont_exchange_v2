@@ -195,6 +195,8 @@ struct ConditionalLink {
 
 struct ComboOrder {
   std::string combo_order_id;
+  std::string user_id;     ///< владелец (T-F09-062): персистится → ledger postings
+  std::string account_id;
   std::optional<std::string> batch_order_id;
   ComboType combo_type{ComboType::kUnspecified};
   ExecutionMode execution_mode{ExecutionMode::kUnspecified};

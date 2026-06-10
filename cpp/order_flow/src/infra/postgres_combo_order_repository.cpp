@@ -246,11 +246,11 @@ ON CONFLICT (batch_order_id) DO NOTHING
 INSERT INTO combo_orders (
   combo_order_id, batch_order_id, combo_type, execution_mode, status,
   ratio_basis, atomicity_policy, atomicity_scope, fallback_policy,
-  min_execution_scale, max_ratio_deviation_bps)
+  min_execution_scale, max_ratio_deviation_bps, user_id, account_id)
 VALUES (
   $1::uuid, NULLIF($2,'')::uuid, $3, $4, $5,
   NULLIF($6,''), $7, $8, $9,
-  NULLIF($10,'')::numeric, NULLIF($11,'')::int)
+  NULLIF($10,'')::numeric, NULLIF($11,'')::int, NULLIF($12,''), NULLIF($13,''))
 ON CONFLICT (combo_order_id) DO NOTHING
 )SQL",
                  combo.combo_order_id,
@@ -264,7 +264,8 @@ ON CONFLICT (combo_order_id) DO NOTHING
                  FallbackPolicyDb(combo.fallback_policy),
                  OptDec(combo.min_execution_scale),
                  combo.max_ratio_deviation_bps.has_value()
-                     ? std::to_string(*combo.max_ratio_deviation_bps) : std::string{});
+                     ? std::to_string(*combo.max_ratio_deviation_bps) : std::string{},
+                 combo.user_id, combo.account_id);
 
   // 3) Legs.
   for (const auto& leg : combo.legs) {

@@ -48,9 +48,9 @@ int main() {
       pqxx::work tx{conn};
       tx.exec_params(R"SQL(
 INSERT INTO combo_orders
-  (combo_order_id, combo_type, execution_mode, status, ratio_basis,
+  (combo_order_id, user_id, combo_type, execution_mode, status, ratio_basis,
    atomicity_policy, atomicity_scope, fallback_policy, min_execution_scale, max_ratio_deviation_bps)
-VALUES ($1::uuid,'basket','multileg_vector_solver','active','notional_weight',
+VALUES ($1::uuid,'u-loader','basket','multileg_vector_solver','active','notional_weight',
         'scalable_atomic','internal_batch','scale_down', 0.1, 50)
 ON CONFLICT (combo_order_id) DO NOTHING
 )SQL",
@@ -77,6 +77,7 @@ ON CONFLICT (leg_id) DO NOTHING
 
     ok = expect(mine != nullptr, "loaded group present") && ok;
     if (mine != nullptr) {
+      ok = expect(mine->user_id == "u-loader", "user_id loaded (T-F09-062)") && ok;
       ok = expect(mine->atomicity_policy == d::GroupAtomicityPolicy::kScalableAtomic,
                   "policy = scalable_atomic") && ok;
       ok = expect(Decimal::cmp(mine->min_execution_scale, Decimal{1, 1}) == 0,

@@ -392,6 +392,10 @@ CREATE TABLE IF NOT EXISTS combo_orders (
   combo_order_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   -- NULL = autonomous combo order not wrapped in a batch_order
   batch_order_id          UUID REFERENCES batch_orders(batch_order_id) ON DELETE CASCADE,
+  -- T-F09-062: owner — needed by matching loader → ExecutionGroup.user_id →
+  -- ledger grouped postings + hierarchical PnL.
+  user_id                 TEXT,
+  account_id              TEXT,
   -- combo_type: pair/basket/spread/conditional/oco/bracket/factor/budget
   combo_type              TEXT NOT NULL,
   -- execution_mode: orchestration_only|multileg_vector_solver

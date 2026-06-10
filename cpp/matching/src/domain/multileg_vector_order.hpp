@@ -81,6 +81,7 @@ struct VectorLeg {
 /// Группа целиком.
 struct MultiLegVectorOrder {
   std::string parent_order_id;
+  std::string user_id;  ///< владелец (для ExecutionGroup.user_id → ledger postings)
   std::vector<VectorLeg> legs;
 
   GroupAtomicityPolicy atomicity_policy{GroupAtomicityPolicy::kBestEffort};

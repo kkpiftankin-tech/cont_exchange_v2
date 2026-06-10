@@ -117,6 +117,8 @@ Decimal DecimalFromDouble(double v) {
 d::ComboOrder BuildDomain(const pv1::CreateComboOrderRequest& req, const std::string& combo_id) {
   d::ComboOrder combo;
   combo.combo_order_id = combo_id;
+  combo.user_id = req.user_id();        // T-F09-062: персистится → ledger postings
+  combo.account_id = req.account_id();
   // NOTE (MVP-1): batch_order_id игнорируется — FK требует существующей строки
   // batch_orders; standalone combo не создаёт batch. Привязка к batch — позже.
   combo.batch_order_id = std::nullopt;

@@ -58,7 +58,7 @@ std::vector<d::MultiLegVectorOrder> PostgresActiveGroupsLoader::LoadActiveGroups
   // Активные группы grouped-режима (orchestration_only исключён — он идёт как
   // независимые FlowOrder через orders.normalized).
   const pqxx::result groups = tx.exec(R"SQL(
-SELECT combo_order_id::text, atomicity_policy, fallback_policy, ratio_basis,
+SELECT combo_order_id::text, user_id, atomicity_policy, fallback_policy, ratio_basis,
        min_execution_scale, max_ratio_deviation_bps
 FROM combo_orders
 WHERE execution_mode = 'multileg_vector_solver'
@@ -72,6 +72,7 @@ ORDER BY combo_order_id
   for (const auto& g : groups) {
     d::MultiLegVectorOrder order;
     order.parent_order_id = g["combo_order_id"].as<std::string>();
+    order.user_id = g["user_id"].is_null() ? std::string() : g["user_id"].as<std::string>();
     order.atomicity_policy = PolicyFromDb(g["atomicity_policy"].as<std::string>());
     order.fallback_policy = FallbackFromDb(g["fallback_policy"].as<std::string>());
     order.min_execution_scale = NumOrZero(g["min_execution_scale"]);

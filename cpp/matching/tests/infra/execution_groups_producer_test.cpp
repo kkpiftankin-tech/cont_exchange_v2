@@ -40,6 +40,7 @@ d::MultiLegVectorOrder MakePair(const std::string& id, d::GroupAtomicityPolicy p
                                 std::int64_t eth_liq) {
   d::MultiLegVectorOrder g;
   g.parent_order_id = id;
+  g.user_id = "user-x";
   g.atomicity_policy = policy;
   g.legs.push_back(MakeLeg("leg-btc", "BTCUSDT", 1, 10));
   g.legs.push_back(MakeLeg("leg-eth", "ETHUSDT", -1, 10, eth_liq));
@@ -87,6 +88,12 @@ int main() {
                 "BTC exec_notional=600") && ok;
     ok = expect(eg.execution_mode() == fob::orders::v1::EXECUTION_MODE_MULTILEG_VECTOR_SOLVER,
                 "execution_mode = multileg_vector_solver") && ok;
+    // T-F09-062: user_id + per-leg instrument_symbol/side для ledger.
+    ok = expect(eg.user_id() == "user-x", "user_id set (T-F09-062)") && ok;
+    const auto* eth = Find(eg, "leg-eth");
+    ok = expect(btc && btc->instrument_symbol() == "BTCUSDT", "BTC leg instrument_symbol") && ok;
+    ok = expect(btc && btc->side() == fob::common::v1::SIDE_BUY, "BTC leg side BUY (ratio +1)") && ok;
+    ok = expect(eth && eth->side() == fob::common::v1::SIDE_SELL, "ETH leg side SELL (ratio -1)") && ok;
   }
 
   // 2) strict, ETH illiquid (cap=4) → CANCELLED_BY_ATOMICITY, leg_results пусто.

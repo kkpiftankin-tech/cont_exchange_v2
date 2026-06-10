@@ -70,6 +70,10 @@ message LegResult {
   string fill_id                      = 5;
   // Источник ликвидности (internal / cex_hedge / dex_hedge / ...).
   string liquidity_source             = 6;
+  // Инструмент ноги — нужен ledger для постинга в позицию. T-F09-062, additive.
+  string instrument_symbol            = 7;
+  // Направление ноги (buy/sell base) — нужно ledger для знака позиции. T-F09-062.
+  fob.common.v1.Side side             = 8;
 }
 
 // Kafka envelope топика execution.groups.
@@ -122,4 +126,7 @@ message ExecutionGroup {
   GroupSolverDiagnostics solver_diagnostics = 14;
 
   google.protobuf.Timestamp created_at    = 15;
+
+  // Владелец заявки — нужен ledger для постинга и hierarchical PnL. T-F09-062, additive.
+  string user_id                          = 16;
 }

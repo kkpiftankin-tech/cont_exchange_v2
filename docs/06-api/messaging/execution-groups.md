@@ -81,6 +81,10 @@ message LegResult {
   string fill_id                         = 5;
   // Источник ликвидности (internal / cex_hedge / dex_hedge / ...).
   string liquidity_source                = 6;
+  // T-F09-062 (additive): инструмент и сторона ноги — нужны ledger для
+  // постинга в позицию (знак позиции по side).
+  string instrument_symbol               = 7;
+  fob.common.v1.Side side                = 8;
 }
 ```
 
@@ -134,6 +138,10 @@ message ExecutionGroup {
   GroupSolverDiagnostics solver_diagnostics = 14;
 
   google.protobuf.Timestamp created_at      = 15;
+
+  // T-F09-062 (additive): владелец заявки — нужен ledger для постинга и
+  // hierarchical PnL (leg/group/parent/strategy).
+  string user_id                            = 16;
 }
 ```
 

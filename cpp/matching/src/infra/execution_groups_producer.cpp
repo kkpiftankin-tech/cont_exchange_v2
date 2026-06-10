@@ -45,6 +45,12 @@ Decimal PriceOf(const d::ReferencePrices& prices, const std::string& symbol) {
   return it != prices.end() ? it->second : Decimal::zero();
 }
 
+// Знак target_ratio → сторона ноги: <0 = sell base, иначе buy.
+fob::common::v1::Side SideFromRatio(const Decimal& ratio) {
+  return Decimal::cmp(ratio, Decimal::zero()) < 0 ? fob::common::v1::SIDE_SELL
+                                                  : fob::common::v1::SIDE_BUY;
+}
+
 }  // namespace
 
 mv1::ExecutionGroup BuildExecutionGroup(const ExecutionGroupRecord& rec) {
@@ -60,6 +66,7 @@ mv1::ExecutionGroup BuildExecutionGroup(const ExecutionGroupRecord& rec) {
   eg.set_execution_group_id(rec.execution_group_id);
   eg.set_batch_id(rec.batch_id);
   eg.set_parent_order_id(rec.order.parent_order_id);
+  eg.set_user_id(rec.order.user_id);  // T-F09-062: для ledger postings
   // MVP-2: grouped solver → multileg_vector_solver, scope internal_batch.
   eg.set_execution_mode(fob::orders::v1::EXECUTION_MODE_MULTILEG_VECTOR_SOLVER);
   eg.set_atomicity_policy(PolicyProto(rec.order.atomicity_policy));
@@ -71,6 +78,8 @@ mv1::ExecutionGroup BuildExecutionGroup(const ExecutionGroupRecord& rec) {
   for (const auto& exec : rec.result.leg_execs) {
     auto* lr = eg.add_leg_results();
     lr->set_leg_id(exec.leg_id);
+    lr->set_instrument_symbol(exec.instrument_symbol);  // T-F09-062
+    lr->set_side(SideFromRatio(exec.target_ratio));     // T-F09-062
     *lr->mutable_exec_qty() = exec.executed_qty.to_proto();
     const Decimal price = PriceOf(rec.reference_prices, exec.instrument_symbol);
     *lr->mutable_exec_price() = price.to_proto();
