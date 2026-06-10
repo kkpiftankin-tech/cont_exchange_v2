@@ -50,10 +50,17 @@ ADR-031 ввёл `atomicity_scope = external_compensating`: combo может и�
 В grouped-batch matching **разделяет ноги активной группы**:
 - **internal** → существующий grouped solver (вектор `e`, ExecutionGroup) — без
   изменений;
-- **external** → `ExecutionIntent` через существующий `execution_intent_builder`
-  (`internal_order_id = leg_id`, `instrument`, `side`, `target_qty = q_max −
-  filled_cum`, `allowed_venues = venue_preferences`, tif/urgency из combo) →
-  `execution.intents`. venues исполняет, ledger постит report (как F-12).
+- **external** → `ExecutionIntent` **строится напрямую** из ноги и публикуется
+  через существующий `execution_intents_producer` → `execution.intents`
+  (`internal_order_id = leg_id`, `instrument`, `side` из знака `target_ratio`,
+  `target_qty = q_max − filled_cum`, `allowed_venues = venue_preferences`). venues
+  исполняет, ledger постит report (как F-12).
+
+> **Правка по факту реализации:** `execution_intent_builder` (app) — это
+> hedge-планировщик F-12 (OrderForecast / hedge_trigger_policy / double-цены), не
+> переиспользуется для combo-ног. Строим generic `ExecutionIntent` (proto) прямо.
+> `VectorLeg` (matching domain) расширяется `venue_preferences` + флагом external;
+> loader их грузит, grouped-batch исключает external из solve-вектора.
 
 External-ноги **не входят** во внутренний solve-вектор (как cancelled/waiting уже
 исключены). Так internal и external исполняются независимо — что и есть смысл
