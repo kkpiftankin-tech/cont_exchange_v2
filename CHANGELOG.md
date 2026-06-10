@@ -26,8 +26,18 @@
 - matching infra: `ExecutionGroups` producer (Kafka) + Postgres repo
   (идемпотентно, проверено против live PG) + active groups loader (live PG).
 - Интеграция в `matching_loop` (gated на `MATCHING_POSTGRES_DSN`, аддитивно к
-  single-leg F-04). **Live end-to-end:** gRPC create multileg combo →
-  `execution_groups` (PG) + `execution.groups` (Kafka).
+  single-leg F-04).
+- **filled_cum convergence (GAP-1 закрыт):** partial-группы накапливают
+  `filled_cum` идемпотентно; combo → filled при исчерпании binding-ноги
+  (ratio-максимум); пустые batch'и не публикуются.
+- **Feature flags + policy (002):** `ComboPolicy` (флаги `f09_*_enabled` +
+  лимиты) — честный create-gate в order_flow (env `F09_*`).
+- **ExecutionGroup enrichment (062):** proto += `user_id` + LegResult
+  `instrument_symbol`/`side`; `combo_orders` += `user_id`/`account_id`.
+- **Ledger grouped postings (060):** `ApplyExecutionGroup` over `execution.groups`
+  consumer (идемпотентно по `execution_group_id`).
+- **Полный E2E (090) проверен LIVE:** multileg combo → matching → `execution.groups`
+  → ledger position владельца.
 
-**Известные гэпы (см. feature README):** фидбэк `filled_cum` для partial-групп,
-ledger grouped postings (060), risk `PreTradeCheckGroup` (040), полный E2E (090).
+**Остаток MVP-2:** risk `PreTradeCheckGroup` (040, сейчас stub-approve).
+**Известные нюансы (feature README):** `exec_price=0` для не котируемых символов.
