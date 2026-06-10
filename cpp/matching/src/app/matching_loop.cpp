@@ -373,6 +373,7 @@ MatchingLoop::MatchingLoop(
       active_groups_loader_ =
           std::make_unique<infra::PostgresActiveGroupsLoader>(postgres_dsn);
       eg_repo_ = std::make_unique<infra::PostgresExecutionGroupsRepository>(postgres_dsn);
+      child_graph_repo_ = std::make_unique<infra::PostgresChildGraphRepository>(postgres_dsn);
       eg_producer_.emplace(producer_);
       solve_grouped_uc_.emplace(grouped_solver_);
       grouped_enabled_ = true;
@@ -899,6 +900,33 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
                                {"parent_order_id", r.parent_order_id},
                                {"error", ex.what()}});
       }
+
+      // MVP-4 (ADR-035): OCO/bracket leg-переходы после исполнения (filled_cum
+      // обновлён PersistExecutionGroup). Аддитивно; группы без графа → no-op.
+      if (child_graph_repo_) {
+        try {
+          auto state = child_graph_repo_->LoadComboGroupState(r.parent_order_id);
+          if (!state.edges.empty()) {
+            auto transitions = domain::ApplyOCOTransitions(state);
+            auto bracket = domain::ResizeBracketExits(state);
+            transitions.insert(transitions.end(), bracket.begin(), bracket.end());
+            if (!transitions.empty()) {
+              child_graph_repo_->PersistChildGraphTransitions(rec.execution_group_id, batch_id,
+                                                              state, transitions);
+              cex::common::log_json("INFO", "Child-graph transitions applied",
+                                    {{"batch_id", batch_id},
+                                     {"parent_order_id", r.parent_order_id},
+                                     {"transitions", std::to_string(transitions.size())}});
+            }
+          }
+        } catch (const std::exception& ex) {
+          cex::common::log_json("ERROR", "Child-graph step failed",
+                                {{"batch_id", batch_id},
+                                 {"parent_order_id", r.parent_order_id},
+                                 {"error", ex.what()}});
+        }
+      }
+
       ++produced;
     }
 

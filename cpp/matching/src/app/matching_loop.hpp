@@ -21,6 +21,7 @@
 #include "infra/active_grouped_orders_loader.hpp"
 #include "infra/execution_groups_producer.hpp"
 #include "infra/postgres_execution_groups_repository.hpp"
+#include "infra/postgres_child_graph_repository.hpp"
 #include "infra/market_data/market_data_client.hpp"
 #include "fob/matching/v1/batch.pb.h"
 #include "infra/market_data/market_data_client.hpp"
@@ -113,6 +114,7 @@ class MatchingLoop {
   std::optional<infra::ExecutionGroupsProducer> eg_producer_;  // обёртка над producer_
   std::unique_ptr<infra::PostgresActiveGroupsLoader> active_groups_loader_;
   std::unique_ptr<infra::PostgresExecutionGroupsRepository> eg_repo_;
+  std::unique_ptr<infra::PostgresChildGraphRepository> child_graph_repo_;  // MVP-4 OCO/bracket
 };
 
 }  // namespace cex::matching::app
