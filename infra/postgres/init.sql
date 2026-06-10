@@ -537,6 +537,30 @@ CREATE INDEX IF NOT EXISTS idx_conditional_links_parent_order
 CREATE INDEX IF NOT EXISTS idx_conditional_links_from_leg
   ON conditional_links (from_leg_id);
 
+-- F-09 MVP-5 (ADR-037): требования компенсации при сбое внешней ноги combo.
+-- external_compensating: внутренние ноги исполнены, внешняя провалилась → pending.
+-- Сам компенсирующий трейд (реверс/повторный хедж) — operator/policy-driven (MVP-6).
+CREATE TABLE IF NOT EXISTS combo_compensations (
+  compensation_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  parent_order_id     UUID NOT NULL REFERENCES combo_orders(combo_order_id) ON DELETE CASCADE,
+  leg_id              UUID NOT NULL,
+  -- report_id внешней ExecutionReport, вызвавшей компенсацию (idempotency)
+  report_id           TEXT NOT NULL,
+  -- reason: rejected | timeout | cancelled (статус провала внешней ноги)
+  reason              TEXT NOT NULL,
+  internal_filled_qty NUMERIC(38,18),
+  status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'resolved', 'cancelled')),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT combo_compensations_idem UNIQUE (parent_order_id, leg_id, report_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_combo_compensations_parent
+  ON combo_compensations (parent_order_id);
+CREATE INDEX IF NOT EXISTS idx_combo_compensations_status
+  ON combo_compensations (status);
+
 -- ---------------------------------------------------------------------------
 -- execution_groups: result of one grouped solve cycle for one ComboOrder.
 -- execution_group_id is the idempotency key for ledger (ADR-033).
