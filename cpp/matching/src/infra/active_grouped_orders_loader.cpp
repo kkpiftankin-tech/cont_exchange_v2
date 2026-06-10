@@ -92,7 +92,8 @@ ORDER BY combo_order_id
 
     const pqxx::result legs = tx.exec_params(R"SQL(
 SELECT leg_id::text, instrument_symbol, side, ratio, weight,
-       p_low, p_high, q_rate, q_max, filled_cum
+       p_low, p_high, q_rate, q_max, filled_cum,
+       array_to_string(venue_preferences, ',') AS venue_prefs
 FROM combo_order_legs
 WHERE parent_order_id = $1::uuid
   AND status NOT IN ('cancelled', 'waiting_for_trigger')
@@ -114,6 +115,18 @@ ORDER BY leg_id
       leg.q_rate = NumOrZero(l["q_rate"]);
       leg.q_max = NumOrZero(l["q_max"]);
       leg.filled_cum = NumOrZero(l["filled_cum"]);
+      // MVP-5: venue_preferences (TEXT[] → CSV); непусто и без "internal" → external.
+      if (!l["venue_prefs"].is_null()) {
+        const std::string csv = l["venue_prefs"].as<std::string>();
+        std::size_t start = 0;
+        while (start < csv.size()) {
+          const std::size_t comma = csv.find(',', start);
+          const std::size_t end = comma == std::string::npos ? csv.size() : comma;
+          if (end > start) leg.venue_preferences.push_back(csv.substr(start, end - start));
+          if (comma == std::string::npos) break;
+          start = comma + 1;
+        }
+      }
       order.legs.push_back(std::move(leg));
     }
 

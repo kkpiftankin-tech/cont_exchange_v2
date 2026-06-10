@@ -54,6 +54,7 @@
 #include "fob/execution/v1/execution.pb.h"
 
 #include "app/execution_planner.hpp"
+#include "app/combo_external_routing.hpp"
 #include "app/hedge_execution_intents_publisher.hpp"
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"
@@ -869,12 +870,40 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
       }
     }
 
-    const auto results = solve_grouped_uc_->Execute(groups, reference_prices);
+    // MVP-5 (ADR-037): external-ноги combo исполняются на venue через
+    // ExecutionIntent, а не внутренним solver'ом. Split аддитивен — для combo без
+    // external-ног (venue_preferences пусто) internal_groups == groups, поведение
+    // не меняется.
+    std::vector<domain::MultiLegVectorOrder> internal_groups;
+    internal_groups.reserve(groups.size());
+    std::size_t external_intents = 0;
+    {
+      infra::ExecutionIntentsProducer ext_producer(producer_);
+      for (const auto& g : groups) {
+        auto split = SplitInternalExternal(g);
+        for (const auto& ext_leg : split.external) {
+          const auto intent =
+              BuildExternalIntent(g.parent_order_id, batch_id, cex::common::uuid_v4(), ext_leg);
+          if (ext_producer.produce(intent)) ++external_intents;
+        }
+        if (!split.internal.empty()) {
+          domain::MultiLegVectorOrder ig = g;
+          ig.legs = std::move(split.internal);
+          internal_groups.push_back(std::move(ig));
+        }
+      }
+    }
+    if (external_intents > 0) {
+      cex::common::log_json("INFO", "Combo external legs routed to venues",
+                            {{"batch_id", batch_id}, {"intents", std::to_string(external_intents)}});
+    }
+
+    const auto results = solve_grouped_uc_->Execute(internal_groups, reference_prices);
 
     std::size_t produced = 0;
     for (const auto& r : results) {
       const domain::MultiLegVectorOrder* order = nullptr;
-      for (const auto& g : groups) {
+      for (const auto& g : internal_groups) {
         if (g.parent_order_id == r.parent_order_id) order = &g;
       }
       if (order == nullptr) continue;
