@@ -14,11 +14,32 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cex/common/decimal.hpp"
 
 namespace cex::matching::domain {
+
+/// Тип группового ограничения (MVP-3): линейная комбинация по символам.
+enum class GroupConstraintType {
+  kSpreadRange,      ///< Σ coeff·price ∈ [L,U]
+  kFactorNeutrality, ///< Σ coeff·signed_exec ∈ [L,U] (обычно ≈0)
+  kMaxTotalNotional, ///< Σ |exec·price| ≤ U
+  kOther             ///< прочие — пока не оцениваются
+};
+
+enum class GroupConstraintSeverity { kHard, kSoft };
+
+/// Групповое ограничение (combo_constraints).
+struct GroupConstraint {
+  std::string constraint_id;
+  GroupConstraintType type{GroupConstraintType::kOther};
+  std::unordered_map<std::string, cex::common::Decimal> coefficients;  // symbol → coeff
+  std::optional<cex::common::Decimal> lower;
+  std::optional<cex::common::Decimal> upper;
+  GroupConstraintSeverity severity{GroupConstraintSeverity::kHard};
+};
 
 /// Политика атомарности группы (зеркало AtomicityPolicy из combo.proto).
 enum class GroupAtomicityPolicy {
@@ -93,6 +114,9 @@ struct MultiLegVectorOrder {
 
   /// Максимально допустимое отклонение соотношения (bps), для scalable.
   std::int32_t max_ratio_deviation_bps{0};
+
+  /// Групповые ограничения (MVP-3): spread/factor/notional.
+  std::vector<GroupConstraint> constraints;
 };
 
 /// Feasible cap одной ноги: Q_feasible = min(remaining, rate, liq, risk, venue).

@@ -48,6 +48,7 @@ add_executable(matching
   src/domain/multileg_feasible_caps.cpp
   src/domain/grouped_solver_bisection.cpp
   src/domain/child_graph_transitions.cpp
+  src/domain/constraint_evaluator.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -153,6 +154,18 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_child_graph_transitions_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_child_graph_transitions_test COMMAND matching_child_graph_transitions_test)
+
+  # F-09 (T-F09-094, MVP-3): group constraint evaluator (spread/factor/notional).
+  add_executable(matching_constraint_evaluator_test
+    tests/domain/constraint_evaluator_test.cpp
+    src/domain/constraint_evaluator.cpp
+  )
+  target_include_directories(matching_constraint_evaluator_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_constraint_evaluator_test PRIVATE cex_common)
+  target_compile_options(matching_constraint_evaluator_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_constraint_evaluator_test COMMAND matching_constraint_evaluator_test)
 
   # F-09 (T-F09-045): SolveGroupedBatch use case (solve loop over active groups).
   add_executable(matching_solve_grouped_batch_test
