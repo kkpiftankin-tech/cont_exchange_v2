@@ -172,9 +172,43 @@ void test_apply_batch_result_empty_batch_keeps_balances() {
 
 }  // namespace
 
+// F-09 (T-F09-060): ApplyExecutionGroup постит ноги в позиции + идемпотентность.
+void test_apply_execution_group_updates_positions() {
+  cex::ledger::app::LedgerUseCases uc;
+
+  fob::matching::v1::ExecutionGroup eg;
+  eg.set_execution_group_id("eg-ledger-1");
+  eg.set_parent_order_id("parent-1");
+  eg.set_user_id("grp-user");
+
+  auto* lr1 = eg.add_leg_results();
+  lr1->set_instrument_symbol("BTCUSDT");
+  lr1->set_side(fob::common::v1::SIDE_BUY);
+  *lr1->mutable_exec_qty() = make_decimal(2, 0);    // 2.0
+  *lr1->mutable_exec_price() = make_decimal(100, 0);
+
+  auto* lr2 = eg.add_leg_results();
+  lr2->set_instrument_symbol("ETHUSDT");
+  lr2->set_side(fob::common::v1::SIDE_BUY);
+  *lr2->mutable_exec_qty() = make_decimal(3, 0);    // 3.0
+  *lr2->mutable_exec_price() = make_decimal(50, 0);
+
+  uc.ApplyExecutionGroup(eg);
+  const auto btc = uc.GetPosition("grp-user", "BTCUSDT");
+  const auto eth = uc.GetPosition("grp-user", "ETHUSDT");
+  assert(cex::common::Decimal::cmp(btc.amount, cex::common::Decimal{2, 0}) == 0);
+  assert(cex::common::Decimal::cmp(eth.amount, cex::common::Decimal{3, 0}) == 0);
+
+  // Идемпотентность: повтор той же группы → позиции не меняются (не x2).
+  uc.ApplyExecutionGroup(eg);
+  const auto btc2 = uc.GetPosition("grp-user", "BTCUSDT");
+  assert(cex::common::Decimal::cmp(btc2.amount, cex::common::Decimal{2, 0}) == 0);
+}
+
 int main() {
   test_apply_batch_result_buy_updates_balances();
   test_apply_batch_result_sell_updates_balances();
   test_apply_batch_result_empty_batch_keeps_balances();
+  test_apply_execution_group_updates_positions();
   return 0;
 }

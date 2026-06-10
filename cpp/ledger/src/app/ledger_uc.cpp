@@ -417,6 +417,36 @@ void LedgerUseCases::calculate_and_record_pnl(
 // BUY → увеличиваем позицию + пересчитываем weighted-average entry price.
 // SELL → calculate_and_record_pnl (см. выше).
 //
+// F-09 (T-F09-060): применяет grouped execution к позициям владельца.
+void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup& eg) {
+  // Пустая группа (blocked / cancelled_by_atomicity) — постить нечего.
+  if (eg.leg_results_size() == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  // Идемпотентность по execution_group_id: повторная доставка не дублирует постинги.
+  if (!seen_execution_group_ids_.insert(eg.execution_group_id()).second) {
+    cex::common::log_json("INFO", "Ledger skipped duplicate ExecutionGroup",
+                          {{"execution_group_id", eg.execution_group_id()}});
+    return;
+  }
+  // Каждая нога → позиция владельца (переиспользуем single-leg математику).
+  for (const auto& lr : eg.leg_results()) {
+    fob::matching::v1::FlowFill fill;
+    fill.set_user_id(eg.user_id());
+    fill.mutable_instrument()->set_symbol(lr.instrument_symbol());
+    fill.set_side(lr.side());
+    *fill.mutable_executed_qty() = lr.exec_qty();
+    *fill.mutable_price() = lr.exec_price();
+    update_position_for_fill(fill);
+  }
+  cex::common::log_json("INFO", "Ledger applied ExecutionGroup",
+                        {{"execution_group_id", eg.execution_group_id()},
+                         {"parent_order_id", eg.parent_order_id()},
+                         {"user_id", eg.user_id()},
+                         {"legs", std::to_string(eg.leg_results_size())}});
+}
+
 // Weighted avg формула: new_avg = (old_amount * old_avg + new_qty * new_price) / (old_amount + new_qty).
 // Также через double — TECHNICAL DEBT, см. above.
 // ============================================================================
