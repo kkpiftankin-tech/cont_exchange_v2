@@ -7,7 +7,7 @@ owners:
   - core-team
 related:
   - docs/03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md
-  - docs/03-architecture/adr/ADR-035-oco-bracket-runtime.md
+  - docs/03-architecture/adr/ADR-038-oco-bracket-runtime.md
   - docs/02-system/features/F-09-batch-combo-orders/feature.yaml
   - docs/02-system/features/F-12-execution-hedge/
   - cpp/matching/src/app/execution_intent_builder.hpp

@@ -901,7 +901,7 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
                                {"error", ex.what()}});
       }
 
-      // MVP-4 (ADR-035): OCO/bracket leg-переходы после исполнения (filled_cum
+      // MVP-4 (ADR-038): OCO/bracket leg-переходы после исполнения (filled_cum
       // обновлён PersistExecutionGroup). Аддитивно; группы без графа → no-op.
       if (child_graph_repo_) {
         try {

@@ -1,5 +1,5 @@
 // ============================================================================
-// postgres_child_graph_repository_test.cpp — F-09 (MVP-4, ADR-035).
+// postgres_child_graph_repository_test.cpp — F-09 (MVP-4, ADR-038).
 // Интеграционный тест с реальным PostgreSQL (TEST_PG_DSN; иначе SKIP).
 // OCO: A filled → cancel sibling B. Bracket: A filled → resize exit C (q_max,
 // active). Идемпотентность по idempotency_key. group_id = execution_group_id.

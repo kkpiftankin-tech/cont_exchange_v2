@@ -251,7 +251,7 @@ if(BUILD_TESTING)
   target_compile_options(matching_active_groups_loader_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_active_groups_loader_test COMMAND matching_active_groups_loader_test)
 
-  # F-09 (MVP-4, ADR-035): child-graph repository — OCO/bracket leg transitions (PG).
+  # F-09 (MVP-4, ADR-038): child-graph repository — OCO/bracket leg transitions (PG).
   add_executable(matching_child_graph_repo_test
     tests/infra/postgres_child_graph_repository_test.cpp
     src/infra/postgres_child_graph_repository.cpp

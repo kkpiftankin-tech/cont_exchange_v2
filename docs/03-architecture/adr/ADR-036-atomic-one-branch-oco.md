@@ -6,21 +6,21 @@ owners:
   - architecture
   - core-team
 related:
-  - docs/03-architecture/adr/ADR-035-oco-bracket-runtime.md
+  - docs/03-architecture/adr/ADR-038-oco-bracket-runtime.md
   - docs/02-system/features/F-09-batch-combo-orders/feature.yaml
   - cpp/matching/src/domain/child_graph_transitions.cpp
   - cpp/matching/src/domain/trigger_condition.cpp
   - cpp/order_flow/src/app/create_combo_order_use_case.cpp
-source: ADR-035 §2 (deferred MVP-4.1); F-09 v2 §11.6
+source: ADR-038 §2 (deferred MVP-4.1); F-09 v2 §11.6
 ---
 
 # ADR-036: Atomic one-branch OCO через conditional-ветви
 
 ## Контекст
 
-ADR-035 ввёл OCO runtime в форме **eventual-consistency**: все ветви OCO активны,
+ADR-038 ввёл OCO runtime в форме **eventual-consistency**: все ветви OCO активны,
 basket-solver исполняет их вместе, после первого fill `ApplyOCOTransitions`
-отменяет сиблингов. Один batch может частично исполнить >1 ветви до отмены. ADR-035
+отменяет сиблингов. Один batch может частично исполнить >1 ветви до отмены. ADR-038
 отложил **атомарный one-branch OCO** (исполняется ровно одна ветвь) в MVP-4.1,
 пометив открытым вопрос «метрика выбора ветви».
 
@@ -33,7 +33,7 @@ MVP-4.1 добавил **trigger_condition** (28eaf8a6): нога в `waiting_fo
 
 **Атомарный one-branch OCO достигается композицией уже реализованных шагов —
 trigger_condition + OCO — без нового кода.** Триггер-условие ветви *является*
-метрикой выбора, которую ADR-035 считал открытой.
+метрикой выбора, которую ADR-038 считал открытой.
 
 ### Conditional OCO (атомарный)
 

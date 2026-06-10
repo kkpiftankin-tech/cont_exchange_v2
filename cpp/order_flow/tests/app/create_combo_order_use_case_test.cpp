@@ -195,7 +195,7 @@ int main() {
                 "policy: too many legs → reject") && ok;
   }
 
-  // 8) AC-F09-011 + ADR-035: OCO combo → honest eventual (best_effort) guarantee.
+  // 8) AC-F09-011 + ADR-038: OCO combo → honest eventual (best_effort) guarantee.
   {
     FakeRepo repo;
     cex::order_flow::infra::OrdersNormalizedGroupedProducer producer{

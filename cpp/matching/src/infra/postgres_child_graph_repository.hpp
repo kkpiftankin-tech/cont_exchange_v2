@@ -1,11 +1,11 @@
 #pragma once
 // ============================================================================
-// postgres_child_graph_repository.hpp — F-09 (MVP-4, ADR-035). Matching infra.
+// postgres_child_graph_repository.hpp — F-09 (MVP-4, ADR-038). Matching infra.
 //
 // Data-слой OCO/bracket runtime: загрузка ComboGroupState (ноги со статусом +
 // граф conditional_links) и идемпотентный персист leg-переходов после grouped
 // batch. group_state_transitions.group_id = execution_group_id триггерящего
-// batch (ADR-035 §1). Доменные переходы — child_graph_transitions.{hpp,cpp}.
+// batch (ADR-038 §1). Доменные переходы — child_graph_transitions.{hpp,cpp}.
 // ============================================================================
 
 #include <functional>

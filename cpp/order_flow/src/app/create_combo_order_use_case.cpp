@@ -190,7 +190,7 @@ void SetGuarantees(fob::orders::v1::CreateComboOrderResponse& resp, pv1::Executi
     resp.set_execution_guarantees(
         "orchestration_only: ноги исполняются независимо; ratio/weights/spread НЕ гарантируются");
   } else if (combo_type == pv1::COMBO_TYPE_OCO) {
-    // ADR-035: OCO в MVP — eventual (best_effort), не атомарный one-branch.
+    // ADR-038: OCO в MVP — eventual (best_effort), не атомарный one-branch.
     resp.set_ratio_guaranteed(false);
     resp.set_execution_guarantees(
         "OCO eventual: исполняется одна ветвь, сиблинги отменяются; возможно частичное "

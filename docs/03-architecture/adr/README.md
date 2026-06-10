@@ -47,14 +47,9 @@
 | ADR-032 | F-09 parent/child (BatchOrder→ComboOrder→Leg) order model | [accepted](ADR-032-parent-child-order-model.md) |
 | ADR-033 | F-09 `execution.groups` Kafka topic | [accepted](ADR-033-execution-groups-topic.md) |
 | ADR-034 | F-09 grouped constraint solver (feasibility-gate now, OSQP QP later) | [accepted](ADR-034-grouped-constraint-solver.md) |
-| ADR-035 | F-09 OCO/bracket runtime — leg-transition persistence + execution semantics | [accepted](ADR-035-oco-bracket-runtime.md) |
 | ADR-035 | FOB Solver Mathematical Foundation (Hamiltonian-Based, IN-012) | [accepted](ADR-035-fob-solver-mathematical-foundation.md) |
 | ADR-036 | F-09 atomic one-branch OCO via conditional branches (no new solver) | [accepted](ADR-036-atomic-one-branch-oco.md) |
 | ADR-037 | F-09 external-leg execution + compensation (MVP-5, reuse F-12 hedge path) | [accepted](ADR-037-external-leg-execution-compensation.md) |
-
-> ⚠️ **Numbering collision:** два файла занимают `ADR-035` (OCO/bracket runtime —
-> F-09, и FOB Solver Mathematical Foundation — IN-012, созданы параллельно). Одно
-> требует переномерации (напр. FOB-solver → следующий свободный номер). Зафиксировано
-> для разрешения владельцем; ссылки в коде/доках пока указывают на текущие имена файлов.
+| ADR-038 | F-09 OCO/bracket runtime — leg-transition persistence + execution semantics (ранее ADR-035, переномерован из-за коллизии) | [accepted](ADR-038-oco-bracket-runtime.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

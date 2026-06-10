@@ -1,5 +1,5 @@
 ---
-id: ADR-035
+id: ADR-038
 status: accepted
 date: 2026-06-10
 owners:
@@ -17,7 +17,10 @@ related:
 source: IN-011 (F-09 v2) §11.6; F-09 v2 system-impact §3.7, §3.9
 ---
 
-# ADR-035: OCO/bracket runtime — execution-семантика и персистенс leg-переходов
+# ADR-038: OCO/bracket runtime — execution-семантика и персистенс leg-переходов
+
+> **Note:** ранее имел номер ADR-035 (коллизия с ADR-035 FOB Solver Mathematical
+> Foundation из IN-012, закоммиченным раньше) → переномерован в ADR-038.
 
 ## Контекст
 

@@ -1,5 +1,5 @@
 // ============================================================================
-// postgres_child_graph_repository.cpp — F-09 (MVP-4, ADR-035). См. .hpp.
+// postgres_child_graph_repository.cpp — F-09 (MVP-4, ADR-038). См. .hpp.
 // ============================================================================
 
 #include "infra/postgres_child_graph_repository.hpp"
@@ -133,7 +133,7 @@ void PostgresChildGraphRepository::PersistChildGraphTransitions(
           "WHERE leg_id = $1::uuid AND status = 'waiting_for_trigger'",
           t.target_leg_id);
     }
-    // group_id = execution_group_id триггерящего batch (ADR-035 §1); идемпотентно.
+    // group_id = execution_group_id триггерящего batch (ADR-038 §1); идемпотентно.
     tx.exec_params(R"SQL(
 INSERT INTO group_state_transitions
   (group_id, from_status, to_status, batch_id, reason, idempotency_key)
