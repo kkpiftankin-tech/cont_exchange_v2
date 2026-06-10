@@ -6,6 +6,9 @@
 
 #include <utility>
 
+#include "cex/common/decimal.hpp"
+#include "domain/constraint_evaluator.hpp"
+
 namespace cex::matching::app {
 
 SolveGroupedBatchUseCase::SolveGroupedBatchUseCase(domain::IGroupedSolver& solver)
@@ -27,6 +30,26 @@ std::vector<GroupBatchResult> SolveGroupedBatchUseCase::Execute(
     GroupBatchResult result;
     result.parent_order_id = group.parent_order_id;
     result.solve = solver_.Solve(input);
+
+    // MVP-3: применяем групповые ограничения к solved execs. Hard-нарушение
+    // блокирует группу (ничего не исполняется), soft → degrade (фиксируем).
+    if (!group.constraints.empty() && !result.solve.leg_execs.empty()) {
+      const auto violations =
+          domain::EvaluateConstraints(group.constraints, result.solve.leg_execs, reference_prices);
+      bool hard = false;
+      for (const auto& v : violations) {
+        result.solve.violated_constraints.push_back(v.constraint_id);
+        if (v.hard) hard = true;
+      }
+      if (hard) {
+        result.solve.leg_execs.clear();
+        result.solve.execution_scale = cex::common::Decimal::zero();
+        result.solve.status = domain::GroupExecStatus::kBlocked;
+      } else if (!violations.empty()) {
+        result.solve.status = domain::GroupExecStatus::kDegraded;
+      }
+    }
+
     results.push_back(std::move(result));
   }
 

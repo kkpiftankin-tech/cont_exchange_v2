@@ -173,6 +173,7 @@ if(BUILD_TESTING)
     src/app/solve_grouped_batch_use_case.cpp
     src/domain/grouped_solver_bisection.cpp
     src/domain/multileg_feasible_caps.cpp
+    src/domain/constraint_evaluator.cpp
   )
   target_include_directories(matching_solve_grouped_batch_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -33,6 +33,14 @@ d::GroupFallbackPolicy FallbackFromDb(const std::string& s) {
   return d::GroupFallbackPolicy::kScaleDown;
 }
 
+// MVP-3: тип ограничения. Оцениваемые — spread/factor/notional; прочие → kOther.
+d::GroupConstraintType ConstraintTypeFromDb(const std::string& s) {
+  if (s == "spread_range") return d::GroupConstraintType::kSpreadRange;
+  if (s == "factor_neutrality") return d::GroupConstraintType::kFactorNeutrality;
+  if (s == "max_total_notional") return d::GroupConstraintType::kMaxTotalNotional;
+  return d::GroupConstraintType::kOther;
+}
+
 // Decimal из nullable NUMERIC-поля (NULL → zero).
 Decimal NumOrZero(const pqxx::field& f) {
   return f.is_null() ? Decimal::zero() : ParsePgNumeric(f.as<std::string>());
@@ -106,6 +114,33 @@ ORDER BY leg_id
       leg.q_max = NumOrZero(l["q_max"]);
       leg.filled_cum = NumOrZero(l["filled_cum"]);
       order.legs.push_back(std::move(leg));
+    }
+
+    // MVP-3: групповые ограничения (combo_constraints). coefficients (JSONB
+    // {symbol: coeff}) разворачиваем через jsonb_each_text — без C++ JSON-парсера.
+    const pqxx::result cons = tx.exec_params(R"SQL(
+SELECT constraint_id::text, constraint_type, lower_bound, upper_bound, severity
+FROM combo_constraints WHERE parent_order_id = $1::uuid
+ORDER BY constraint_id
+)SQL",
+                                             order.parent_order_id);
+    for (const auto& c : cons) {
+      d::GroupConstraint gc;
+      gc.constraint_id = c["constraint_id"].as<std::string>();
+      gc.type = ConstraintTypeFromDb(c["constraint_type"].as<std::string>());
+      if (!c["lower_bound"].is_null()) gc.lower = ParsePgNumeric(c["lower_bound"].as<std::string>());
+      if (!c["upper_bound"].is_null()) gc.upper = ParsePgNumeric(c["upper_bound"].as<std::string>());
+      gc.severity = c["severity"].as<std::string>() == "soft" ? d::GroupConstraintSeverity::kSoft
+                                                              : d::GroupConstraintSeverity::kHard;
+      const pqxx::result coeffs = tx.exec_params(R"SQL(
+SELECT key, value FROM jsonb_each_text(
+  (SELECT coefficients FROM combo_constraints WHERE constraint_id = $1::uuid))
+)SQL",
+                                                 gc.constraint_id);
+      for (const auto& kv : coeffs) {
+        gc.coefficients[kv[0].as<std::string>()] = ParsePgNumeric(kv[1].as<std::string>());
+      }
+      order.constraints.push_back(std::move(gc));
     }
 
     result.push_back(std::move(order));

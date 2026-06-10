@@ -107,6 +107,31 @@ int main() {
     ok = expect(same, "replay batch: identical results (idempotent, no dup fills)") && ok;
   }
 
+  // MVP-3: hard factor-constraint нарушен → группа blocked.
+  {
+    d::MultiLegVectorOrder g;
+    g.parent_order_id = "g-constraint";
+    g.atomicity_policy = d::GroupAtomicityPolicy::kScalableAtomic;
+    g.legs.push_back(MakeLeg("BTCUSDT", 1, 10));  // buy (+)
+    g.legs.push_back(MakeLeg("ETHUSDT", 1, 10));  // buy (+) → factor != 0
+    d::GroupConstraint c;
+    c.constraint_id = "fc";
+    c.type = d::GroupConstraintType::kFactorNeutrality;
+    c.coefficients = {{"BTCUSDT", Decimal{1, 0}}, {"ETHUSDT", Decimal{1, 0}}};
+    c.lower = Decimal{-1, 0};
+    c.upper = Decimal{1, 0};
+    c.severity = d::GroupConstraintSeverity::kHard;
+    g.constraints.push_back(c);
+
+    const auto r = uc.Execute({g}, prices);
+    // solver: BTC=10, ETH=10 → factor = 10 + 10 = 20 > 1 → hard → blocked.
+    ok = expect(r.size() == 1 && r[0].solve.status == d::GroupExecStatus::kBlocked,
+                "hard factor constraint → blocked") && ok;
+    ok = expect(r.size() == 1 && r[0].solve.leg_execs.empty(), "constraint-blocked: no fills") && ok;
+    ok = expect(r.size() == 1 && !r[0].solve.violated_constraints.empty(),
+                "violated_constraints recorded") && ok;
+  }
+
   if (ok) { std::cout << "solve_grouped_batch_use_case_test: ALL PASSED\n"; return 0; }
   return 1;
 }
