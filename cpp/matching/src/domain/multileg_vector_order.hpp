@@ -97,6 +97,18 @@ struct VectorLeg {
                ? cex::common::Decimal::sub(zero, target_ratio)
                : target_ratio;
   }
+
+  /// MVP-5 (ADR-037): предпочтения venue. Непусто и без "internal" → external-нога.
+  std::vector<std::string> venue_preferences;
+
+  /// Нога исполняется на внешней venue (через ExecutionIntent, не solver'ом).
+  [[nodiscard]] bool is_external() const {
+    if (venue_preferences.empty()) return false;
+    for (const auto& v : venue_preferences) {
+      if (v == "internal") return false;
+    }
+    return true;
+  }
 };
 
 /// Группа целиком.

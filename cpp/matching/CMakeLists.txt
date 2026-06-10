@@ -43,6 +43,7 @@ add_executable(matching
   src/app/run_batch_uc.cpp
   src/app/solver_metrics.cpp
   src/app/solve_grouped_batch_use_case.cpp
+  src/app/combo_external_routing.cpp
   src/domain/solver_impl.cpp
   src/domain/batch_result_to_fill_events.cpp
   src/domain/multileg_feasible_caps.cpp
@@ -286,6 +287,18 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_combo_compensation_repo_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_combo_compensation_repo_test COMMAND matching_combo_compensation_repo_test)
+
+  # F-09 MVP-5 (ADR-037): combo external-leg routing (split + build ExecutionIntent).
+  add_executable(matching_combo_external_routing_test
+    tests/app/combo_external_routing_test.cpp
+    src/app/combo_external_routing.cpp
+  )
+  target_include_directories(matching_combo_external_routing_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_combo_external_routing_test PRIVATE cex_common contracts_proto)
+  target_compile_options(matching_combo_external_routing_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_combo_external_routing_test COMMAND matching_combo_external_routing_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp
