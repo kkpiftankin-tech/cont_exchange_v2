@@ -60,7 +60,9 @@ FROM combo_order_legs WHERE parent_order_id = $1::uuid ORDER BY leg_id
 )SQL",
                                            parent_order_id);
   const pqxx::result links = tx.exec_params(R"SQL(
-SELECT link_type, from_leg_id::text, to_leg_id::text
+SELECT link_type, from_leg_id::text, to_leg_id::text,
+       condition->>'op' AS cond_op, condition->>'symbol' AS cond_symbol,
+       condition->>'price' AS cond_price
 FROM conditional_links WHERE parent_order_id = $1::uuid ORDER BY link_id
 )SQL",
                                             parent_order_id);
@@ -88,6 +90,13 @@ FROM conditional_links WHERE parent_order_id = $1::uuid ORDER BY link_id
     edge.type = EdgeTypeFromDb(e["link_type"].as<std::string>());
     edge.source_leg_id = e["from_leg_id"].as<std::string>();
     edge.target_leg_id = e["to_leg_id"].as<std::string>();
+    // MVP-4.1: trigged condition (NULL поля → безусловно).
+    if (!e["cond_op"].is_null() && !e["cond_symbol"].is_null() && !e["cond_price"].is_null()) {
+      edge.condition.present = true;
+      edge.condition.op = d::TriggerOpFromString(e["cond_op"].as<std::string>());
+      edge.condition.symbol = e["cond_symbol"].as<std::string>();
+      edge.condition.threshold = ParsePgNumeric(e["cond_price"].as<std::string>());
+    }
     state.edges.push_back(std::move(edge));
   }
   return state;
@@ -118,6 +127,11 @@ void PostgresChildGraphRepository::PersistChildGraphTransitions(
             "WHERE leg_id = $1::uuid",
             t.target_leg_id, ToPgNumeric(leg->q_max));
       }
+    } else if (t.action == "conditional_activate") {
+      tx.exec_params(
+          "UPDATE combo_order_legs SET status = 'active' "
+          "WHERE leg_id = $1::uuid AND status = 'waiting_for_trigger'",
+          t.target_leg_id);
     }
     // group_id = execution_group_id триггерящего batch (ADR-035 §1); идемпотентно.
     tx.exec_params(R"SQL(

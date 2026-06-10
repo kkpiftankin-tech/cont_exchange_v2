@@ -91,6 +91,35 @@ int main() {
     ok = expect(Find(g, "B")->status == d::GroupLegStatus::kActive, "OCO: B stays active") && ok;
   }
 
+  // Conditional (MVP-4.1): target waiting, условие → активация; идемпотентно.
+  {
+    d::ComboGroupState g;
+    g.parent_order_id = "p-cond";
+    g.legs.push_back(MakeLeg("S", 10, 5));  // source
+    auto target = MakeLeg("C", 10, 0);
+    target.status = d::GroupLegStatus::kWaitingForTrigger;
+    g.legs.push_back(target);
+    d::GroupEdge edge{d::GroupEdgeType::kConditional, "S", "C"};
+    edge.condition =
+        d::TriggerCondition{true, "BTCUSDT", d::TriggerOp::kGte, cex::common::Decimal{100, 0}};
+    g.edges.push_back(edge);
+
+    const d::ReferencePrices hit = {{"BTCUSDT", cex::common::Decimal{150, 0}}};   // 150 >= 100
+    const d::ReferencePrices miss = {{"BTCUSDT", cex::common::Decimal{50, 0}}};   // 50 < 100
+
+    const auto t_miss = d::ApplyConditionalActivations(g, miss);
+    ok = expect(t_miss.empty() && Find(g, "C")->status == d::GroupLegStatus::kWaitingForTrigger,
+                "conditional: not met → stays waiting") && ok;
+
+    const auto t_hit = d::ApplyConditionalActivations(g, hit);
+    ok = expect(t_hit.size() == 1 && t_hit[0].action == "conditional_activate",
+                "conditional: met → activated") && ok;
+    ok = expect(Find(g, "C")->status == d::GroupLegStatus::kActive, "conditional: C active") && ok;
+
+    const auto t_again = d::ApplyConditionalActivations(g, hit);
+    ok = expect(t_again.empty(), "conditional: idempotent (already active)") && ok;
+  }
+
   if (ok) { std::cout << "child_graph_transitions_test: ALL PASSED\n"; return 0; }
   return 1;
 }

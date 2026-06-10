@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "domain/trigger_condition.hpp"  // TriggerCondition + ReferencePrices
 
 namespace cex::matching::domain {
 
@@ -43,6 +44,7 @@ struct GroupEdge {
   GroupEdgeType type{GroupEdgeType::kConditional};
   std::string source_leg_id;
   std::string target_leg_id;
+  TriggerCondition condition;  ///< для kConditional (present=false → безусловно)
 };
 
 struct ComboGroupState {
@@ -73,5 +75,11 @@ struct GraphTransition {
 /// filled_cum>0, ресайзит target exit-ногу: q_max := entry.filled_cum.
 /// Идемпотентно: если q_max уже равен filled entry — перехода нет.
 [[nodiscard]] std::vector<GraphTransition> ResizeBracketExits(ComboGroupState& group);
+
+/// Conditional (MVP-4.1): для каждого ребра kConditional, если target-нога в
+/// waiting_for_trigger и условие выполнено (EvaluateTrigger по рыночным ценам),
+/// активирует target (→ Active). Идемпотентно: уже активную ногу не трогаем.
+[[nodiscard]] std::vector<GraphTransition> ApplyConditionalActivations(
+    ComboGroupState& group, const ReferencePrices& prices);
 
 }  // namespace cex::matching::domain

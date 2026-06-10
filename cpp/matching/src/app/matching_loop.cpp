@@ -910,6 +910,9 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
             auto transitions = domain::ApplyOCOTransitions(state);
             auto bracket = domain::ResizeBracketExits(state);
             transitions.insert(transitions.end(), bracket.begin(), bracket.end());
+            // MVP-4.1: conditional-активация по триггеру (рыночные цены batch).
+            auto conditional = domain::ApplyConditionalActivations(state, reference_prices);
+            transitions.insert(transitions.end(), conditional.begin(), conditional.end());
             if (!transitions.empty()) {
               child_graph_repo_->PersistChildGraphTransitions(rec.execution_group_id, batch_id,
                                                               state, transitions);

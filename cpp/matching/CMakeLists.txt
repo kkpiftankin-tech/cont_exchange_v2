@@ -147,6 +147,7 @@ if(BUILD_TESTING)
   add_executable(matching_child_graph_transitions_test
     tests/domain/child_graph_transitions_test.cpp
     src/domain/child_graph_transitions.cpp
+    src/domain/trigger_condition.cpp
   )
   target_include_directories(matching_child_graph_transitions_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -254,6 +255,7 @@ if(BUILD_TESTING)
     tests/infra/postgres_child_graph_repository_test.cpp
     src/infra/postgres_child_graph_repository.cpp
     src/domain/child_graph_transitions.cpp
+    src/domain/trigger_condition.cpp
     src/infra/postgres/decimal_conversion.cpp
   )
   target_include_directories(matching_child_graph_repo_test PRIVATE
