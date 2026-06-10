@@ -12,6 +12,11 @@ class GrpcRiskService final : public fob::risk::v1::RiskService::Service {
                             const fob::risk::v1::PreTradeCheckRequest* request,
                             fob::risk::v1::PreTradeCheckResponse* response) override;
 
+  // F-09 (T-F09-040): grouped pre-trade risk check.
+  grpc::Status PreTradeCheckGroup(grpc::ServerContext* context,
+                                  const fob::risk::v1::PreTradeCheckGroupRequest* request,
+                                  fob::risk::v1::PreTradeCheckGroupResponse* response) override;
+
   // F-12 DoD-3 (PR-F12-13).
   grpc::Status PreHedgeCheck(grpc::ServerContext* context,
                              const fob::risk::v1::PreHedgeCheckRequest* request,

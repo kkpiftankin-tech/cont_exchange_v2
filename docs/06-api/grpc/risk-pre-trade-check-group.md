@@ -2,8 +2,37 @@
 
 ## Status
 
-TODO / planned — proposed schema sketch. Материализуется code-implementer #11
-после утверждения risk-service boundaries (ADR-025).
+✅ **Реализовано (T-F09-040).** `rpc PreTradeCheckGroup` в `fob.risk.v1.RiskService`.
+Доменная логика — `cpp/risk/src/domain/grouped_risk_check.cpp` (pure,
+`GroupPreTradeCheck`): max legs, total notional ≤ limit, max external legs,
+`strict_atomic + external_compensating → REJECT` (AC-F09-006). Лимиты — из env
+(`F09_MAX_LEGS_PER_GROUP`, `F09_MAX_EXTERNAL_LEGS`, `F09_MAX_TOTAL_NOTIONAL`).
+order_flow `CreateComboOrderUseCase` вызывает метод через `RiskClient`
+(fail-closed). MVP: notional ноги оценивается как `q_max * p_high`; `external`
+всегда false (внешние ноги — MVP-5); spread/factor — MVP-3.
+
+Фактический контракт (`contracts/proto/fob/risk/v1/risk.proto`):
+
+```proto
+message GroupRiskLegInput {
+  string instrument_symbol = 1;
+  fob.common.v1.Decimal notional = 2;   // |qty * price| quote
+  bool external = 3;
+}
+message PreTradeCheckGroupRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  string atomicity_policy = 3;   // strict_atomic/scalable_atomic/best_effort/...
+  string atomicity_scope = 4;    // internal_batch/venue_native/...
+  repeated GroupRiskLegInput legs = 5;
+}
+message PreTradeCheckGroupResponse {
+  fob.common.v1.EventMeta meta = 1;
+  RiskDecision decision = 2;     // ACCEPT/REJECT
+  fob.common.v1.Error error = 3; // reason на REJECT (code=GROUPED_PRE_TRADE_REJECTED)
+}
+rpc PreTradeCheckGroup(PreTradeCheckGroupRequest) returns (PreTradeCheckGroupResponse);
+```
 
 ## Purpose
 

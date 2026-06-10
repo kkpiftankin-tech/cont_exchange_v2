@@ -34,6 +34,32 @@
 #include "infra/risk_client.hpp"
 #include "transport/grpc_order_flow_service.hpp"
 
+namespace {
+
+// F-09 (T-F09-040): domain enum → строка для PreTradeCheckGroupRequest.
+std::string ComboPolicyStr(cex::order_flow::domain::AtomicityPolicy p) {
+  using P = cex::order_flow::domain::AtomicityPolicy;
+  switch (p) {
+    case P::kStrictAtomic: return "strict_atomic";
+    case P::kScalableAtomic: return "scalable_atomic";
+    case P::kBestEffort: return "best_effort";
+    case P::kSequentialFallback: return "sequential_fallback";
+    case P::kExternalCompensating: return "external_compensating";
+    default: return "best_effort";
+  }
+}
+std::string ComboScopeStr(cex::order_flow::domain::AtomicityScope s) {
+  using S = cex::order_flow::domain::AtomicityScope;
+  switch (s) {
+    case S::kVenueNative: return "venue_native";
+    case S::kExternalCompensating: return "external_compensating";
+    case S::kNone: return "none";
+    default: return "internal_batch";
+  }
+}
+
+}  // namespace
+
 int main() {
   const std::string listen_addr =
       cex::common::Env::get_string("ORDER_FLOW_GRPC_LISTEN", "0.0.0.0:50051");
@@ -111,11 +137,32 @@ int main() {
     combo_policy.max_grouped_solve_time_ms =
         cex::common::Env::get_int("F09_MAX_GROUPED_SOLVE_TIME_MS", 100);
 
-    create_combo_uc.emplace(
-        *combo_repo, *grouped_producer,
-        // MVP-1 risk-заглушка (approve). Реальный RiskService/PreTradeCheckGroup — фаза E.
-        [](const cex::order_flow::domain::ComboOrder&, std::string&) { return true; },
-        combo_policy);
+    // F-09 (T-F09-040): реальный групповой risk через RiskService.PreTradeCheckGroup
+    // (отдельный клиент для combo-пути; fail-closed на gRPC-ошибке).
+    auto combo_risk = std::make_shared<cex::order_flow::infra::RiskClient>(risk_addr);
+    auto grouped_risk_check =
+        [combo_risk](const cex::order_flow::domain::ComboOrder& combo,
+                     std::string& reject_reason) -> bool {
+      fob::risk::v1::PreTradeCheckGroupRequest rreq;
+      rreq.set_user_id(combo.user_id);
+      rreq.set_atomicity_policy(ComboPolicyStr(combo.atomicity_policy));
+      rreq.set_atomicity_scope(ComboScopeStr(combo.atomicity_scope));
+      for (const auto& leg : combo.legs) {
+        auto* l = rreq.add_legs();
+        l->set_instrument_symbol(leg.instrument_symbol);
+        // Оценка notional ноги = q_max * p_high (верхняя граница). External — MVP false.
+        *l->mutable_notional() = cex::common::Decimal::mul(leg.q_max, leg.p_high).to_proto();
+        l->set_external(false);
+      }
+      const auto rresp = combo_risk->PreTradeCheckGroup(rreq);
+      if (rresp.decision() != fob::risk::v1::RISK_DECISION_ACCEPT) {
+        reject_reason = rresp.error().message().empty() ? rresp.error().code()
+                                                        : rresp.error().message();
+        return false;
+      }
+      return true;
+    };
+    create_combo_uc.emplace(*combo_repo, *grouped_producer, grouped_risk_check, combo_policy);
     cancel_combo_uc.emplace(*combo_repo, *grouped_producer);
     cex::common::log_json(
         "INFO", "OrderFlow F-09 combo orders enabled",
