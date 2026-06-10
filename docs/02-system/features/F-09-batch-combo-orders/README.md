@@ -1,10 +1,11 @@
 # F-09 — Batch, Combo and Multi-leg Orders
 
-> **Статус:** `in-progress` (PR #13). MVP-1 (`orchestration_only`) реализован;
-> MVP-2 grouped vector solver работает **live end-to-end** до `execution_groups`
-> (order_flow → matching → Kafka `execution.groups` + PG). Осталось: ledger
-> grouped postings (060), risk group (040), полный E2E (090), фидбэк `filled_cum`
-> для partial-групп (см. Known Gaps ниже).
+> **Статус:** `in-progress` (PR #13). MVP-1 (`orchestration_only`) реализован.
+> MVP-2 grouped vector solver работает **live end-to-end до позиций ledger**:
+> order_flow → matching → Kafka `execution.groups` + PG → ledger grouped postings
+> (T-F09-090 проверен LIVE). Реализованы: feature flags/policy (002), proto
+> enrichment (062), ledger (060); GAP `filled_cum` закрыт. Остаток MVP-2 —
+> только risk `PreTradeCheckGroup` (040, сейчас stub-approve).
 > Источник: [incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md](../../../../incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md) (IN-011).
 
 ## Описание
