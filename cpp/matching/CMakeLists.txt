@@ -49,6 +49,7 @@ add_executable(matching
   src/domain/grouped_solver_bisection.cpp
   src/domain/child_graph_transitions.cpp
   src/domain/constraint_evaluator.cpp
+  src/domain/trigger_condition.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -167,6 +168,18 @@ if(BUILD_TESTING)
   target_link_libraries(matching_constraint_evaluator_test PRIVATE cex_common)
   target_compile_options(matching_constraint_evaluator_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_constraint_evaluator_test COMMAND matching_constraint_evaluator_test)
+
+  # F-09 (MVP-4.1): trigger condition evaluator (conditional links).
+  add_executable(matching_trigger_condition_test
+    tests/domain/trigger_condition_test.cpp
+    src/domain/trigger_condition.cpp
+  )
+  target_include_directories(matching_trigger_condition_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_trigger_condition_test PRIVATE cex_common)
+  target_compile_options(matching_trigger_condition_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_trigger_condition_test COMMAND matching_trigger_condition_test)
 
   # F-09 (T-F09-045): SolveGroupedBatch use case (solve loop over active groups).
   add_executable(matching_solve_grouped_batch_test
