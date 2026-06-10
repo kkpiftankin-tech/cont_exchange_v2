@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <pqxx/pqxx>
@@ -37,6 +38,9 @@ class PostgresComboCompensationRepository {
   bool RecordPending(const ComboCompensation& c);
   /// Число pending-компенсаций для combo (для проверок/мониторинга).
   int CountPending(const std::string& parent_order_id);
+  /// parent_order_id, если leg_id — нога combo (иначе nullopt). Различает
+  /// combo-ноги от hedge/прочих internal_order_id в ExecutionReport.
+  std::optional<std::string> FindComboLegParent(const std::string& leg_id);
 
  private:
   ConnectionFactory connection_factory_;

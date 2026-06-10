@@ -28,7 +28,10 @@ fob::execution::v1::ExecutionIntent BuildExternalIntent(const std::string& paren
   intent.mutable_meta()->set_source("matching");
   intent.set_intent_id(intent_id);
   intent.set_batch_id(batch_id);
-  intent.set_internal_order_id(leg.leg_id);  // линковка ExecutionReport → combo-нога
+  intent.set_internal_order_id(leg.leg_id);
+  // client_order_id = leg_id: venues эхо-копирует его в ExecutionReport.client_order_id,
+  // по нему consumer линкует report → combo-нога (report не несёт internal_order_id).
+  intent.set_client_order_id(leg.leg_id);
   intent.set_reason("combo_external_leg:" + parent_order_id);
   intent.mutable_instrument()->set_symbol(leg.instrument_symbol);
 

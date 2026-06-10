@@ -22,7 +22,9 @@
 #include "infra/execution_groups_producer.hpp"
 #include "infra/postgres_execution_groups_repository.hpp"
 #include "infra/postgres_child_graph_repository.hpp"
+#include "infra/postgres_combo_compensation_repository.hpp"
 #include "infra/market_data/market_data_client.hpp"
+#include "fob/execution/v1/execution.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "infra/market_data/market_data_client.hpp"
 #include "fob/orders/v1/orders.pb.h"
@@ -68,6 +70,8 @@ class MatchingLoop {
   void on_order_event(const fob::orders::v1::OrdersNormalized& evt);
   void on_liquidity_curve(const fob::venue::v1::VenueLiquidityCurve& curve);
   void on_venue_health(const fob::venue::v1::VenueHealth& health);
+  // MVP-5 (ADR-037): провал внешней combo-ноги → combo_compensations(pending).
+  void on_external_execution_report(const fob::execution::v1::ExecutionReport& report);
   domain::ExternalLiquidityBySymbol filtered_external_liquidity() const;
   domain::ExternalLiquidityBySymbol filtered_external_liquidity_unlocked() const;
   void run_one_batch();
@@ -115,6 +119,7 @@ class MatchingLoop {
   std::unique_ptr<infra::PostgresActiveGroupsLoader> active_groups_loader_;
   std::unique_ptr<infra::PostgresExecutionGroupsRepository> eg_repo_;
   std::unique_ptr<infra::PostgresChildGraphRepository> child_graph_repo_;  // MVP-4 OCO/bracket
+  std::unique_ptr<infra::PostgresComboCompensationRepository> compensation_repo_;  // MVP-5
 };
 
 }  // namespace cex::matching::app

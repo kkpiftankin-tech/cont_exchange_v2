@@ -43,6 +43,14 @@ VALUES ($1::uuid,'basket','multileg_vector_solver','partially_filled','notional_
 ON CONFLICT (combo_order_id) DO NOTHING
 )SQL",
                      parent_id);
+      // Нога, чтобы FindComboLegParent её нашёл.
+      tx.exec_params(R"SQL(
+INSERT INTO combo_order_legs (leg_id, parent_order_id, instrument_symbol, side, weight,
+                             ratio_basis, p_low, p_high, q_rate, q_max, filled_cum, status)
+VALUES ($1::uuid,$2::uuid,'ETHUSDT','sell',0.4,'notional_weight',100,200,100,10,0,'active')
+ON CONFLICT (leg_id) DO NOTHING
+)SQL",
+                     leg_id, parent_id);
       tx.commit();
     }
 
@@ -64,6 +72,12 @@ ON CONFLICT (combo_order_id) DO NOTHING
     c2.reason = "timeout";
     ok = expect(repo.RecordPending(c2), "second distinct report → inserted") && ok;
     ok = expect(repo.CountPending(parent_id) == 2, "two pending compensations") && ok;
+
+    // FindComboLegParent: combo-нога → parent; неизвестный leg → nullopt.
+    const auto found = repo.FindComboLegParent(leg_id);
+    ok = expect(found.has_value() && *found == parent_id, "FindComboLegParent → parent") && ok;
+    const auto missing = repo.FindComboLegParent("dddddddd-9999-9999-9999-999999999999");
+    ok = expect(!missing.has_value(), "FindComboLegParent unknown → nullopt") && ok;
 
     {
       pqxx::work tx{conn};

@@ -375,6 +375,7 @@ MatchingLoop::MatchingLoop(
           std::make_unique<infra::PostgresActiveGroupsLoader>(postgres_dsn);
       eg_repo_ = std::make_unique<infra::PostgresExecutionGroupsRepository>(postgres_dsn);
       child_graph_repo_ = std::make_unique<infra::PostgresChildGraphRepository>(postgres_dsn);
+      compensation_repo_ = std::make_unique<infra::PostgresComboCompensationRepository>(postgres_dsn);
       eg_producer_.emplace(producer_);
       solve_grouped_uc_.emplace(grouped_solver_);
       grouped_enabled_ = true;
@@ -430,7 +431,7 @@ void MatchingLoop::start() {
 
   running_.store(true);
   consumer_.subscribe(
-      {"orders.normalized", "venue.liquidity.fob", "venue.health"});
+      {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue"});
   t_consume_ = std::thread([this] { consume_orders_loop(); });
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
@@ -498,10 +499,67 @@ void MatchingLoop::consume_orders_loop() {
             on_venue_health(*health);
             return;
           }
+
+          // MVP-5 (ADR-037): провал внешней combo-ноги → требование компенсации.
+          if (topic == "execution.venue") {
+            fob::execution::v1::ExecutionReport report;
+            if (!cex::common::from_bytes(payload, report)) {
+              cex::common::log_json("ERROR", "Failed to parse ExecutionReport (execution.venue)");
+              return;
+            }
+            on_external_execution_report(report);
+            return;
+          }
         });
     if (!ok) {
       break;
     }
+  }
+}
+
+// on_external_execution_report — MVP-5 (ADR-037). Провал внешней combo-ноги
+// (rejected/cancelled/expired) фиксируется как combo_compensations(pending).
+// Успех/partial игнорируются (ledger постит). Не-combo internal_order_id (hedge)
+// отсеиваются по FindComboLegParent. Идемпотентно по report_id.
+void MatchingLoop::on_external_execution_report(
+    const fob::execution::v1::ExecutionReport& report) {
+  if (!compensation_repo_) {
+    return;
+  }
+  const char* reason = nullptr;
+  switch (report.status()) {
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED: reason = "rejected"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED: reason = "cancelled"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED: reason = "expired"; break;
+    default: return;  // успех/partial → компенсация не нужна
+  }
+  // report не несёт internal_order_id; линковка через client_order_id (= leg_id,
+  // выставлен в BuildExternalIntent, эхо venues).
+  const std::string& leg_id = report.client_order_id();
+  if (leg_id.empty()) {
+    return;
+  }
+  try {
+    const auto parent = compensation_repo_->FindComboLegParent(leg_id);
+    if (!parent.has_value()) {
+      return;  // не combo-нога (hedge / прочий internal_order_id)
+    }
+    infra::ComboCompensation c;
+    c.parent_order_id = *parent;
+    c.leg_id = leg_id;
+    c.report_id = report.report_id();
+    c.reason = reason;
+    c.internal_filled_qty = cex::common::Decimal::from_proto(report.filled_qty());
+    if (compensation_repo_->RecordPending(c)) {
+      cex::common::log_json("WARN", "Combo external leg failed — compensation pending",
+                            {{"parent_order_id", *parent},
+                             {"leg_id", leg_id},
+                             {"reason", reason},
+                             {"report_id", c.report_id}});
+    }
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Compensation check failed",
+                          {{"leg_id", leg_id}, {"error", ex.what()}});
   }
 }
 

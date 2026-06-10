@@ -33,6 +33,18 @@ ON CONFLICT (parent_order_id, leg_id, report_id) DO NOTHING
   return r.affected_rows() > 0;
 }
 
+std::optional<std::string> PostgresComboCompensationRepository::FindComboLegParent(
+    const std::string& leg_id) {
+  if (leg_id.empty()) return std::nullopt;
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  const pqxx::result r = tx.exec_params(
+      "SELECT parent_order_id::text FROM combo_order_legs WHERE leg_id = $1::uuid", leg_id);
+  tx.commit();
+  if (r.empty()) return std::nullopt;
+  return r[0][0].as<std::string>();
+}
+
 int PostgresComboCompensationRepository::CountPending(const std::string& parent_order_id) {
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
