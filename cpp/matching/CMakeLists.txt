@@ -55,6 +55,7 @@ add_executable(matching
   src/infra/postgres/postgres_solver_config_repository.cpp
   src/infra/postgres_execution_groups_repository.cpp
   src/infra/active_grouped_orders_loader.cpp
+  src/infra/postgres_child_graph_repository.cpp
   src/infra/kafka/batch_outputs_producer.cpp
   src/infra/kafka/execution_intents_producer.cpp
   src/infra/execution_groups_producer.cpp
@@ -234,6 +235,24 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_active_groups_loader_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_active_groups_loader_test COMMAND matching_active_groups_loader_test)
+
+  # F-09 (MVP-4, ADR-035): child-graph repository — OCO/bracket leg transitions (PG).
+  add_executable(matching_child_graph_repo_test
+    tests/infra/postgres_child_graph_repository_test.cpp
+    src/infra/postgres_child_graph_repository.cpp
+    src/domain/child_graph_transitions.cpp
+    src/infra/postgres/decimal_conversion.cpp
+  )
+  target_include_directories(matching_child_graph_repo_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_child_graph_repo_test PRIVATE
+    cex_common
+    ${MATCHING_PQXX_TARGET}
+    PostgreSQL::PostgreSQL
+  )
+  target_compile_options(matching_child_graph_repo_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_child_graph_repo_test COMMAND matching_child_graph_repo_test)
 
 #   add_executable(matching_simulated_solver_test
 #     tests/domain/simulated_solver_test.cpp

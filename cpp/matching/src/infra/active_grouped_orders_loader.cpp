@@ -95,6 +95,7 @@ SELECT leg_id::text, instrument_symbol, side, ratio, weight,
        p_low, p_high, q_rate, q_max, filled_cum
 FROM combo_order_legs
 WHERE parent_order_id = $1::uuid
+  AND status NOT IN ('cancelled', 'waiting_for_trigger')
 ORDER BY leg_id
 )SQL",
                                              order.parent_order_id);
