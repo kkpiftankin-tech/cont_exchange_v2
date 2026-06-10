@@ -1566,7 +1566,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 | # | Вопрос | Влияние | Срок |
 | --- | --- | --- | --- |
-| OQ-1 | Solver формулировка для spread/factor: per-symbol bisection (MVP, без QP) vs OSQP/Eigen (полный A_g e=b_g α)? | T-F09-044, T-F09-094; выбор влияет на внешнюю зависимость CMakeLists | До MVP-2 |
+| OQ-1 | ✅ **РЕШЕНО — [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md).** MVP-2/3: bisection (closed-form) + feasibility-gate constraint evaluator (block/degrade). Полный QP (`A_g e=b_g α`) **отложен** до реального спроса; при внедрении — OSQP за `IGroupedSolver` в детерминированном режиме (replay). | T-F09-044, T-F09-094 | закрыто ADR-034 |
 | OQ-2 | `combo_order_legs` vs `flow_order_legs` — рекомендация oltp-schema.md: отдельная таблица. Окончательно закрыть как ADR-decision в ADR-032. | T-F09-021, T-F09-034; влияет на F-02/F-04 repos | До T-F09-021 |
 | OQ-3 | `fills` топик расширение (FlowFill tags 20+) — breaking change assessment для существующих consumers без перекомпиляции? | T-F09-013 | До T-F09-013 |
 | OQ-4 | Интеграция `SolveGroupedBatch` с F-04 `RunBatchUseCase`: отдельный timer или shared cycle? | T-F09-045 performance | До T-F09-045 |

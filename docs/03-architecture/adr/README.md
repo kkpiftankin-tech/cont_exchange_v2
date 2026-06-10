@@ -46,6 +46,7 @@
 | ADR-031 | F-09 multi-leg execution modes & atomicity policies | [accepted](ADR-031-multileg-execution-modes-atomicity.md) |
 | ADR-032 | F-09 parent/child (BatchOrder→ComboOrder→Leg) order model | [accepted](ADR-032-parent-child-order-model.md) |
 | ADR-033 | F-09 `execution.groups` Kafka topic | [accepted](ADR-033-execution-groups-topic.md) |
+| ADR-034 | F-09 grouped constraint solver (feasibility-gate now, OSQP QP later) | [accepted](ADR-034-grouped-constraint-solver.md) |
 | ADR-035 | FOB Solver Mathematical Foundation (Hamiltonian-Based, IN-012) | [accepted](ADR-035-fob-solver-mathematical-foundation.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).
