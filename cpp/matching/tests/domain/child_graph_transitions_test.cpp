@@ -120,6 +120,41 @@ int main() {
     ok = expect(t_again.empty(), "conditional: idempotent (already active)") && ok;
   }
 
+  // ADR-036: atomic one-branch OCO через conditional-ветви.
+  // B1 активируется триггером (и только B1 видит солвер); при fill отменяет B2.
+  {
+    d::ComboGroupState g;
+    g.parent_order_id = "p-atomic-oco";
+    auto b1 = MakeLeg("B1", 10, 0);
+    b1.status = d::GroupLegStatus::kWaitingForTrigger;
+    auto b2 = MakeLeg("B2", 10, 0);
+    b2.status = d::GroupLegStatus::kWaitingForTrigger;
+    g.legs.push_back(b1);
+    g.legs.push_back(b2);
+    d::GroupEdge cond{d::GroupEdgeType::kConditional, "ext", "B1"};  // активирует B1
+    cond.condition =
+        d::TriggerCondition{true, "BTCUSDT", d::TriggerOp::kGte, cex::common::Decimal{100, 0}};
+    g.edges.push_back(cond);
+    g.edges.push_back(d::GroupEdge{d::GroupEdgeType::kOcoSibling, "B1", "B2"});  // B1 fill → cancel B2
+
+    const d::ReferencePrices fire = {{"BTCUSDT", cex::common::Decimal{150, 0}}};
+
+    // 1) Триггер → B1 active; B2 остаётся waiting (солвер видит только B1).
+    const auto act = d::ApplyConditionalActivations(g, fire);
+    ok = expect(act.size() == 1 && Find(g, "B1")->status == d::GroupLegStatus::kActive,
+                "atomic OCO: B1 activated by trigger") && ok;
+    ok = expect(Find(g, "B2")->status == d::GroupLegStatus::kWaitingForTrigger,
+                "atomic OCO: B2 stays waiting (excluded from solver)") && ok;
+
+    // 2) B1 исполнена → OCO отменяет B2. Ровно одна ветвь.
+    g.FindLeg("B1")->filled_cum = cex::common::Decimal{10, 0};
+    const auto canc = d::ApplyOCOTransitions(g);
+    ok = expect(canc.size() == 1 && Find(g, "B2")->status == d::GroupLegStatus::kCancelled,
+                "atomic OCO: B2 cancelled on B1 fill") && ok;
+    ok = expect(Find(g, "B1")->status == d::GroupLegStatus::kActive,
+                "atomic OCO: exactly one branch (B1) executed") && ok;
+  }
+
   if (ok) { std::cout << "child_graph_transitions_test: ALL PASSED\n"; return 0; }
   return 1;
 }
