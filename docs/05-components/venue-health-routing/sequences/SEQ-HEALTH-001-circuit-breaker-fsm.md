@@ -35,7 +35,7 @@ Internal Component Sequence (venue-health-routing)
 
 ```mermaid
 sequenceDiagram
-    participant SVC as Service::OnRawReport
+    participant SVC as Service.OnRawReport
     participant ST as VenueState
     participant CB as CircuitBreaker
     participant PUB as Publisher

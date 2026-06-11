@@ -73,7 +73,7 @@ sequenceDiagram
     LDGC-->>ORCH: ok
 
     ORCH->>PUB: publish batch.outputs (BatchResult + fills)
-    Note right of PUB: см. Conflict Note C-1:<br/>спецификация IN-003 разделяет на<br/>`batch.outputs` и `fills`; MVP использует<br/>единый topic
+    Note right of PUB: см. Conflict Note C-1.<br/>IN-003 разделяет на<br/>batch.outputs и fills.<br/>MVP использует единый topic
     PUB-->>ORCH: ack
 ```
 

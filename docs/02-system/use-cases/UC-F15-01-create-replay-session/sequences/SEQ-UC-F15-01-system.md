@@ -44,7 +44,7 @@ sequenceDiagram
     S-->>A: 201 Created (session_id, status=pending, created_at)
 
     Note over S: worker picks pending session
-    S->>S: status=running; init shadow ledger
+    S->>S: status=running, init shadow ledger
     S->>S: loop: solve → risk → apply → log
     S-->>A: WebSocket progress (replay.results)
     S-->>A: WebSocket completed / failed

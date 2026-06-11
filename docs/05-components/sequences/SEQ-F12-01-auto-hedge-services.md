@@ -86,7 +86,7 @@ sequenceDiagram
         Note over ADP: see SEQ-F12-03 (error scenarios)
     end
     K3-->>LDG: consume ExecutionReport
-    LDG->>LDG: apply hedge: position += filled_qty * side; compute HedgePnL
+    LDG->>LDG: apply hedge (position += filled_qty * side, compute HedgePnL)
     K3-->>CH: insert execution_reports row
     K3-->>OBS: log lifecycle, update metrics (latency, slippage, fill_rate)
 ```

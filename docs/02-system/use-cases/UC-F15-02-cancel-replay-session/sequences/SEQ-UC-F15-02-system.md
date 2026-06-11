@@ -31,7 +31,7 @@ sequenceDiagram
     alt session.status == pending
         S->>S: status = cancelled (immediate)
     else session.status == running
-        S->>S: set cancellation token; finish current batch
+        S->>S: set cancellation token, finish current batch
         S->>S: save partial AgentLog + partial Summary
         S->>S: status = cancelled
     else terminal status

@@ -49,7 +49,7 @@ sequenceDiagram
     T->>S: CreateComboOrder(legs, constraints, graphLinks,\nexecutionMode, atomicityPolicy, atomicityScope,\nclientComboId)
 
     alt executionMode = orchestration_only
-        S-->>T: WARNING: ноги исполняются независимо;\nвеса / ratio / spread / portfolio exposure\nмогут отклониться от целевых значений
+        S-->>T: WARNING. Ноги исполняются независимо.\nВеса / ratio / spread / portfolio exposure\nмогут отклониться от целевых значений
         S-->>T: ParentOrderAccepted(parentOrderId, status=active,\nlegOrderIds[])
     else executionMode = multileg_vector_solver, risk approved
         S-->>T: ParentOrderAccepted(parentOrderId,\nstatus=active|waiting_for_trigger,\nexecutionMode, atomicityPolicy)

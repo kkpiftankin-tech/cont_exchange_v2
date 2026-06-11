@@ -56,7 +56,7 @@ sequenceDiagram
     CH-->>BS: N batches stream
 
     loop For each batch i = 1..N
-        Note over BS: Check cancellation flag; break if cancelled [L2 detail]
+        Note over BS: Check cancellation flag, break if cancelled [L2 detail]
         BS->>BS: RestoreState (PnL, positions, prev reward)
         BS->>BS: Build ReplayBatchInput (strategy FlowOrders + historical orders + refprice)
         BS->>MB: gRPC Solver/Solve(BatchRequest)

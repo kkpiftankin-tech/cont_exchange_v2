@@ -83,7 +83,7 @@ sequenceDiagram
 
     note over UI,GW: orchestration_only: предупреждение перед сохранением
     opt executionMode = orchestration_only
-        GW-->>UI: WARNING: ноги исполняются независимо;\nвеса / ratio / spread могут отклониться
+        GW-->>UI: WARNING. Ноги исполняются независимо.\nВеса / ratio / spread могут отклониться
     end
 ```
 
