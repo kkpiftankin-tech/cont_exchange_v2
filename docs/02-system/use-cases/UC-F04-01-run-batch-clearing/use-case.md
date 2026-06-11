@@ -7,6 +7,22 @@ level: sea
 
 # UC-F04-01. Выполнить цикл batch clearing
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-04 Batch Clearing](../../features/F-04-batch-clearing/) |
+| ☁️ L0 system sequence | [SEQ-UC-F04-01-system](sequences/SEQ-UC-F04-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F04-UC-F04-01-services](../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequence | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) — внутренние классы matching |
+| 💻 Component overview | [matching-fob-core](../../../05-components/matching-fob-core/overview.md) — список классов |
+| 💻 Source code | [cpp/matching/](../../../../cpp/matching/) |
+
+### Drill-down по шагам Main Flow
+
+После описания шагов ниже — таблица «шаг → L2 sequence → cpp/ файл»
+для быстрого перехода от сценария к коду.
+
 ## Feature
 
 - [F-04. Batch Clearing](../../features/F-04-batch-clearing/)
@@ -39,6 +55,18 @@ System (Matching Backend timer)
 5. Ledger применяет fills к балансам.
 6. Risk Manager обновляет позиции и проверяет post-trade лимиты.
 7. Observability логирует diagnostics.
+
+### Drill-down: step → L2 sequence → code (IN-013)
+
+| # | Шаг | L2 sequence 🐟 | Реализация (cpp/) |
+| --- | --- | --- | --- |
+| 1 | Load active orders | [SEQ-MATCHING-001 §load](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) | [postgres_flow_order_repository.cpp](../../../../cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp) |
+| 2 | Solver clearing | [SEQ-MATCHING-001 §solve](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) | [solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp) + [solver-foundation.md](../../../09-implementation/solver-foundation.md) (math) |
+| 3 | Build BatchResult | [SEQ-MATCHING-001 §build](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) | [batch_result_to_fill_events.cpp](../../../../cpp/matching/src/domain/batch_result_to_fill_events.cpp), [run_batch_uc.cpp](../../../../cpp/matching/src/app/run_batch_uc.cpp) |
+| 4 | Publish `batch.outputs` + `fills` | [SEQ-MATCHING-001 §publish](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) | [batch_outputs_producer.cpp](../../../../cpp/matching/src/infra/kafka/batch_outputs_producer.cpp) |
+| 5 | Apply fills to balances | (L2 в ledger TBD) | [cpp/ledger/src/app/ledger_uc.cpp](../../../../cpp/ledger/src/app/ledger_uc.cpp) |
+| 6 | Post-trade risk check | (L2 в risk TBD) | [cpp/risk/src/transport/grpc_risk_service.cpp](../../../../cpp/risk/src/transport/grpc_risk_service.cpp) |
+| 7 | Observability diagnostics | (L2 в observability TBD) | [solver_metrics.cpp](../../../../cpp/matching/src/app/solver_metrics.cpp) |
 
 ## Alternative Flows
 

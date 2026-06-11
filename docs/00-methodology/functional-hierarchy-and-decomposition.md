@@ -153,7 +153,7 @@ sequenceDiagram
 - **Чужие компоненты**: только `participant X as X [external]` без
   раскрытия внутренностей.
 - **Секция трассировки**: `## Трассировка` с обратными ссылками вверх
-  + ссылками на `cpp/<component>/src/...`.
+  и ссылками на `cpp/<component>/src/...`.
 
 ## 5. Frontmatter requirement (новое — IN-013)
 
@@ -318,7 +318,111 @@ L2 Comp Seq ──expands-step─────► L1 service seq #step-N
 | `docs/04-domain/` единое или по компонентам | **Оставить единое** | Текущий `04-domain/entities.md` — system-wide ubiquitous language; component-specific domain (когда появится) → `05-components/{component}/domain/` |
 | Запрет `[text](url)` в mermaid-блоках | **Принят** | IN-013 corrects observed bug-prone pattern |
 
-## 11. Related artifacts
+## 11. Drill-down navigation: канонический пример F-04
+
+Чтобы reader мог за один шаг chain'ом перейти от Feature до строки `cpp/`,
+каждый артефакт обязан содержать **Navigation block** со ссылками вверх
+и вниз. Эта секция описывает шаблон, реализованный для F-04 как canonical
+пример (см. артефакты ниже).
+
+### Полный путь сверху вниз
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Шаг 1. F-04 README — Navigation Map                                    │
+│    docs/02-system/features/F-04-batch-clearing/README.md                │
+│                                                                          │
+│  Содержит:                                                               │
+│    • drill-down outline (что отвечает каждый уровень)                    │
+│    • таблица Use Cases → ссылки на L0/L1 sequences                       │
+│    • таблица Components → ссылки на L2 component overview               │
+│    • L0 system sequence preview (mermaid + ссылка на полную версию)     │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Шаг 2. UC-F04-01 use-case.md — пошаговый сценарий                      │
+│    docs/02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md   │
+│                                                                          │
+│  Navigation block содержит ссылки на:                                    │
+│    ⬆ Parent F-04                                                         │
+│    ☁ L0 system sequence (SEQ-UC-F04-01-system.md)                        │
+│    🌊 L1 service sequence (SEQ-F04-UC-F04-01-services.md)                │
+│    🐟 L2 component sequence (SEQ-MATCHING-001-solver-cycle.md)           │
+│    💻 Component overview (matching-fob-core/overview.md)                 │
+│    💻 Source code (cpp/matching/)                                        │
+│                                                                          │
+│  Под Main Flow — таблица «step → L2 sequence → cpp/ file»                │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Шаг 3. matching-fob-core/overview.md — внутреннее устройство сервиса  │
+│    docs/05-components/matching-fob-core/overview.md                     │
+│                                                                          │
+│  Содержит:                                                               │
+│    • Navigation block: какие F-XX используют компонент                  │
+│    • Class structure (mermaid classDiagram)                              │
+│    • L2 sequences inventory (таблица с linked classes)                   │
+│    • Таблица «класс ↔ cpp/-файл»                                         │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Шаг 4. cpp/matching/src/...cpp — implementation                        │
+│                                                                          │
+│  C++ файлы имеют header-комментарии с обратной ссылкой на:               │
+│    • IN-NNN (academic source)                                            │
+│    • ADR-NNN (decision record)                                           │
+│    • L2 sequence (SEQ-COMPONENT-NNN-*.md)                                │
+│    • domain rules (R-XXX-NNN)                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Что должен содержать Navigation block в каждом артефакте
+
+**В Feature README (L0 ☁️):**
+
+- 🧭 Navigation Map — ASCII drill-down outline.
+- 📋 Use Cases — таблица со ссылками на L0/L1 sequences каждого UC.
+- 🏗 Components Involved — таблица со ссылками на component overview.
+- ☁️ L0 — System view (preview) — mermaid диаграмма + ссылка на полную.
+
+**В Use Case (L1 🌊):**
+
+- 🧭 Navigation — таблица «уровень → артефакт» (parent feature, L0 sequence, L1 sequence, L2 sequences, component overview, source).
+- Под Main Flow — таблица «step → L2 → cpp/ файл».
+
+**В Component overview (L2 🐟 owner):**
+
+- 🧭 Navigation — какие F-XX используют компонент, ссылки на L1/L2 sequences.
+- 🏗 Class structure — `mermaid classDiagram` с основными классами.
+- 🐟 L2 sequences — таблица «sequence ↔ запускающий UC ↔ задействованные классы».
+- 💻 Код — таблица «класс ↔ файл».
+
+### Применение шаблона к другим features
+
+Для каждой существующей фичи F-01..F-20 нужно последовательно добавить:
+
+1. Navigation Map в README.md (15–30 строк).
+2. Navigation block в use-case.md каждого UC (~10 строк).
+3. Navigation + classDiagram в component overview.md (если компонент
+   реализован).
+4. Опционально: создать недостающие L2 sequences.
+
+→ Backfill для всех 18 features — отдельный долгосрочный backlog
+(OQ-IN013-06).
+
+### Pilot artifacts (canonical example)
+
+| Артефакт | Файл |
+| --- | --- |
+| Feature README (drill-down entry) | [`02-system/features/F-04-batch-clearing/README.md`](../02-system/features/F-04-batch-clearing/README.md) |
+| Use Case (drill-down step 2) | [`02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md`](../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md) |
+| Component overview (drill-down step 3) | [`05-components/matching-fob-core/overview.md`](../05-components/matching-fob-core/overview.md) |
+| L0 system sequence | [`SEQ-UC-F04-01-system.md`](../02-system/use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md) |
+| L1 service sequence | [`SEQ-F04-UC-F04-01-services.md`](../05-components/sequences/SEQ-F04-UC-F04-01-services.md) |
+| L2 component sequence | [`SEQ-MATCHING-001-solver-cycle.md`](../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
+| Source code | [`cpp/matching/`](../../cpp/matching/) |
+
+## 12. Related artifacts
 
 - [IN-013 source](../../incoming-docs/2026-06-11-docs-methodology-guide-v1.md)
 - [IN-013 meta](../../incoming-docs/IN-013.meta.md)
