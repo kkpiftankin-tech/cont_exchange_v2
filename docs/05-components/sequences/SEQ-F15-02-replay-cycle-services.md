@@ -50,13 +50,13 @@ sequenceDiagram
     BS->>PG: SELECT replay_sessions WHERE status='pending' (worker poll)
     PG-->>BS: pending session
     BS->>PG: UPDATE replay_sessions SET status='running', started_at=now()
-    BS->>CL: ShadowNamespaceInitializer.Init(session_id, initial_balances)
+    BS->>CL: Init shadow ledger namespace(session_id, initial_balances)
 
     BS->>CH: SELECT batchresults, fills, marketdata_snapshots WHERE time BETWEEN from AND to ORDER BY time
     CH-->>BS: N batches stream
 
     loop For each batch i = 1..N
-        BS->>BS: CancellationToken.IsCancelled()? break if yes
+        Note over BS: Check cancellation flag; break if cancelled [L2 detail]
         BS->>BS: RestoreState (PnL, positions, prev reward)
         BS->>BS: Build ReplayBatchInput (strategy FlowOrders + historical orders + refprice)
         BS->>MB: gRPC Solver/Solve(BatchRequest)

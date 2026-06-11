@@ -40,7 +40,7 @@ sequenceDiagram
 
     U->>GW: POST /api/v1/replay/audit-runs (batch_id, tolerance, override?)
     GW->>BS: HTTP forward
-    BS->>BS: RbacEngine.Authorize(replay:execute + admin)
+    Note over BS: Authorize replay:execute + admin role (RBAC) [L2 detail]
     BS->>PG: INSERT replay_audit_runs (status=pending)
 
     BS->>CH: SELECT * FROM batchresults WHERE batch_id=?

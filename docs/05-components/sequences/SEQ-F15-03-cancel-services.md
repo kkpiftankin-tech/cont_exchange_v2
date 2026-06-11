@@ -42,7 +42,7 @@ sequenceDiagram
 
     U->>GW: DELETE /api/v1/replay/sessions/{id}
     GW->>BS: HTTP forward
-    BS->>BS: RbacEngine.Authorize(replay:cancel)
+    Note over BS: Authorize replay:cancel (RBAC) [L2 detail]
     BS->>PG: SELECT session
     PG-->>BS: session DTO
     alt status == pending
@@ -51,7 +51,7 @@ sequenceDiagram
         BS->>K: produce ReplayCancelledEvent
         BS-->>GW: 200 OK
     else status == running
-        BS->>BS: SetCancelled(session_id) (ICancellationToken)
+        Note over BS: Set session cancelled flag (cooperative token) [L2 detail]
         BS-->>GW: 200 OK (final state pending)
         Note over W: W is mid-batch
         W->>W: finish current batch

@@ -45,13 +45,13 @@ sequenceDiagram
 
     CL->>GW: POST /api/v1/replay/sessions (strategy, range, configs, JWT)
     GW->>BS: HTTP forward (port 8087)
-    BS->>BS: RbacEngine.Authorize(replay:create)
+    Note over BS: Authorize replay:create (RBAC) [L2 detail]
     BS->>BS: ValidateStrategy (F15-22..25)
     BS->>CH: SELECT count(*) FROM batchresults WHERE event_time_ms BETWEEN ? AND ?
     CH-->>BS: N (must be > 0)
     BS->>PG: SELECT solver_config, risk_limits BY id (or use inline_json)
     PG-->>BS: configs
-    BS->>BS: ReplayConfigSnapshotBuilder.Build(configs, fee_model, reward, seed)
+    Note over BS: Build replay config snapshot (configs + fee_model + reward + seed) [L2 detail]
     BS->>PG: INSERT INTO replay_sessions (session_id, status='pending', snapshot, ...)
     PG-->>BS: ok
     BS->>PG: INSERT INTO audit_log (action='create_session', status='success', ...)
