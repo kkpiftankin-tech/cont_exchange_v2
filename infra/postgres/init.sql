@@ -551,6 +551,12 @@ CREATE TABLE IF NOT EXISTS combo_compensations (
   internal_filled_qty NUMERIC(38,18),
   status              TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'resolved', 'cancelled')),
+  -- MVP-6 (ADR-039): operator-driven resolution (audit). NULL пока pending.
+  -- resolution_action: reverse_internal | retry_external | accept
+  resolution_action   TEXT,
+  operator_id         TEXT,
+  resolving_ref       TEXT,  -- id реверсивной FlowOrder / retry-intent
+  resolved_at         TIMESTAMPTZ,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
   CONSTRAINT combo_compensations_idem UNIQUE (parent_order_id, leg_id, report_id)

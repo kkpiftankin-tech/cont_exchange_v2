@@ -6,9 +6,11 @@
 
 #include <utility>
 
-#include "infra/postgres/decimal_conversion.hpp"  // ToPgNumeric
+#include "infra/postgres/decimal_conversion.hpp"  // ToPgNumeric / ParsePgNumeric
 
 namespace cex::matching::infra {
+
+using cex::matching::infra::postgres::ParsePgNumeric;
 
 PostgresComboCompensationRepository::PostgresComboCompensationRepository(std::string dsn)
     : connection_factory_([dsn = std::move(dsn)]() {
@@ -43,6 +45,50 @@ std::optional<std::string> PostgresComboCompensationRepository::FindComboLegPare
   tx.commit();
   if (r.empty()) return std::nullopt;
   return r[0][0].as<std::string>();
+}
+
+bool PostgresComboCompensationRepository::ResolvePending(const std::string& compensation_id,
+                                                         const std::string& action,
+                                                         const std::string& operator_id,
+                                                         const std::string& resolving_ref) {
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  // accept → cancelled (оператор принимает экспозицию); иначе resolved.
+  const std::string new_status = action == "accept" ? "cancelled" : "resolved";
+  const pqxx::result r = tx.exec_params(R"SQL(
+UPDATE combo_compensations
+SET status = $2, resolution_action = $3, operator_id = $4, resolving_ref = $5, resolved_at = NOW()
+WHERE compensation_id = $1::uuid AND status = 'pending'
+)SQL",
+                                        compensation_id, new_status, action, operator_id,
+                                        resolving_ref);
+  tx.commit();
+  return r.affected_rows() > 0;
+}
+
+std::vector<PendingCompensation> PostgresComboCompensationRepository::ListPending() {
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  const pqxx::result rows = tx.exec(R"SQL(
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+FROM combo_compensations WHERE status = 'pending' ORDER BY created_at
+)SQL");
+  tx.commit();
+
+  std::vector<PendingCompensation> out;
+  out.reserve(rows.size());
+  for (const auto& row : rows) {
+    PendingCompensation c;
+    c.compensation_id = row["compensation_id"].as<std::string>();
+    c.parent_order_id = row["parent_order_id"].as<std::string>();
+    c.leg_id = row["leg_id"].as<std::string>();
+    c.reason = row["reason"].as<std::string>();
+    if (!row["internal_filled_qty"].is_null()) {
+      c.internal_filled_qty = ParsePgNumeric(row["internal_filled_qty"].as<std::string>());
+    }
+    out.push_back(std::move(c));
+  }
+  return out;
 }
 
 int PostgresComboCompensationRepository::CountPending(const std::string& parent_order_id) {

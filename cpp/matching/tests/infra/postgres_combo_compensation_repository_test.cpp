@@ -38,7 +38,7 @@ int main() {
       tx.exec_params(R"SQL(
 INSERT INTO combo_orders (combo_order_id, combo_type, execution_mode, status, ratio_basis,
                           atomicity_policy, atomicity_scope, fallback_policy)
-VALUES ($1::uuid,'basket','multileg_vector_solver','partially_filled','notional_weight',
+VALUES ($1::uuid,'basket','multileg_vector_solver','filled','notional_weight',
         'scalable_atomic','external_compensating','compensate')
 ON CONFLICT (combo_order_id) DO NOTHING
 )SQL",
@@ -79,9 +79,26 @@ ON CONFLICT (leg_id) DO NOTHING
     const auto missing = repo.FindComboLegParent("dddddddd-9999-9999-9999-999999999999");
     ok = expect(!missing.has_value(), "FindComboLegParent unknown → nullopt") && ok;
 
-    {
+    // MVP-6: ListPending + ResolvePending (идемпотентно).
+    std::string my_comp_id;
+    int my_pending = 0;
+    for (const auto& p : repo.ListPending()) {
+      if (p.parent_order_id == parent_id) {
+        ++my_pending;
+        if (my_comp_id.empty()) my_comp_id = p.compensation_id;
+      }
+    }
+    ok = expect(my_pending == 2, "ListPending sees our 2 pending") && ok;
+    ok = expect(repo.ResolvePending(my_comp_id, "reverse_internal", "op-1", "fo-99"),
+                "ResolvePending pending → applied") && ok;
+    ok = expect(!repo.ResolvePending(my_comp_id, "reverse_internal", "op-1", "fo-99"),
+                "re-resolve → idempotent no-op") && ok;
+    ok = expect(repo.CountPending(parent_id) == 1, "one pending after resolve") && ok;
+
+    {  // execution_groups FK не cascade → удаляем первым (на случай live-matching).
       pqxx::work tx{conn};
-      tx.exec_params("DELETE FROM combo_orders WHERE combo_order_id=$1::uuid", parent_id);  // cascade
+      tx.exec_params("DELETE FROM execution_groups WHERE parent_order_id=$1::uuid", parent_id);
+      tx.exec_params("DELETE FROM combo_orders WHERE combo_order_id=$1::uuid", parent_id);
       tx.commit();
     }
   } catch (const std::exception& e) {
