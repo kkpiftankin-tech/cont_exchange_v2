@@ -94,3 +94,12 @@ Machine-readable source-of-truth for components and features lives in [`specs/do
 
 > Полная карта фрагментов IN-011 (все §1–§21 + Доп. пояснения) — в [`incoming-docs/IN-011.fragment-map.md`](../../incoming-docs/IN-011.fragment-map.md).
 > Полная карта фрагментов IN-012 (все F-01..F-24) — в [`incoming-docs/IN-012.fragment-map.md`](../../incoming-docs/IN-012.fragment-map.md).
+
+| IN-013 | F-01, F-02, F-06 | METHODOLOGY, REPO_STRUCTURE | `docs/00-methodology/functional-hierarchy-and-decomposition.md` (new) §1–§3 (two-axis model + Cockburn levels + mapping IN-013↔repo paths) | created | complete |
+| IN-013 | F-03, F-08 | METHODOLOGY | `docs/00-methodology/sequence-diagram-rules.md` (L0/L1/L2 intro table) + `CLAUDE.md` §26a (level annotations + no-links-in-mermaid rule) | merged | complete |
+| IN-013 | F-04, F-05, F-07, F-10 | METHODOLOGY | `docs/00-methodology/functional-hierarchy-and-decomposition.md` §4–§9 (bidirectional links, frontmatter, checklists, prohibitions) | created | complete |
+| IN-013 | F-05 (templates) | METHODOLOGY | `docs/00-methodology/artifact-templates.md` §Decomposition level + `02-system/features/_template/feature.yaml` + `02-system/use-cases/_template/use-case.md` + `02-system/use-cases/_template/sequences/SEQ-UC-FXX-NN-system.md` + `05-components/sequences/_template/SEQ-FXX-UC-FXX-NN-services.md` (all with `level:` field) | merged | complete |
+| IN-013 | F-06 (placement) | REPO_STRUCTURE | `CLAUDE.md` §0c (placement table with L0/L1/L2) | merged | complete |
+| IN-013 | F-09 (full example) | METHODOLOGY | `docs/traceability/feature-to-uc.md` (new, all 18 features), `docs/traceability/uc-to-sequences.md` (new, ~33 UCs L0/L1/L2 inventory), `docs/traceability/sequence-to-code.md` (new, L2→cpp/) | created | complete |
+
+> Полная карта фрагментов IN-013 (все F-01..F-10) — в [`incoming-docs/IN-013.fragment-map.md`](../../incoming-docs/IN-013.fragment-map.md).

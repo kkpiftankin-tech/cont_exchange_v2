@@ -3,6 +3,14 @@ feature:
   name: Short Feature Name
   status: draft           # draft | in-progress | shipped | deprecated
   owner: core-team
+  level: kite             # IN-013: kite | sea | fish — для Feature всегда kite ☁️
+
+# IN-013 (опционально). Декомпозиция Feature вниз по Use Cases.
+# Полное описание — docs/00-methodology/functional-hierarchy-and-decomposition.md.
+decomposedInto:           # перечислите все UC, на которые раскладывается фича
+  - UC-FXX-01
+  - UC-FXX-02
+parentRequirements: []    # ссылки на REQ / BR из docs/01-business/ или 02-system/
 
 description: >
   Краткое описание фичи в 1-2 предложениях.

@@ -1,10 +1,24 @@
+<!-- IN-013 frontmatter (YAML). Уровень декомпозиции — Cockburn `sea` 🌊 для L1 service-level sequence.
+---
+id: SEQ-FXX-UC-FXX-NN-services
+title: "{Заголовок}"
+level: sea
+parent-feature: F-XX
+parent-uc: UC-FXX-NN
+components-involved: []
+contracts: []
+---
+-->
+
 # SEQ-FXX-UC-FXX-NN-services. {Заголовок}
 
 > **Template.** При копировании замените плейсхолдеры `{slug}`, `XX`, `NN`, имена сервисов на конкретные значения. Пути ниже — шаблонные, не клики.
+>
+> **IN-013**: `level: sea` 🌊. Участники — компоненты верхнего уровня (`gateway`, `order_flow`, `matching`, `risk`, `ledger`, `market_data`, `venues`, Kafka topics, PG/CH tables). Имена классов/методов внутри компонента запрещены — для них создавайте L2 sequences в `docs/05-components/{component}/sequences/`.
 
 ## Type
 
-Service Interaction Sequence
+Service Interaction Sequence (L1 🌊)
 
 ## Feature
 

@@ -1,10 +1,21 @@
+<!-- IN-013 frontmatter (YAML). Уровень декомпозиции — Cockburn `kite` ☁️ для L0 system-level sequence.
+---
+id: SEQ-UC-FXX-NN-system
+title: "{Заголовок}"
+level: kite
+parent-uc: UC-FXX-NN
+---
+-->
+
 # SEQ-UC-FXX-NN-system. {Заголовок}
 
 > **Template.** При копировании замените `{slug}`, `XX`, `NN` на конкретные значения. Пути с плейсхолдерами — шаблонные, не клики.
+>
+> **IN-013**: `level: kite` ☁️. Участники — только внешние actors + `participant System as Continuous Exchange System`. Имена внутренних сервисов (`matching`, `risk`, ...) запрещены — для них создавайте L1 service sequence в `docs/05-components/sequences/`.
 
 ## Type
 
-System Context Sequence
+System Context Sequence (L0 ☁️)
 
 ## Feature
 
