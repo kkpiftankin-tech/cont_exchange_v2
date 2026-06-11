@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F10-01. Опубликовать MM-кривую ликвидности
 
 ## Feature

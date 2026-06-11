@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F15-UC-F15-01-services
+level: sea
+---
+-->
+
 # SEQ-F15-UC-F15-01-services. (Superseded) — Replay: service view
 
 > **Статус:** superseded. Этот placeholder заменён более детальными

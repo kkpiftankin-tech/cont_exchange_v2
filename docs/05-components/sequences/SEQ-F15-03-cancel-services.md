@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F15-03-cancel-services
+level: sea
+---
+-->
+
 # SEQ-F15-03-cancel-services. Replay: cancel session — service view
 
 ## Type

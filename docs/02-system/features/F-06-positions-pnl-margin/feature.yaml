@@ -3,6 +3,7 @@ feature:
   name: Positions / PnL / Margin
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Учёт балансов (available/reserved), позиций и PnL пользователей.

@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F09-UC-F09-03-services
+level: sea
+---
+-->
+
 # SEQ-F09-UC-F09-03-services. External Leg Execution / Compensating: service view
 
 ## Type

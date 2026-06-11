@@ -3,6 +3,7 @@ feature:
   name: External Venues / LOB to FOB
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 # Theoretical foundation (IN-012, 2026-04-15) — типология 1D/2D агентов
 # для калибровки depth_curve_builder (LOB→FOB conversion).

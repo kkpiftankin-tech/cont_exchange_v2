@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F11-01. Принять external market data (legacy)
 
 > **Статус:** **DEPRECATED — заменено на [UC-F11-02. Publish VenueSnapshot](../UC-F11-02-publish-snapshot/use-case.md).**

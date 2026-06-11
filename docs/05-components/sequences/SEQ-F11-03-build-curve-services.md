@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F11-03-build-curve-services
+level: sea
+---
+-->
+
 # SEQ-F11-03-build-curve-services. Build VenueLiquidityCurve: service view
 
 ## Type

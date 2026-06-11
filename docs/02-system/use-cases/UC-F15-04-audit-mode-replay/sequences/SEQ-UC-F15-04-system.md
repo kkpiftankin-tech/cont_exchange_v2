@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F15-04-system
+level: kite
+---
+-->
+
 # SEQ-UC-F15-04-system. Audit-mode Replay: system view
 
 ## Type

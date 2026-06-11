@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F12-03-system
+level: kite
+---
+-->
+
 # SEQ-UC-F12-03-system. Partial Fill + Retry: system view
 
 ## Type

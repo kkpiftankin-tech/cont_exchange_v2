@@ -3,6 +3,7 @@ feature:
   name: Backtest / Replay
   status: in-progress-impl
   owner: core-team
+  level: kite
 
 description: >
   Backtest и shadow-replay исторических батчей через тот же solver, risk

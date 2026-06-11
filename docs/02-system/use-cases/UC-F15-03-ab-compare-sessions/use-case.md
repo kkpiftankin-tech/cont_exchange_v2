@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F15-03. A/B сравнение двух replay-сессий
 
 ## Feature

@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F12-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F12-01-system. Auto Hedge After Batch: system view
 
 ## Type

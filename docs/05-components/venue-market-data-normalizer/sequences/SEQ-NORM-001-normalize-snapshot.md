@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-NORM-001-normalize-snapshot
+level: fish
+component: venue-market-data-normalizer
+---
+-->
+
 # SEQ-NORM-001. Normalize raw → VenueSnapshot
 
 ## Type

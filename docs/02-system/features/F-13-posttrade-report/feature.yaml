@@ -3,6 +3,7 @@ feature:
   name: Post-Trade Report
   status: not-implemented
   owner: core-team
+  level: kite
 
 description: >
   Детальный отчёт по завершённой FlowOrder: фактический VWAP, IS

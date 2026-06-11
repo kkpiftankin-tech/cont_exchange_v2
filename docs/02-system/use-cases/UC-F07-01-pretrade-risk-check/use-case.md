@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F07-01. Pre-trade risk check
 
 ## Feature

@@ -3,6 +3,7 @@ feature:
   name: Execution Hedge
   status: doc-complete-impl-partial
   owner: core-team
+  level: kite
 
 description: >
   Автоматическое хеджирование нетто-позиций провайдера на внешних площадках

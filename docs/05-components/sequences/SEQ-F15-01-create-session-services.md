@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F15-01-create-session-services
+level: sea
+---
+-->
+
 # SEQ-F15-01-create-session-services. Replay: create session — service view
 
 ## Type

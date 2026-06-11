@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F05-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F05-01-system. Live Market Data: system view
 
 ## Type

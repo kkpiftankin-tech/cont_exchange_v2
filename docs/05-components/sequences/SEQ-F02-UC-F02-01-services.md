@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F02-UC-F02-01-services
+level: sea
+---
+-->
+
 # SEQ-F02-UC-F02-01-services. Create FlowOrder: service view
 
 ## Type

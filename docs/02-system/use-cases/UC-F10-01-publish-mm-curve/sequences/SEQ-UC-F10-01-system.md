@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F10-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F10-01-system. MM Curve: system view
 
 ## Type

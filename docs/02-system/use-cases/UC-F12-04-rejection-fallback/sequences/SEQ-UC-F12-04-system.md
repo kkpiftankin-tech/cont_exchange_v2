@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F12-04-system
+level: kite
+---
+-->
+
 # SEQ-UC-F12-04-system. Rejection + Fallback: system view
 
 ## Type

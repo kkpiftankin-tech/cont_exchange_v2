@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F09-03-system
+level: kite
+---
+-->
+
 # SEQ-UC-F09-03-system. External Leg Execution / Compensating: system view
 
 ## Type

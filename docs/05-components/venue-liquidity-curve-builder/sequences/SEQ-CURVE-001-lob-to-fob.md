@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-CURVE-001-lob-to-fob
+level: fish
+component: venue-liquidity-curve-builder
+---
+-->
+
 # SEQ-CURVE-001. LOB → FOB cycle (внутренний)
 
 ## Type

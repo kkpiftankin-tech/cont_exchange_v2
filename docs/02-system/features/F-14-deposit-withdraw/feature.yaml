@@ -3,6 +3,7 @@ feature:
   name: Deposit & Withdraw
   status: not-implemented
   owner: core-team
+  level: kite
 
 description: >
   Обработка депозитов и выводов средств: on-chain переводы (для крипты),

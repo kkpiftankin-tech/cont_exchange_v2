@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-BACKTEST-01-create-session
+level: fish
+component: backtest-service
+---
+-->
+
 # SEQ-BACKTEST-01. Internal: CreateReplaySession
 
 ## Type

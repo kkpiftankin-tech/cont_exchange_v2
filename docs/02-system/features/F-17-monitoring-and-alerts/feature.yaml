@@ -3,6 +3,7 @@ feature:
   name: Monitoring & Alerting (Observability)
   status: partially-implemented-mvp
   owner: core-team
+  level: kite
 
 description: >
   Непрерывный сбор метрик производительности (solve time, fill rate, IS,

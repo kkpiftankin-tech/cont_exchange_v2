@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F15-02-replay-cycle-services
+level: sea
+---
+-->
+
 # SEQ-F15-02-replay-cycle-services. Replay: per-batch cycle — service view
 
 ## Type

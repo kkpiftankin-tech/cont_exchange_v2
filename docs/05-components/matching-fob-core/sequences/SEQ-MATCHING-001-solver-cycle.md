@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-MATCHING-001-solver-cycle
+level: fish
+component: matching-fob-core
+---
+-->
+
 # SEQ-MATCHING-001-solver-cycle. Внутренний цикл solver Matching Backend
 
 ## Type

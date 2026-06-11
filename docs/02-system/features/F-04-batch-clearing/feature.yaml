@@ -3,6 +3,7 @@ feature:
   name: Batch Clearing Cycle
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 # Theoretical foundation (IN-012, 2026-04-15) — Hamiltonian-based QP
 # formulation. Closed-form test vectors §4.5/§6.1.3; agent typology §5.1.

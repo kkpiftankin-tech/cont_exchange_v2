@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F15-01. (Historical / Superseded) — Replay исторического batch
 
 > **Статус:** superseded. Этот UC был placeholder и теперь разбит на 6 более

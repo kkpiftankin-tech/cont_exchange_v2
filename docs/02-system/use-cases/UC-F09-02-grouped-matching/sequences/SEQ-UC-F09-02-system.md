@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F09-02-system
+level: kite
+---
+-->
+
 # SEQ-UC-F09-02-system. Grouped Matching (batch cycle): system view
 
 ## Type

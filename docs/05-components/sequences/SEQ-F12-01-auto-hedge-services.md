@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F12-01-auto-hedge-services
+level: sea
+---
+-->
+
 # SEQ-F12-01-auto-hedge-services. Auto Hedge After Batch: service view
 
 ## Type

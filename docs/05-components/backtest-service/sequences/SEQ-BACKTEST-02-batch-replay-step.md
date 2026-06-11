@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-BACKTEST-02-batch-replay-step
+level: fish
+component: backtest-service
+---
+-->
+
 # SEQ-BACKTEST-02. Internal: Per-batch replay step
 
 ## Type

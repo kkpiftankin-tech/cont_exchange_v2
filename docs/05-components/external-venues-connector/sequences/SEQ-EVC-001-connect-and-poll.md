@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-EVC-001-connect-and-poll
+level: fish
+component: external-venues-connector
+---
+-->
+
 # SEQ-EVC-001. Connect + poll cycle (внутренний)
 
 ## Type
@@ -29,31 +37,28 @@ Internal Component Sequence (external-venues-connector)
 
 ```mermaid
 sequenceDiagram
-    participant LOOP as VenuesLoop
+    participant LOOP1 as VenuesLoop
     participant ADAPT as VenueAdapter
-    participant ASSY as LocalLobAssembler (CEX)
+    participant ASSY as LocalLobAssembler CEX
     participant OBS as VenueObservabilityProducer
 
-    LOOP->>ADAPT: connect()
-    ADAPT-->>LOOP: ok / error
+    LOOP->>ADAPT: connect
+    ADAPT-->>LOOP1: ok  error
 
     loop while running
-        ADAPT->>ADAPT: poll_once() / await message
+        ADAPT->>ADAPT: poll_once / await message
         alt CEX
             ADAPT->>ASSY: apply diff
             ASSY-->>ADAPT: snapshot
         else DEX
             ADAPT->>ADAPT: read pool state
         end
-        ADAPT-->>LOOP: VenueSnapshot (raw)
-        LOOP->>OBS: heartbeat update
+        ADAPT-->>LOOP1: VenueSnapshot raw
+        LOOP1->>OBS: heartbeat update
         OBS->>OBS: aggregate latency / errors
         OBS->>OBS: publish RAW VenueHealth
-        opt error
-            ADAPT->>ADAPT: backoff
-            ADAPT->>ADAPT: reconnect
-        end
-    end
+	end 
+	
 ```
 
 ## Contract Binding Table

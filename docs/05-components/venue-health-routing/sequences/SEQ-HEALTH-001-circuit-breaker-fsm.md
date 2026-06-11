@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-HEALTH-001-circuit-breaker-fsm
+level: fish
+component: venue-health-routing
+---
+-->
+
 # SEQ-HEALTH-001. Circuit Breaker FSM
 
 ## Type

@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F11-01-onboard-venue-services
+level: sea
+---
+-->
+
 # SEQ-F11-01-onboard-venue-services. Onboard venue: service view
 
 ## Type

@@ -3,6 +3,7 @@ feature:
   name: Batch, Combo and Multi-leg Orders
   status: planned
   owner: core-team
+  level: kite
 
 description: >
   Заявки, в которых пользовательский торговый intent относится не к одному

@@ -3,6 +3,7 @@ feature:
   name: Registration & Authentication
   status: not-implemented
   owner: core-team
+  level: kite
 
 description: >
   Регистрация, логин, управление сессиями и ролями пользователей

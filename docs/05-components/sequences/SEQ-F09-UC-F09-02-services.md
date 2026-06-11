@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F09-UC-F09-02-services
+level: sea
+---
+-->
+
 # SEQ-F09-UC-F09-02-services. Grouped Matching (batch cycle): service view
 
 ## Type

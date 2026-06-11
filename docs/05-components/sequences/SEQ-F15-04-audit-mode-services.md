@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F15-04-audit-mode-services
+level: sea
+---
+-->
+
 # SEQ-F15-04-audit-mode-services. Replay: audit-mode — service view
 
 ## Type
