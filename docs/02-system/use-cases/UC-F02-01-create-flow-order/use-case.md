@@ -7,6 +7,16 @@ level: sea
 
 # UC-F02-01. Создать одноактивную потоковую заявку
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-02-create-floworder](../../features/F-02-create-floworder/) |
+| ☁️ L0 system sequence | [SEQ-UC-F02-01-system](sequences/SEQ-UC-F02-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F02-UC-F02-01-services](../../../05-components/sequences/SEQ-F02-UC-F02-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-02. Create FlowOrder](../../features/F-02-create-floworder/)

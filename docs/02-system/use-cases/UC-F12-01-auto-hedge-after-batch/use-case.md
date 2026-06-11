@@ -7,6 +7,16 @@ level: sea
 
 # UC-F12-01. Auto Hedge After Batch (Happy Path)
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-12-execution-hedge](../../features/F-12-execution-hedge/) |
+| ☁️ L0 system sequence | [SEQ-UC-F12-01-system](sequences/SEQ-UC-F12-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F12-01-auto-hedge-services](../../../05-components/sequences/SEQ-F12-01-auto-hedge-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-12. Execution Hedge](../../features/F-12-execution-hedge/)

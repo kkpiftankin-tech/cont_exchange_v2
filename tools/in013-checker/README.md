@@ -1,4 +1,14 @@
-# IN-013 + Mermaid syntax checker
+# IN-013 + Mermaid syntax checker + nav generator
+
+Набор инструментов для поддержки IN-013 methodology (`level: kite/sea/fish`
+двухосевая декомпозиция).
+
+| Tool | Назначение |
+| --- | --- |
+| [`check.py`](check.py) | CI-friendly validator: IN-013 compliance + mermaid syntax |
+| [`gen_nav_maps.py`](gen_nav_maps.py) | Data-driven generator Navigation Map блоков для feature READMEs + UC use-case.md |
+
+## check.py — Validator
 
 CI-friendly validator для документации `docs/`. Объединяет два аудита:
 
@@ -17,7 +27,7 @@ CI-friendly validator для документации `docs/`. Объединя�
    - **H7**: незакрытый `<br>` без `/`.
    - **H9**: `\`\`\`` (triple ticks) внутри mermaid block.
 
-## Usage
+## check.py — Usage
 
 ```bash
 # Full report (human-readable)
@@ -45,6 +55,54 @@ python3 tools/in013-checker/check.py --paths docs/02-system/features/F-04-batch-
 - **2026-06-11** (commit `<this>`): mermaid syntax cleanup — 7 violations
   (6 H1 + 1 H6) в 7 sequence файлах + tooling.
 
+## gen_nav_maps.py — Navigation Map generator
+
+Data-driven генератор: читает `feature.yaml` каждой фичи + scan
+directory структуры (UCs, L0/L1 sequences, component overviews) и
+автоматически вставляет блок `🧭 Navigation Map` (для feature README)
+или `🧭 Navigation (IN-013)` (для UC use-case.md).
+
+**Idempotent**: пропускает файлы, где блок уже присутствует — повторный
+запуск безопасен.
+
+### gen_nav_maps — Usage
+
+```bash
+# Dry-run — показать что будет обновлено, без записи
+python3 tools/in013-checker/gen_nav_maps.py --dry-run
+
+# Реальный запуск — записать обновления
+python3 tools/in013-checker/gen_nav_maps.py
+```
+
+### Что генерируется
+
+Для feature README — три секции после H1 + status banner:
+
+1. `## 🧭 Navigation Map (IN-013 drill-down)` — ASCII outline двух осей.
+2. `## 📋 Use Cases (L1 🌊)` — таблица UC → L0 sequence → L1 sequence.
+3. `## 🏗 Components Involved` — таблица component → overview + L2 sequences.
+
+Для UC use-case.md — одна таблица после H1:
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | F-XX |
+| ☁️ L0 system sequence | SEQ-{UC}-system.md |
+| 🌊 L1 service sequence | SEQ-{F}-{UC}-services.md |
+| 🐟 L2 component sequences | (ссылки на component overviews) |
+| 💻 Source code | cpp/ |
+
+### Зависимости
+
+`PyYAML` (`pip install pyyaml`) — для чтения `feature.yaml`.
+
+### Когда запускать
+
+- После создания новой feature → автоматически генерирует Navigation Map.
+- После добавления нового UC → автоматически добавляет Navigation block.
+- После переименования L0/L1 sequence файлов — re-run обновит ссылки.
+
 ## Related
 
 - [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../docs/00-methodology/functional-hierarchy-and-decomposition.md) —
@@ -57,10 +115,14 @@ python3 tools/in013-checker/check.py --paths docs/02-system/features/F-04-batch-
 
 Добавить в `Makefile`:
 
+<!-- markdownlint-disable MD010 -->
 ```makefile
 check-docs:
 	@python3 tools/in013-checker/check.py --quiet
 ```
+<!-- markdownlint-enable MD010 -->
+
+(Hard tab перед `@python3` — обязательный синтаксис Makefile.)
 
 И в `.github/workflows/ci.yml` (если будет добавлен):
 

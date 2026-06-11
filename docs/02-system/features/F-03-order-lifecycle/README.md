@@ -2,6 +2,41 @@
 
 > **Статус:** частично реализовано (только Cancel, с критическим багом).
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F03-01](../../use-cases/UC-F03-01-amend-cancel-order/use-case.md) | Amend Cancel Order | [SEQ-UC-F03-01-system](../../use-cases/UC-F03-01-amend-cancel-order/sequences/SEQ-UC-F03-01-system.md) | [SEQ-F03-UC-F03-01-services](../../../05-components/sequences/SEQ-F03-UC-F03-01-services.md) |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [gateway](../../../05-components/gateway/overview.md) | (L2 sequences pending) |
+| [order-flow](../../../05-components/order-flow/overview.md) | (L2 sequences pending) |
+| `risk` (overview pending) | (L2 sequences pending) |
+| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
+| `matching` (overview pending) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Описание
 
 Управление активной заявкой после её создания: изменение параметров (amend), отмена, автоматическое истечение по `time_in_force`. Каждое изменение проходит повторный risk-check.

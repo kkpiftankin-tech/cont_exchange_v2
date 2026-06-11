@@ -8,6 +8,45 @@
 > (spread/factor QP, OCO/bracket, external legs, frontend/observability).
 > Источник: [incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md](../../../../incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md) (IN-011).
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F09-01](../../use-cases/UC-F09-01-create-combo-order/use-case.md) | Create Combo Order | [SEQ-UC-F09-01-system](../../use-cases/UC-F09-01-create-combo-order/sequences/SEQ-UC-F09-01-system.md) | [SEQ-F09-UC-F09-01-services](../../../05-components/sequences/SEQ-F09-UC-F09-01-services.md) |
+| [UC-F09-02](../../use-cases/UC-F09-02-grouped-matching/use-case.md) | Grouped Matching | [SEQ-UC-F09-02-system](../../use-cases/UC-F09-02-grouped-matching/sequences/SEQ-UC-F09-02-system.md) | [SEQ-F09-UC-F09-02-services](../../../05-components/sequences/SEQ-F09-UC-F09-02-services.md) |
+| [UC-F09-03](../../use-cases/UC-F09-03-external-leg-execution/use-case.md) | External Leg Execution | [SEQ-UC-F09-03-system](../../use-cases/UC-F09-03-external-leg-execution/sequences/SEQ-UC-F09-03-system.md) | [SEQ-F09-UC-F09-03-services](../../../05-components/sequences/SEQ-F09-UC-F09-03-services.md) |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [order-flow](../../../05-components/order-flow/overview.md) | (L2 sequences pending) |
+| `matching` (overview pending) | (L2 sequences pending) |
+| `risk` (overview pending) | (L2 sequences pending) |
+| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
+| [market-data](../../../05-components/market-data/overview.md) | (L2 sequences pending) |
+| `venues` (overview pending) | (L2 sequences pending) |
+| `observability` (overview pending) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Описание
 
 F-09 вводит заявки, где торговый intent относится не к одному инструменту, а к

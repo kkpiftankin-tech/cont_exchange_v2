@@ -7,6 +7,16 @@ level: sea
 
 # UC-F11-01. Принять external market data (legacy)
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-11-external-venues-lob-to-fob](../../features/F-11-external-venues-lob-to-fob/) |
+| ☁️ L0 system sequence | [SEQ-UC-F11-01-system](sequences/SEQ-UC-F11-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F11-UC-F11-01-services](../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 > **Статус:** **DEPRECATED — заменено на [UC-F11-02. Publish VenueSnapshot](../UC-F11-02-publish-snapshot/use-case.md).**
 >
 > Этот use case остался для совместимости старых ссылок (sequence-диаграмма, traceability в [F-11 README §«Use Cases»](../../features/F-11-external-venues-lob-to-fob/README.md#use-cases)). Использовать UC-F11-02 для всех новых ссылок и реализаций.

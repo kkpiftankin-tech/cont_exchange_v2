@@ -2,6 +2,46 @@
 
 > **Статус:** in-progress, MVP. Connectors к Binance/Coinbase/Uniswap v3 + LOB→FOB конвертация + Venue Health/Routing работают; ClickHouse DDL + risk-консьюмер health — pending.
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F11-01](../../use-cases/UC-F11-01-ingest-external-marketdata/use-case.md) | Ingest External Marketdata | [SEQ-UC-F11-01-system](../../use-cases/UC-F11-01-ingest-external-marketdata/sequences/SEQ-UC-F11-01-system.md) | [SEQ-F11-UC-F11-01-services](../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md) |
+| [UC-F11-01](../../use-cases/UC-F11-01-onboard-venue/use-case.md) | Onboard Venue | [SEQ-UC-F11-01-system](../../use-cases/UC-F11-01-onboard-venue/sequences/SEQ-UC-F11-01-system.md) | [SEQ-F11-UC-F11-01-services](../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md) |
+| [UC-F11-02](../../use-cases/UC-F11-02-publish-snapshot/use-case.md) | Publish Snapshot | [SEQ-UC-F11-02-system](../../use-cases/UC-F11-02-publish-snapshot/sequences/SEQ-UC-F11-02-system.md) | [SEQ-F11-02-publish-snapshot-services](../../../05-components/sequences/SEQ-F11-02-publish-snapshot-services.md) |
+| [UC-F11-03](../../use-cases/UC-F11-03-build-liquidity-curve/use-case.md) | Build Liquidity Curve | [SEQ-UC-F11-03-system](../../use-cases/UC-F11-03-build-liquidity-curve/sequences/SEQ-UC-F11-03-system.md) | [SEQ-F11-03-build-curve-services](../../../05-components/sequences/SEQ-F11-03-build-curve-services.md) |
+| [UC-F11-04](../../use-cases/UC-F11-04-venue-health-degradation/use-case.md) | Venue Health Degradation | [SEQ-UC-F11-04-system](../../use-cases/UC-F11-04-venue-health-degradation/sequences/SEQ-UC-F11-04-system.md) | [SEQ-F11-04-health-routing-services](../../../05-components/sequences/SEQ-F11-04-health-routing-services.md) |
+| [UC-F11-05](../../use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md) | Execute Hedge On Venue | [SEQ-UC-F11-05-system](../../use-cases/UC-F11-05-execute-hedge-on-venue/sequences/SEQ-UC-F11-05-system.md) | [SEQ-F11-05-execute-on-venue-services](../../../05-components/sequences/SEQ-F11-05-execute-on-venue-services.md) |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [external-venues-connector](../../../05-components/external-venues-connector/overview.md) | [SEQ-EVC-001-connect-and-poll](../../../05-components/external-venues-connector/sequences/SEQ-EVC-001-connect-and-poll.md) |
+| [venue-market-data-normalizer](../../../05-components/venue-market-data-normalizer/overview.md) | [SEQ-NORM-001-normalize-snapshot](../../../05-components/venue-market-data-normalizer/sequences/SEQ-NORM-001-normalize-snapshot.md) |
+| [venue-liquidity-curve-builder](../../../05-components/venue-liquidity-curve-builder/overview.md) | [SEQ-CURVE-001-lob-to-fob](../../../05-components/venue-liquidity-curve-builder/sequences/SEQ-CURVE-001-lob-to-fob.md) |
+| [venue-health-routing](../../../05-components/venue-health-routing/overview.md) | [SEQ-HEALTH-001-circuit-breaker-fsm](../../../05-components/venue-health-routing/sequences/SEQ-HEALTH-001-circuit-breaker-fsm.md) |
+| [venue-execution-adapter](../../../05-components/venue-execution-adapter/overview.md) | [SEQ-EXEC-ADAPT-001-intent-to-report](../../../05-components/venue-execution-adapter/sequences/SEQ-EXEC-ADAPT-001-intent-to-report.md) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Бизнес-цели
 
 Подключить внешнюю ликвидность (CEX/DEX/AMM) к Continuous Exchange как непрерывный источник `VenueLiquidityCurve`, чтобы:

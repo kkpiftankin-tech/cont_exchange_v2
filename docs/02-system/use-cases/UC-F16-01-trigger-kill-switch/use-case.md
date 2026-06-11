@@ -7,6 +7,16 @@ level: sea
 
 # UC-F16-01. Активировать kill-switch
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-16-operator-console](../../features/F-16-operator-console/) |
+| ☁️ L0 system sequence | [SEQ-UC-F16-01-system](sequences/SEQ-UC-F16-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F16-UC-F16-01-services](../../../05-components/sequences/SEQ-F16-UC-F16-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-16. Operator Console & Kill-Switch](../../features/F-16-operator-console/)

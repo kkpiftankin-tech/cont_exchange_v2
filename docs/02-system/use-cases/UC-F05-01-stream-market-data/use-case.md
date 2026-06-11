@@ -7,6 +7,16 @@ level: sea
 
 # UC-F05-01. Получить поток live market data
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-05-live-market-data](../../features/F-05-live-market-data/) |
+| ☁️ L0 system sequence | [SEQ-UC-F05-01-system](sequences/SEQ-UC-F05-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F05-UC-F05-01-services](../../../05-components/sequences/SEQ-F05-UC-F05-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-05. Live Market Data](../../features/F-05-live-market-data/)

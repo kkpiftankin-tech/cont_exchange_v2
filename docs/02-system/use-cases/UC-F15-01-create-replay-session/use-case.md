@@ -7,6 +7,16 @@ level: sea
 
 # UC-F15-01. Создать replay-сессию
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-15-backtest-replay](../../features/F-15-backtest-replay/) |
+| ☁️ L0 system sequence | [SEQ-UC-F15-01-system](sequences/SEQ-UC-F15-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F15-UC-F15-01-services](../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-15. Backtest / Replay](../../features/F-15-backtest-replay/)

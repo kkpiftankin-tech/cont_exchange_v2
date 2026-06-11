@@ -7,6 +7,16 @@ level: sea
 
 # UC-F14-01. Депозит средств
 
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-14-deposit-withdraw](../../features/F-14-deposit-withdraw/) |
+| ☁️ L0 system sequence | [SEQ-UC-F14-01-system](sequences/SEQ-UC-F14-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F14-UC-F14-01-services](../../../05-components/sequences/SEQ-F14-UC-F14-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
+
 ## Feature
 
 - [F-14. Deposit / Withdraw](../../features/F-14-deposit-withdraw/)

@@ -7,6 +7,43 @@ owner: core-team
 
 # F-20 — Live Venue Simulator
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+> Use Cases пока не определены (feature в статусе planned/draft).
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| `venue-simulator` (overview pending) | (L2 sequences pending) |
+| `venue-sim-router` (overview pending) | (L2 sequences pending) |
+| `sim-session-manager` (overview pending) | (L2 sequences pending) |
+| `divergence-service` (overview pending) | (L2 sequences pending) |
+| [external-venues](../../../05-components/external-venues/overview.md) | (L2 sequences pending) |
+| [venue-execution-adapter](../../../05-components/venue-execution-adapter/overview.md) | [SEQ-EXEC-ADAPT-001-intent-to-report](../../../05-components/venue-execution-adapter/sequences/SEQ-EXEC-ADAPT-001-intent-to-report.md) |
+| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
+| [risk-manager](../../../05-components/risk-manager/overview.md) | (L2 sequences pending) |
+| [observability-reporting](../../../05-components/observability-reporting/overview.md) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Что это
 
 Гибридный режим исполнения: живой LOB из F-11 + симулятор исполнения

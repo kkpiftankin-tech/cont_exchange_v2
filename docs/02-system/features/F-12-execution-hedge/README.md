@@ -2,6 +2,48 @@
 
 > **Статус:** docs-complete, implementation-partial. Контракты proto/openapi определены, код частично реализован (matching emits ExecutionIntent, venues исполняет через симулятор и реальные адаптеры). Persistence (PostgreSQL hedgeflows / child_orders + ClickHouse execution_reports), Execution Planning routing logic, PreHedgeCheck RPC и HedgePnL calculation — отсутствуют.
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F12-01](../../use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md) | Auto Hedge After Batch | [SEQ-UC-F12-01-system](../../use-cases/UC-F12-01-auto-hedge-after-batch/sequences/SEQ-UC-F12-01-system.md) | [SEQ-F12-01-auto-hedge-services](../../../05-components/sequences/SEQ-F12-01-auto-hedge-services.md) |
+| [UC-F12-02](../../use-cases/UC-F12-02-manual-operator-hedge/use-case.md) | Manual Operator Hedge | [SEQ-UC-F12-02-system](../../use-cases/UC-F12-02-manual-operator-hedge/sequences/SEQ-UC-F12-02-system.md) | [SEQ-F12-02-rejection-fallback-services](../../../05-components/sequences/SEQ-F12-02-rejection-fallback-services.md) |
+| [UC-F12-03](../../use-cases/UC-F12-03-partial-fill-retry/use-case.md) | Partial Fill Retry | [SEQ-UC-F12-03-system](../../use-cases/UC-F12-03-partial-fill-retry/sequences/SEQ-UC-F12-03-system.md) | [SEQ-F12-03-error-scenarios-services](../../../05-components/sequences/SEQ-F12-03-error-scenarios-services.md) |
+| [UC-F12-04](../../use-cases/UC-F12-04-rejection-fallback/use-case.md) | Rejection Fallback | [SEQ-UC-F12-04-system](../../use-cases/UC-F12-04-rejection-fallback/sequences/SEQ-UC-F12-04-system.md) | — |
+| [UC-F12-05](../../use-cases/UC-F12-05-timeout-underfilled-reconciliation/use-case.md) | Timeout Underfilled Reconciliation | [SEQ-UC-F12-05-system](../../use-cases/UC-F12-05-timeout-underfilled-reconciliation/sequences/SEQ-UC-F12-05-system.md) | — |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [venue-execution-adapter](../../../05-components/venue-execution-adapter/overview.md) | [SEQ-EXEC-ADAPT-001-intent-to-report](../../../05-components/venue-execution-adapter/sequences/SEQ-EXEC-ADAPT-001-intent-to-report.md) |
+| [execution-planning](../../../05-components/execution-planning/overview.md) | (L2 sequences pending) |
+| [matching-fob-core](../../../05-components/matching-fob-core/overview.md) | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
+| [risk-manager](../../../05-components/risk-manager/overview.md) | (L2 sequences pending) |
+| [external-venues](../../../05-components/external-venues/overview.md) | (L2 sequences pending) |
+| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
+| [observability-reporting](../../../05-components/observability-reporting/overview.md) | (L2 sequences pending) |
+| [market-data](../../../05-components/market-data/overview.md) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Описание
 
 Автоматическое хеджирование нетто-позиций провайдера на внешних площадках (CEX/DEX/AMM) после внутреннего batch clearing.
