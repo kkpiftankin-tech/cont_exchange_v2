@@ -20,7 +20,9 @@
 
 #include <pqxx/pqxx>
 
+#include "cex/common/decimal.hpp"
 #include "domain/combo_order.hpp"
+#include "infra/combo_reversal_context.hpp"  // ReversalLegRow, ComboReversalContext
 
 namespace cex::order_flow::infra {
 
@@ -47,6 +49,11 @@ class IComboOrderRepository {
 
   /// Атомарно переводит combo и его активные ноги в cancelled (одна транзакция).
   virtual void CancelComboAndLegs(const std::string& combo_order_id) = 0;
+
+  /// Internal-ноги combo (venue_preferences пусто/['internal']) с filled_cum>0 +
+  /// владелец — для operator reverse_internal (T-F09-067).
+  virtual ComboReversalContext LoadInternalFilledLegs(
+      const std::string& parent_order_id) = 0;
 };
 
 /// PostgreSQL-реализация (libpqxx), зеркалит стиль PostgresFlowOrderRepository.
@@ -65,6 +72,7 @@ class PostgresComboOrderRepository final : public IComboOrderRepository {
       const std::string& combo_order_id) override;
   std::vector<std::string> GetActiveLegIds(const std::string& combo_order_id) override;
   void CancelComboAndLegs(const std::string& combo_order_id) override;
+  ComboReversalContext LoadInternalFilledLegs(const std::string& parent_order_id) override;
 
  private:
   ConnectionFactory connection_factory_;

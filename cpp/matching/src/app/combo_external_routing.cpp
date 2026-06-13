@@ -43,6 +43,13 @@ fob::execution::v1::ExecutionIntent BuildExternalIntent(const std::string& paren
   *intent.mutable_target_qty() = leg.remaining_qty().to_proto();
 
   for (const auto& v : leg.venue_preferences) intent.add_allowed_venues(v);
+  // Внешняя биржа принимает ДИСКРЕТНЫЙ ордер на КОНКРЕТНУЮ площадку (как реальный
+  // venue API). Назначаем целевую venue = первичный (не-internal) preference, иначе
+  // venues дефолтит на "default" → legacy round-robin connector в обход venue-sim
+  // (который моделирует accept/reject дискретного ордера). T-F09-068 / ADR-037.
+  for (const auto& v : leg.venue_preferences) {
+    if (!v.empty() && v != "internal") { intent.set_venue(v); break; }
+  }
   return intent;
 }
 

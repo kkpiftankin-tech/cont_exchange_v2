@@ -91,6 +91,53 @@ FROM combo_compensations WHERE status = 'pending' ORDER BY created_at
   return out;
 }
 
+namespace {
+PendingCompensation MapPendingRow(const pqxx::row& row) {
+  PendingCompensation c;
+  c.compensation_id = row["compensation_id"].as<std::string>();
+  c.parent_order_id = row["parent_order_id"].as<std::string>();
+  c.leg_id = row["leg_id"].as<std::string>();
+  c.reason = row["reason"].as<std::string>();
+  if (!row["internal_filled_qty"].is_null()) {
+    c.internal_filled_qty = ParsePgNumeric(row["internal_filled_qty"].as<std::string>());
+  }
+  return c;
+}
+}  // namespace
+
+std::vector<PendingCompensation> PostgresComboCompensationRepository::ListPending(
+    const std::string& parent_order_id) {
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  const pqxx::result rows = tx.exec_params(R"SQL(
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+FROM combo_compensations WHERE status = 'pending' AND parent_order_id = $1::uuid
+ORDER BY created_at
+)SQL",
+                                           parent_order_id);
+  tx.commit();
+
+  std::vector<PendingCompensation> out;
+  out.reserve(rows.size());
+  for (const auto& row : rows) out.push_back(MapPendingRow(row));
+  return out;
+}
+
+std::optional<PendingCompensation> PostgresComboCompensationRepository::GetPending(
+    const std::string& compensation_id) {
+  if (compensation_id.empty()) return std::nullopt;
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  const pqxx::result rows = tx.exec_params(R"SQL(
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+FROM combo_compensations WHERE status = 'pending' AND compensation_id = $1::uuid
+)SQL",
+                                           compensation_id);
+  tx.commit();
+  if (rows.empty()) return std::nullopt;
+  return MapPendingRow(rows[0]);
+}
+
 int PostgresComboCompensationRepository::CountPending(const std::string& parent_order_id) {
   auto conn = connection_factory_();
   pqxx::work tx(*conn);

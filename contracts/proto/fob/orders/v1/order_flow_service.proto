@@ -53,6 +53,25 @@ message ListFlowOrdersResponse {
   repeated FlowOrderView views = 2;
 }
 
+// F-09 MVP-6 slice 3b (T-F09-067, ADR-039/ADR-040): operator-driven compensation
+// resolution. Запрос приходит от F-16 console; order_flow читает pending из
+// matching.CompensationService, для reverse_internal создаёт reversing-FlowOrder,
+// затем matching.ResolvePending. operator_id — для audit (§22).
+message ResolveCompensationRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string compensation_id = 2;
+  string action          = 3;  // reverse_internal | retry_external | accept
+  string operator_id     = 4;  // F-16 operator (audit)
+}
+
+message ResolveCompensationResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool applied                 = 2;  // false → был не-pending (идемпотентный no-op)
+  // id созданных reversing-FlowOrder (для action=reverse_internal).
+  repeated string reversing_order_ids = 3;
+  fob.common.v1.Error error    = 4;  // только на реальную ошибку
+}
+
 service OrderFlowService {
   // Main synchronous entrypoint for Gateway.
   rpc CreateFlowOrder(CreateFlowOrderRequest) returns (CreateFlowOrderResponse);
@@ -67,4 +86,7 @@ service OrderFlowService {
   rpc PreviewComboOrder(PreviewComboOrderRequest) returns (PreviewComboOrderResponse);
   rpc CancelComboOrder(CancelComboOrderRequest) returns (CancelComboOrderResponse);
   rpc GetComboOrder(GetComboOrderRequest) returns (GetComboOrderResponse);
+
+  // F-09 MVP-6 slice 3b (T-F09-067): operator resolves a pending compensation.
+  rpc ResolveCompensation(ResolveCompensationRequest) returns (ResolveCompensationResponse);
 }

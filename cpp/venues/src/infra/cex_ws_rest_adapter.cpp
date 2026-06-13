@@ -231,9 +231,37 @@ domain::VenueOrderResult MakeSimulatedOrderResult(
     const CexWsRestAdapterConfig& cfg,
     const fob::execution::v1::ExecutionIntent& intent) {
   domain::VenueOrderResult out;
-  out.accepted = true;
   out.venue_order_id = cfg.simulated_order_id_prefix +
       (intent.client_order_id().empty() ? intent.intent_id() : intent.client_order_id());
+
+  // F-09 T-F09-068: симулируем отказ биржи на дискретный ордер по символу из
+  // конфигурации (CSV). Реальный venue API может REJECT — moделируем это, чтобы
+  // путь combo external-leg → compensation был воспроизводим end-to-end.
+  const std::string& sym = intent.instrument().symbol();
+  bool reject = false;
+  if (!cfg.simulate_reject_symbols.empty() && !sym.empty()) {
+    std::size_t pos = 0;
+    const std::string& csv = cfg.simulate_reject_symbols;
+    while (pos < csv.size()) {
+      std::size_t comma = csv.find(',', pos);
+      const std::string token = csv.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      if (token == sym) { reject = true; break; }
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+  }
+  if (reject) {
+    const auto target = cex::common::Decimal::from_proto(intent.target_qty());
+    out.accepted = false;
+    out.status = fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED;
+    out.filled_qty = cex::common::Decimal{0, target.scale};
+    out.remaining_qty = target;
+    out.error_code = "SIM_VENUE_REJECT";
+    out.error_message = "simulated venue reject for " + sym;
+    return out;
+  }
+
+  out.accepted = true;
   out.status = fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED;
   out.filled_qty = cex::common::Decimal::from_proto(intent.target_qty());
   out.remaining_qty = cex::common::Decimal{0, out.filled_qty.scale};

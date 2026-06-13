@@ -1514,6 +1514,248 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 ---
 
+## Phase L: MVP-6 Compensation Resolution (slice 3b — MONEY)
+
+> Источник: ADR-039 (operator-driven resolution) + **ADR-040** (размещение endpoint
+> в order_flow, matching экспонирует `CompensationService` gRPC; владение
+> `combo_compensations` остаётся за matching). Предшествующие срезы готовы: DDL
+> (slice 1), repo `ResolvePending`/`ListPending` (slice 2), pure `ComputeReversals`
+> (slice 3a). Ниже — реализация operator-authorized resolution до денег.
+
+### T-F09-063: ADR-040 — размещение endpoint + cross-service контракт
+
+**PR name:** `PR-F09-063 — docs(adr): ADR-040 compensation resolution cross-service placement`
+**Goal:** Зафиксировать решение «endpoint в order_flow, matching экспонирует
+`CompensationService`» (выбор зафиксирован 2026-06-11).
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-006 (внешние/компенсация)
+**Estimated diff:** ≤ 130 lines (docs-only)
+
+**Target files:**
+- `docs/03-architecture/adr/ADR-040-compensation-resolution-cross-service.md` — создать ✅
+
+**Acceptance criteria:**
+- ADR содержит контекст (конфликт §10.3 vs §14/§17), решение, альтернативы,
+  последствия, обратимость
+- Ссылается на ADR-039 §5
+
+**Definition of Done:** docs-only, сборка не требуется. **Статус: ✅ выполнено.**
+
+**Rollback:** `git revert <sha>` безопасен
+
+---
+
+### T-F09-064: Proto `compensation.proto` — CompensationService gRPC
+
+**PR name:** `PR-F09-064 — feat(F-09, proto): add matching CompensationService (List/Get/Resolve)`
+**Goal:** Материализовать gRPC-контракт для read+resolve компенсаций (matching-side).
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-006, AC-F09-009
+**Estimated diff:** ≤ 90 lines
+
+**Target files:**
+- `contracts/proto/fob/matching/v1/compensation.proto` — создать: `service
+  CompensationService` с rpc `ListPendingCompensations`, `GetPendingCompensation`,
+  `ResolvePending`; messages `PendingCompensation` (compensation_id, parent_order_id,
+  leg_id, reason, internal_filled_qty:Decimal), Request/Response для 3 методов;
+  `ResolvePendingRequest{compensation_id, action, operator_id, resolving_ref}`
+- `contracts/CMakeLists.txt` — добавить файл
+- `docs/06-api/grpc/matching-compensation-service.md` — контракт-doc
+
+**Non-target files:**
+- `contracts/proto/fob/matching/v1/solver.proto` — не трогать (отдельный сервис)
+
+**Acceptance criteria:**
+- `internal_filled_qty` — тип `fob.common.v1.Decimal` (не double, §9)
+- `cmake --build build --target contracts_proto` зелёный
+- backward-compat: новый сервис аддитивен
+
+**Definition of Done:** protoc зелёный; контракт-doc создан. Зависит от: T-F09-063.
+**Статус: ✅ выполнено.** `compensation.proto` создан, `protoc` зелёный локально
+(импорты common разрешаются); контракт-doc `matching-compensation-service.md` создан.
+`contracts/CMakeLists.txt` правки не требует (`GLOB_RECURSE *.proto` подхватывает файл).
+
+**Rollback:** `git revert <sha>` безопасен (аддитивный proto)
+
+**Risks:** action — `string` (reverse_internal|retry_external|accept) для читаемости,
+валидация на стороне сервера.
+
+---
+
+### T-F09-065: matching transport — CompensationService gRPC server
+
+**PR name:** `PR-F09-065 — feat(F-09, matching): CompensationService gRPC over existing repo`
+**Goal:** Поднять gRPC-сервис поверх `PostgresComboCompensationRepository`
+(`ListPending`/`ResolvePending` уже есть; добавить `GetPendingCompensation`).
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-006, AC-F09-009
+**Estimated diff:** ≤ 160 lines
+
+**Target files:**
+- `cpp/matching/src/transport/grpc_compensation_service.{hpp,cpp}` — 3 rpc → repo
+- `cpp/matching/src/infra/postgres_combo_compensation_repository.{hpp,cpp}` —
+  добавить `std::optional<PendingCompensation> GetPending(compensation_id)`
+- `cpp/matching/src/main.cpp` — зарегистрировать сервис на существующем gRPC-сервере
+  (рядом с `grpc_isolation_matching_service`)
+- `cpp/matching/tests/grpc_compensation_service_test.cpp` — list/get/resolve, idempotent
+
+**Non-target files:**
+- `cpp/matching/src/app/matching_loop.cpp` — не трогать (compensation consumer уже там)
+
+**Acceptance criteria:**
+- `ResolvePending` идемпотентен (повтор pending→resolved — no-op, true только при
+  фактическом переходе)
+- `ListPendingCompensations` возвращает все pending
+- gRPC-регистрация не ломает `Solver`/isolation service
+
+**Definition of Done:** `ctest -R grpc_compensation_service_test` (live PG) зелёный.
+Зависит от: T-F09-064.
+**Статус: ✅ выполнено (verified live).** `grpc_compensation_service.{hpp,cpp}` (3 rpc),
+репо `GetPending`+`ListPending(parent)`, регистрация на isolation gRPC-сервере (порт
+50053, gated на `MATCHING_POSTGRES_DSN`). `matching_grpc_compensation_service_test`
+Passed против live PG (cex_net); полный `matching` executable собирается. Решён риск
+«нет постоянного gRPC-сервера»: isolation server поднимается всегда.
+
+**Rollback:** `git revert <sha>` безопасен (новый сервис, репо-метод аддитивен)
+
+**Risks:** matching может не иметь постоянного gRPC-сервера в проде — проверить, что
+`grpc_isolation_matching_service` поднимается всегда, а не только в replay.
+
+---
+
+### T-F09-066: Перенести `ComputeReversals` в `cpp/common` (shared, ADR-040 §4)
+
+**PR name:** `PR-F09-066 — refactor(F-09): relocate ComputeReversals to cpp/common`
+**Goal:** Сделать pure `ComputeReversals` доступной order_flow без matching-зависимости.
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-009
+**Estimated diff:** ≤ 80 lines (перемещение + правка include)
+
+**Target files:**
+- `cpp/common/src/domain/compensation_reversal.{hpp,cpp}` — перенести из
+  `cpp/matching/src/domain/compensation_reversal*`
+- `cpp/matching/...` — обновить include на common; matching-тест оставить зелёным
+- `cpp/common/tests/compensation_reversal_test.cpp` — перенести unit-тесты slice 3a
+
+**Acceptance criteria:**
+- Функция остаётся pure (без IO/Kafka/DB), сигнатура `internal_legs → ReversalOrder[]`
+  неизменна
+- matching и order_flow оба линкуются с common-версией
+- Существующие unit-тесты slice 3a зелёные после переезда
+
+**Definition of Done:** `cmake --build build -j` + `ctest -R compensation_reversal`
+зелёные. Зависит от: T-F09-063.
+**Статус: ✅ выполнено (verified live).** `ComputeReversals`+`ReversalLeg`/`ReversalOrder`
+перенесены `cpp/matching/src/domain/` → `cpp/common` (namespace `cex::matching::domain`
+→ `cex::common`); тест → `cex_common_compensation_reversal_test` (Passed); matching
+собирается без старых файлов. Старые файлы и matching CMake-записи удалены.
+
+**Rollback:** `git revert <sha>` безопасен (чистый рефактор, поведение неизменно)
+
+**Risks:** Циклы в CMake — common не должен зависеть от matching (направление верное).
+
+---
+
+### T-F09-067: order_flow — matching compensation client + ResolveCompensation UseCase + operator gRPC
+
+**PR name:** `PR-F09-067 — feat(F-09, order-flow): operator ResolveCompensation (reverse_internal money path)`
+**Goal:** Operator-authorized endpoint: read pending (matching gRPC) → reverse_internal
+считает реверс из `combo_order_legs` → `CreateFlowOrder` → matching `ResolvePending`.
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-006, AC-F09-009
+**Estimated diff:** ≤ 220 lines
+
+**Target files:**
+- `cpp/order_flow/src/infra/matching_compensation_client.{hpp,cpp}` — gRPC client к
+  `CompensationService` (Get/List/Resolve), паттерн `risk_client`/`ledger_client`
+- `cpp/order_flow/src/app/resolve_compensation_use_case.{hpp,cpp}` — оркестрация
+  (ADR-040 §3): get → load internal legs (combo repo, `filled_cum`) → `ComputeReversals`
+  → `CreateFlowOrder` (client_order_id = compensation_id+leg, идемпотентно) → ResolvePending
+- `cpp/order_flow/src/transport/grpc_order_flow_service.{hpp,cpp}` — rpc
+  `ResolveCompensation` с operator-auth guard (по образцу `SetKillSwitch`)
+- `cpp/order_flow/tests/resolve_compensation_use_case_test.cpp` — reverse_internal,
+  accept, идемпотентность ретрая, retry_external (re-emit intent)
+- `docs/06-api/grpc/order-flow-resolve-compensation.md` — контракт-doc
+
+**Non-target files:**
+- `cpp/order_flow/src/infra/postgres_combo_order_repository.*` — добавить только read
+  `filled_cum` по combo, не менять write-путь
+- `cpp/ledger/` — не трогать (реверс идёт штатным pipeline)
+
+**Acceptance criteria:**
+- Деньги идут ТОЛЬКО через `CreateFlowOrder` pipeline (нет прямого ledger-мутирования)
+- `reverse_internal`: создаётся FlowOrder противоположной стороны, qty = Σ filled_cum
+  внутренних ног; `resolving_ref` = id реверсивной заявки; затем `ResolvePending(resolved)`
+- `accept` → `ResolvePending(accept)` без создания ордера (cancelled)
+- Ретрай endpoint идемпотентен (повторный вызов не создаёт дублей FlowOrder и не
+  переоткрывает resolved)
+- operator-auth guard отклоняет неавторизованный вызов (как kill-switch)
+
+**Definition of Done:** `ctest -R resolve_compensation_use_case_test` зелёный; контракт-doc
+создан. Зависит от: T-F09-064, T-F09-065, T-F09-066.
+**Статус: ✅ выполнено (unit verified live).** proto `ResolveCompensation` rpc +
+messages; `matching_compensation_client` (Get/Resolve); `resolve_compensation_use_case`
+(std::function-порты: get→reverse_internal/accept/retry_external→resolve); repo
+`LoadInternalFilledLegs` (internal-ноги filled_cum>0 + owner; локальный NUMERIC-парсер);
+DTO в `combo_reversal_context.hpp` (без pqxx); operator-auth как SetKillSwitch (operator_id
++ audit); idem `client_order_id=comp:leg`; band/rate из исходной ноги; gRPC-метод +
+wiring (`MATCHING_GRPC_TARGET`, gated на DSN); контракт-doc. `order_flow_resolve_comp_tests`
+Passed (6 кейсов) + order_flow executable собирается. retry_external → NOT_IMPLEMENTED (MVP-7).
+
+**Rollback:** `git revert <sha>` безопасен; за operator-auth флагом можно отключить.
+
+**Risks:** partial-fill математика реверса (несимметричный fill ног) — в slice 3b
+полный объём `filled_cum`; сложные partial-кейсы помечены deferred MVP-7 (ADR-039).
+
+---
+
+### T-F09-068: E2E — operator resolves pending compensation → reverse → ledger
+
+**PR name:** `PR-F09-068 — test(F-09, e2e): operator compensation resolution reverses internal exposure`
+**Goal:** Полный путь: внешняя нога combo отклонена → pending compensation →
+operator `ResolveCompensation(reverse_internal)` → реверсивная FlowOrder → ledger
+разворачивает позицию → `combo_compensations.status = resolved`.
+**Linked feature:** [F-09](../02-system/features/F-09-batch-combo-orders/feature.yaml)
+**Linked AC:** AC-F09-006, AC-F09-009
+**Estimated diff:** ≤ 120 lines (Testing/ скрипт)
+
+**Target files:**
+- `Testing/f09_compensation_resolution_e2e.sh` — combo (internal+external) → rejecting
+  venue → pending → gRPC ResolveCompensation → assert reversing FlowOrder + ledger
+  delta + status=resolved
+- `docs/10-testing/features/F-09-test-plan.md` — добавить кейс
+
+**Acceptance criteria:**
+- Требует «отклоняющего» venue-sim (Трек 2): live-провал внешней ноги
+- Повторный ResolveCompensation — no-op (идемпотентность на E2E-уровне)
+- Позиция combo после реверса нейтрализована по внутренним ногам
+
+**Definition of Done:** скрипт зелёный на dev-стеке. Зависит от: T-F09-067 + Трек 2
+(rejecting venue для live-провала).
+**Статус: ✅ выполнено (PASSED live).** `Testing/f09_compensation_resolution_e2e.sh`
+зелёный на dev-стеке. Полная цепочка проверена LIVE: combo (BTC internal buy +
+ETH external sell→binance) → internal наполнена (scalable_atomic, filled_cum=0.002)
+→ binance REJECT дискретного ETH-ордера → matching pending compensation →
+ResolveCompensation(reverse_internal) applied=true + reversingOrderIds → reversing
+FlowOrder persisted → status=resolved → re-resolve no-op (идемпотентно).
+**Потребовало venue/matching-фиксов (вне resolution-кода, но нужны для live):**
+(a) `combo_external_routing.cpp BuildExternalIntent` ставит `intent.venue`=primary
+preference (дискретный ордер на конкретную биржу — иначе legacy round-robin минует
+venue-sim); (b) EVC simulate (`cex_ws_rest_adapter`) умеет REJECT по
+`simulate_reject_symbols` (env `BINANCE_SIMULATE_REJECT_SYMBOLS=ETH/USDT`) —
+моделирует отказ реальной биржи; (c) `resolve_compensation_use_case` ставит
+детерминированный `order_id` реверс-ордера (gateway генерит id, а UC зовётся
+напрямую); (d) combo для E2E = `scalable_atomic` (EXTERNAL_COMPENSATING политика
+в solver'е = kBlocked, не наполняет — см. grouped_solver_bisection.cpp:142);
+(e) compose env `F09_EXTERNAL_COMPENSATING_ENABLED=true` на order_flow.
+
+**Rollback:** `git revert <sha>` безопасен (тест-скрипт)
+
+**Risks:** Текущий venue-sim заполняет все intents → нужен режим reject (см. Трек 2,
+live external-leg failure E2E). До этого — unit/integration покрытие (T-F09-067).
+
+---
+
 ## Recommended MVP Increments
 
 | MVP | Scope | Задачи | Когда |
@@ -1523,6 +1765,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 | **MVP-3** spread/factor/budget/risk + strict_atomic | Линейная система (A_g e=b_g α) для spread/factor constraints. QP solver (OSQP/Eigen). Strict_atomic polished. | T-F09-094 + solver extension в T-F09-044 | После MVP-2 |
 | **MVP-4** OCO/bracket + observability + E2E | OCO transitions, bracket resize, full observability, replay determinism. | T-F09-022, T-F09-023, T-F09-071, T-F09-081, T-F09-092, T-F09-093, T-F09-095, T-F09-096 | После MVP-3 |
 | **MVP-5** external/compensating | venue_native, external_compensating, compensation ledger, venues stubs → real. | T-F09-050, T-F09-051, T-F09-052, T-F09-061 | После MVP-4 или параллельно |
+| **MVP-6** compensation resolution (operator-driven) | ADR-039/040. DDL+repo (slice1/2 ✅), pure ComputeReversals (slice3a ✅), operator gRPC ResolveCompensation→reverse_internal money path (slice3b), F-16 console (slice4). | T-F09-063..068 (slice3b), slice4=frontend | После MVP-5 |
 
 ---
 

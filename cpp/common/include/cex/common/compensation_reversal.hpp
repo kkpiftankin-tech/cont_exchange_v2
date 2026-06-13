@@ -1,12 +1,13 @@
 #pragma once
 // ============================================================================
-// compensation_reversal.hpp — F-09 MVP-6 (ADR-039). Matching domain (pure).
+// compensation_reversal.hpp — F-09 MVP-6 (ADR-039, перенесён в common ADR-040 §4).
 //
 // Считает реверсивные ордера для разворота внутренней экспозиции combo, когда
 // внешняя нога провалилась (operator action reverse_internal). Для каждой
 // исполненной внутренней ноги — ордер ПРОТИВОПОЛОЖНОЙ стороны на filled-объём.
-// Чистая функция (без IO/ордеров/денег); фактическое размещение FlowOrder через
-// order_flow pipeline с operator-auth — отдельный шаг (slice 3b).
+// Чистая функция (без IO/ордеров/денег). Размещена в cex::common, чтобы её мог
+// использовать и matching, и order_flow (фактическое размещение FlowOrder через
+// order_flow pipeline с operator-auth — T-F09-067).
 // ============================================================================
 
 #include <string>
@@ -14,7 +15,7 @@
 
 #include "cex/common/decimal.hpp"
 
-namespace cex::matching::domain {
+namespace cex::common {
 
 struct ReversalLeg {
   std::string instrument_symbol;
@@ -33,4 +34,4 @@ struct ReversalOrder {
 [[nodiscard]] std::vector<ReversalOrder> ComputeReversals(
     const std::vector<ReversalLeg>& internal_legs);
 
-}  // namespace cex::matching::domain
+}  // namespace cex::common

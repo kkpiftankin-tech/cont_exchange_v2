@@ -57,6 +57,8 @@ int main() {
   ok = expect(intent.target_qty().units() == 7 && intent.target_qty().scale() == 0,
               "target_qty = remaining (10-3=7)") && ok;
   ok = expect(intent.allowed_venues_size() == 2, "allowed_venues = venue_preferences") && ok;
+  // T-F09-068: discrete order targets a concrete venue (primary non-internal pref).
+  ok = expect(intent.venue() == "binance", "intent.venue = primary venue_preference") && ok;
 
   if (ok) { std::cout << "combo_external_routing_test: ALL PASSED\n"; return 0; }
   return 1;

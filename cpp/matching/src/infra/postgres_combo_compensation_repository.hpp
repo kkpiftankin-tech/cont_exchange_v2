@@ -59,6 +59,10 @@ class PostgresComboCompensationRepository {
                       const std::string& operator_id, const std::string& resolving_ref);
   /// Все pending-компенсации (для operator-console).
   std::vector<PendingCompensation> ListPending();
+  /// Pending-компенсации одной combo (фильтр для gRPC ListPendingCompensations).
+  std::vector<PendingCompensation> ListPending(const std::string& parent_order_id);
+  /// Pending-компенсация по id (T-F09-065). nullopt если нет pending с таким id.
+  std::optional<PendingCompensation> GetPending(const std::string& compensation_id);
 
  private:
   ConnectionFactory connection_factory_;

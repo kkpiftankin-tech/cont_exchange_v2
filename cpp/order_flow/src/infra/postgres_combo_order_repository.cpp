@@ -16,6 +16,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -387,6 +388,83 @@ void PostgresComboOrderRepository::CancelComboAndLegs(const std::string& combo_o
       "WHERE parent_order_id = $1::uuid AND status NOT IN ('filled','cancelled')",
       combo_order_id);
   tx.commit();
+}
+
+namespace {
+// Компактный парсер PG NUMERIC(38,18) → Decimal для read-пути reverse_internal.
+// Снимает trailing-zero padding ("100.000…0" → "100"), знак, дробную часть.
+// Значения combo малы (цены/qty/rate) — переполнения int64 нет. Результат
+// ре-валидируется CreateFlowOrder (§9). TODO: консолидировать с matching
+// ParsePgNumeric в cex/common при следующем money-рефакторе.
+cex::common::Decimal ParseNum(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ')) s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ')) s.remove_suffix(1);
+  if (s.find('.') != std::string_view::npos) {
+    while (s.size() > 1 && s.back() == '0') s.remove_suffix(1);
+    if (!s.empty() && s.back() == '.') s.remove_suffix(1);
+  }
+  if (s.empty()) return cex::common::Decimal::zero();
+  bool negative = false;
+  std::size_t i = 0;
+  if (s.front() == '+' || s.front() == '-') { negative = s.front() == '-'; i = 1; }
+  __int128 acc = 0;
+  std::int32_t scale = 0;
+  bool dot = false;
+  for (; i < s.size(); ++i) {
+    const char ch = s[i];
+    if (ch == '.') { dot = true; continue; }
+    if (ch < '0' || ch > '9') {
+      throw std::invalid_argument("combo NUMERIC has non-digit: " + std::string(s));
+    }
+    acc = acc * 10 + (ch - '0');
+    if (dot) ++scale;
+  }
+  if (negative) acc = -acc;
+  return cex::common::Decimal{static_cast<std::int64_t>(acc), scale};
+}
+}  // namespace
+
+ComboReversalContext PostgresComboOrderRepository::LoadInternalFilledLegs(
+    const std::string& parent_order_id) {
+  auto conn = connection_factory_();
+  if (!conn || !conn->is_open()) {
+    throw std::runtime_error("Failed to open PostgreSQL connection");
+  }
+  pqxx::work tx(*conn);
+  // Internal-нога = venue_preferences NULL / пусто / ['internal'] (зеркало
+  // VectorLeg::is_external из MVP-5). Только filled_cum>0 (есть что разворачивать).
+  const pqxx::result rows = tx.exec_params(R"SQL(
+SELECT l.leg_id::text, l.instrument_symbol, l.side,
+       l.p_low::text, l.p_high::text, l.q_rate::text, l.filled_cum::text,
+       COALESCE(c.user_id,''), COALESCE(c.account_id,'')
+FROM combo_order_legs l
+JOIN combo_orders c ON c.combo_order_id = l.parent_order_id
+WHERE l.parent_order_id = $1::uuid
+  AND l.filled_cum > 0
+  AND (l.venue_preferences IS NULL
+       OR cardinality(l.venue_preferences) = 0
+       OR l.venue_preferences = ARRAY['internal']::text[])
+ORDER BY l.leg_id
+)SQL",
+                                           parent_order_id);
+  tx.commit();
+
+  ComboReversalContext ctx;
+  ctx.legs.reserve(rows.size());
+  for (const auto& row : rows) {
+    ReversalLegRow leg;
+    leg.leg_id = row[0].as<std::string>();
+    leg.instrument_symbol = row[1].as<std::string>();
+    leg.is_buy = row[2].as<std::string>() == "buy";
+    leg.p_low = ParseNum(row[3].as<std::string>());
+    leg.p_high = ParseNum(row[4].as<std::string>());
+    leg.q_rate = ParseNum(row[5].as<std::string>());
+    leg.filled_cum = ParseNum(row[6].as<std::string>());
+    if (ctx.user_id.empty()) ctx.user_id = row[7].as<std::string>();
+    if (ctx.account_id.empty()) ctx.account_id = row[8].as<std::string>();
+    ctx.legs.push_back(std::move(leg));
+  }
+  return ctx;
 }
 
 }  // namespace cex::order_flow::infra

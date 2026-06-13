@@ -1,10 +1,10 @@
 // ============================================================================
-// compensation_reversal.cpp — F-09 MVP-6 (ADR-039). См. .hpp.
+// compensation_reversal.cpp — F-09 MVP-6 (ADR-039 / ADR-040 §4). См. .hpp.
 // ============================================================================
 
-#include "domain/compensation_reversal.hpp"
+#include "cex/common/compensation_reversal.hpp"
 
-namespace cex::matching::domain {
+namespace cex::common {
 
 std::vector<ReversalOrder> ComputeReversals(const std::vector<ReversalLeg>& internal_legs) {
   std::vector<ReversalOrder> out;
@@ -18,4 +18,4 @@ std::vector<ReversalOrder> ComputeReversals(const std::vector<ReversalLeg>& inte
   return out;
 }
 
-}  // namespace cex::matching::domain
+}  // namespace cex::common

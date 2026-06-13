@@ -731,6 +731,10 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     binance_cfg.rest_base_url = cex::common::Env::get_string(
         "BINANCE_REST_BASE_URL", "https://api.binance.com");
     apply_real_cex_defaults(&binance_cfg);
+    // F-09 T-F09-068: symbols this venue (in simulate) returns as REJECTED —
+    // моделирует отказ реальной биржи на дискретный ордер (combo external-leg E2E).
+    binance_cfg.simulate_reject_symbols =
+        cex::common::Env::get_string("BINANCE_SIMULATE_REJECT_SYMBOLS", "");
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(binance_cfg));
 
     infra::CexWsRestAdapterConfig coinbase_cfg;

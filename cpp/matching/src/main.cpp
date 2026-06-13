@@ -30,6 +30,8 @@
 #include "infra/postgres/postgres_flow_order_repository.hpp"
 #include "infra/postgres/postgres_solver_config_repository.hpp"
 #include "transport/grpc_isolation_matching_service.hpp"
+#include "transport/grpc_compensation_service.hpp"
+#include "infra/postgres_combo_compensation_repository.hpp"
 #include "crow.h"
 
 int main() {
@@ -83,6 +85,21 @@ int main() {
   grpc::ServerBuilder isolation_builder;
   isolation_builder.AddListeningPort(isolation_listen, grpc::InsecureServerCredentials());
   isolation_builder.RegisterService(&isolation_service);
+
+  // F-09 MVP-6 (T-F09-065, ADR-040): CompensationService на том же gRPC-сервере.
+  // Доступен только когда есть PG-DSN (combo_compensations владеет matching).
+  std::unique_ptr<cex::matching::infra::PostgresComboCompensationRepository> compensation_repo;
+  std::unique_ptr<cex::matching::transport::GrpcCompensationService> compensation_service;
+  if (postgres_dsn.has_value() && !postgres_dsn->empty()) {
+    compensation_repo =
+        std::make_unique<cex::matching::infra::PostgresComboCompensationRepository>(*postgres_dsn);
+    compensation_service =
+        std::make_unique<cex::matching::transport::GrpcCompensationService>(compensation_repo.get());
+    isolation_builder.RegisterService(compensation_service.get());
+    cex::common::log_json("INFO", "Matching CompensationService gRPC enabled",
+                          {{"addr", isolation_listen}});
+  }
+
   auto isolation_server = isolation_builder.BuildAndStart();
   if (isolation_server) {
     cex::common::log_json("INFO", "Matching isolation gRPC listening",

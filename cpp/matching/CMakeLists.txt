@@ -51,7 +51,6 @@ add_executable(matching
   src/domain/child_graph_transitions.cpp
   src/domain/constraint_evaluator.cpp
   src/domain/trigger_condition.cpp
-  src/domain/compensation_reversal.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -64,6 +63,7 @@ add_executable(matching
   src/infra/kafka/execution_intents_producer.cpp
   src/infra/execution_groups_producer.cpp
   src/transport/grpc_isolation_matching_service.cpp
+  src/transport/grpc_compensation_service.cpp
 )
 
 target_include_directories(matching PRIVATE
@@ -185,17 +185,8 @@ if(BUILD_TESTING)
   target_compile_options(matching_trigger_condition_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_trigger_condition_test COMMAND matching_trigger_condition_test)
 
-  # F-09 MVP-6 (ADR-039): compensation reversal computation (pure domain).
-  add_executable(matching_compensation_reversal_test
-    tests/domain/compensation_reversal_test.cpp
-    src/domain/compensation_reversal.cpp
-  )
-  target_include_directories(matching_compensation_reversal_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
-  target_link_libraries(matching_compensation_reversal_test PRIVATE cex_common)
-  target_compile_options(matching_compensation_reversal_test PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME matching_compensation_reversal_test COMMAND matching_compensation_reversal_test)
+  # F-09 MVP-6: ComputeReversals перенесён в cpp/common (ADR-040 §4).
+  # Тест → cex_common_compensation_reversal_test (cpp/common/CMakeLists.txt).
 
   # F-09 (T-F09-045): SolveGroupedBatch use case (solve loop over active groups).
   add_executable(matching_solve_grouped_batch_test
@@ -300,6 +291,25 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_combo_compensation_repo_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_combo_compensation_repo_test COMMAND matching_combo_compensation_repo_test)
+
+  # F-09 MVP-6 slice 3b (T-F09-065, ADR-040): CompensationService gRPC (PG integration).
+  add_executable(matching_grpc_compensation_service_test
+    tests/transport/grpc_compensation_service_test.cpp
+    src/transport/grpc_compensation_service.cpp
+    src/infra/postgres_combo_compensation_repository.cpp
+    src/infra/postgres/decimal_conversion.cpp
+  )
+  target_include_directories(matching_grpc_compensation_service_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_grpc_compensation_service_test PRIVATE
+    cex_common
+    contracts_proto
+    ${MATCHING_PQXX_TARGET}
+    PostgreSQL::PostgreSQL
+  )
+  target_compile_options(matching_grpc_compensation_service_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_grpc_compensation_service_test COMMAND matching_grpc_compensation_service_test)
 
   # F-09 MVP-5 (ADR-037): combo external-leg routing (split + build ExecutionIntent).
   add_executable(matching_combo_external_routing_test

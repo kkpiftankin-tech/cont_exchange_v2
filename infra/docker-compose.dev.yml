@@ -136,6 +136,10 @@ services:
         TARGET: order_flow
         BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
+    environment:
+      # F-09 MVP-5/6: разрешить external_compensating combo (внешние ноги +
+      # compensation resolution). По умолчанию выключено (honest gate, T-F09-002).
+      F09_EXTERNAL_COMPENSATING_ENABLED: "true"
     depends_on:
       risk:
         condition: service_started
@@ -174,6 +178,9 @@ services:
       CURVE_LEVEL: "L3"
       BINANCE_VENUE_ID: "binance"
       BINANCE_VENUE_SYMBOL: "BTCUSDT"
+      # F-09 T-F09-068: binance (simulate) отклоняет дискретный ордер по ETH/USDT,
+      # чтобы воспроизвести combo external-leg failure → compensation.
+      BINANCE_SIMULATE_REJECT_SYMBOLS: "ETH/USDT"
       COINBASE_VENUE_ID: "coinbase"
       COINBASE_VENUE_SYMBOL: "BTC-USD"
       UNISWAP_VENUE_ID: "uniswap_v3"

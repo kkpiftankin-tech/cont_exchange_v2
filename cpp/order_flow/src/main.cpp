@@ -30,6 +30,8 @@
 #include "infra/orders_kafka_publisher.hpp"
 #include "infra/orders_normalized_grouped_producer.hpp"
 #include "infra/postgres/postgres_flow_order_repository.hpp"
+#include "app/resolve_compensation_use_case.hpp"
+#include "infra/matching_compensation_client.hpp"
 #include "infra/postgres_combo_order_repository.hpp"
 #include "infra/risk_client.hpp"
 #include "transport/grpc_order_flow_service.hpp"
@@ -117,6 +119,9 @@ int main() {
   std::optional<cex::order_flow::infra::OrdersNormalizedGroupedProducer> grouped_producer;
   std::optional<cex::order_flow::app::CreateComboOrderUseCase> create_combo_uc;
   std::optional<cex::order_flow::app::CancelComboOrderUseCase> cancel_combo_uc;
+  // F-09 MVP-6 slice 3b (T-F09-067): operator compensation resolution.
+  std::optional<cex::order_flow::infra::MatchingCompensationClient> comp_client;
+  std::optional<cex::order_flow::app::ResolveCompensationUseCase> resolve_comp_uc;
   if (!pg_dsn.empty()) {
     combo_repo.emplace(pg_dsn);
     combo_publisher.emplace(
@@ -164,16 +169,39 @@ int main() {
     };
     create_combo_uc.emplace(*combo_repo, *grouped_producer, grouped_risk_check, combo_policy);
     cancel_combo_uc.emplace(*combo_repo, *grouped_producer);
+
+    // F-09 MVP-6 slice 3b (T-F09-067, ADR-040): operator ResolveCompensation.
+    // matching владеет combo_compensations → gRPC-клиент к CompensationService
+    // (порт isolation-сервера matching). Реверс — через локальный uc.CreateFlowOrder.
+    const std::string matching_target =
+        cex::common::Env::get_string("MATCHING_GRPC_TARGET", "matching:50053");
+    comp_client.emplace(matching_target);
+    resolve_comp_uc.emplace(
+        [&comp_client](const fob::matching::v1::GetPendingCompensationRequest& r) {
+          return comp_client->GetPending(r);
+        },
+        [&comp_client](const fob::matching::v1::ResolvePendingRequest& r) {
+          return comp_client->ResolvePending(r);
+        },
+        [&combo_repo](const std::string& parent_order_id) {
+          return combo_repo->LoadInternalFilledLegs(parent_order_id);
+        },
+        [&uc](const fob::orders::v1::CreateFlowOrderRequest& r) {
+          return uc.CreateFlowOrder(r);
+        });
+
     cex::common::log_json(
         "INFO", "OrderFlow F-09 combo orders enabled",
         {{"multileg_solver", combo_policy.multileg_vector_solver_enabled ? "on" : "off"},
          {"external_compensating", combo_policy.external_compensating_enabled ? "on" : "off"},
-         {"max_legs", std::to_string(combo_policy.max_legs_per_group)}});
+         {"max_legs", std::to_string(combo_policy.max_legs_per_group)},
+         {"matching_target", matching_target}});
   }
 
   cex::order_flow::transport::GrpcOrderFlowService svc(
       &uc, create_combo_uc ? &*create_combo_uc : nullptr,
-      cancel_combo_uc ? &*cancel_combo_uc : nullptr);
+      cancel_combo_uc ? &*cancel_combo_uc : nullptr,
+      resolve_comp_uc ? &*resolve_comp_uc : nullptr);
 
   // Subscribe to batch.outputs so fills from matching propagate to the
   // in-memory FlowOrder store. Without this, gateway/UI would forever see

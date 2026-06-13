@@ -3,6 +3,7 @@
 #include "app/cancel_combo_order_use_case.hpp"
 #include "app/create_combo_order_use_case.hpp"
 #include "app/order_flow_uc.hpp"
+#include "app/resolve_compensation_use_case.hpp"
 
 namespace cex::order_flow::transport {
 
@@ -12,8 +13,12 @@ class GrpcOrderFlowService final : public fob::orders::v1::OrderFlowService::Ser
   // combo требует PG). При nullptr combo-методы возвращают FAILED_PRECONDITION.
   explicit GrpcOrderFlowService(app::OrderFlowUseCases* uc,
                                 app::CreateComboOrderUseCase* create_combo = nullptr,
-                                app::CancelComboOrderUseCase* cancel_combo = nullptr)
-      : uc_(uc), create_combo_(create_combo), cancel_combo_(cancel_combo) {}
+                                app::CancelComboOrderUseCase* cancel_combo = nullptr,
+                                app::ResolveCompensationUseCase* resolve_comp = nullptr)
+      : uc_(uc),
+        create_combo_(create_combo),
+        cancel_combo_(cancel_combo),
+        resolve_comp_(resolve_comp) {}
 
   grpc::Status CreateFlowOrder(grpc::ServerContext* context,
                               const fob::orders::v1::CreateFlowOrderRequest* request,
@@ -41,10 +46,17 @@ class GrpcOrderFlowService final : public fob::orders::v1::OrderFlowService::Ser
                                 const fob::orders::v1::CancelComboOrderRequest* request,
                                 fob::orders::v1::CancelComboOrderResponse* response) override;
 
+  // F-09 MVP-6 slice 3b (T-F09-067): operator resolves pending compensation.
+  grpc::Status ResolveCompensation(
+      grpc::ServerContext* context,
+      const fob::orders::v1::ResolveCompensationRequest* request,
+      fob::orders::v1::ResolveCompensationResponse* response) override;
+
  private:
   app::OrderFlowUseCases* uc_;
   app::CreateComboOrderUseCase* create_combo_;
   app::CancelComboOrderUseCase* cancel_combo_;
+  app::ResolveCompensationUseCase* resolve_comp_;
 };
 
 }  // namespace cex::order_flow::transport

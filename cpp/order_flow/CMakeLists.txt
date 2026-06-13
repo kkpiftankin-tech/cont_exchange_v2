@@ -39,6 +39,8 @@ add_executable(order_flow
   src/infra/orders_normalized_grouped_producer.cpp
   src/app/create_combo_order_use_case.cpp
   src/app/cancel_combo_order_use_case.cpp
+  src/infra/matching_compensation_client.cpp
+  src/app/resolve_compensation_use_case.cpp
 )
 
 target_include_directories(order_flow PRIVATE
@@ -146,4 +148,20 @@ if(BUILD_TESTING)
   )
   target_compile_options(order_flow_cancel_uc_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME order_flow_cancel_uc_tests COMMAND order_flow_cancel_uc_tests)
+
+  # F-09 MVP-6 slice 3b (T-F09-067): ResolveCompensationUseCase test (std::function
+  # fakes — без PG/сети). combo_reversal_context.hpp не тянет pqxx.
+  add_executable(order_flow_resolve_comp_tests
+    tests/app/resolve_compensation_use_case_test.cpp
+    src/app/resolve_compensation_use_case.cpp
+  )
+  target_include_directories(order_flow_resolve_comp_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(order_flow_resolve_comp_tests PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(order_flow_resolve_comp_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME order_flow_resolve_comp_tests COMMAND order_flow_resolve_comp_tests)
 endif()

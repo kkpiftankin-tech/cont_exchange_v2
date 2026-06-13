@@ -77,4 +77,17 @@ grpc::Status GrpcOrderFlowService::CancelComboOrder(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcOrderFlowService::ResolveCompensation(
+    grpc::ServerContext*,
+    const fob::orders::v1::ResolveCompensationRequest* request,
+    fob::orders::v1::ResolveCompensationResponse* response) {
+  if (resolve_comp_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                        "compensation resolution requires ORDER_FLOW_POSTGRES_DSN "
+                        "and MATCHING_GRPC_TARGET");
+  }
+  *response = resolve_comp_->Resolve(*request);
+  return grpc::Status::OK;
+}
+
 }  // namespace cex::order_flow::transport
