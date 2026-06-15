@@ -189,6 +189,9 @@ services:
       # F-09 T-F09-068: binance (simulate) отклоняет дискретный ордер по ETH/USDT,
       # чтобы воспроизвести combo external-leg failure → compensation.
       BINANCE_SIMULATE_REJECT_SYMBOLS: "ETH/USDT"
+      # F-09 UX: доп. символы для тикер-фида (live-котировки в combo-форме). Пары,
+      # которые binance реально торгует (USDT/USDC/EUR/BTC-quote для major-баз).
+      VENUES_FEED_SYMBOLS: "ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,AVAX/USDT,LINK/USDT,LTC/USDT,DOT/USDT,MATIC/USDT,TRX/USDT,ATOM/USDT,UNI/USDT,BCH/USDT,NEAR/USDT,APT/USDT,ARB/USDT,OP/USDT,FIL/USDT,ETC/USDT,XLM/USDT,ALGO/USDT,INJ/USDT,SUI/USDT,SEI/USDT,BTC/USDC,ETH/USDC,SOL/USDC,XRP/USDC,BTC/EUR,ETH/EUR,SOL/EUR,ETH/BTC,SOL/BTC,BNB/BTC,XRP/BTC"
       COINBASE_VENUE_ID: "coinbase"
       COINBASE_VENUE_SYMBOL: "BTC-USD"
       UNISWAP_VENUE_ID: "uniswap_v3"

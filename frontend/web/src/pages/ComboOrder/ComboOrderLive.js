@@ -138,7 +138,9 @@ const ComboOrderLive = () => {
     setLegs((prev) => prev.map((l, idx) => {
       if (idx !== i) return l;
       base = l.base;
-      return { ...l, quote };
+      // Сбрасываем band на дефолт базы (иначе при смене quote без фида остаётся
+      // стале-цена прежней пары). Live ниже перекроет, если котировка есть.
+      return { ...l, quote, ...bandFor(l.base) };
     }));
     applyQuote(i, base, quote);
   };
