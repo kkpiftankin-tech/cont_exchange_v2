@@ -1366,8 +1366,14 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 **Definition of Done:**
 - `bash Testing/f09_basket_scalable_atomic_e2e.sh` зелёный
 - Зависит от: все фазы D + F + H
-
-**Rollback:** `git revert <sha>` безопасен
+**Статус: ✅ выполнено (live).** `Testing/f09_basket_scalable_e2e.sh` — basket (2
+internal ноги, scalable_atomic) через grpcurl → grouped solver наполняет ноги →
+execution_group (PG) + combo_order_legs.filled_cum>0 + group_status partial→filled,
+execution_scale>0, leg_results present. PASSED на dev-стеке (combo сходится за ~2
+батча: scale 0.5 partial → 1.0 filled). NB: combo создаётся через order_flow gRPC
+(gateway combo не проксирует), не REST. Остальные T-F09-091..096 — преимущественно
+покрыты cpp unit/integration (grouped_solver/child_graph/constraint/trigger/negative)
++ live (compensation E2E T-F09-068); доп. live-shell-E2E — по запросу.
 
 ---
 
