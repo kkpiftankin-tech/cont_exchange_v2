@@ -1787,8 +1787,20 @@ unit-тест `order_flow_auto_resolve_policy_tests` PASSED. README ADR обно
 скользящее окно (circuit-breaker). main.cpp wiring + env (compose order_flow). **Live:**
 deployed auto ON — loop авто-разрешил 2 eligible (notional_est=145<cap) → status=resolved,
 operator_id=auto:reverse_internal, reversing FlowOrders persisted; notional=0 →
-escalate (pending, fail-safe). Открытый gap (отдельно, MVP-5): external reject не
-маркирует ногу терминальной → matching re-routes каждый батч → новые компенсации.
+escalate (pending, fail-safe).
+
+### T-F09-052-fix: external-нога → терминальный статус после venue-отчёта (MVP-5 bugfix)
+
+**Статус: ✅ выполнено (live).** Был баг: `on_external_execution_report` не маркировал
+combo-ногу терминально → нога остаётся `active` → loader грузит её каждый батч →
+matching re-routes → новая компенсация на батч (рост до 4161) + дублирующиеся внешние
+ордера на FILLED-пути. Фикс: repo `MarkExternalLegFailed`(→`failed_external`)/
+`MarkExternalLegFilled`(→`filled`+filled_cum, идемпотентно из `active`);
+`on_external_execution_report` пишет компенсацию ТОЛЬКО на первый терминальный переход
+(active→failed_external) → ровно ОДНА компенсация; FILLED → нога `filled`;
+`active_grouped_orders_loader` исключает `failed_external`,`filled` → routing
+прекращается. Repo-тест +2 idempotency-кейса (live PG). **Live:** combo→reject →
+compensations=1 (не растёт), нога `failed_external`, routing остановился.
 
 ---
 

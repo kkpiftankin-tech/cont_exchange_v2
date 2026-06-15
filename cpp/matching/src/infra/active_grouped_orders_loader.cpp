@@ -96,7 +96,9 @@ SELECT leg_id::text, instrument_symbol, side, ratio, weight,
        array_to_string(venue_preferences, ',') AS venue_prefs
 FROM combo_order_legs
 WHERE parent_order_id = $1::uuid
-  AND status NOT IN ('cancelled', 'waiting_for_trigger')
+  -- MVP-5 fix: терминальные external-ноги (failed_external/filled) больше не
+  -- грузим → matching перестаёт их re-routить каждый батч (нет роста компенсаций).
+  AND status NOT IN ('cancelled', 'waiting_for_trigger', 'failed_external', 'filled')
 ORDER BY leg_id
 )SQL",
                                              order.parent_order_id);

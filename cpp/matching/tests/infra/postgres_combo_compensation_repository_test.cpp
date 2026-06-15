@@ -95,6 +95,38 @@ ON CONFLICT (leg_id) DO NOTHING
                 "re-resolve → idempotent no-op") && ok;
     ok = expect(repo.CountPending(parent_id) == 1, "one pending after resolve") && ok;
 
+    // MVP-5 fix: терминальный статус external-ноги (идемпотентно).
+    ok = expect(repo.MarkExternalLegFailed(leg_id),
+                "MarkExternalLegFailed: active→failed_external") && ok;
+    ok = expect(!repo.MarkExternalLegFailed(leg_id),
+                "MarkExternalLegFailed again → no-op") && ok;
+    ok = expect(!repo.MarkExternalLegFilled(leg_id, Decimal{1, 0}),
+                "MarkExternalLegFilled from failed → no-op (не active)") && ok;
+    const std::string leg2 = "dddddddd-0000-0000-0000-0000000000bb";
+    {
+      pqxx::work tx{conn};
+      tx.exec_params(R"SQL(
+INSERT INTO combo_order_legs (leg_id, parent_order_id, instrument_symbol, side, weight,
+                             ratio_basis, p_low, p_high, q_rate, q_max, filled_cum, status)
+VALUES ($1::uuid,$2::uuid,'BTCUSDT','buy',0.6,'notional_weight',100,200,100,10,0,'active')
+ON CONFLICT (leg_id) DO NOTHING
+)SQL",
+                     leg2, parent_id);
+      tx.commit();
+    }
+    ok = expect(repo.MarkExternalLegFilled(leg2, Decimal{3, 0}),
+                "MarkExternalLegFilled: active→filled") && ok;
+    ok = expect(!repo.MarkExternalLegFilled(leg2, Decimal{3, 0}),
+                "MarkExternalLegFilled again → no-op (filled_cum не двоится)") && ok;
+    {
+      pqxx::work tx{conn};
+      const auto r = tx.exec_params(
+          "SELECT filled_cum::text FROM combo_order_legs WHERE leg_id=$1::uuid", leg2);
+      tx.commit();
+      ok = expect(!r.empty() && r[0][0].as<std::string>().rfind("3", 0) == 0,
+                  "filled_cum=3 (идемпотентно, не 6)") && ok;
+    }
+
     {  // execution_groups FK не cascade → удаляем первым (на случай live-matching).
       pqxx::work tx{conn};
       tx.exec_params("DELETE FROM execution_groups WHERE parent_order_id=$1::uuid", parent_id);

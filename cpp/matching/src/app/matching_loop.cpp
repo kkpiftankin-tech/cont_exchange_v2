@@ -526,31 +526,51 @@ void MatchingLoop::on_external_execution_report(
   if (!compensation_repo_) {
     return;
   }
-  const char* reason = nullptr;
-  switch (report.status()) {
-    case fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED: reason = "rejected"; break;
-    case fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED: reason = "cancelled"; break;
-    case fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED: reason = "expired"; break;
-    default: return;  // успех/partial → компенсация не нужна
-  }
   // report не несёт internal_order_id; линковка через client_order_id (= leg_id,
   // выставлен в BuildExternalIntent, эхо venues).
   const std::string& leg_id = report.client_order_id();
   if (leg_id.empty()) {
     return;
   }
+
+  const auto st = report.status();
+  const bool is_fill = st == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED;
+  const char* reason = nullptr;
+  switch (st) {
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED: reason = "rejected"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED: reason = "cancelled"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED: reason = "expired"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED: break;  // терминальный успех
+    default: return;  // NEW / PARTIALLY_FILLED → не терминально
+  }
   try {
     const auto parent = compensation_repo_->FindComboLegParent(leg_id);
     if (!parent.has_value()) {
       return;  // не combo-нога (hedge / прочий internal_order_id)
     }
-    infra::ComboCompensation c;
-    c.parent_order_id = *parent;
-    c.leg_id = leg_id;
-    c.report_id = report.report_id();
-    c.reason = reason;
-    c.internal_filled_qty = cex::common::Decimal::from_proto(report.filled_qty());
-    if (compensation_repo_->RecordPending(c)) {
+
+    if (is_fill) {
+      // MVP-5 fix: внешняя нога исполнена → 'filled' (loader перестаёт re-routить).
+      // Идемпотентно: только первый active→filled применяет filled_cum.
+      if (compensation_repo_->MarkExternalLegFilled(
+              leg_id, cex::common::Decimal::from_proto(report.filled_qty()))) {
+        cex::common::log_json("INFO", "Combo external leg filled",
+                              {{"parent_order_id", *parent}, {"leg_id", leg_id}});
+      }
+      return;
+    }
+
+    // reject/cancel/expire: компенсацию пишем ТОЛЬКО на первый терминальный переход
+    // ноги (active→failed_external) → ровно ОДНА компенсация на ногу, без роста от
+    // повторного routing'а (MVP-5 fix). Loader исключает failed_external.
+    if (compensation_repo_->MarkExternalLegFailed(leg_id)) {
+      infra::ComboCompensation c;
+      c.parent_order_id = *parent;
+      c.leg_id = leg_id;
+      c.report_id = report.report_id();
+      c.reason = reason;
+      c.internal_filled_qty = cex::common::Decimal::from_proto(report.filled_qty());
+      compensation_repo_->RecordPending(c);
       cex::common::log_json("WARN", "Combo external leg failed — compensation pending",
                             {{"parent_order_id", *parent},
                              {"leg_id", leg_id},

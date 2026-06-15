@@ -54,6 +54,16 @@ class PostgresComboCompensationRepository {
   /// combo-ноги от hedge/прочих internal_order_id в ExecutionReport.
   std::optional<std::string> FindComboLegParent(const std::string& leg_id);
 
+  // --- MVP-5 fix: терминальный статус external-ноги после venue-отчёта ---
+  // Без этого нога остаётся 'active' → matching re-routes её каждый батч →
+  // новые intents/компенсации без конца. Loader исключает терминальные статусы.
+  /// Внешняя нога провалилась (reject/cancel/expire) → 'failed_external'.
+  /// Идемпотентно (только из не-терминального статуса). true если применено.
+  bool MarkExternalLegFailed(const std::string& leg_id);
+  /// Внешняя нога исполнена → 'filled' + аккумулирует filled_cum. Идемпотентно
+  /// (только из 'active' — повтор отчёта не двоит filled_cum). true если применено.
+  bool MarkExternalLegFilled(const std::string& leg_id, const cex::common::Decimal& filled_qty);
+
   // --- MVP-6 (ADR-039): operator-driven resolution ---
   /// Идемпотентно по status='pending'. action=accept → cancelled; иначе resolved.
   /// true если переход применён (был pending).

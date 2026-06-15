@@ -47,6 +47,33 @@ std::optional<std::string> PostgresComboCompensationRepository::FindComboLegPare
   return r[0][0].as<std::string>();
 }
 
+bool PostgresComboCompensationRepository::MarkExternalLegFailed(const std::string& leg_id) {
+  if (leg_id.empty()) return false;
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  // Идемпотентно: только из не-терминального статуса.
+  const pqxx::result r = tx.exec_params(
+      "UPDATE combo_order_legs SET status = 'failed_external' "
+      "WHERE leg_id = $1::uuid AND status NOT IN ('cancelled','filled','failed_external')",
+      leg_id);
+  tx.commit();
+  return r.affected_rows() > 0;
+}
+
+bool PostgresComboCompensationRepository::MarkExternalLegFilled(
+    const std::string& leg_id, const cex::common::Decimal& filled_qty) {
+  if (leg_id.empty()) return false;
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  // Идемпотентно: переход только из 'active' — повтор отчёта не двоит filled_cum.
+  const pqxx::result r = tx.exec_params(
+      "UPDATE combo_order_legs SET status = 'filled', filled_cum = filled_cum + $2::numeric "
+      "WHERE leg_id = $1::uuid AND status = 'active'",
+      leg_id, postgres::ToPgNumeric(filled_qty));
+  tx.commit();
+  return r.affected_rows() > 0;
+}
+
 bool PostgresComboCompensationRepository::ResolvePending(const std::string& compensation_id,
                                                          const std::string& action,
                                                          const std::string& operator_id,
