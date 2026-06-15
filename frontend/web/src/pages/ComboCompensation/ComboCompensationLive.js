@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
+import '../Profile/Profile.css';   // единый chrome (profile-container + navbar-main)
 import './ComboCompensationLive.css';
 
 // F-09 MVP-6 slice 4 — operator-driven combo compensation resolution (ADR-039/040).
@@ -23,6 +25,7 @@ function fmtTs(value) {
 
 const ComboCompensationLive = () => {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [isAuth, setIsAuth] = useState(null);
   const [data, setData] = useState({ compensations: [], generatedAt: null });
   const [loading, setLoading] = useState(true);
@@ -95,25 +98,26 @@ const ComboCompensationLive = () => {
   const pendingCount = all.length;
 
   return (
-    <div className="comp-page">
-      <nav className="navbar-main hedge-navbar">
+    <div className="profile-container">
+      <nav className="navbar-main">
         <div className="logo">
           <img src={logo} alt="Logo" className="logo-purple" />
-          <span>CEX</span>
+          <span>{t('navbar.logo')}</span>
         </div>
         <div className="nav-links">
-          <a href="/main">Торговля</a>
-          <a href="/profile">Профиль</a>
-          <a href="/venues">Площадки</a>
-          <a href="/hedge-flows-live">HedgeFlow</a>
-          <a href="/hedge-pnl-live">PnL</a>
-          <a href="/execution-live-feed-live">Execution</a>
-          <a href="/reconciliation-alerts-live">Alerts</a>
-          <a href="/manual-override-live">Manual override</a>
-          <a href="/policy-config">Policy</a>
+          <a href="/main">{t('navbar.trade')}</a>
+          <a href="/profile">{t('navbar.profile')}</a>
+          <a href="/venues">{t('navbar.venues')}</a>
+          <a href="/hedge-flows-live">{t('navbar.hedgeflows')}</a>
+          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
+          <a href="/execution-live">{t('navbar.executionLive')}</a>
+          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
+          <a href="/manual-override">{t('navbar.manualOverride')}</a>
+          <a href="/policy-config">{t('navbar.policyConfig')}</a>
+          <a href="/replay">{t('navbar.replay')}</a>
           <a href="/combo-order-live">Combo</a>
           <a href="/combo-compensation-live" className="active">Compensation</a>
-          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
+          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>
 

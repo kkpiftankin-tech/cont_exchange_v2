@@ -1,29 +1,39 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
+import '../Profile/Profile.css';   // единый chrome (profile-container + navbar-main)
 import './ComboOrderLive.css';
 
 // F-09 — создание многоногой combo-заявки + просмотр результата исполнения.
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const POLL_INTERVAL_MS = 3000;
 
-const emptyLeg = (venue = 'internal', symbol = 'BTC/USDT', side = 'SIDE_BUY') => ({
-  symbol, side, weight: '0.5', priceLow: '70000', priceHigh: '75000',
-  maxRate: '0.001', maxQty: '0.002', venue
+// Поддерживаемые пары + дефолтные band/rate/qty (выбор пары вместо ручного ввода).
+const PAIRS = {
+  'BTC/USDT': { priceLow: '70000', priceHigh: '75000', maxRate: '0.001', maxQty: '0.002' },
+  'ETH/USDT': { priceLow: '3000', priceHigh: '4000', maxRate: '0.01', maxQty: '0.02' },
+  'SOL/USDT': { priceLow: '120', priceHigh: '180', maxRate: '0.1', maxQty: '0.2' }
+};
+const PAIR_LIST = Object.keys(PAIRS);
+
+const emptyLeg = (symbol = 'BTC/USDT', side = 'SIDE_BUY', venue = 'internal') => ({
+  symbol, side, venue, weight: '0.5', ...PAIRS[symbol]
 });
 
 const ComboOrderLive = () => {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [isAuth, setIsAuth] = useState(null);
   const [comboType, setComboType] = useState('COMBO_TYPE_BASKET');
   const [atomicityPolicy, setAtomicityPolicy] = useState('ATOMICITY_POLICY_SCALABLE_ATOMIC');
   const [atomicityScope, setAtomicityScope] = useState('ATOMICITY_SCOPE_INTERNAL_BATCH');
   const [legs, setLegs] = useState([
-    emptyLeg('internal', 'BTC/USDT', 'SIDE_BUY'),
-    emptyLeg('internal', 'ETH/USDT', 'SIDE_BUY')
+    emptyLeg('BTC/USDT', 'SIDE_BUY', 'internal'),
+    emptyLeg('ETH/USDT', 'SIDE_BUY', 'internal')
   ]);
   const [submitting, setSubmitting] = useState(false);
   const [createResult, setCreateResult] = useState(null);
@@ -61,7 +71,11 @@ const ComboOrderLive = () => {
   const updateLeg = (i, field, value) => {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)));
   };
-  const addLeg = () => setLegs((prev) => [...prev, emptyLeg('internal', 'SOL/USDT', 'SIDE_BUY')]);
+  // Смена пары → подставляем дефолтные band/rate/qty этой пары.
+  const changePair = (i, symbol) => {
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, symbol, ...PAIRS[symbol] } : l)));
+  };
+  const addLeg = () => setLegs((prev) => [...prev, emptyLeg('SOL/USDT', 'SIDE_BUY', 'internal')]);
   const removeLeg = (i) => setLegs((prev) => prev.filter((_, idx) => idx !== i));
 
   const submit = async () => {
@@ -96,17 +110,23 @@ const ComboOrderLive = () => {
   if (isAuth === null) return <div className="loading-screen">Загрузка...</div>;
 
   return (
-    <div className="cbo-page">
-      <nav className="navbar-main hedge-navbar">
-        <div className="logo"><img src={logo} alt="Logo" className="logo-purple" /><span>CEX</span></div>
+    <div className="profile-container">
+      <nav className="navbar-main">
+        <div className="logo"><img src={logo} alt="Logo" className="logo-purple" /><span>{t('navbar.logo')}</span></div>
         <div className="nav-links">
-          <a href="/main">Торговля</a>
-          <a href="/profile">Профиль</a>
-          <a href="/venues">Площадки</a>
-          <a href="/hedge-flows-live">HedgeFlow</a>
+          <a href="/main">{t('navbar.trade')}</a>
+          <a href="/profile">{t('navbar.profile')}</a>
+          <a href="/venues">{t('navbar.venues')}</a>
+          <a href="/hedge-flows-live">{t('navbar.hedgeflows')}</a>
+          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
+          <a href="/execution-live">{t('navbar.executionLive')}</a>
+          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
+          <a href="/manual-override">{t('navbar.manualOverride')}</a>
+          <a href="/policy-config">{t('navbar.policyConfig')}</a>
+          <a href="/replay">{t('navbar.replay')}</a>
           <a href="/combo-order-live" className="active">Combo</a>
           <a href="/combo-compensation-live">Compensation</a>
-          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
+          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>
 
@@ -154,7 +174,11 @@ const ComboOrderLive = () => {
               <tbody>
                 {legs.map((l, i) => (
                   <tr key={i}>
-                    <td><input value={l.symbol} onChange={(e) => updateLeg(i, 'symbol', e.target.value)} /></td>
+                    <td>
+                      <select value={l.symbol} onChange={(e) => changePair(i, e.target.value)}>
+                        {PAIR_LIST.map((p) => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </td>
                     <td>
                       <select value={l.side} onChange={(e) => updateLeg(i, 'side', e.target.value)}>
                         <option value="SIDE_BUY">buy</option><option value="SIDE_SELL">sell</option>
