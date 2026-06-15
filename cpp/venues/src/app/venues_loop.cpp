@@ -1258,6 +1258,7 @@ void VenuesLoop::start() {
   t_md_ = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
+  t_extra_ticker_ = std::thread([this] { extra_ticker_loop(); });
 }
 
 /// Graceful shutdown: clear running_ flag, ждём все threads.
@@ -1267,6 +1268,7 @@ void VenuesLoop::stop() {
   if (t_md_.joinable()) t_md_.join();
   if (t_exec_.joinable()) t_exec_.join();
   if (t_sim_config_.joinable()) t_sim_config_.join();
+  if (t_extra_ticker_.joinable()) t_extra_ticker_.join();
 }
 
 // F-20 Phase 4 — consume `sim.config` (SimConfigEvent) and apply each to the
@@ -1333,6 +1335,72 @@ void VenuesLoop::sim_config_consume_loop() {
     }
   }
   cex::common::log_json("INFO", "Venues sim.config consumer loop stopped");
+}
+
+// ============================================================================
+// extra_ticker_loop — F-09 UX. Лёгкий тикер-фид по доп. символам (на одной venue,
+// по умолчанию binance): RequestSnapshot(symbol) → publish_raw_ticker, чтобы
+// market_data кэшировал last ticker и /api/v1/quote отдавал цену не только для
+// BTC/USDT. Изолирован от core md_publish_loop (только тикеры; без curves/snapshot
+// store) — не влияет на F-11/F-12.
+// ============================================================================
+void VenuesLoop::extra_ticker_loop() {
+  const std::string venue = cex::common::Env::get_string("VENUES_FEED_VENUE", "binance");
+  const std::string list = cex::common::Env::get_string(
+      "VENUES_FEED_SYMBOLS",
+      "ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,AVAX/USDT,LINK/USDT,LTC/USDT");
+  const int interval_ms = cex::common::Env::get_int("VENUES_FEED_INTERVAL_MS", 5000);
+
+  // CSV "BASE/QUOTE,..." → VenueSnapshotRequest[] (venue_symbol = BASEQUOTE для binance).
+  std::vector<domain::VenueSnapshotRequest> reqs;
+  std::size_t pos = 0;
+  while (pos < list.size()) {
+    const std::size_t comma = list.find(',', pos);
+    std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+    while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+    const std::size_t slash = tok.find('/');
+    if (!tok.empty() && slash != std::string::npos) {
+      domain::VenueSnapshotRequest req;
+      const std::string base = tok.substr(0, slash);
+      const std::string quote = tok.substr(slash + 1);
+      req.instrument.set_symbol(tok);
+      req.instrument.set_base(base);
+      req.instrument.set_quote(quote);
+      req.venue_symbol = base + quote;
+      reqs.push_back(std::move(req));
+    }
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+
+  cex::common::log_json("INFO", "Venues extra-ticker loop starting",
+                        {{"venue", venue}, {"symbols", std::to_string(reqs.size())},
+                         {"interval_ms", std::to_string(interval_ms)}});
+
+  while (running_.load()) {
+    domain::VenueAdapter* adapter = find_adapter(venue);
+    if (adapter != nullptr) {
+      for (const auto& req : reqs) {
+        if (!running_.load()) break;
+        try {
+          std::optional<domain::VenueRawSnapshot> snap;
+          {
+            std::lock_guard<std::mutex> lk(snapshot_mu_);
+            snap = adapter->RequestSnapshot(req);
+          }
+          if (snap.has_value()) publish_raw_ticker(&producer_, *snap);
+        } catch (const std::exception& e) {
+          cex::common::log_json("WARN", "extra-ticker snapshot failed",
+                                {{"symbol", req.instrument.symbol()}, {"error", e.what()}});
+        }
+      }
+    }
+    for (int slept = 0; slept < interval_ms && running_.load(); slept += 200) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }
+  cex::common::log_json("INFO", "Venues extra-ticker loop stopped", {});
 }
 
 // ============================================================================
@@ -1635,8 +1703,11 @@ void VenuesLoop::md_publish_loop() {
           continue;
         }
 
-        const std::optional<domain::VenueRawSnapshot> snapshot =
-            adapter->RequestSnapshot(request);
+        std::optional<domain::VenueRawSnapshot> snapshot;
+        {
+          std::lock_guard<std::mutex> lk(snapshot_mu_);
+          snapshot = adapter->RequestSnapshot(request);
+        }
         if (!snapshot.has_value()) {
           cex::common::log_json("WARN", "Adapter returned empty snapshot",
                                 {{"venue", adapter->VenueId()}});
