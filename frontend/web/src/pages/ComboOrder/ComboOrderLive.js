@@ -74,7 +74,6 @@ const ComboOrderLive = () => {
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [recent, setRecent] = useState([]);
-  const [refPrice, setRefPrice] = useState(null);  // текущая котировка (clearing-price)
 
   useEffect(() => {
     isAuthenticated().then((auth) => { setIsAuth(auth); if (!auth) navigate('/login'); });
@@ -95,20 +94,24 @@ const ComboOrderLive = () => {
     } catch (e) { /* keep last */ }
   }, []);
 
-  // Текущая котировка с биржи (clearing-price) → дефолтные границы band.
+  // Котировка по конкретной паре (base/quote) → дефолтные границы band ±3%.
+  const applyQuote = useCallback(async (i, base, quote) => {
+    try {
+      const r = await axios.get(`${API_BASE}/v1/quote`, {
+        params: { symbol: `${base}/${quote}` }, timeout: 4000
+      });
+      const p = Number(r.data?.price);
+      if (r.data?.found && p > 0) {
+        setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...bandFromQuote(base, p) } : l)));
+      }
+    } catch (e) { /* нет котировки → остаются дефолты по базе */ }
+  }, []);
+
+  // При входе подтягиваем котировки для дефолтных ног.
   useEffect(() => {
     if (!isAuth) return;
-    axios.get(`${API_BASE}/clearing-price`, { timeout: 6000 })
-      .then((r) => {
-        const p = r.data?.price;
-        if (p && Number(p) > 0) {
-          setRefPrice(p);
-          // Обновляем band уже добавленных BTC-ног под текущую котировку.
-          setLegs((prev) => prev.map((l) => (l.base === 'BTC' ? { ...l, ...bandFromQuote('BTC', p) } : l)));
-        }
-      })
-      .catch(() => { /* нет котировки → дефолты по базе */ });
-  }, [isAuth]);
+    setLegs((prev) => { prev.forEach((l, i) => applyQuote(i, l.base, l.quote)); return prev; });
+  }, [isAuth, applyQuote]);
 
   useEffect(() => { if (isAuth) loadRecent(); }, [isAuth, loadRecent]);
   useInterval(() => {
@@ -120,13 +123,24 @@ const ComboOrderLive = () => {
   const updateLeg = (i, field, value) => {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)));
   };
-  // Смена базовой валюты → band из текущей котировки (для BTC) или дефолт базы.
+  // Смена базовой/котируемой валюты → ставим дефолт по базе сразу + тянем котировку.
   const changeBase = (i, base) => {
-    const band = base === 'BTC' ? bandFromQuote('BTC', refPrice) : bandFor(base);
-    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, base, ...band } : l)));
+    let quote = 'USDT';
+    setLegs((prev) => prev.map((l, idx) => {
+      if (idx !== i) return l;
+      quote = l.quote;
+      return { ...l, base, ...bandFor(base) };
+    }));
+    applyQuote(i, base, quote);
   };
   const changeQuote = (i, quote) => {
-    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, quote } : l)));
+    let base = 'BTC';
+    setLegs((prev) => prev.map((l, idx) => {
+      if (idx !== i) return l;
+      base = l.base;
+      return { ...l, quote };
+    }));
+    applyQuote(i, base, quote);
   };
   // Стрелки ▲/▼: повысить/понизить границу на разумный шаг.
   const stepLeg = (i, field, dir) => {
@@ -137,7 +151,14 @@ const ComboOrderLive = () => {
       return { ...l, [field]: roundPrice(next) };
     }));
   };
-  const addLeg = () => setLegs((prev) => [...prev, emptyLeg('SOL', 'USDT', 'SIDE_BUY', 'internal')]);
+  const addLeg = () => {
+    setLegs((prev) => {
+      const i = prev.length;
+      const leg = emptyLeg('SOL', 'USDT', 'SIDE_BUY', 'internal');
+      applyQuote(i, leg.base, leg.quote);
+      return [...prev, leg];
+    });
+  };
   const removeLeg = (i) => setLegs((prev) => prev.filter((_, idx) => idx !== i));
 
   const submit = async () => {

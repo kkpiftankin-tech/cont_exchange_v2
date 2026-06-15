@@ -29,6 +29,9 @@ const LEDGER_ADDR = process.env.LEDGER_GRPC_ADDR || 'ledger:50053';
 // F-09 MVP-6 slice 4: combo compensation console.
 const MATCHING_GRPC_ADDR = process.env.MATCHING_GRPC_ADDR || 'matching:50053';
 const ORDER_FLOW_GRPC_ADDR = process.env.ORDER_FLOW_GRPC_ADDR || 'order_flow:50051';
+// F-09 UX: per-symbol котировка для дефолтных границ band.
+const MARKET_DATA_GRPC_ADDR = process.env.MARKET_DATA_GRPC_ADDR || 'market_data:50054';
+const MARKET_DATA_VENUE = process.env.MARKET_DATA_REFERENCE_VENUE || 'binance';
 const GATEWAY_ADDR = process.env.GATEWAY_HTTP_ADDR || 'http://gateway:8080';
 const REPLAY_FAKE_REQUESTED = String(process.env.REPLAY_FAKE_ENABLED || "0") === "1";
 const REPLAY_FAKE_ENABLED = REPLAY_FAKE_REQUESTED && NODE_ENV !== "production";
@@ -50,6 +53,7 @@ const COMMON_PROTO = join(PROTO_DIR, 'fob/common/v1/common.proto');
 // F-09 MVP-6 slice 4 protos.
 const COMPENSATION_PROTO = join(PROTO_DIR, 'fob/matching/v1/compensation.proto');
 const ORDER_FLOW_PROTO = join(PROTO_DIR, 'fob/orders/v1/order_flow_service.proto');
+const MARKETDATA_PROTO = join(PROTO_DIR, 'fob/marketdata/v1/marketdata_raw.proto');
 
 let ledgerClient = null;
 
@@ -778,6 +782,54 @@ function initOrderFlowClient() {
     console.error('[grpc] Failed to create OrderFlowService client:', err.message);
   }
   return orderFlowClient;
+}
+
+let marketDataClient = null;
+function initMarketDataClient() {
+  if (marketDataClient) return marketDataClient;
+  try {
+    const pd = protoLoader.loadSync([MARKETDATA_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    marketDataClient = new proto.fob.marketdata.v1.MarketDataService(
+      MARKET_DATA_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] MarketDataService client created, target=${MARKET_DATA_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create MarketDataService client:', err.message);
+  }
+  return marketDataClient;
+}
+
+// Decimal proto → number (для отображения котировки / band; не money settlement).
+function decimalToNum(d) {
+  if (!d || d.units === undefined || d.units === null) return 0;
+  return Number(d.units) / Math.pow(10, Number(d.scale || 0));
+}
+
+// GET /api/v1/quote?symbol=BTC/USDT — текущая котировка (mid bid/ask или last).
+async function handleQuote(req, res, pathname, query) {
+  if (req.method !== 'GET' || pathname !== '/api/v1/quote') return false;
+  const symbol = (query && query.symbol) || '';
+  const venue = (query && query.venue) || MARKET_DATA_VENUE;
+  if (!symbol) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'symbol required' } }); return true; }
+  const client = initMarketDataClient();
+  if (!client) { writeJson(res, 200, { symbol, found: false, price: 0 }); return true; }
+  const request = { venue, symbol };
+  const result = await new Promise((resolve) => {
+    client.GetLastTicker(request, (err, response) => {
+      if (err) { return resolve({ error: err.message }); }
+      resolve({ response });
+    });
+  });
+  if (result.error) { writeJson(res, 200, { symbol, found: false, price: 0 }); return true; }
+  const r = result.response || {};
+  const tk = r.ticker || {};
+  const bid = decimalToNum(tk.bid), ask = decimalToNum(tk.ask), last = decimalToNum(tk.last);
+  const mid = (bid > 0 && ask > 0) ? (bid + ask) / 2 : (last > 0 ? last : (bid > 0 ? bid : ask));
+  writeJson(res, 200, { symbol, venue, found: !!r.found && mid > 0, price: mid, bid, ask, last });
+  return true;
 }
 
 // Decimal proto → каноническая строка. БЕЗ float (CLAUDE.md §9).
@@ -6840,6 +6892,12 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/policy-config") {
       const handled = await handlePolicyConfigV1(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    // F-09 UX: per-symbol котировка.
+    if (pathname === "/api/v1/quote") {
+      const handled = await handleQuote(req, res, pathname, query);
       if (handled !== false) return;
     }
 
