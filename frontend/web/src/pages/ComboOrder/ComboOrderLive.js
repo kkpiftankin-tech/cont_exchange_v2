@@ -12,16 +12,19 @@ import './ComboOrderLive.css';
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const POLL_INTERVAL_MS = 3000;
 
-// Поддерживаемые пары + дефолтные band/rate/qty (выбор пары вместо ручного ввода).
-const PAIRS = {
-  'BTC/USDT': { priceLow: '70000', priceHigh: '75000', maxRate: '0.001', maxQty: '0.002' },
-  'ETH/USDT': { priceLow: '3000', priceHigh: '4000', maxRate: '0.01', maxQty: '0.02' },
-  'SOL/USDT': { priceLow: '120', priceHigh: '180', maxRate: '0.1', maxQty: '0.2' }
+// Раздельный выбор базовой и котируемой валюты пары (base / quote).
+const BASES = ['BTC', 'ETH', 'SOL'];
+const QUOTES = ['USDT', 'USDC', 'BTC'];
+// Дефолтные band/rate/qty по базовой валюте (quote обычно USDT).
+const BAND_BY_BASE = {
+  BTC: { priceLow: '70000', priceHigh: '75000', maxRate: '0.001', maxQty: '0.002' },
+  ETH: { priceLow: '3000', priceHigh: '4000', maxRate: '0.01', maxQty: '0.02' },
+  SOL: { priceLow: '120', priceHigh: '180', maxRate: '0.1', maxQty: '0.2' }
 };
-const PAIR_LIST = Object.keys(PAIRS);
+const bandFor = (base) => BAND_BY_BASE[base] || { priceLow: '1', priceHigh: '1000000', maxRate: '0.001', maxQty: '0.002' };
 
-const emptyLeg = (symbol = 'BTC/USDT', side = 'SIDE_BUY', venue = 'internal') => ({
-  symbol, side, venue, weight: '0.5', ...PAIRS[symbol]
+const emptyLeg = (base = 'BTC', quote = 'USDT', side = 'SIDE_BUY', venue = 'internal') => ({
+  base, quote, side, venue, weight: '0.5', ...bandFor(base)
 });
 
 const ComboOrderLive = () => {
@@ -32,8 +35,8 @@ const ComboOrderLive = () => {
   const [atomicityPolicy, setAtomicityPolicy] = useState('ATOMICITY_POLICY_SCALABLE_ATOMIC');
   const [atomicityScope, setAtomicityScope] = useState('ATOMICITY_SCOPE_INTERNAL_BATCH');
   const [legs, setLegs] = useState([
-    emptyLeg('BTC/USDT', 'SIDE_BUY', 'internal'),
-    emptyLeg('ETH/USDT', 'SIDE_BUY', 'internal')
+    emptyLeg('BTC', 'USDT', 'SIDE_BUY', 'internal'),
+    emptyLeg('ETH', 'USDT', 'SIDE_BUY', 'internal')
   ]);
   const [submitting, setSubmitting] = useState(false);
   const [createResult, setCreateResult] = useState(null);
@@ -71,11 +74,14 @@ const ComboOrderLive = () => {
   const updateLeg = (i, field, value) => {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)));
   };
-  // Смена пары → подставляем дефолтные band/rate/qty этой пары.
-  const changePair = (i, symbol) => {
-    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, symbol, ...PAIRS[symbol] } : l)));
+  // Смена базовой валюты → подставляем дефолтные band/rate/qty этой базы.
+  const changeBase = (i, base) => {
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, base, ...bandFor(base) } : l)));
   };
-  const addLeg = () => setLegs((prev) => [...prev, emptyLeg('SOL/USDT', 'SIDE_BUY', 'internal')]);
+  const changeQuote = (i, quote) => {
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, quote } : l)));
+  };
+  const addLeg = () => setLegs((prev) => [...prev, emptyLeg('SOL', 'USDT', 'SIDE_BUY', 'internal')]);
   const removeLeg = (i) => setLegs((prev) => prev.filter((_, idx) => idx !== i));
 
   const submit = async () => {
@@ -88,7 +94,7 @@ const ComboOrderLive = () => {
         ratioBasis: 'RATIO_BASIS_NOTIONAL_WEIGHT',
         fallbackPolicy: atomicityScope === 'ATOMICITY_SCOPE_EXTERNAL_COMPENSATING' ? 'compensate' : 'scale_down',
         legs: legs.map((l) => ({
-          symbol: l.symbol, side: l.side, weight: l.weight,
+          symbol: `${l.base}/${l.quote}`, base: l.base, quote: l.quote, side: l.side, weight: l.weight,
           priceLow: l.priceLow, priceHigh: l.priceHigh, maxRate: l.maxRate, maxQty: l.maxQty,
           venuePreferences: [l.venue]
         }))
@@ -168,15 +174,20 @@ const ComboOrderLive = () => {
 
             <table className="cbo-legs">
               <thead><tr>
-                <th>Symbol</th><th>Side</th><th>Weight</th><th>Price low</th><th>Price high</th>
+                <th>Base</th><th>Quote</th><th>Side</th><th>Weight</th><th>Price low</th><th>Price high</th>
                 <th>Max rate</th><th>Max qty</th><th>Venue</th><th></th>
               </tr></thead>
               <tbody>
                 {legs.map((l, i) => (
                   <tr key={i}>
                     <td>
-                      <select value={l.symbol} onChange={(e) => changePair(i, e.target.value)}>
-                        {PAIR_LIST.map((p) => <option key={p} value={p}>{p}</option>)}
+                      <select value={l.base} onChange={(e) => changeBase(i, e.target.value)}>
+                        {BASES.map((b) => <option key={b} value={b}>{b}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={l.quote} onChange={(e) => changeQuote(i, e.target.value)}>
+                        {QUOTES.map((q) => <option key={q} value={q}>{q}</option>)}
                       </select>
                     </td>
                     <td>
