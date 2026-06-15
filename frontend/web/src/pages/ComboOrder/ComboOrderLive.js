@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import axios from 'axios';
@@ -13,8 +14,13 @@ const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const POLL_INTERVAL_MS = 3000;
 
 // Раздельный выбор базовой и котируемой валюты пары (base / quote).
-const BASES = ['BTC', 'ETH', 'SOL'];
-const QUOTES = ['USDT', 'USDC', 'BTC'];
+const BASES = [
+  'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT', 'MATIC',
+  'LINK', 'LTC', 'TRX', 'ATOM', 'UNI', 'BCH', 'NEAR', 'APT', 'ARB', 'OP',
+  'FIL', 'ICP', 'ETC', 'XLM', 'ALGO', 'VET', 'GRT', 'AAVE', 'MKR', 'SAND',
+  'INJ', 'SUI', 'TIA', 'SEI', 'RUNE'
+];
+const QUOTES = ['USDT', 'USDC', 'BTC', 'ETH', 'BUSD', 'DAI', 'EUR', 'TUSD'];
 // Дефолтные band/rate/qty по базовой валюте (quote обычно USDT).
 const BAND_BY_BASE = {
   BTC: { priceLow: '70000', priceHigh: '75000', maxRate: '0.001', maxQty: '0.002' },
@@ -22,6 +28,27 @@ const BAND_BY_BASE = {
   SOL: { priceLow: '120', priceHigh: '180', maxRate: '0.1', maxQty: '0.2' }
 };
 const bandFor = (base) => BAND_BY_BASE[base] || { priceLow: '1', priceHigh: '1000000', maxRate: '0.001', maxQty: '0.002' };
+
+// Округление цены до разумной точности (для отображения band).
+const roundPrice = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  if (n >= 1000) return String(Math.round(n));
+  if (n >= 1) return n.toFixed(2);
+  return n.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '');
+};
+// Band вокруг текущей котировки ref: low = ref·0.97, high = ref·1.03 (±3%).
+const bandFromQuote = (base, ref) => {
+  if (!ref || !Number.isFinite(Number(ref))) return bandFor(base);
+  const r = Number(ref);
+  return { ...bandFor(base), priceLow: roundPrice(r * 0.97), priceHigh: roundPrice(r * 1.03) };
+};
+// Шаг стрелок: 0.5% от значения (разумный тик), не меньше минимального.
+const stepOf = (v) => {
+  const n = Number(v) || 0;
+  const step = Math.abs(n) * 0.005;
+  return step >= 1 ? Math.round(step) : Math.max(step, n >= 1 ? 0.01 : 0.0001);
+};
 
 const emptyLeg = (base = 'BTC', quote = 'USDT', side = 'SIDE_BUY', venue = 'internal') => ({
   base, quote, side, venue, weight: '0.5', ...bandFor(base)
@@ -44,6 +71,7 @@ const ComboOrderLive = () => {
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [recent, setRecent] = useState([]);
+  const [refPrice, setRefPrice] = useState(null);  // текущая котировка (clearing-price)
 
   useEffect(() => {
     isAuthenticated().then((auth) => { setIsAuth(auth); if (!auth) navigate('/login'); });
@@ -64,6 +92,21 @@ const ComboOrderLive = () => {
     } catch (e) { /* keep last */ }
   }, []);
 
+  // Текущая котировка с биржи (clearing-price) → дефолтные границы band.
+  useEffect(() => {
+    if (!isAuth) return;
+    axios.get(`${API_BASE}/clearing-price`, { timeout: 6000 })
+      .then((r) => {
+        const p = r.data?.price;
+        if (p && Number(p) > 0) {
+          setRefPrice(p);
+          // Обновляем band уже добавленных BTC-ног под текущую котировку.
+          setLegs((prev) => prev.map((l) => (l.base === 'BTC' ? { ...l, ...bandFromQuote('BTC', p) } : l)));
+        }
+      })
+      .catch(() => { /* нет котировки → дефолты по базе */ });
+  }, [isAuth]);
+
   useEffect(() => { if (isAuth) loadRecent(); }, [isAuth, loadRecent]);
   useInterval(() => {
     if (!isAuth) return;
@@ -74,12 +117,22 @@ const ComboOrderLive = () => {
   const updateLeg = (i, field, value) => {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)));
   };
-  // Смена базовой валюты → подставляем дефолтные band/rate/qty этой базы.
+  // Смена базовой валюты → band из текущей котировки (для BTC) или дефолт базы.
   const changeBase = (i, base) => {
-    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, base, ...bandFor(base) } : l)));
+    const band = base === 'BTC' ? bandFromQuote('BTC', refPrice) : bandFor(base);
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, base, ...band } : l)));
   };
   const changeQuote = (i, quote) => {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, quote } : l)));
+  };
+  // Стрелки ▲/▼: повысить/понизить границу на разумный шаг.
+  const stepLeg = (i, field, dir) => {
+    setLegs((prev) => prev.map((l, idx) => {
+      if (idx !== i) return l;
+      const cur = Number(l[field]) || 0;
+      const next = Math.max(0, cur + dir * stepOf(cur || 1));
+      return { ...l, [field]: roundPrice(next) };
+    }));
   };
   const addLeg = () => setLegs((prev) => [...prev, emptyLeg('SOL', 'USDT', 'SIDE_BUY', 'internal')]);
   const removeLeg = (i) => setLegs((prev) => prev.filter((_, idx) => idx !== i));
@@ -117,24 +170,7 @@ const ComboOrderLive = () => {
 
   return (
     <div className="profile-container">
-      <nav className="navbar-main">
-        <div className="logo"><img src={logo} alt="Logo" className="logo-purple" /><span>{t('navbar.logo')}</span></div>
-        <div className="nav-links">
-          <a href="/main">{t('navbar.trade')}</a>
-          <a href="/profile">{t('navbar.profile')}</a>
-          <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedge-flows-live">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay">{t('navbar.replay')}</a>
-          <a href="/combo-order-live" className="active">Combo</a>
-          <a href="/combo-compensation-live">Compensation</a>
-          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">{t('navbar.logout')}</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <main className="cbo-shell">
         <section className="cbo-hero">
@@ -196,8 +232,24 @@ const ComboOrderLive = () => {
                       </select>
                     </td>
                     <td><input value={l.weight} onChange={(e) => updateLeg(i, 'weight', e.target.value)} /></td>
-                    <td><input value={l.priceLow} onChange={(e) => updateLeg(i, 'priceLow', e.target.value)} /></td>
-                    <td><input value={l.priceHigh} onChange={(e) => updateLeg(i, 'priceHigh', e.target.value)} /></td>
+                    <td>
+                      <div className="cbo-stepper">
+                        <input value={l.priceLow} onChange={(e) => updateLeg(i, 'priceLow', e.target.value)} />
+                        <div className="cbo-arrows">
+                          <button type="button" onClick={() => stepLeg(i, 'priceLow', 1)}>▲</button>
+                          <button type="button" onClick={() => stepLeg(i, 'priceLow', -1)}>▼</button>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="cbo-stepper">
+                        <input value={l.priceHigh} onChange={(e) => updateLeg(i, 'priceHigh', e.target.value)} />
+                        <div className="cbo-arrows">
+                          <button type="button" onClick={() => stepLeg(i, 'priceHigh', 1)}>▲</button>
+                          <button type="button" onClick={() => stepLeg(i, 'priceHigh', -1)}>▼</button>
+                        </div>
+                      </div>
+                    </td>
                     <td><input value={l.maxRate} onChange={(e) => updateLeg(i, 'maxRate', e.target.value)} /></td>
                     <td><input value={l.maxQty} onChange={(e) => updateLeg(i, 'maxQty', e.target.value)} /></td>
                     <td>

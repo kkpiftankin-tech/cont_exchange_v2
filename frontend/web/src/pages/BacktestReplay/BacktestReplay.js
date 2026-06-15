@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useTranslation } from 'react-i18next';
@@ -962,25 +963,7 @@ const BacktestReplay = () => {
 
   return (
     <div className="replay-page">
-      <nav className="navbar-main replay-navbar">
-        <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple" />
-          <span>{t('navbar.logo')}</span>
-        </div>
-        <div className="nav-links">
-          <a href="/main">{t('navbar.trade')}</a>
-          <a href="/profile">{t('navbar.profile')}</a>
-          <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedgeflows">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay" className="active">{t('navbar.replay')}</a>
-          <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <main className="replay-shell">
         <section className="replay-workspace" aria-label={t('replay.title')}>

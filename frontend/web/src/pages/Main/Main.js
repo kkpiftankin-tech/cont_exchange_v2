@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import MarketChart from '../../components/MarketChart';
 import { useNavigate } from 'react-router-dom';
 import { isAuthenticated, logout } from '../../api/authService';
@@ -76,9 +77,28 @@ const Main = () => {
       const priceResponse = await getClearingPrice();
       setClearingPrice(priceResponse.price);
       setPriceError(false);
+      // Дефолтные границы по текущей котировке (±3%), если оператор ещё не задал.
+      const p = Number(priceResponse.price);
+      if (Number.isFinite(p) && p > 0) {
+        setFormData((prev) => ({
+          ...prev,
+          minPrice: prev.minPrice === '' ? (p * 0.97).toFixed(2) : prev.minPrice,
+          maxPrice: prev.maxPrice === '' ? (p * 1.03).toFixed(2) : prev.maxPrice
+        }));
+      }
     } catch (error) {
       setPriceError(true);
     }
+  };
+
+  // Стрелки ▲/▼ для границ цены: шаг 0.5% от значения.
+  const stepPrice = (field, dir) => {
+    setFormData((prev) => {
+      const cur = Number(prev[field]) || Number(clearingPrice) || 0;
+      const step = Math.max(Math.abs(cur) * 0.005, cur >= 1 ? 0.01 : 0.0001);
+      const next = Math.max(0, cur + dir * step);
+      return { ...prev, [field]: (next >= 1000 ? Math.round(next) : Number(next.toFixed(2))).toString() };
+    });
   };
 
   const loadData = async () => {
@@ -302,25 +322,7 @@ const Main = () => {
 
   return (
     <div className="main-container">
-      <nav className="navbar-main">
-        <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple"/>
-          <span>{t('navbar.logo')}</span>
-        </div>
-        <div className="nav-links">
-          <a href="/main" className="active">{t('navbar.trade')}</a>
-          <a href="/profile">{t('navbar.profile')}</a>
-          <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedgeflows">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay">{t('navbar.replay')}</a>
-          <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <div className="content">
         <div className="chart-section">
@@ -363,6 +365,10 @@ const Main = () => {
                   onChange={handleChange}
                   className={`input ${errors.minPrice ? "error" : ""}`}
                 />
+                <div className="price-arrows">
+                  <button type="button" onClick={() => stepPrice('minPrice', 1)}>▲</button>
+                  <button type="button" onClick={() => stepPrice('minPrice', -1)}>▼</button>
+                </div>
                 {errors.minPrice && submitAttempted && (
                   <div className="tooltip show">{errors.minPrice}</div>
                 )}
@@ -377,6 +383,10 @@ const Main = () => {
                   onChange={handleChange}
                   className={`input ${errors.maxPrice ? "error" : ""}`}
                 />
+                <div className="price-arrows">
+                  <button type="button" onClick={() => stepPrice('maxPrice', 1)}>▲</button>
+                  <button type="button" onClick={() => stepPrice('maxPrice', -1)}>▼</button>
+                </div>
                 {errors.maxPrice && submitAttempted && (
                   <div className="tooltip show">{errors.maxPrice}</div>
                 )}

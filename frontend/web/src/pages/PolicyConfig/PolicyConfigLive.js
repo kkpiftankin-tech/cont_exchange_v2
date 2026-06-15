@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
@@ -50,26 +51,7 @@ const PolicyConfigLive = () => {
 
   return (
     <div className="pc-page">
-      <nav className="navbar-main hedge-navbar">
-        <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple" />
-          <span>CEX</span>
-        </div>
-        <div className="nav-links">
-          <a href="/main">Торговля</a>
-          <a href="/profile">Профиль</a>
-          <a href="/venues">Площадки</a>
-          <a href="/hedge-flows-live">HedgeFlow</a>
-          <a href="/hedge-pnl-live">PnL</a>
-          <a href="/execution-live-feed-live">Execution</a>
-          <a href="/reconciliation-alerts-live">Alerts</a>
-          <a href="/manual-override-live">Manual override</a>
-          <a href="/policy-config-live" className="active">Policy</a>
-          <a href="/combo-order-live">Combo</a>
-          <a href="/combo-compensation-live">Compensation</a>
-          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <main className="pc-shell">
         <section className="pc-hero">

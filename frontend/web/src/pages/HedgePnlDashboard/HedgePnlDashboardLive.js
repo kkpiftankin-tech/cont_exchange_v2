@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
@@ -126,28 +127,7 @@ const HedgePnlDashboardLive = () => {
 
   return (
     <div className="hedge-pnl-page">
-      <nav className="navbar-main hedge-navbar">
-        <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple" />
-          <span>CEX</span>
-        </div>
-        <div className="nav-links">
-          <a href="/main">Торговля</a>
-          <a href="/profile">Профиль</a>
-          <a href="/venues">Площадки</a>
-          <a href="/hedgeflows">HedgeFlow (mock)</a>
-          <a href="/hedge-flows-live">HedgeFlow (live)</a>
-          <a href="/hedge-pnl">PnL (mock)</a>
-          <a href="/hedge-pnl-live" className="active">PnL (live)</a>
-          <a href="/execution-live">Execution feed</a>
-          <a href="/reconciliation-alerts">Alerts</a>
-          <a href="/manual-override">Manual override</a>
-          <a href="/policy-config">Policy</a>
-          <a href="/combo-order-live">Combo</a>
-          <a href="/combo-compensation-live">Compensation</a>
-          <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <main className="hedge-pnl-shell">
         <section className="hedge-pnl-hero">

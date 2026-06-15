@@ -28,6 +28,12 @@
   padding: 4px 4px; }
 .cbo-legs td { padding: 3px 4px; }
 .cbo-legs input { width: 78px; }
+.cbo-stepper { display: inline-flex; align-items: stretch; gap: 2px; }
+.cbo-stepper input { width: 70px; }
+.cbo-arrows { display: flex; flex-direction: column; }
+.cbo-arrows button { background: rgba(180,140,255,0.18); color: #fff; border: 1px solid rgba(180,140,255,0.3);
+  border-radius: 4px; cursor: pointer; font-size: 8px; line-height: 1; padding: 1px 4px; }
+.cbo-arrows button:hover { background: rgba(180,140,255,0.32); }
 .cbo-x { background: rgba(244,67,54,0.18); color: #ff8a80; border: 1px solid rgba(244,67,54,0.3);
   border-radius: 5px; cursor: pointer; padding: 2px 7px; }
 
