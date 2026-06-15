@@ -10,6 +10,19 @@ MatchingCompensationClient::MatchingCompensationClient(const std::string& target
   cex::common::log_json("INFO", "MatchingCompensationClient created", {{"target", target}});
 }
 
+fob::matching::v1::ListPendingCompensationsResponse MatchingCompensationClient::ListPending(
+    const fob::matching::v1::ListPendingCompensationsRequest& req) {
+  fob::matching::v1::ListPendingCompensationsResponse resp;
+  grpc::ClientContext ctx;
+  const auto status = stub_->ListPendingCompensations(&ctx, req, &resp);
+  if (!status.ok()) {
+    cex::common::log_json("ERROR", "Matching ListPendingCompensations gRPC failed",
+                          {{"code", std::to_string(status.error_code())},
+                           {"msg", status.error_message()}});
+  }
+  return resp;  // пустой список при ошибке (авто-loop просто ничего не делает)
+}
+
 fob::matching::v1::GetPendingCompensationResponse MatchingCompensationClient::GetPending(
     const fob::matching::v1::GetPendingCompensationRequest& req) {
   fob::matching::v1::GetPendingCompensationResponse resp;

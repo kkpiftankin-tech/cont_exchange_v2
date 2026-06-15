@@ -20,6 +20,10 @@ class MatchingCompensationClient {
  public:
   explicit MatchingCompensationClient(const std::string& target);
 
+  // Все pending-компенсации (опц. фильтр по parent) — для авто-policy (MVP-7).
+  fob::matching::v1::ListPendingCompensationsResponse ListPending(
+      const fob::matching::v1::ListPendingCompensationsRequest& req);
+
   // Деталь pending-компенсации по id (found=false если нет pending).
   fob::matching::v1::GetPendingCompensationResponse GetPending(
       const fob::matching::v1::GetPendingCompensationRequest& req);

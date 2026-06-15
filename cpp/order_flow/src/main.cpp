@@ -30,6 +30,8 @@
 #include "infra/orders_kafka_publisher.hpp"
 #include "infra/orders_normalized_grouped_producer.hpp"
 #include "infra/postgres/postgres_flow_order_repository.hpp"
+#include "app/auto_resolve_loop.hpp"
+#include "app/auto_resolve_policy.hpp"
 #include "app/resolve_compensation_use_case.hpp"
 #include "infra/matching_compensation_client.hpp"
 #include "infra/postgres_combo_order_repository.hpp"
@@ -122,6 +124,8 @@ int main() {
   // F-09 MVP-6 slice 3b (T-F09-067): operator compensation resolution.
   std::optional<cex::order_flow::infra::MatchingCompensationClient> comp_client;
   std::optional<cex::order_flow::app::ResolveCompensationUseCase> resolve_comp_uc;
+  // F-09 MVP-7 (ADR-041): auto-policy resolution loop (gated, default OFF).
+  std::optional<cex::order_flow::app::AutoResolveLoop> auto_resolve_loop;
   if (!pg_dsn.empty()) {
     combo_repo.emplace(pg_dsn);
     combo_publisher.emplace(
@@ -190,11 +194,28 @@ int main() {
           return uc.CreateFlowOrder(r);
         });
 
+    // F-09 MVP-7 (ADR-041): auto-policy resolution loop. Default OFF — opt-in
+    // через F09_AUTO_RESOLVE_ENABLED после risk-review. Те же money-guardrails.
+    cex::order_flow::app::AutoResolveConfig auto_cfg;
+    auto_cfg.enabled = cex::common::Env::get_bool("F09_AUTO_RESOLVE_ENABLED", false);
+    auto_cfg.max_notional =
+        cex::common::Decimal{cex::common::Env::get_int("F09_AUTO_MAX_NOTIONAL", 0), 0};
+    auto_cfg.window_notional =
+        cex::common::Decimal{cex::common::Env::get_int("F09_AUTO_WINDOW_NOTIONAL", 0), 0};
+    auto_cfg.max_per_window = cex::common::Env::get_int("F09_AUTO_MAX_PER_WINDOW", 0);
+    auto_cfg.min_age_ms = cex::common::Env::get_int("F09_AUTO_MIN_AGE_MS", 30000);
+    const auto auto_interval_ms = cex::common::Env::get_int("F09_AUTO_RESOLVE_INTERVAL_MS", 10000);
+    const auto auto_window_ms = cex::common::Env::get_int("F09_AUTO_WINDOW_MS", 3600000);
+    auto_resolve_loop.emplace(&*comp_client, &*combo_repo, &*resolve_comp_uc, auto_cfg,
+                              auto_interval_ms, auto_window_ms);
+    auto_resolve_loop->Start();
+
     cex::common::log_json(
         "INFO", "OrderFlow F-09 combo orders enabled",
         {{"multileg_solver", combo_policy.multileg_vector_solver_enabled ? "on" : "off"},
          {"external_compensating", combo_policy.external_compensating_enabled ? "on" : "off"},
          {"max_legs", std::to_string(combo_policy.max_legs_per_group)},
+         {"auto_resolve", auto_cfg.enabled ? "on" : "off"},
          {"matching_target", matching_target}});
   }
 

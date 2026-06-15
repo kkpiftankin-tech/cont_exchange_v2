@@ -14,6 +14,7 @@ void ToProto(const infra::PendingCompensation& src,
   dst->set_leg_id(src.leg_id);
   dst->set_reason(src.reason);
   *dst->mutable_internal_filled_qty() = src.internal_filled_qty.to_proto();
+  dst->set_created_at_ms(src.created_at_ms);
 }
 
 }  // namespace

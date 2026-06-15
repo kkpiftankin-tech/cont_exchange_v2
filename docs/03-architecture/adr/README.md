@@ -52,5 +52,7 @@
 | ADR-037 | F-09 external-leg execution + compensation (MVP-5, reuse F-12 hedge path) | [accepted](ADR-037-external-leg-execution-compensation.md) |
 | ADR-038 | F-09 OCO/bracket runtime — leg-transition persistence + execution semantics (ранее ADR-035, переномерован из-за коллизии) | [accepted](ADR-038-oco-bracket-runtime.md) |
 | ADR-039 | F-09 compensation resolution (MVP-6, operator-driven, no auto-cascade) | [accepted](ADR-039-compensation-resolution.md) |
+| ADR-040 | F-09 compensation resolution — endpoint в order_flow, matching экспонирует CompensationService gRPC (MVP-6 slice 3b) | [accepted](ADR-040-compensation-resolution-cross-service.md) |
+| ADR-041 | F-09 auto-policy compensation resolution (MVP-7, money-guardrails + circuit-breaker, default OFF) | [accepted](ADR-041-auto-policy-compensation-resolution.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

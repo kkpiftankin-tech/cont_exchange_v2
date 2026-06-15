@@ -140,6 +140,14 @@ services:
       # F-09 MVP-5/6: разрешить external_compensating combo (внешние ноги +
       # compensation resolution). По умолчанию выключено (honest gate, T-F09-002).
       F09_EXTERNAL_COMPENSATING_ENABLED: "true"
+      # F-09 MVP-7 (ADR-041): auto-policy resolution (default OFF; dev — ON с лимитами).
+      F09_AUTO_RESOLVE_ENABLED: "true"
+      F09_AUTO_MAX_NOTIONAL: "1000000"
+      F09_AUTO_WINDOW_NOTIONAL: "10000000"
+      F09_AUTO_MAX_PER_WINDOW: "100"
+      F09_AUTO_MIN_AGE_MS: "3000"
+      F09_AUTO_RESOLVE_INTERVAL_MS: "5000"
+      F09_AUTO_WINDOW_MS: "3600000"
     depends_on:
       risk:
         condition: service_started

@@ -8,6 +8,7 @@
 // компенсирующий трейд — operator/policy-driven (MVP-6).
 // ============================================================================
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -35,6 +36,7 @@ struct PendingCompensation {
   std::string leg_id;
   std::string reason;
   cex::common::Decimal internal_filled_qty{};
+  std::int64_t created_at_ms{0};  ///< F-09 MVP-7: epoch-ms для age-gate (ADR-041).
 };
 
 class PostgresComboCompensationRepository {

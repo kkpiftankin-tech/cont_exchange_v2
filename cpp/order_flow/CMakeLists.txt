@@ -41,6 +41,8 @@ add_executable(order_flow
   src/app/cancel_combo_order_use_case.cpp
   src/infra/matching_compensation_client.cpp
   src/app/resolve_compensation_use_case.cpp
+  src/app/auto_resolve_policy.cpp
+  src/app/auto_resolve_loop.cpp
 )
 
 target_include_directories(order_flow PRIVATE
@@ -164,4 +166,16 @@ if(BUILD_TESTING)
   )
   target_compile_options(order_flow_resolve_comp_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME order_flow_resolve_comp_tests COMMAND order_flow_resolve_comp_tests)
+
+  # F-09 MVP-7 (ADR-041): AutoResolvePolicy pure guardrail test (no PG/net).
+  add_executable(order_flow_auto_resolve_policy_tests
+    tests/app/auto_resolve_policy_test.cpp
+    src/app/auto_resolve_policy.cpp
+  )
+  target_include_directories(order_flow_auto_resolve_policy_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(order_flow_auto_resolve_policy_tests PRIVATE cex_common)
+  target_compile_options(order_flow_auto_resolve_policy_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME order_flow_auto_resolve_policy_tests COMMAND order_flow_auto_resolve_policy_tests)
 endif()

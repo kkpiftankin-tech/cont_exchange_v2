@@ -70,7 +70,8 @@ std::vector<PendingCompensation> PostgresComboCompensationRepository::ListPendin
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
   const pqxx::result rows = tx.exec(R"SQL(
-SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty,
+       (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_at_ms
 FROM combo_compensations WHERE status = 'pending' ORDER BY created_at
 )SQL");
   tx.commit();
@@ -86,6 +87,7 @@ FROM combo_compensations WHERE status = 'pending' ORDER BY created_at
     if (!row["internal_filled_qty"].is_null()) {
       c.internal_filled_qty = ParsePgNumeric(row["internal_filled_qty"].as<std::string>());
     }
+    if (!row["created_at_ms"].is_null()) c.created_at_ms = row["created_at_ms"].as<std::int64_t>();
     out.push_back(std::move(c));
   }
   return out;
@@ -101,6 +103,7 @@ PendingCompensation MapPendingRow(const pqxx::row& row) {
   if (!row["internal_filled_qty"].is_null()) {
     c.internal_filled_qty = ParsePgNumeric(row["internal_filled_qty"].as<std::string>());
   }
+  if (!row["created_at_ms"].is_null()) c.created_at_ms = row["created_at_ms"].as<std::int64_t>();
   return c;
 }
 }  // namespace
@@ -110,7 +113,8 @@ std::vector<PendingCompensation> PostgresComboCompensationRepository::ListPendin
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
   const pqxx::result rows = tx.exec_params(R"SQL(
-SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty,
+       (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_at_ms
 FROM combo_compensations WHERE status = 'pending' AND parent_order_id = $1::uuid
 ORDER BY created_at
 )SQL",
@@ -129,7 +133,8 @@ std::optional<PendingCompensation> PostgresComboCompensationRepository::GetPendi
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
   const pqxx::result rows = tx.exec_params(R"SQL(
-SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty
+SELECT compensation_id::text, parent_order_id::text, leg_id::text, reason, internal_filled_qty,
+       (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_at_ms
 FROM combo_compensations WHERE status = 'pending' AND compensation_id = $1::uuid
 )SQL",
                                            compensation_id);

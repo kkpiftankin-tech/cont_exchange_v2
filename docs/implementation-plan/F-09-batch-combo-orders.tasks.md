@@ -1756,6 +1756,42 @@ live external-leg failure E2E). До этого — unit/integration покры�
 
 ---
 
+## Phase M: MVP-7 Auto-policy Resolution (ADR-041)
+
+> Авто-резолв pending-компенсаций по правилам, БЕЗ оператора — аддитивный слой над
+> slice-3b (тот же money-путь). Money-safety: pure guardrail-функция + circuit-breaker;
+> default OFF. ADR-041.
+
+### T-F09-072: ADR-041 + AutoResolvePolicy (pure guardrails)
+
+**Статус: ✅ выполнено (verified).** `docs/03-architecture/adr/ADR-041-auto-policy-compensation-resolution.md`
+(operator-driven остаётся; авто — только `reverse_internal` в пределах guardrails,
+иначе escalate; никогда авто-accept/retry; circuit-breaker по оконному notional;
+default OFF). `cpp/order_flow/src/app/auto_resolve_policy.{hpp,cpp}` — чистая
+`EvaluateAutoResolve(candidate, config, window)` (enabled / terminal-reason / min_age /
+nothing_to_reverse / notional-cap / window-count / window-notional). 11-кейсовый
+unit-тест `order_flow_auto_resolve_policy_tests` PASSED. README ADR обновлён (+040/041).
+
+### T-F09-073: created_at_ms (age-gate) + ListPending client
+
+**Статус: ✅ выполнено.** `compensation.proto` `PendingCompensation += created_at_ms`
+(epoch-ms); matching repo (`EXTRACT(EPOCH FROM created_at)*1000`) + grpc ToProto;
+`MatchingCompensationClient += ListPending`. Сборка matching+order_flow зелёная.
+
+### T-F09-074: AutoResolveLoop + wiring + live verify
+
+**Статус: ✅ выполнено (live).** `auto_resolve_loop.{hpp,cpp}` — периодический поток
+(gated `F09_AUTO_RESOLVE_ENABLED`): ListPending → оценка notional
+`Σ filled_cum·mid(p_low,p_high)` → `EvaluateAutoResolve` → при auto вызывает
+`ResolveCompensationUseCase(reverse_internal, operator_id="auto:reverse_internal")` +
+скользящее окно (circuit-breaker). main.cpp wiring + env (compose order_flow). **Live:**
+deployed auto ON — loop авто-разрешил 2 eligible (notional_est=145<cap) → status=resolved,
+operator_id=auto:reverse_internal, reversing FlowOrders persisted; notional=0 →
+escalate (pending, fail-safe). Открытый gap (отдельно, MVP-5): external reject не
+маркирует ногу терминальной → matching re-routes каждый батч → новые компенсации.
+
+---
+
 ## Recommended MVP Increments
 
 | MVP | Scope | Задачи | Когда |
@@ -1765,7 +1801,8 @@ live external-leg failure E2E). До этого — unit/integration покры�
 | **MVP-3** spread/factor/budget/risk + strict_atomic | Линейная система (A_g e=b_g α) для spread/factor constraints. QP solver (OSQP/Eigen). Strict_atomic polished. | T-F09-094 + solver extension в T-F09-044 | После MVP-2 |
 | **MVP-4** OCO/bracket + observability + E2E | OCO transitions, bracket resize, full observability, replay determinism. | T-F09-022, T-F09-023, T-F09-071, T-F09-081, T-F09-092, T-F09-093, T-F09-095, T-F09-096 | После MVP-3 |
 | **MVP-5** external/compensating | venue_native, external_compensating, compensation ledger, venues stubs → real. | T-F09-050, T-F09-051, T-F09-052, T-F09-061 | После MVP-4 или параллельно |
-| **MVP-6** compensation resolution (operator-driven) | ADR-039/040. DDL+repo (slice1/2 ✅), pure ComputeReversals (slice3a ✅), operator gRPC ResolveCompensation→reverse_internal money path (slice3b), F-16 console (slice4). | T-F09-063..068 (slice3b), slice4=frontend | После MVP-5 |
+| **MVP-6** compensation resolution (operator-driven) | ADR-039/040. DDL+repo (slice1/2 ✅), pure ComputeReversals (slice3a ✅), operator gRPC ResolveCompensation→reverse_internal money path (slice3b ✅ live), F-16 console (slice4 ✅ live). | T-F09-063..068 (slice3b), slice4=frontend | ✅ После MVP-5 |
+| **MVP-7** auto-policy resolution | ADR-041 (money-guardrails + circuit-breaker, default OFF). pure AutoResolvePolicy + AutoResolveLoop (order_flow), reuse slice-3b money path, operator_id="auto:...". ✅ live-verified. | T-F09-072..074 (Phase M) | ✅ После MVP-6 |
 
 ---
 

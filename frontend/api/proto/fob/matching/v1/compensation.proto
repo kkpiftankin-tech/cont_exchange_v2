@@ -24,6 +24,8 @@ message PendingCompensation {
   // Снимок filled внешнего ExecutionReport (информационный; реальный объём для
   // reverse_internal пересчитывается из combo_order_legs.filled_cum — ADR-039 §3).
   fob.common.v1.Decimal internal_filled_qty = 5;
+  // F-09 MVP-7 (ADR-041): created_at в epoch-ms — для age-gate авто-policy (debounce).
+  int64 created_at_ms = 6;
 }
 
 message ListPendingCompensationsRequest {
