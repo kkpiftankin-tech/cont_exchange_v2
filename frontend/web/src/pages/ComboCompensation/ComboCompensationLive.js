@@ -111,6 +111,7 @@ const ComboCompensationLive = () => {
           <a href="/reconciliation-alerts-live">Alerts</a>
           <a href="/manual-override-live">Manual override</a>
           <a href="/policy-config">Policy</a>
+          <a href="/combo-order-live">Combo</a>
           <a href="/combo-compensation-live" className="active">Compensation</a>
           <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
         </div>

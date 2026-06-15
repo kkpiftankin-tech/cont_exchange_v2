@@ -795,6 +795,178 @@ function decimalToString(d) {
   return neg ? '-' + s : s;
 }
 
+// ── F-09: combo orders (create / list / status / cancel) ───────────────────
+// Создание/отмена → order_flow gRPC; статус/результат → PG (combo_orders +
+// combo_order_legs + execution_groups + combo_compensations). gateway combo не
+// проксирует, поэтому весь combo-flow для фронта живёт здесь.
+
+// Десятичная строка/число → proto Decimal {units, scale} БЕЗ float (CLAUDE.md §9).
+function numToDecimal(v) {
+  let s = String(v == null ? '' : v).trim();
+  if (s === '') return { units: 0, scale: 0 };
+  const neg = s.startsWith('-'); if (neg) s = s.slice(1);
+  let [intp, frac = ''] = s.split('.');
+  frac = frac.replace(/0+$/, '');
+  const scale = frac.length;
+  let digits = (intp + frac).replace(/^0+/, '');
+  if (digits === '') digits = '0';
+  let units = parseInt(digits, 10);
+  if (neg) units = -units;
+  return { units, scale };
+}
+
+async function comboStatusFromPg(comboId) {
+  const pool = getPgPool();
+  if (!pool) return null;
+  const combo = await pool.query(
+    `SELECT combo_order_id, combo_type, execution_mode, status, atomicity_policy,
+            atomicity_scope, ratio_basis, created_at, updated_at
+     FROM combo_orders WHERE combo_order_id = $1`, [comboId]);
+  if (combo.rowCount === 0) return null;
+  const legs = await pool.query(
+    `SELECT leg_id, instrument_symbol, side, filled_cum::text, q_max::text, status,
+            array_to_string(venue_preferences, ',') AS venue_prefs
+     FROM combo_order_legs WHERE parent_order_id = $1 ORDER BY leg_id`, [comboId]);
+  const groups = await pool.query(
+    `SELECT execution_group_id, group_status, execution_scale::text, ratio_deviation_bps,
+            leg_results, created_at
+     FROM execution_groups WHERE parent_order_id = $1 ORDER BY created_at DESC LIMIT 10`, [comboId]);
+  const comps = await pool.query(
+    `SELECT compensation_id, leg_id, reason, status, COALESCE(operator_id,'') AS operator_id
+     FROM combo_compensations WHERE parent_order_id = $1 ORDER BY created_at DESC`, [comboId]);
+  const c = combo.rows[0];
+  return {
+    comboId: c.combo_order_id,
+    comboType: c.combo_type,
+    executionMode: c.execution_mode,
+    status: c.status,
+    atomicityPolicy: c.atomicity_policy,
+    atomicityScope: c.atomicity_scope,
+    ratioBasis: c.ratio_basis,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    legs: legs.rows.map(l => ({
+      legId: l.leg_id, symbol: l.instrument_symbol, side: l.side,
+      filledCum: l.filled_cum, qMax: l.q_max, status: l.status, venuePreferences: l.venue_prefs
+    })),
+    executionGroups: groups.rows.map(g => ({
+      executionGroupId: g.execution_group_id, groupStatus: g.group_status,
+      executionScale: g.execution_scale, ratioDeviationBps: g.ratio_deviation_bps,
+      legResults: g.leg_results, createdAt: g.created_at
+    })),
+    compensations: comps.rows.map(cc => ({
+      compensationId: cc.compensation_id, legId: cc.leg_id, reason: cc.reason,
+      status: cc.status, operatorId: cc.operator_id
+    }))
+  };
+}
+
+async function handleComboOrders(req, res, pathname, query) {
+  // POST /api/v1/combo-orders — создать многоногую заявку.
+  if (req.method === 'POST' && pathname === '/api/v1/combo-orders') {
+    let body;
+    try { body = await parseBody(req); } catch (e) { writeJson(res, 400, { error: { code: 'BAD_BODY', message: e.message } }); return true; }
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const legs = Array.isArray(body.legs) ? body.legs : [];
+    if (legs.length < 2) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'combo requires >= 2 legs' } }); return true; }
+    const request = {
+      meta: createEventMeta('create-combo-order'),
+      client_combo_id: body.clientComboId || `ui-combo-${Date.now()}`,
+      user_id: body.userId || 'demo-user',
+      account_id: body.accountId || 'demo-acct',
+      combo_type: body.comboType || 'COMBO_TYPE_BASKET',
+      execution_mode: body.executionMode || 'EXECUTION_MODE_MULTILEG_VECTOR_SOLVER',
+      atomicity_policy: body.atomicityPolicy || 'ATOMICITY_POLICY_SCALABLE_ATOMIC',
+      atomicity_scope: body.atomicityScope || 'ATOMICITY_SCOPE_INTERNAL_BATCH',
+      fallback_policy: body.fallbackPolicy || 'scale_down',
+      ratio_basis: body.ratioBasis || 'RATIO_BASIS_NOTIONAL_WEIGHT',
+      legs: legs.map(l => {
+        const leg = {
+          instrument: { symbol: l.symbol, base: l.base || (l.symbol || '').split('/')[0] || '', quote: l.quote || (l.symbol || '').split('/')[1] || '' },
+          side: l.side || 'SIDE_BUY',
+          price_low: numToDecimal(l.priceLow),
+          price_high: numToDecimal(l.priceHigh),
+          max_rate: numToDecimal(l.maxRate),
+          max_qty: numToDecimal(l.maxQty),
+          venue_preferences: Array.isArray(l.venuePreferences) ? l.venuePreferences
+            : (l.venue ? [l.venue] : ['internal'])
+        };
+        // Домен: ровно одно из {ratio, weight} (XOR). QUANTITY → ratio, иначе weight.
+        if ((body.ratioBasis || 'RATIO_BASIS_NOTIONAL_WEIGHT') === 'RATIO_BASIS_QUANTITY') {
+          leg.ratio = numToDecimal(l.ratio != null ? l.ratio : (l.weight != null ? l.weight : 0));
+        } else {
+          leg.weight = numToDecimal(l.weight != null ? l.weight : 0);
+        }
+        return leg;
+      })
+    };
+    const result = await new Promise((resolve) => {
+      client.CreateComboOrder(request, (err, response) => {
+        if (err) { console.error('[grpc] CreateComboOrder error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const r = result.response || {};
+    writeJson(res, 200, {
+      accepted: !!r.accepted,
+      comboId: r.combo_id || '',
+      status: r.status,
+      executionGuarantees: r.execution_guarantees || '',
+      ratioGuaranteed: !!r.ratio_guaranteed,
+      legOrderIds: r.leg_order_ids || {},
+      error: (r.error && r.error.code) ? { code: r.error.code, message: r.error.message } : null
+    });
+    return true;
+  }
+
+  // GET /api/v1/combo-orders — недавние combo (PG).
+  if (req.method === 'GET' && pathname === '/api/v1/combo-orders') {
+    const pool = getPgPool();
+    if (!pool) { writeJson(res, 502, { error: { code: 'NO_PG', message: 'PG unavailable' } }); return true; }
+    const rows = await pool.query(
+      `SELECT combo_order_id, combo_type, execution_mode, status, atomicity_scope, created_at
+       FROM combo_orders ORDER BY created_at DESC LIMIT 25`);
+    writeJson(res, 200, {
+      combos: rows.rows.map(c => ({
+        comboId: c.combo_order_id, comboType: c.combo_type, executionMode: c.execution_mode,
+        status: c.status, atomicityScope: c.atomicity_scope, createdAt: c.created_at
+      })), generatedAt: new Date().toISOString()
+    });
+    return true;
+  }
+
+  // POST /api/v1/combo-orders/{id}/cancel
+  const cm = pathname.match(/^\/api\/v1\/combo-orders\/([^/]+)\/cancel$/);
+  if (req.method === 'POST' && cm) {
+    const comboId = decodeURIComponent(cm[1]);
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const request = { meta: createEventMeta('cancel-combo-order'), combo_id: comboId };
+    const result = await new Promise((resolve) => {
+      client.CancelComboOrder(request, (err, response) => {
+        if (err) { console.error('[grpc] CancelComboOrder error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    writeJson(res, 200, { cancelled: true });
+    return true;
+  }
+
+  // GET /api/v1/combo-orders/{id} — статус/результат (PG).
+  const gm = pathname.match(/^\/api\/v1\/combo-orders\/([^/]+)$/);
+  if (req.method === 'GET' && gm) {
+    const comboId = decodeURIComponent(gm[1]);
+    const status = await comboStatusFromPg(comboId);
+    if (!status) { writeJson(res, 404, { error: { code: 'NOT_FOUND', message: 'combo not found' } }); return true; }
+    writeJson(res, 200, status);
+    return true;
+  }
+  return false;
+}
+
 async function handleComboCompensations(req, res, pathname, query) {
   // GET /api/v1/combo-compensations?status=pending
   if (req.method === 'GET' && pathname === '/api/v1/combo-compensations') {
@@ -6668,6 +6840,13 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/policy-config") {
       const handled = await handlePolicyConfigV1(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    // F-09: combo orders (create / list / status / cancel).
+    if (pathname === "/api/v1/combo-orders" ||
+        pathname.startsWith("/api/v1/combo-orders/")) {
+      const handled = await handleComboOrders(req, res, pathname, query);
       if (handled !== false) return;
     }
 
