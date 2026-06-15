@@ -13,14 +13,17 @@ import './ComboOrderLive.css';
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const POLL_INTERVAL_MS = 3000;
 
-// Раздельный выбор базовой и котируемой валюты пары (base / quote).
-const BASES = [
-  'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT', 'MATIC',
+// Единый полный список валют — и для базовой, и для котируемой стороны пары.
+const CURRENCIES = [
+  'USDT', 'USDC', 'BTC', 'ETH', 'BUSD', 'DAI', 'EUR', 'TUSD',
+  'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT', 'MATIC',
   'LINK', 'LTC', 'TRX', 'ATOM', 'UNI', 'BCH', 'NEAR', 'APT', 'ARB', 'OP',
   'FIL', 'ICP', 'ETC', 'XLM', 'ALGO', 'VET', 'GRT', 'AAVE', 'MKR', 'SAND',
   'INJ', 'SUI', 'TIA', 'SEI', 'RUNE'
 ];
-const QUOTES = ['USDT', 'USDC', 'BTC', 'ETH', 'BUSD', 'DAI', 'EUR', 'TUSD'];
+// Base по умолчанию открываем с BTC (удобнее для дефолтов band).
+const BASES = ['BTC', 'ETH', ...CURRENCIES.filter((c) => c !== 'BTC' && c !== 'ETH')];
+const QUOTES = CURRENCIES;
 // Дефолтные band/rate/qty по базовой валюте (quote обычно USDT).
 const BAND_BY_BASE = {
   BTC: { priceLow: '70000', priceHigh: '75000', maxRate: '0.001', maxQty: '0.002' },
