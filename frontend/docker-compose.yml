@@ -13,6 +13,9 @@ services:
       MATCHING_VIEW_CACHE_TTL_MS: ${MATCHING_VIEW_CACHE_TTL_MS:-5000}
       LEDGER_GRPC_ADDR: ${LEDGER_GRPC_ADDR:-ledger:50053}
       VENUES_HTTP_ADDR: ${VENUES_HTTP_ADDR:-http://venues:8087}
+      # F-09 MVP-6 slice 4: combo compensation console (matching list + order_flow resolve).
+      MATCHING_GRPC_ADDR: ${MATCHING_GRPC_ADDR:-matching:50053}
+      ORDER_FLOW_GRPC_ADDR: ${ORDER_FLOW_GRPC_ADDR:-order_flow:50051}
       # F-12 DoD-14: HedgeFlow Monitor reads PG hedgeflows directly.
       FRONTEND_POSTGRES_DSN: ${FRONTEND_POSTGRES_DSN:-postgresql://cex:cex@postgres:5432/cex}
       # F-12 DoD-15 (PR-F12-9d): Policy Config page mirrors matching-service env.

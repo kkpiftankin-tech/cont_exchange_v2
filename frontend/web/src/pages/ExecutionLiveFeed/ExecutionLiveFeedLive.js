@@ -87,6 +87,7 @@ const ExecutionLiveFeedLive = () => {
           <a href="/reconciliation-alerts-live">Alerts</a>
           <a href="/manual-override">Manual override</a>
           <a href="/policy-config">Policy</a>
+          <a href="/combo-compensation-live">Compensation</a>
           <button onClick={() => { logout(); navigate('/login'); }} className="logout-btn">Выйти</button>
         </div>
       </nav>

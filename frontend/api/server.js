@@ -26,6 +26,9 @@ const MS_PER_HOUR = 3600 * 1000;
 // Ledger gRPC configuration
 // Путь к proto внутри контейнера
 const LEDGER_ADDR = process.env.LEDGER_GRPC_ADDR || 'ledger:50053';
+// F-09 MVP-6 slice 4: combo compensation console.
+const MATCHING_GRPC_ADDR = process.env.MATCHING_GRPC_ADDR || 'matching:50053';
+const ORDER_FLOW_GRPC_ADDR = process.env.ORDER_FLOW_GRPC_ADDR || 'order_flow:50051';
 const GATEWAY_ADDR = process.env.GATEWAY_HTTP_ADDR || 'http://gateway:8080';
 const REPLAY_FAKE_REQUESTED = String(process.env.REPLAY_FAKE_ENABLED || "0") === "1";
 const REPLAY_FAKE_ENABLED = REPLAY_FAKE_REQUESTED && NODE_ENV !== "production";
@@ -44,6 +47,9 @@ const FRONTEND_POSTGRES_DSN = process.env.FRONTEND_POSTGRES_DSN || '';
 const PROTO_DIR = join(__dirname, 'proto');
 const LEDGER_PROTO = join(PROTO_DIR, 'fob/ledger/v1/ledger.proto');
 const COMMON_PROTO = join(PROTO_DIR, 'fob/common/v1/common.proto');
+// F-09 MVP-6 slice 4 protos.
+const COMPENSATION_PROTO = join(PROTO_DIR, 'fob/matching/v1/compensation.proto');
+const ORDER_FLOW_PROTO = join(PROTO_DIR, 'fob/orders/v1/order_flow_service.proto');
 
 let ledgerClient = null;
 
@@ -732,6 +738,128 @@ function parseBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+// ── F-09 MVP-6 slice 4: combo compensation BFF ─────────────────────────────
+// GET list → matching CompensationService; POST resolve → order_flow
+// OrderFlowService (ADR-040). См. docs/06-api/rest/combo-compensations.md.
+let compensationClient = null;
+let orderFlowClient = null;
+
+function initCompensationClient() {
+  if (compensationClient) return compensationClient;
+  try {
+    const pd = protoLoader.loadSync([COMPENSATION_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    compensationClient = new proto.fob.matching.v1.CompensationService(
+      MATCHING_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] CompensationService client created, target=${MATCHING_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create CompensationService client:', err.message);
+  }
+  return compensationClient;
+}
+
+function initOrderFlowClient() {
+  if (orderFlowClient) return orderFlowClient;
+  try {
+    const pd = protoLoader.loadSync([ORDER_FLOW_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    orderFlowClient = new proto.fob.orders.v1.OrderFlowService(
+      ORDER_FLOW_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] OrderFlowService client created, target=${ORDER_FLOW_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create OrderFlowService client:', err.message);
+  }
+  return orderFlowClient;
+}
+
+// Decimal proto → каноническая строка. БЕЗ float (CLAUDE.md §9).
+function decimalToString(d) {
+  if (!d || d.units === undefined || d.units === null) return '0';
+  const units = String(d.units);
+  const scale = Number(d.scale || 0);
+  if (scale <= 0) return units;
+  const neg = units.startsWith('-');
+  let digits = neg ? units.slice(1) : units;
+  while (digits.length <= scale) digits = '0' + digits;
+  const intPart = digits.slice(0, digits.length - scale);
+  const frac = digits.slice(digits.length - scale).replace(/0+$/, '');
+  const s = frac ? `${intPart}.${frac}` : intPart;
+  return neg ? '-' + s : s;
+}
+
+async function handleComboCompensations(req, res, pathname, query) {
+  // GET /api/v1/combo-compensations?status=pending
+  if (req.method === 'GET' && pathname === '/api/v1/combo-compensations') {
+    const client = initCompensationClient();
+    if (!client) {
+      writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'CompensationService unavailable' } });
+      return true;
+    }
+    const request = {
+      meta: createEventMeta('list-pending-compensations'),
+      parent_order_id: (query && query.parent_order_id) || ''
+    };
+    const result = await new Promise((resolve) => {
+      client.ListPendingCompensations(request, (err, response) => {
+        if (err) { console.error('[grpc] ListPendingCompensations error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const comps = (result.response.compensations || []).map((c) => ({
+      compensationId: c.compensation_id,
+      parentOrderId: c.parent_order_id,
+      legId: c.leg_id,
+      reason: c.reason,
+      internalFilledQty: decimalToString(c.internal_filled_qty)
+    }));
+    writeJson(res, 200, { compensations: comps, generatedAt: new Date().toISOString() });
+    return true;
+  }
+
+  // POST /api/v1/combo-compensations/{id}/resolve
+  const m = pathname.match(/^\/api\/v1\/combo-compensations\/([^/]+)\/resolve$/);
+  if (req.method === 'POST' && m) {
+    const compensationId = decodeURIComponent(m[1]);
+    let body;
+    try { body = await parseBody(req); } catch (e) { writeJson(res, 400, { error: { code: 'BAD_BODY', message: e.message } }); return true; }
+    const action = String(body.action || '').trim();
+    const operatorId = String(body.operatorId || '').trim();
+    if (!action) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'action required' } }); return true; }
+    if (!operatorId) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'operatorId required' } }); return true; }
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const request = {
+      meta: createEventMeta('resolve-compensation'),
+      compensation_id: compensationId,
+      action,
+      operator_id: operatorId
+    };
+    const result = await new Promise((resolve) => {
+      client.ResolveCompensation(request, (err, response) => {
+        if (err) { console.error('[grpc] ResolveCompensation error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const r = result.response || {};
+    const hasErr = r.error && r.error.code;
+    writeJson(res, 200, {
+      applied: !!r.applied,
+      reversingOrderIds: r.reversing_order_ids || [],
+      error: hasErr ? { code: r.error.code, message: r.error.message } : null
+    });
+    return true;
+  }
+  return false;
 }
 
 function readRawBody(req) {
@@ -6540,6 +6668,13 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/policy-config") {
       const handled = await handlePolicyConfigV1(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    // F-09 MVP-6 slice 4: combo compensation console.
+    if (pathname === "/api/v1/combo-compensations" ||
+        pathname.startsWith("/api/v1/combo-compensations/")) {
+      const handled = await handleComboCompensations(req, res, pathname, query);
       if (handled !== false) return;
     }
 

@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+// T-F09-064 (ADR-040): CompensationService — read + idempotent-resolve combo
+// compensations. matching остаётся единственным владельцем таблицы
+// `combo_compensations`; order_flow вызывает этот сервис как client (ADR-040 §2)
+// и сам создаёт reversing-FlowOrder (matching ордера не создаёт, CLAUDE.md §10.3).
+// Сервис аддитивен (backward-compat); изменение тегов — breaking, требует ADR.
+package fob.matching.v1;
+
+import "fob/common/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+// Pending-компенсация для operator-console (F-16) и order_flow-оркестрации.
+// Зеркалит `combo_compensations` (status='pending'); см.
+// cpp/matching/src/infra/postgres_combo_compensation_repository.hpp.
+message PendingCompensation {
+  string compensation_id   = 1;  // UUID PK, idempotency key для ResolvePending
+  string parent_order_id   = 2;  // combo_orders.combo_order_id
+  string leg_id            = 3;  // нога combo с провалившейся внешней частью
+  string reason            = 4;  // rejected | timeout | cancelled
+  // Снимок filled внешнего ExecutionReport (информационный; реальный объём для
+  // reverse_internal пересчитывается из combo_order_legs.filled_cum — ADR-039 §3).
+  fob.common.v1.Decimal internal_filled_qty = 5;
+}
+
+message ListPendingCompensationsRequest {
+  fob.common.v1.EventMeta meta = 1;
+  // Опциональный фильтр; пусто → все pending.
+  string parent_order_id = 2;
+}
+
+message ListPendingCompensationsResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated PendingCompensation compensations = 2;
+}
+
+message GetPendingCompensationRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string compensation_id       = 2;
+}
+
+message GetPendingCompensationResponse {
+  fob.common.v1.EventMeta meta = 1;
+  PendingCompensation compensation = 2;  // валидно только при found=true
+  bool found                       = 3;  // false → нет pending с таким id
+}
+
+message ResolvePendingRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string compensation_id       = 2;
+  // reverse_internal | retry_external | accept (ADR-039 §2). Валидируется сервером.
+  string action                = 3;
+  string operator_id           = 4;  // audit (§22)
+  // id реверсивной FlowOrder / retry-intent (для action != accept).
+  string resolving_ref         = 5;
+}
+
+message ResolvePendingResponse {
+  fob.common.v1.EventMeta meta = 1;
+  // true — переход pending→resolved|cancelled применён; false — был не-pending
+  // (идемпотентный no-op повторного resolve, НЕ ошибка).
+  bool applied                 = 2;
+  fob.common.v1.Error error    = 3;  // выставляется только на реальную ошибку
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+// Read + resolve combo-компенсаций. БЕЗ создания ордеров (ADR-040 §2): резолв —
+// это переход состояния компенсации, а не торговое решение.
+service CompensationService {
+  // Все pending (optionally по parent) — для operator-console.
+  rpc ListPendingCompensations(ListPendingCompensationsRequest)
+      returns (ListPendingCompensationsResponse);
+  // Деталь по compensation_id (order_flow читает перед reverse_internal).
+  rpc GetPendingCompensation(GetPendingCompensationRequest)
+      returns (GetPendingCompensationResponse);
+  // Идемпотентный переход pending→resolved|cancelled + audit. Вызывается order_flow
+  // ПОСЛЕ создания reversing-ордера (resolving_ref = id заявки).
+  rpc ResolvePending(ResolvePendingRequest) returns (ResolvePendingResponse);
+}

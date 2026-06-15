@@ -165,6 +165,7 @@ const HedgeFlowMonitorLive = () => {
           <a href="/manual-override">{t('navbar.manualOverride')}</a>
           <a href="/policy-config">{t('navbar.policyConfig')}</a>
           <a href="/replay">{t('navbar.replay')}</a>
+          <a href="/combo-compensation-live">Compensation</a>
           <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
         </div>
       </nav>
