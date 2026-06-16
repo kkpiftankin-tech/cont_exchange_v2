@@ -353,3 +353,59 @@ CREATE TABLE IF NOT EXISTS sim_divergence_log (
 PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
 ORDER BY (sim_session_id, event_time_ms, client_order_id)
 TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+
+-- ---------------------------------------------------------------------------
+-- F-09 / ADR-042: единый read-слой батчей (одномерные + многоногие combo).
+--
+-- batchresults (этот файл, выше) — иммутабельные single_leg батчи (F-04),
+-- источник: matching → batch.outputs → market_data → ClickHouse.
+--
+-- combo (многоногие) батчи — это МУТАБЕЛЬНОЕ OLTP-состояние (статусы ног и
+-- execution_scale меняются по циклам), их authoritative-хранилище — PostgreSQL
+-- execution_groups. Чтобы не дублировать мутабельные строки в OLAP (риск
+-- рассинхрона), федерируем их в ClickHouse через PostgreSQL table engine и
+-- объединяем с batchresults во view batch_results_unified. Профиль (вкладка
+-- «Батчи») и BFF /api/batches читают ЕДИНЫЙ источник — этот view.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS combo_groups_pg
+(
+    batch_id            String,
+    parent_order_id     String,
+    group_status        String,
+    execution_scale     Decimal128(18),
+    ratio_deviation_bps Nullable(Int32),
+    leg_results         String,        -- JSON array [{legId, execQty, execPrice}]
+    created_at          DateTime64(6)
+)
+ENGINE = PostgreSQL('postgres:5432', 'cex', 'execution_groups', 'cex', 'cex');
+
+CREATE VIEW IF NOT EXISTS batch_results_unified AS
+SELECT
+    batch_id,
+    event_time_ms,
+    multiIf(residual_norm > 0.1, 'FAILED', residual_norm > 0.01, 'PARTIAL', 'SUCCESS') AS status,
+    solve_time_ms,
+    residual_norm,
+    num_active_orders,
+    fills_count,
+    'single_leg' AS kind,
+    '' AS parent_order_id,
+    '' AS execution_scale,
+    CAST(NULL AS Nullable(Int32)) AS ratio_deviation_bps
+FROM batchresults
+UNION ALL
+SELECT
+    batch_id,
+    toUnixTimestamp64Milli(created_at) AS event_time_ms,
+    multiIf(group_status = 'filled', 'SUCCESS',
+            group_status IN ('failed','rejected','cancelled'), 'FAILED', 'PARTIAL') AS status,
+    toFloat64(0) AS solve_time_ms,
+    toFloat64(0) AS residual_norm,
+    toInt64(JSONLength(leg_results)) AS num_active_orders,
+    toInt64(arrayCount(x -> toFloat64OrZero(JSONExtractString(x, 'execQty')) > 0,
+                       JSONExtractArrayRaw(leg_results))) AS fills_count,
+    'combo_group' AS kind,
+    parent_order_id,
+    toString(execution_scale) AS execution_scale,
+    ratio_deviation_bps
+FROM combo_groups_pg;

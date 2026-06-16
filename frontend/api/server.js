@@ -4010,6 +4010,9 @@ async function handleMatching(req, res, pathname, query) {
 // the real batch_ids matching emitted, plus the actual solve_time_ms,
 // residual_norm, num_active_orders, fills_count.
 async function fetchBatchesFromClickHouse(limit = 100) {
+  // F-09: batch_results_unified — единый read-слой ClickHouse: single_leg
+  // (batchresults) + combo_group (federation из PG execution_groups). Колонка
+  // kind различает их; status уже посчитан во view.
   const query = [
     "SELECT",
     "  batch_id,",
@@ -4017,8 +4020,13 @@ async function fetchBatchesFromClickHouse(limit = 100) {
     "  solve_time_ms,",
     "  residual_norm,",
     "  num_active_orders,",
-    "  fills_count",
-    `FROM ${CLICKHOUSE_DB}.batchresults`,
+    "  fills_count,",
+    "  status,",
+    "  kind,",
+    "  parent_order_id,",
+    "  execution_scale,",
+    "  ratio_deviation_bps",
+    `FROM ${CLICKHOUSE_DB}.batch_results_unified`,
     "ORDER BY event_time_ms DESC",
     `LIMIT ${Math.max(1, Math.min(500, Number(limit) || 100))}`,
     "FORMAT JSONEachRow"
@@ -4036,15 +4044,15 @@ async function fetchBatchesFromClickHouse(limit = 100) {
     const row = JSON.parse(line);
     const residual = parseNumeric(row.residual_norm, 0);
     const fills = parseNumeric(row.fills_count, 0);
-    // Heuristic status mapping consistent with what the simulator emitted,
-    // so the existing UI badge styles keep working: residual_norm > 0.1
-    // signals solver instability (FAILED), 0.01–0.1 signals partial
-    // convergence (PARTIAL), and below that with at least one fill is
-    // SUCCESS. Empty batches (fills_count=0) are also SUCCESS — the
-    // solver just had nothing to do.
-    let status = "SUCCESS";
-    if (residual > 0.1) status = "FAILED";
-    else if (residual > 0.01) status = "PARTIAL";
+    // status уже посчитан во view (для combo — из group_status, для single_leg —
+    // из residual_norm). Fallback на эвристику, если поле отсутствует.
+    let status = row.status;
+    if (!status) {
+      status = "SUCCESS";
+      if (residual > 0.1) status = "FAILED";
+      else if (residual > 0.01) status = "PARTIAL";
+    }
+    const kind = row.kind || "single_leg";
     return {
       batchId: row.batch_id,
       time: new Date(parseNumeric(row.event_time_ms, 0)).toISOString(),
@@ -4052,7 +4060,11 @@ async function fetchBatchesFromClickHouse(limit = 100) {
       solveTimeMs: parseNumeric(row.solve_time_ms, 0),
       residualNorm: residual,
       numActiveOrders: parseNumeric(row.num_active_orders, 0),
-      fillsCount: fills
+      fillsCount: fills,
+      kind,
+      comboId: kind === "combo_group" ? (row.parent_order_id || "") : undefined,
+      executionScale: kind === "combo_group" ? (row.execution_scale || "") : undefined,
+      ratioDeviationBps: row.ratio_deviation_bps != null ? Number(row.ratio_deviation_bps) : undefined
     };
   });
 }
