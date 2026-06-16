@@ -56,6 +56,13 @@ const stepOf = (v) => {
   return step >= 1 ? Math.round(step) : Math.max(step, n >= 1 ? 0.01 : 0.0001);
 };
 
+// Компактный формат количества (убираем хвостовые нули): 0.002000… → "0.002".
+const fmtQty = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  return v.toFixed(8).replace(/\.?0+$/, '') || '0';
+};
+
 const emptyLeg = (base = 'BTC', quote = 'USDT', side = 'SIDE_BUY', venue = 'internal') => ({
   base, quote, side, venue, weight: '0.5', mid: '', ...bandFor(base)
 });
@@ -325,15 +332,46 @@ const ComboOrderLive = () => {
                   {detail.status !== 'cancelled' && detail.status !== 'filled' &&
                     <button type="button" className="cbo-cancel" onClick={() => cancelCombo(detail.comboId)}>Отменить</button>}
                 </div>
-                <h3>Ноги</h3>
-                <table className="cbo-mini"><thead><tr>
-                  <th>Symbol</th><th>Side</th><th>Filled / Max</th><th>Venue</th><th>Status</th></tr></thead>
-                  <tbody>{detail.legs.map((l) => (
-                    <tr key={l.legId}>
-                      <td>{l.symbol}</td><td className={`side-${l.side === 'SIDE_SELL' ? 'sell' : 'buy'}`}>{l.side === 'SIDE_SELL' ? 'sell' : 'buy'}</td>
-                      <td>{l.filledCum} / {l.qMax}</td><td>{l.venuePreferences}</td>
-                      <td><span className={`cbo-legst st-${l.status}`}>{l.status}</span></td>
-                    </tr>))}</tbody>
+                {(() => {
+                  // Синхронность ног: % исполнения по каждой паре. При атомарном
+                  // combo ноги должны двигаться вместе — показываем это явно.
+                  const pcts = detail.legs.map((l) => {
+                    const m = Number(l.qMax) || 0;
+                    return m > 0 ? Math.min(100, ((Number(l.filledCum) || 0) / m) * 100) : 0;
+                  });
+                  const minP = pcts.length ? Math.min(...pcts) : 0;
+                  const maxP = pcts.length ? Math.max(...pcts) : 0;
+                  const synced = (maxP - minP) <= 1;  // в пределах 1 п.п. — синхронно
+                  return (
+                    <h3>Ноги — исполнение по парам{' '}
+                      <span className={synced ? 'cbo-sync-ok' : 'cbo-sync-warn'}>
+                        {synced ? `✓ синхронно (~${maxP.toFixed(0)}%)` : `рассинхрон Δ${(maxP - minP).toFixed(0)} п.п.`}
+                      </span>
+                    </h3>
+                  );
+                })()}
+                <table className="cbo-mini cbo-legs-prog"><thead><tr>
+                  <th>Пара</th><th>Side</th><th>Исполнено</th><th>Осталось</th><th>Прогресс</th><th>Статус</th></tr></thead>
+                  <tbody>{detail.legs.map((l) => {
+                    const filled = Number(l.filledCum) || 0;
+                    const max = Number(l.qMax) || 0;
+                    const remaining = Math.max(0, max - filled);
+                    const pct = max > 0 ? Math.min(100, (filled / max) * 100) : 0;
+                    return (
+                      <tr key={l.legId}>
+                        <td>{l.symbol}</td>
+                        <td className={`side-${l.side === 'SIDE_SELL' ? 'sell' : 'buy'}`}>{l.side === 'SIDE_SELL' ? 'sell' : 'buy'}</td>
+                        <td>{fmtQty(filled)}</td>
+                        <td>{fmtQty(remaining)}</td>
+                        <td>
+                          <div className="cbo-prog" title={`${pct.toFixed(1)}% (${l.venuePreferences})`}>
+                            <div className="cbo-prog-bar" style={{ width: `${pct}%` }} />
+                            <span className="cbo-prog-pct">{pct.toFixed(0)}%</span>
+                          </div>
+                        </td>
+                        <td><span className={`cbo-legst st-${l.status}`}>{l.status}</span></td>
+                      </tr>);
+                  })}</tbody>
                 </table>
                 <h3>Execution groups ({detail.executionGroups.length})</h3>
                 {detail.executionGroups.length === 0 ? <div className="cbo-empty">пока нет (combo ещё не исполнялся)</div> : (
