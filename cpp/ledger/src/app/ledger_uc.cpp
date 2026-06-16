@@ -430,7 +430,8 @@ void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup
                           {{"execution_group_id", eg.execution_group_id()}});
     return;
   }
-  // Каждая нога → позиция владельца (переиспользуем single-leg математику).
+  // Каждая нога → позиция владельца + settle баланса (переиспользуем single-leg
+  // математику для позиции).
   for (const auto& lr : eg.leg_results()) {
     fob::matching::v1::FlowFill fill;
     fill.set_user_id(eg.user_id());
@@ -439,6 +440,34 @@ void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup
     *fill.mutable_executed_qty() = lr.exec_qty();
     *fill.mutable_price() = lr.exec_price();
     update_position_for_fill(fill);
+
+    // F-09: combo НЕ резервирует средства при создании, поэтому settle напрямую
+    // из available (как видит «личный счёт» на вкладке Торговля). Контраст с
+    // single-leg ApplyBatchResult, где списывается из reserved. §17 — только Decimal.
+    //   BUY  ноги: available(quote) -= notional; available(base)  += qty.
+    //   SELL ноги: available(base)  -= qty;      available(quote) += notional.
+    const std::string& sym = lr.instrument_symbol();
+    const auto slash = sym.find('/');
+    if (slash == std::string::npos || slash == 0 || slash + 1 >= sym.size()) continue;
+    const std::string base = sym.substr(0, slash);
+    const std::string quote = sym.substr(slash + 1);
+    const std::string& user = eg.user_id();
+    const Decimal qty = Decimal::from_proto(lr.exec_qty());
+    Decimal notional = Decimal::from_proto(lr.exec_notional());
+    if (Decimal::cmp(notional, Decimal{0, notional.scale}) <= 0) {
+      notional = Decimal::mul(qty, Decimal::from_proto(lr.exec_price()));
+    }
+    if (lr.side() == fob::common::v1::SIDE_BUY) {
+      auto& qbal = ensure_balance_locked(user, quote);
+      qbal.available = Decimal::sub(qbal.available, notional);
+      auto& bbal = ensure_balance_locked(user, base);
+      bbal.available = Decimal::add(bbal.available, qty);
+    } else if (lr.side() == fob::common::v1::SIDE_SELL) {
+      auto& bbal = ensure_balance_locked(user, base);
+      bbal.available = Decimal::sub(bbal.available, qty);
+      auto& qbal = ensure_balance_locked(user, quote);
+      qbal.available = Decimal::add(qbal.available, notional);
+    }
   }
   cex::common::log_json("INFO", "Ledger applied ExecutionGroup",
                         {{"execution_group_id", eg.execution_group_id()},

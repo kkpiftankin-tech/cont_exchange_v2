@@ -205,10 +205,54 @@ void test_apply_execution_group_updates_positions() {
   assert(cex::common::Decimal::cmp(btc2.amount, cex::common::Decimal{2, 0}) == 0);
 }
 
+// F-09: ApplyExecutionGroup должен двигать БАЛАНСЫ (а не только позиции), иначе
+// «личный счёт» на вкладке Торговля не меняется по combo. Combo не резервирует —
+// settle из available: BUY -quote +base.
+void test_apply_execution_group_settles_balances() {
+  cex::ledger::app::LedgerUseCases uc;  // seed demo-user: 10000.00 USDT, 2.5 BTC
+
+  fob::matching::v1::ExecutionGroup eg;
+  eg.set_execution_group_id("eg-bal-1");
+  eg.set_parent_order_id("parent-bal-1");
+  eg.set_user_id("demo-user");
+
+  auto* lr1 = eg.add_leg_results();           // BTC/USDT BUY 0.01 @ notional 50.00
+  lr1->set_instrument_symbol("BTC/USDT");
+  lr1->set_side(fob::common::v1::SIDE_BUY);
+  *lr1->mutable_exec_qty() = make_decimal(1'000'000, 8);   // 0.01 BTC
+  *lr1->mutable_exec_notional() = make_decimal(5'000, 2);  // 50.00 USDT
+
+  auto* lr2 = eg.add_leg_results();           // ETH/USDT BUY 1.0 @ notional 30.00
+  lr2->set_instrument_symbol("ETH/USDT");
+  lr2->set_side(fob::common::v1::SIDE_BUY);
+  *lr2->mutable_exec_qty() = make_decimal(100'000'000, 8); // 1.0 ETH
+  *lr2->mutable_exec_notional() = make_decimal(3'000, 2);  // 30.00 USDT
+
+  uc.ApplyExecutionGroup(eg);
+  auto bal = get_balances(uc, "demo-user");
+  const auto* usdt = find_balance(bal, "USDT");
+  const auto* btc = find_balance(bal, "BTC");
+  const auto* eth = find_balance(bal, "ETH");
+  assert(usdt && btc && eth);
+  // USDT: 10000.00 − 50.00 − 30.00 = 9920.00
+  assert(usdt->available().units() == 992'000 && usdt->available().scale() == 2);
+  // BTC: 2.50000000 + 0.01000000 = 2.51000000
+  assert(btc->available().units() == 251'000'000 && btc->available().scale() == 8);
+  // ETH: 0 + 1.00000000 = 1.00000000
+  assert(eth->available().units() == 100'000'000 && eth->available().scale() == 8);
+
+  // Идемпотентность: повтор той же группы не двоит балансы.
+  uc.ApplyExecutionGroup(eg);
+  auto bal2 = get_balances(uc, "demo-user");
+  assert(find_balance(bal2, "USDT")->available().units() == 992'000);
+  assert(find_balance(bal2, "BTC")->available().units() == 251'000'000);
+}
+
 int main() {
   test_apply_batch_result_buy_updates_balances();
   test_apply_batch_result_sell_updates_balances();
   test_apply_batch_result_empty_batch_keeps_balances();
   test_apply_execution_group_updates_positions();
+  test_apply_execution_group_settles_balances();
   return 0;
 }
