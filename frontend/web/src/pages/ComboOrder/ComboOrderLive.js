@@ -40,11 +40,11 @@ const roundPrice = (v) => {
   if (n >= 1) return n.toFixed(2);
   return n.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '');
 };
-// Band вокруг текущей котировки ref: low = ref·0.97, high = ref·1.03 (±3%).
+// Band вокруг текущей котировки ref: low = ref·0.999, high = ref·1.001 (±0.1%).
 const bandFromQuote = (base, ref) => {
   if (!ref || !Number.isFinite(Number(ref))) return bandFor(base);
   const r = Number(ref);
-  return { ...bandFor(base), priceLow: roundPrice(r * 0.97), priceHigh: roundPrice(r * 1.03) };
+  return { ...bandFor(base), priceLow: roundPrice(r * 0.999), priceHigh: roundPrice(r * 1.001) };
 };
 // Шаг стрелок: 0.5% от значения (разумный тик), не меньше минимального.
 const stepOf = (v) => {
@@ -54,7 +54,7 @@ const stepOf = (v) => {
 };
 
 const emptyLeg = (base = 'BTC', quote = 'USDT', side = 'SIDE_BUY', venue = 'internal') => ({
-  base, quote, side, venue, weight: '0.5', ...bandFor(base)
+  base, quote, side, venue, weight: '0.5', mid: '', ...bandFor(base)
 });
 
 const ComboOrderLive = () => {
@@ -102,9 +102,13 @@ const ComboOrderLive = () => {
       });
       const p = Number(r.data?.price);
       if (r.data?.found && p > 0) {
-        setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...bandFromQuote(base, p) } : l)));
+        // Живая котировка с внешней биржи (binance) → mid + band ±0.1% вокруг неё.
+        setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, mid: roundPrice(p), ...bandFromQuote(base, p) } : l)));
+      } else {
+        // Нет live-котировки по паре → честно показываем «—» (band остаётся дефолтным по базе).
+        setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, mid: '' } : l)));
       }
-    } catch (e) { /* нет котировки → остаются дефолты по базе */ }
+    } catch (e) { setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, mid: '' } : l))); }
   }, []);
 
   // При входе подтягиваем котировки для дефолтных ног.
@@ -235,7 +239,7 @@ const ComboOrderLive = () => {
 
             <table className="cbo-legs">
               <thead><tr>
-                <th>Base</th><th>Quote</th><th>Side</th><th>Weight</th><th>Price low</th><th>Price high</th>
+                <th>Base</th><th>Quote</th><th>Side</th><th>Weight</th><th>Mid (bid/ask)</th><th>Price low</th><th>Price high</th>
                 <th>Max rate</th><th>Max qty</th><th>Venue</th><th></th>
               </tr></thead>
               <tbody>
@@ -257,6 +261,9 @@ const ComboOrderLive = () => {
                       </select>
                     </td>
                     <td><input value={l.weight} onChange={(e) => updateLeg(i, 'weight', e.target.value)} /></td>
+                    <td className="cbo-mid" title="Середина bid/ask с внешней биржи (live)">
+                      {l.mid ? l.mid : <span className="cbo-mid-na">нет live-котировки</span>}
+                    </td>
                     <td>
                       <div className="cbo-stepper">
                         <input value={l.priceLow} onChange={(e) => updateLeg(i, 'priceLow', e.target.value)} />
