@@ -180,6 +180,20 @@ UPDATE combo_orders SET status = CASE
 WHERE combo_order_id = $1::uuid AND status NOT IN ('filled','cancelled')
 )SQL",
         eg.parent_order_id());
+
+    // Когда combo достигла 'filled', закрываем ВСЕ её ещё активные ноги:
+    // ratio-locked группа больше не исполняется (binding-нога исчерпана), и без
+    // этого не-binding ноги застревали бы в 'active' навсегда — видны как
+    // «зависшие» в Профиле. Идемпотентно (повторный батч уже DO NOTHING выше).
+    tx.exec_params(
+        R"SQL(
+UPDATE combo_order_legs SET status = 'filled'
+WHERE parent_order_id = $1::uuid
+  AND status = 'active'
+  AND EXISTS (SELECT 1 FROM combo_orders
+              WHERE combo_order_id = $1::uuid AND status = 'filled')
+)SQL",
+        eg.parent_order_id());
   }
 
   tx.commit();
