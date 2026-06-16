@@ -125,22 +125,21 @@ const ComboOrderLive = () => {
   };
   // Смена базовой/котируемой валюты → ставим дефолт по базе сразу + тянем котировку.
   const changeBase = (i, base) => {
-    let quote = 'USDT';
-    setLegs((prev) => prev.map((l, idx) => {
-      if (idx !== i) return l;
-      quote = l.quote;
-      return { ...l, base, ...bandFor(base) };
-    }));
+    // Читаем quote из текущего legs (замыкание), НЕ из setLegs-updater'а: updater
+    // выполняется отложенно, поэтому applyQuote ниже получил бы стартовое значение.
+    const quote = legs[i]?.quote || 'USDT';
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, base, ...bandFor(base) } : l)));
     applyQuote(i, base, quote);
   };
   const changeQuote = (i, quote) => {
-    let base = 'BTC';
+    // base — из текущего legs, не из отложенного updater'а (иначе при смене quote
+    // на не-BTC ноге запросилась бы пара BTC/quote → чужая цена на этой ноге).
+    const base = legs[i]?.base || 'BTC';
     setLegs((prev) => prev.map((l, idx) => {
       if (idx !== i) return l;
-      base = l.base;
       // Сбрасываем band на дефолт базы (иначе при смене quote без фида остаётся
       // стале-цена прежней пары). Live ниже перекроет, если котировка есть.
-      return { ...l, quote, ...bandFor(l.base) };
+      return { ...l, quote, ...bandFor(base) };
     }));
     applyQuote(i, base, quote);
   };
