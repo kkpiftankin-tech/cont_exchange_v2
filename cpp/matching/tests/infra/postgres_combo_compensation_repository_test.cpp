@@ -127,10 +127,60 @@ ON CONFLICT (leg_id) DO NOTHING
                   "filled_cum=3 (идемпотентно, не 6)") && ok;
     }
 
+    // ------------------------------------------------------------------
+    // Fix: SumInternalFilledQty — реальная внутренняя экспозиция к откату.
+    // Раньше internal_filled_qty брался из report.filled_qty() (=0 у reject) →
+    // компенсации с qty=0. Теперь = Σ filled_cum внутренних ног, кроме упавшей.
+    // ------------------------------------------------------------------
+    const std::string p2 = "dddddddd-2222-2222-2222-222222222222";
+    const std::string p2_ext = "dddddddd-2000-0000-0000-0000000000ee";  // упавшая внешняя
+    const std::string p2_int1 = "dddddddd-2000-0000-0000-0000000000a1";  // internal, fill=4
+    const std::string p2_int2 = "dddddddd-2000-0000-0000-0000000000a2";  // internal, fill=1.5
+    const std::string p3 = "dddddddd-3333-3333-3333-333333333333";
+    const std::string p3_ext = "dddddddd-3000-0000-0000-0000000000ee";  // только внешняя, fill=0
+    {
+      pqxx::work tx{conn};
+      for (const auto& pid : {p2, p3}) {
+        tx.exec_params(R"SQL(
+INSERT INTO combo_orders (combo_order_id, combo_type, execution_mode, status, ratio_basis,
+                          atomicity_policy, atomicity_scope, fallback_policy)
+VALUES ($1::uuid,'basket','multileg_vector_solver','active','notional_weight',
+        'scalable_atomic','external_compensating','compensate')
+ON CONFLICT (combo_order_id) DO NOTHING
+)SQL", pid);
+      }
+      auto ins_leg = [&](const std::string& lid, const std::string& pid, const std::string& sym,
+                         const std::string& venue, const std::string& fill) {
+        tx.exec_params(R"SQL(
+INSERT INTO combo_order_legs (leg_id, parent_order_id, instrument_symbol, side, weight,
+                             ratio_basis, p_low, p_high, q_rate, q_max, filled_cum, status,
+                             venue_preferences)
+VALUES ($1::uuid,$2::uuid,$3,'buy',0.5,'notional_weight',100,200,100,10,$4::numeric,'active',
+        ARRAY[$5]::text[])
+ON CONFLICT (leg_id) DO NOTHING
+)SQL", lid, pid, sym, fill, venue);
+      };
+      ins_leg(p2_ext, p2, "ETHUSDT", "binance", "0");
+      ins_leg(p2_int1, p2, "BTCUSDT", "internal", "4");
+      ins_leg(p2_int2, p2, "SOLUSDT", "internal", "1.5");
+      ins_leg(p3_ext, p3, "ETHUSDT", "binance", "0");
+      tx.commit();
+    }
+    // p2: Σ внутренних (4 + 1.5) = 5.5, внешняя p2_ext исключена.
+    const Decimal sum2 = repo.SumInternalFilledQty(p2, p2_ext);
+    ok = expect(Decimal::cmp(sum2, Decimal{55, 1}) == 0,
+                "SumInternalFilledQty: internal 4 + 1.5 = 5.5 (external excluded)") && ok;
+    // p3: внутренних ног с fill нет → 0 → гейт не пишет компенсацию.
+    const Decimal sum3 = repo.SumInternalFilledQty(p3, p3_ext);
+    ok = expect(Decimal::cmp(sum3, Decimal::zero()) == 0,
+                "SumInternalFilledQty: no internal fill → 0 (gate skips compensation)") && ok;
+
     {  // execution_groups FK не cascade → удаляем первым (на случай live-matching).
       pqxx::work tx{conn};
-      tx.exec_params("DELETE FROM execution_groups WHERE parent_order_id=$1::uuid", parent_id);
-      tx.exec_params("DELETE FROM combo_orders WHERE combo_order_id=$1::uuid", parent_id);
+      for (const auto& pid : {parent_id, p2, p3}) {
+        tx.exec_params("DELETE FROM execution_groups WHERE parent_order_id=$1::uuid", pid);
+        tx.exec_params("DELETE FROM combo_orders WHERE combo_order_id=$1::uuid", pid);
+      }
       tx.commit();
     }
   } catch (const std::exception& e) {

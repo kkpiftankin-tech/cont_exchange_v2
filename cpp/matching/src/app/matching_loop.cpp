@@ -564,18 +564,30 @@ void MatchingLoop::on_external_execution_report(
     // ноги (active→failed_external) → ровно ОДНА компенсация на ногу, без роста от
     // повторного routing'а (MVP-5 fix). Loader исключает failed_external.
     if (compensation_repo_->MarkExternalLegFailed(leg_id)) {
-      infra::ComboCompensation c;
-      c.parent_order_id = *parent;
-      c.leg_id = leg_id;
-      c.report_id = report.report_id();
-      c.reason = reason;
-      c.internal_filled_qty = cex::common::Decimal::from_proto(report.filled_qty());
-      compensation_repo_->RecordPending(c);
-      cex::common::log_json("WARN", "Combo external leg failed — compensation pending",
-                            {{"parent_order_id", *parent},
-                             {"leg_id", leg_id},
-                             {"reason", reason},
-                             {"report_id", c.report_id}});
+      // Реальная внутренняя экспозиция combo (Σ filled_cum внутренних ног, кроме
+      // упавшей) — её и нужно откатить. НЕ report.filled_qty(): у reject'а он 0,
+      // из-за чего раньше компенсации писались с qty=0 и ничего не откатывали.
+      const cex::common::Decimal internal_filled =
+          compensation_repo_->SumInternalFilledQty(*parent, leg_id);
+      if (cex::common::Decimal::cmp(internal_filled, cex::common::Decimal::zero()) <= 0) {
+        // Откатывать нечего → компенсация не нужна (нога просто failed_external).
+        cex::common::log_json("INFO", "Combo external leg failed — no internal fill, no compensation",
+                              {{"parent_order_id", *parent}, {"leg_id", leg_id}, {"reason", reason}});
+      } else {
+        infra::ComboCompensation c;
+        c.parent_order_id = *parent;
+        c.leg_id = leg_id;
+        c.report_id = report.report_id();
+        c.reason = reason;
+        c.internal_filled_qty = internal_filled;
+        compensation_repo_->RecordPending(c);
+        cex::common::log_json("WARN", "Combo external leg failed — compensation pending",
+                              {{"parent_order_id", *parent},
+                               {"leg_id", leg_id},
+                               {"reason", reason},
+                               {"report_id", c.report_id},
+                               {"internal_filled_qty", internal_filled.to_string()}});
+      }
     }
   } catch (const std::exception& ex) {
     cex::common::log_json("ERROR", "Compensation check failed",

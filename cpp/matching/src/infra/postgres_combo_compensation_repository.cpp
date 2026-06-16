@@ -35,6 +35,26 @@ ON CONFLICT (parent_order_id, leg_id, report_id) DO NOTHING
   return r.affected_rows() > 0;
 }
 
+cex::common::Decimal PostgresComboCompensationRepository::SumInternalFilledQty(
+    const std::string& parent_order_id, const std::string& failed_leg_id) {
+  auto conn = connection_factory_();
+  pqxx::work tx(*conn);
+  // Внутренние ноги ('internal' в venue_preferences), кроме упавшей внешней,
+  // с реальным fill'ом — их объём и подлежит откату при компенсации.
+  const pqxx::result r = tx.exec_params(R"SQL(
+SELECT COALESCE(SUM(filled_cum), 0)::text
+FROM combo_order_legs
+WHERE parent_order_id = $1::uuid
+  AND leg_id <> $2::uuid
+  AND 'internal' = ANY(venue_preferences)
+  AND filled_cum > 0
+)SQL",
+                                        parent_order_id, failed_leg_id);
+  tx.commit();
+  if (r.empty() || r[0][0].is_null()) return cex::common::Decimal::zero();
+  return ParsePgNumeric(r[0][0].as<std::string>());
+}
+
 std::optional<std::string> PostgresComboCompensationRepository::FindComboLegParent(
     const std::string& leg_id) {
   if (leg_id.empty()) return std::nullopt;

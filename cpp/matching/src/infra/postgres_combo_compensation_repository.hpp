@@ -48,6 +48,12 @@ class PostgresComboCompensationRepository {
 
   /// Идемпотентно по (parent_order_id, leg_id, report_id). true если вставлено.
   bool RecordPending(const ComboCompensation& c);
+  /// Σ filled_cum ВНУТРЕННИХ ('internal') ног combo, КРОМЕ упавшей внешней ноги
+  /// — реальная внутренняя экспозиция, подлежащая откату. 0 → откатывать нечего
+  /// (компенсация не нужна). Заменяет ошибочный источник report.filled_qty(),
+  /// который у reject'а всегда 0 (см. matching_loop on_external_execution_report).
+  cex::common::Decimal SumInternalFilledQty(const std::string& parent_order_id,
+                                            const std::string& failed_leg_id);
   /// Число pending-компенсаций для combo (для проверок/мониторинга).
   int CountPending(const std::string& parent_order_id);
   /// parent_order_id, если leg_id — нога combo (иначе nullopt). Различает
