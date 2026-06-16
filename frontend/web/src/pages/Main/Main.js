@@ -433,43 +433,40 @@ const Main = () => {
       </div>
 
       <div className="balance-section">
-        <div className="balance-card">
-          <span className="balance-currency">USDT: {balances.USDT.toFixed(2)}</span>
-          <div className="balance-button">
-            <button
-              className="balance-btn withdraw-btn"
-              onClick={() => handleWithdrawClick('USDT')}
-            >
-              {t('main.withdraw')}
-            </button>
-            <button
-              className="balance-btn deposit-btn"
-              onClick={() => handleDepositClick('USDT')}
-            >
-              {t('main.deposit')}
-            </button>
-          </div>
-        </div>
-
-        <div className="balance-card">
-          <span className="balance-currency">BTC: {balances.BTC.toFixed(6)}</span>
-          <div className="balance-button">
-            <button
-              disabled={true}
-              className="balance-btn withdraw-btn disabled"
-              onClick={() => handleWithdrawClick('BTC')}
-            >
-              {t('main.withdraw')}
-            </button>
-            <button
-              disabled={true}
-              className="balance-btn deposit-btn disabled"
-              onClick={() => handleDepositClick('BTC') }
-            >
-              {t('main.deposit')}
-            </button>
-          </div>
-        </div>
+        {/* F-09: карточки по ВСЕМ активам из ledger (USDT/BTC/ETH/… от combo-ног),
+            а не только захардкоженные USDT+BTC. USDT первым, BTC вторым, прочие — по алфавиту.
+            Deposit/withdraw активны для USDT (как было), остальные — disabled. */}
+        {Object.keys(balances)
+          .sort((a, b) => {
+            const order = { USDT: 0, BTC: 1 };
+            return ((order[a] ?? 99) - (order[b] ?? 99)) || a.localeCompare(b);
+          })
+          .map((cur) => {
+            const enabled = cur === 'USDT';
+            const amt = Number(balances[cur]) || 0;
+            const dec = (cur === 'USDT' || cur === 'USDC') ? 2 : 6;
+            return (
+              <div className="balance-card" key={cur}>
+                <span className="balance-currency">{cur}: {amt.toFixed(dec)}</span>
+                <div className="balance-button">
+                  <button
+                    disabled={!enabled}
+                    className={`balance-btn withdraw-btn ${enabled ? '' : 'disabled'}`}
+                    onClick={() => handleWithdrawClick(cur)}
+                  >
+                    {t('main.withdraw')}
+                  </button>
+                  <button
+                    disabled={!enabled}
+                    className={`balance-btn deposit-btn ${enabled ? '' : 'disabled'}`}
+                    onClick={() => handleDepositClick(cur)}
+                  >
+                    {t('main.deposit')}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
       </div>
 
       {showWithdrawModal && (
