@@ -186,9 +186,11 @@ services:
       CURVE_LEVEL: "L3"
       BINANCE_VENUE_ID: "binance"
       BINANCE_VENUE_SYMBOL: "BTCUSDT"
-      # F-09 T-F09-068: binance (simulate) отклоняет дискретный ордер по ETH/USDT,
-      # чтобы воспроизвести combo external-leg failure → compensation.
-      BINANCE_SIMULATE_REJECT_SYMBOLS: "ETH/USDT"
+      # F-09 T-F09-068: симуляция reject дискретного hedge-ордера (для демо
+      # MVP-5 external-leg failure → compensation). Пусто = hedge внешних ног
+      # исполняется нормально. Чтобы снова демонстрировать компенсации —
+      # вернуть сюда символ, напр. "ETH/USDT", и пересоздать venues.
+      BINANCE_SIMULATE_REJECT_SYMBOLS: ""
       # F-09 UX: доп. символы для тикер-фида (live-котировки в combo-форме). Пары,
       # которые binance реально торгует (USDT/USDC/EUR/BTC-quote для major-баз).
       VENUES_FEED_SYMBOLS: "ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,AVAX/USDT,LINK/USDT,LTC/USDT,DOT/USDT,MATIC/USDT,TRX/USDT,ATOM/USDT,UNI/USDT,BCH/USDT,NEAR/USDT,APT/USDT,ARB/USDT,OP/USDT,FIL/USDT,ETC/USDT,XLM/USDT,ALGO/USDT,INJ/USDT,SUI/USDT,SEI/USDT,BTC/USDC,ETH/USDC,SOL/USDC,XRP/USDC,BTC/EUR,ETH/EUR,SOL/EUR,ETH/BTC,SOL/BTC,BNB/BTC,XRP/BTC"
