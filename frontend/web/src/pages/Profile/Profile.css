@@ -552,3 +552,7 @@
     color: gray;
     grid-column: 1 / -1;
 }
+
+/* F-09: бейдж combo для строк многоногих заявок во вкладке «Сделки». */
+.trade-combo-badge { margin-left: 6px; font-size: 10px; padding: 1px 5px; border-radius: 4px;
+  background: #6d28d9; color: #fff; vertical-align: middle; }

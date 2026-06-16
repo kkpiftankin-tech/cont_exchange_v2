@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
 import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
 import { logout } from '../../api/authService';
@@ -11,6 +12,26 @@ import './Profile.css';
 import logo from '../../assets/logo-purple.svg';
 import { useTranslation } from 'react-i18next';
 import BatchesSection from './BatchesSection';
+
+// F-09: combo-ноги показываем в той же вкладке «Сделки» (бейдж combo), а их
+// сделки (fills) — в раскрытой строке. Данные из combo-detail.
+const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
+const fmtQty = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  return v.toFixed(8).replace(/\.?0+$/, '') || '0';
+};
+const fmtPrice = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v === 0) return '—';
+  return v >= 1000 ? v.toFixed(2) : v.toPrecision(6).replace(/\.?0+$/, '');
+};
+const COMBO_LEG_STATUS = {
+  filled: { text: 'Исполнена', style: 'completed' },
+  active: { text: 'Активна', style: 'partial' },
+  cancelled: { text: 'Отменена', style: 'cancelled' },
+  failed_external: { text: 'Внешний сбой', style: 'cancelled' },
+};
 
 const Profile = () => {
   const navigate = useNavigate();
@@ -34,7 +55,46 @@ const Profile = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [transactions, setTransactions] = useState([]);
   const [trades, setTrades] = useState([]);
+  const [comboTrades, setComboTrades] = useState([]);
   const { t } = useTranslation();
+
+  // F-09: combo-заявки → строки-«сделки» (по ноге) + сделки ноги для раскрытия.
+  const loadComboTrades = useCallback(async () => {
+    try {
+      const list = await axios.get(`${API_BASE}/v1/combo-orders`, { timeout: 8000 });
+      const combos = (list.data?.combos || []).slice(0, 15);
+      const details = await Promise.all(combos.map((c) =>
+        axios.get(`${API_BASE}/v1/combo-orders/${encodeURIComponent(c.comboId)}`, { timeout: 8000 })
+          .then((r) => r.data).catch(() => null)));
+      const rows = [];
+      details.filter(Boolean).forEach((d) => {
+        const byLeg = {};
+        (d.executionGroups || []).forEach((g) => (g.legResults || []).forEach((lr) => {
+          if (!lr || !lr.legId) return;
+          (byLeg[lr.legId] = byLeg[lr.legId] || []).push({ time: g.createdAt, qty: lr.execQty, price: lr.execPrice });
+        }));
+        (d.legs || []).forEach((l) => {
+          const [base, quote] = String(l.symbol || '/').split('/');
+          const st = COMBO_LEG_STATUS[l.status] || { text: l.status, style: 'partial' };
+          const legTrades = (byLeg[l.legId] || []).sort((a, b) => new Date(a.time) - new Date(b.time));
+          rows.push({
+            id: l.legId,
+            date: new Date(d.createdAt),
+            sellCurrency: base, buyCurrency: quote,
+            amount: Number(l.qMax) || 0,
+            completedAmount: Number(l.filledCum) || 0,
+            status: st.text, status_style: st.style, rawStatus: l.status,
+            isCombo: true, comboId: d.comboId,
+            legSide: l.side === 'SIDE_SELL' ? 'sell' : 'buy',
+            legTrades,
+          });
+        });
+      });
+      setComboTrades(rows);
+    } catch (_) { /* combo недоступны — не ломаем вкладку */ }
+  }, []);
+
+  useEffect(() => { if (activeTab === 'trades') loadComboTrades(); }, [activeTab, loadComboTrades]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -200,7 +260,8 @@ const Profile = () => {
     });
   };
 
-  const sortedData = [...(activeTab === 'transactions' ? transactions : trades)].sort((a, b) => {
+  const tradesSource = activeTab === 'transactions' ? transactions : trades.concat(comboTrades);
+  const sortedData = [...tradesSource].sort((a, b) => {
     if (a[sortConfig.key] < b[sortConfig.key]) {
       return sortConfig.direction === 'asc' ? -1 : 1;
     }
@@ -407,7 +468,10 @@ const Profile = () => {
                       ) : (
                         <>
                           <div>{formatDate(item.date)}</div>
-                          <div>{item.sellCurrency}/{item.buyCurrency}</div>
+                          <div>
+                            {item.sellCurrency}/{item.buyCurrency}
+                            {item.isCombo && <span className="trade-combo-badge">combo</span>}
+                          </div>
                           <div>{item.amount}</div>
                           {/* <div>{item.fee}</div> */}
                           <div className={`status-${item.status_style}`}>{item.status}</div>
@@ -419,7 +483,7 @@ const Profile = () => {
                             >
                               {expandedId === item.id ? t('profile.table.hide') : t('profile.table.details')}
                             </button>
-                            {(item.rawStatus === 'pending' || item.rawStatus === 'partial') && (
+                            {!item.isCombo && (item.rawStatus === 'pending' || item.rawStatus === 'partial') && (
                               <button
                                 onClick={() => handleCancelClick(item.id)}
                                 className="cancel-btn"
@@ -437,6 +501,39 @@ const Profile = () => {
                         {activeTab === 'transactions' ? (
                           <div className="wallet-info">
                             <strong>{t('profile.table.wallet')}</strong> {item.wallet}
+                          </div>
+                        ) : item.isCombo ? (
+                          <div className="trade-details">
+                            <div><strong>Combo:</strong> <code>{String(item.comboId).slice(0, 18)}…</code></div>
+                            <div><strong>Нога:</strong> {item.sellCurrency}/{item.buyCurrency} ({item.legSide})</div>
+                            <div><strong>Исполнено:</strong> {fmtQty(item.completedAmount)} / {fmtQty(item.amount)}</div>
+                            <div><strong>Прогресс:</strong> {item.amount > 0 ? (item.completedAmount / item.amount * 100).toFixed(1) : 0}%</div>
+                            <div style={{ width: '100%', marginTop: '10px' }}>
+                              <strong>Сделки по ноге ({item.legTrades.length}):</strong>
+                              {item.legTrades.length === 0 ? (
+                                <div className="no-data">сделок пока нет</div>
+                              ) : (
+                                <table style={{ width: '100%', marginTop: '6px', fontSize: '12px',
+                                  borderCollapse: 'collapse', fontFamily: 'monospace' }}>
+                                  <thead>
+                                    <tr style={{ opacity: 0.7, borderBottom: '1px solid rgba(255,255,255,0.15)' }}>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>Время</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Кол-во</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 8px' }}>Цена</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {item.legTrades.map((tr, i) => (
+                                      <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                        <td style={{ padding: '4px 8px' }}>{new Date(tr.time).toLocaleTimeString()}</td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>{fmtQty(tr.qty)}</td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right' }}>{fmtPrice(tr.price)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </div>
                           </div>
                         ) : (
                           <div className="trade-details">
