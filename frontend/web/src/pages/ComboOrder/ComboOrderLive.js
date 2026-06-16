@@ -40,11 +40,14 @@ const roundPrice = (v) => {
   if (n >= 1) return n.toFixed(2);
   return n.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '');
 };
-// Band вокруг текущей котировки ref: low = ref·0.999, high = ref·1.001 (±0.1%).
+// Band вокруг текущей котировки ref: low = ref·0.995, high = ref·1.005 (±0.5%).
+// ±0.5% — компромисс: узко/реалистично, но поглощает дрейф live-цены за время
+// жизни заявки. Слишком узкий band (±0.1%) делал combo неисполнимым: клиринговая
+// цена уходила за границу band'а и matching давал x_sum=0.
 const bandFromQuote = (base, ref) => {
   if (!ref || !Number.isFinite(Number(ref))) return bandFor(base);
   const r = Number(ref);
-  return { ...bandFor(base), priceLow: roundPrice(r * 0.999), priceHigh: roundPrice(r * 1.001) };
+  return { ...bandFor(base), priceLow: roundPrice(r * 0.995), priceHigh: roundPrice(r * 1.005) };
 };
 // Шаг стрелок: 0.5% от значения (разумный тик), не меньше минимального.
 const stepOf = (v) => {
