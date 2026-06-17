@@ -148,7 +148,10 @@ d::ComboOrder BuildDomain(const pv1::CreateComboOrderRequest& req, const std::st
     if (pleg.has_price_high()) leg.p_high = Decimal::from_proto(pleg.price_high());
     if (pleg.has_max_rate())   leg.q_rate = Decimal::from_proto(pleg.max_rate());
     if (pleg.has_max_qty())    leg.q_max = Decimal::from_proto(pleg.max_qty());
-    if (pleg.has_filled_cum()) leg.filled_cum = Decimal::from_proto(pleg.filled_cum());
+    // Fill-состояние — server-owned: НЕ принимаем filled_cum от клиента. Иначе
+    // нога создавалась бы уже исполненной (клиент прислал filled_cum=q_max →
+    // прогресс «сразу 100%», исполнение в обход matching/rate). Всегда 0.
+    leg.filled_cum = Decimal::zero();
     for (const auto& vp : pleg.venue_preferences()) leg.venue_preferences.push_back(vp);
     leg.status = d::LegStatus::kActive;
     combo.legs.push_back(std::move(leg));
