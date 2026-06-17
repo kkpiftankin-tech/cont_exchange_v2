@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <optional>
 #include <unordered_map>
@@ -120,6 +121,11 @@ class MatchingLoop {
   std::unique_ptr<infra::PostgresExecutionGroupsRepository> eg_repo_;
   std::unique_ptr<infra::PostgresChildGraphRepository> child_graph_repo_;  // MVP-4 OCO/bracket
   std::unique_ptr<infra::PostgresComboCompensationRepository> compensation_repo_;  // MVP-5
+  // F-09 rate-throttle внешних ног: leg_id с НЕподтверждённым external-intent.
+  // Не шлём новый chunk, пока предыдущий не исполнен (отчёт venue) — иначе при
+  // лаге venue возможен over-fill сверх q_max и двойной постинг в ledger (§17).
+  std::set<std::string> external_in_flight_;
+  std::mutex external_inflight_mu_;
 };
 
 }  // namespace cex::matching::app

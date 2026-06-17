@@ -85,10 +85,16 @@ bool PostgresComboCompensationRepository::MarkExternalLegFilled(
   if (leg_id.empty()) return false;
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
-  // Идемпотентно: переход только из 'active' — повтор отчёта не двоит filled_cum.
+  // Внешнее исполнение дробится по qRate → ног набирается несколькими частичными
+  // отчётами. Аккумулируем filled_cum (clamp до q_max), и помечаем 'filled' ТОЛЬКО
+  // при достижении q_max, иначе 'partially_filled' (matching до-исполнит остаток
+  // следующими батчами). Допускаем переход из active/partially_filled.
   const pqxx::result r = tx.exec_params(
-      "UPDATE combo_order_legs SET status = 'filled', filled_cum = filled_cum + $2::numeric "
-      "WHERE leg_id = $1::uuid AND status = 'active'",
+      "UPDATE combo_order_legs "
+      "SET filled_cum = LEAST(filled_cum + $2::numeric, q_max), "
+      "    status = CASE WHEN LEAST(filled_cum + $2::numeric, q_max) >= q_max "
+      "                  THEN 'filled' ELSE 'partially_filled' END "
+      "WHERE leg_id = $1::uuid AND status IN ('active','partially_filled')",
       leg_id, postgres::ToPgNumeric(filled_qty));
   tx.commit();
   return r.affected_rows() > 0;

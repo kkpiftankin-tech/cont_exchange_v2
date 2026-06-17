@@ -548,14 +548,22 @@ void MatchingLoop::on_external_execution_report(
     if (!parent.has_value()) {
       return;  // не combo-нога (hedge / прочий internal_order_id)
     }
+    // Терминальный отчёт по chunk'у → снимаем in-flight, чтобы следующий батч мог
+    // дослать остаток (rate-throttle внешней ноги).
+    {
+      std::lock_guard<std::mutex> lk(external_inflight_mu_);
+      external_in_flight_.erase(leg_id);
+    }
 
     if (is_fill) {
-      // MVP-5 fix: внешняя нога исполнена → 'filled' (loader перестаёт re-routить).
-      // Идемпотентно: только первый active→filled применяет filled_cum.
+      // Внешняя нога дробится по qRate: каждый chunk-отчёт аккумулирует filled_cum
+      // (clamp до q_max); статус 'filled' только при достижении q_max, иначе
+      // 'partially_filled' (matching дошлёт остаток следующим батчем).
       if (compensation_repo_->MarkExternalLegFilled(
               leg_id, cex::common::Decimal::from_proto(report.filled_qty()))) {
-        cex::common::log_json("INFO", "Combo external leg filled",
-                              {{"parent_order_id", *parent}, {"leg_id", leg_id}});
+        cex::common::log_json("INFO", "Combo external leg chunk filled",
+                              {{"parent_order_id", *parent}, {"leg_id", leg_id},
+                               {"chunk_qty", cex::common::Decimal::from_proto(report.filled_qty()).to_string()}});
       }
       return;
     }
@@ -972,9 +980,20 @@ void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
       for (const auto& g : groups) {
         auto split = SplitInternalExternal(g);
         for (const auto& ext_leg : split.external) {
+          // Guard: не шлём новый chunk, пока предыдущий по этой ноге не исполнен
+          // (отчёт venue снимет флаг). Защита от over-fill при лаге venue.
+          {
+            std::lock_guard<std::mutex> lk(external_inflight_mu_);
+            if (!external_in_flight_.insert(ext_leg.leg_id).second) continue;
+          }
           const auto intent =
               BuildExternalIntent(g.parent_order_id, batch_id, cex::common::uuid_v4(), ext_leg);
-          if (ext_producer.produce(intent)) ++external_intents;
+          if (ext_producer.produce(intent)) {
+            ++external_intents;
+          } else {
+            std::lock_guard<std::mutex> lk(external_inflight_mu_);
+            external_in_flight_.erase(ext_leg.leg_id);  // produce упал → освобождаем
+          }
         }
         if (!split.internal.empty()) {
           domain::MultiLegVectorOrder ig = g;

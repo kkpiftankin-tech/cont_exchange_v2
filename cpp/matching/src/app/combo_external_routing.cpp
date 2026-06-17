@@ -40,7 +40,13 @@ fob::execution::v1::ExecutionIntent BuildExternalIntent(const std::string& paren
   intent.set_side(cex::common::Decimal::cmp(leg.target_ratio, zero) < 0
                       ? fob::common::v1::SIDE_SELL
                       : fob::common::v1::SIDE_BUY);
-  *intent.mutable_target_qty() = leg.remaining_qty().to_proto();
+  // qRate — ограничение на ПОТОК (Δe_max = qRate·Δt за батч), а не размер одного
+  // ордера. Дробим внешнее исполнение: за раунд шлём не больше qRate, чтобы
+  // средний поток на внешнюю биржу не превышал заданную скорость (см. модель
+  // continuous_order_market / F-09). Иначе venue залил бы весь объём разом.
+  const cex::common::Decimal chunk =
+      cex::common::Decimal::min(leg.remaining_qty(), leg.q_rate);
+  *intent.mutable_target_qty() = chunk.to_proto();
 
   for (const auto& v : leg.venue_preferences) intent.add_allowed_venues(v);
   // Внешняя биржа принимает ДИСКРЕТНЫЙ ордер на КОНКРЕТНУЮ площадку (как реальный
