@@ -3,7 +3,9 @@
     flex-direction: column;
     align-items: center;
     min-height: 100vh;
-    min-width: 100vw;
+    /* 100% (не 100vw): 100vw включает ширину вертикального скроллбара и при
+     * scrollbar-gutter: stable порождает лишний горизонтальный скролл. */
+    min-width: 100%;
     background: radial-gradient(circle at left top, #50129E -200%, black 100%),
     linear-gradient(135deg, #50129E -150%, black);
     background-blend-mode: color-dodge;

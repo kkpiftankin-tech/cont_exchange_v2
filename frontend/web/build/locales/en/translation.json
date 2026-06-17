@@ -7,6 +7,9 @@
     "hedgeflows": "hedge",
     "hedgePnl": "pnl",
     "executionLive": "live",
+    "reconciliationAlerts": "alerts",
+    "manualOverride": "override",
+    "policyConfig": "policy",
     "replay": "replay",
     "logout": "Logout",
     "about": "about",
@@ -50,7 +53,7 @@
     "minPrice": "min price",
     "maxPrice": "max price",
     "amount": "amount BTC to {{action}}",
-    "speed": "buy speed (stocks/hour)",
+    "speed": "max execution speed (BTC/sec)",
     "proceed": "proceed",
     "withdraw": "withdraw",
     "deposit": "deposit",
@@ -74,7 +77,7 @@
       "copy": "Copy",
       "copied": "Copied!"
     },
-    "chart" : {
+    "chart": {
       "volume_hour": "volume per hour",
       "volume": "Volume",
       "clearing": "Clearing",
@@ -119,7 +122,7 @@
     "table": {
       "minPrice": "Min Price",
       "maxPrice": "Max Price",
-      "buySpeed": "Buy Speed",
+      "buySpeed": "Execution Speed (BTC/sec)",
       "spentAmount": "Full Cost",
       "date": "Date",
       "type": "Type",
@@ -212,12 +215,12 @@
       "health": "Health",
       "executionQuality": "Execution quality",
       "latency": "Latency",
-    "spread": "Execution spread",
-    "volume": "24h Volume",
-    "action": "Routing",
-    "controls": "Controls",
-    "details": "Details"
-  },
+      "spread": "Execution spread",
+      "volume": "24h Volume",
+      "action": "Routing",
+      "controls": "Controls",
+      "details": "Details"
+    },
     "actions": {
       "openDetails": "Open",
       "backToList": "Back to list"
@@ -433,7 +436,10 @@
       "numberError": "Use a numeric value.",
       "run": "Run replay",
       "creating": "Creating...",
-      "refresh": "Refresh"
+      "refresh": "Refresh",
+      "persist": "Save results to DB",
+      "persistHelperEphemeral": "Ephemeral mode: results are visible only via the live stream. The session will not appear in the list and summary / agent logs are unavailable via REST.",
+      "persistHelperSaved": "Persisted mode: the session is saved to the DB, appears in the list, and summary / agent logs are accessible via REST after completion."
     },
     "sessions": {
       "caption": "Live queue",
@@ -509,7 +515,9 @@
       "filterSolverError": "solver_error: true",
       "filterSolverOk": "solver_error: false",
       "details": "AgentLog details",
-      "closeDetails": "Close details"
+      "closeDetails": "Close details",
+      "prev": "Prev",
+      "next": "Next"
     },
     "compare": {
       "title": "A/B compare",
@@ -532,9 +540,12 @@
       "metrics": {
         "avgis": "avgIS",
         "totalpnl": "Total PnL",
+        "avgpnl": "Avg PnL",
+        "stdpnl": "Std PnL",
         "sharpe": "Sharpe",
         "fillrate": "Fill rate",
         "maxdrawdown": "Max drawdown",
+        "avgvwap": "Avg VWAP",
         "avgsolvetime": "Avg solve time"
       },
       "errors": {
@@ -610,7 +621,21 @@
       "pending": "Session is queued and waiting to start.",
       "liveRunning": "Replay is running and metrics are updating live.",
       "waitingForLogs": "Replay has started. AgentLog rows will appear after the first batches.",
-      "noAgentLogs": "No AgentLog rows yet."
+      "noAgentLogs": "No AgentLog rows yet.",
+      "ephemeralStarted": "Ephemeral replay started. Results are available only via the live stream.",
+      "ephemeralCompleted": "Ephemeral replay completed. Results were not saved to the DB.",
+      "ephemeralStreamLost": "Live stream was interrupted before completion. Partial results are unavailable.",
+      "ephemeralNoAgentLogs": "Agent logs are not saved — enable \"Save results to DB\" to access logs.",
+      "ephemeralNoEquity": "Equity curve is not available in ephemeral mode.",
+      "ephemeralNoCompare": "Comparison is unavailable — the session was not saved.",
+      "ephemeralNoAudit": "Audit mode is unavailable — the session was not saved.",
+      "noSessions": "No sessions found."
+    },
+    "ephemeral": {
+      "panelTitle": "Current run",
+      "dismiss": "Dismiss",
+      "retryHint": "Run the replay again.",
+      "badge": "Ephemeral"
     }
   },
   "hedgeFlow": {
@@ -740,6 +765,12 @@
       "venue": "Venue",
       "provider": "Provider"
     },
+    "analytics": {
+      "notional": "Notional",
+      "filledQty": "Filled qty",
+      "flows": "Flows / reports",
+      "spread": "Avg price spread"
+    },
     "summary": {
       "netPnl": "Net PnL",
       "netPnlMeta": "Final hedge PnL after fees",
@@ -854,8 +885,208 @@
       "loading": "Loading Execution Live Feed...",
       "error": "Failed to load Execution Live Feed.",
       "badMessage": "Received malformed WebSocket message.",
+      "streamError": "Execution Live Feed WebSocket disconnected. Reconnecting...",
       "empty": "No ExecutionReports match the current filters.",
       "select": "Select a feed event to inspect details."
+    }
+  },
+  "reconciliationAlerts": {
+    "kicker": "F-12 Alerts",
+    "title": "Reconciliation Alerts",
+    "subtitle": "Operator view of `risk.alerts` for UNDERFILLED and rejected HedgeFlows with gap, timestamp, venue route, and next action.",
+    "live": "Polling every {{seconds}}s",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh alerts",
+      "openHedgeflows": "Open HedgeFlow Monitor",
+      "openManualOverride": "Launch manual override"
+    },
+    "filters": {
+      "all": "All",
+      "severity": "Severity",
+      "status": "Status",
+      "type": "Type",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "search": "Search",
+      "searchPlaceholder": "hedgeFlowId, batchId, provider, reason"
+    },
+    "severity": {
+      "critical": "critical",
+      "warning": "warning",
+      "info": "info"
+    },
+    "summary": {
+      "total": "Alerts",
+      "totalMeta": "Active reconciliation alerts",
+      "critical": "Critical",
+      "criticalMeta": "Risk rejects or severe gaps",
+      "underfilled": "Underfilled",
+      "underfilledMeta": "HEDGE_UNDERFILL events",
+      "rejected": "Rejected",
+      "rejectedMeta": "HEDGE_RISK_REJECT events",
+      "gap": "Total gap",
+      "gapMeta": "Residual quantity across alerts",
+      "avgGap": "Avg gap",
+      "avgGapMeta": "Mean gap percentage"
+    },
+    "list": {
+      "title": "Alert queue",
+      "subtitle": "Matched alerts: {{count}}",
+      "topic": "Kafka risk.alerts"
+    },
+    "table": {
+      "time": "Time",
+      "alert": "Alert",
+      "flow": "Flow",
+      "gap": "Gap",
+      "route": "Route",
+      "status": "Status"
+    },
+    "inspector": {
+      "kicker": "Reconciliation",
+      "gap": "Gap qty",
+      "gapPct": "Gap %",
+      "target": "Target",
+      "filled": "Filled",
+      "slippage": "Slippage",
+      "pnl": "Hedge PnL",
+      "nextAction": "Next action",
+      "batch": "Batch",
+      "provider": "Provider",
+      "venues": "Venues",
+      "timeout": "Timeout",
+      "risk": "Risk",
+      "mode": "Mode"
+    },
+    "states": {
+      "loading": "Loading reconciliation alerts...",
+      "error": "Failed to load Reconciliation Alerts.",
+      "empty": "No reconciliation alerts match the current filters.",
+      "select": "Select an alert to inspect reconciliation details."
+    }
+  },
+  "manualOverride": {
+    "kicker": "F-12 Operator UI",
+    "title": "Manual Override",
+    "subtitle": "Create a manual ExecutionIntent for operator-driven hedge execution with venue routing, urgency, qty, and audit reason.",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh context"
+    },
+    "summary": {
+      "alerts": "Source alerts",
+      "alertsMeta": "Open reconciliation alerts",
+      "recent": "Recent",
+      "recentMeta": "Manual intents in this session",
+      "accepted": "Accepted",
+      "acceptedMeta": "Mock risk allowed",
+      "rejected": "Rejected",
+      "rejectedMeta": "Mock risk rejected"
+    },
+    "form": {
+      "title": "ExecutionIntent",
+      "subtitle": "Manual operator hedge request.",
+      "sourceAlert": "Source alert",
+      "noSourceAlert": "No source alert",
+      "symbol": "Symbol",
+      "side": "Side",
+      "targetQty": "Target qty",
+      "provider": "Provider",
+      "priceConstraint": "Price constraint",
+      "timeoutMs": "Timeout ms",
+      "urgency": "Urgency",
+      "venues": "Venues",
+      "reason": "Operator reason",
+      "submit": "Create ExecutionIntent",
+      "submitting": "Creating..."
+    },
+    "preview": {
+      "notional": "Target notional",
+      "riskLimit": "Current mock hedge policy",
+      "maxSlippage": "Max slippage",
+      "urgency": "{{urgency}} urgency policy",
+      "route": "Route",
+      "routeMeta": "Selected venue split"
+    },
+    "side": {
+      "title": "Override trail",
+      "subtitle": "Source alert, created intent, and recent operator actions.",
+      "source": "Source alert",
+      "gap": "Gap",
+      "gapPct": "Gap %",
+      "created": "Created intent",
+      "recent": "Recent intents"
+    },
+    "states": {
+      "loading": "Loading manual override context...",
+      "error": "Failed to load Manual Override context.",
+      "submitError": "Failed to create manual ExecutionIntent.",
+      "created": "Created {{intentId}}.",
+      "noRecent": "No manual override intents yet."
+    }
+  },
+  "policyConfig": {
+    "kicker": "F-12 Admin UI",
+    "title": "Policy Config",
+    "subtitle": "Edit solverconfig hedge thresholds, urgency routing policy, slippage caps, and risk limits with an audit reason.",
+    "lastUpdated": "Generated: {{time}}",
+    "actions": {
+      "refresh": "Refresh config",
+      "reset": "Reset draft",
+      "save": "Save policy",
+      "saving": "Saving..."
+    },
+    "summary": {
+      "revision": "Revision",
+      "revisionMeta": "Current solverconfig version",
+      "eligible": "Eligible flows",
+      "eligibleMeta": "Would trigger auto hedge",
+      "slippage": "Avg slippage cap",
+      "slippageMeta": "Across urgency tiers",
+      "exposure": "Exposure limit",
+      "exposureMeta": "Mock risk budget"
+    },
+    "form": {
+      "title": "solverconfig",
+      "subtitle": "Runtime policy values used by hedge execution.",
+      "general": "General limits",
+      "generalMeta": "Shared risk envelope for auto and manual hedges.",
+      "solverConfigId": "Solver config id",
+      "hedgeExposureLimit": "Hedge exposure limit",
+      "maxNotionalPerHedge": "Max notional per hedge",
+      "thresholds": "Trigger thresholds",
+      "thresholdsMeta": "Net residual qty needed before auto hedge is eligible.",
+      "urgency": "Urgency policy",
+      "urgencyMeta": "Gap percent, order type, timeout, and slippage caps by tier.",
+      "reason": "Audit reason"
+    },
+    "table": {
+      "urgency": "Urgency",
+      "minGap": "Min gap %",
+      "maxSlippage": "Max slippage bps",
+      "timeout": "Timeout ms",
+      "orderType": "Order type"
+    },
+    "side": {
+      "title": "Impact preview",
+      "subtitle": "Current hedge flows evaluated against this policy.",
+      "impact": "Flow eligibility",
+      "threshold": "threshold {{value}}",
+      "skip": "SKIP",
+      "audit": "Audit trail",
+      "revision": "rev {{revision}}",
+      "risk": "Risk view",
+      "maxThreshold": "Max threshold qty",
+      "avgSlippage": "Avg slippage cap",
+      "coverage": "Eligible coverage"
+    },
+    "states": {
+      "loading": "Loading Policy Config...",
+      "error": "Failed to load Policy Config.",
+      "saveError": "Failed to save Policy Config.",
+      "saved": "Saved revision {{revision}}."
     }
   },
   "common": {
