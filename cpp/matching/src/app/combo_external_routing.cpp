@@ -29,9 +29,13 @@ fob::execution::v1::ExecutionIntent BuildExternalIntent(const std::string& paren
   intent.set_intent_id(intent_id);
   intent.set_batch_id(batch_id);
   intent.set_internal_order_id(leg.leg_id);
-  // client_order_id = leg_id: venues эхо-копирует его в ExecutionReport.client_order_id,
-  // по нему consumer линкует report → combo-нога (report не несёт internal_order_id).
-  intent.set_client_order_id(leg.leg_id);
+  // ADR-043: HedgeFlow на НОГУ (группирует все chunk'и), ChildOrder на CHUNK.
+  // hedge_flow_id = leg_id → venues кладёт все срезы ноги под один HedgeFlow.
+  intent.set_hedge_flow_id(leg.leg_id);
+  // client_order_id = "{leg_id}#{intent_id}" — уникален на chunk → venues делает
+  // отдельный ChildOrder на каждый срез (child_order_id = client_order_id). Report
+  // эхо-копирует client_order_id; matching парсит leg_id из префикса до '#'.
+  intent.set_client_order_id(leg.leg_id + "#" + intent_id);
   intent.set_reason("combo_external_leg:" + parent_order_id);
   intent.mutable_instrument()->set_symbol(leg.instrument_symbol);
 

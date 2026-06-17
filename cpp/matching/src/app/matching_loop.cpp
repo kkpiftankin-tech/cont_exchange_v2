@@ -526,12 +526,15 @@ void MatchingLoop::on_external_execution_report(
   if (!compensation_repo_) {
     return;
   }
-  // report не несёт internal_order_id; линковка через client_order_id (= leg_id,
-  // выставлен в BuildExternalIntent, эхо venues).
-  const std::string& leg_id = report.client_order_id();
-  if (leg_id.empty()) {
+  // report не несёт internal_order_id; линковка через client_order_id.
+  // ADR-043: client_order_id структурный "{leg_id}#{chunk}" — берём leg_id до '#'
+  // (combo external дробится на chunk'и, у каждого свой client_order_id/ChildOrder).
+  const std::string& cid = report.client_order_id();
+  if (cid.empty()) {
     return;
   }
+  const auto hash_pos = cid.find('#');
+  const std::string leg_id = (hash_pos == std::string::npos) ? cid : cid.substr(0, hash_pos);
 
   const auto st = report.status();
   const bool is_fill = st == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED;
