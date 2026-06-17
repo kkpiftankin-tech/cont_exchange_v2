@@ -44,10 +44,14 @@ const roundPrice = (v) => {
 // ±0.5% — компромисс: узко/реалистично, но поглощает дрейф live-цены за время
 // жизни заявки. Слишком узкий band (±0.1%) делал combo неисполнимым: клиринговая
 // цена уходила за границу band'а и matching давал x_sum=0.
+// ВАЖНО: возвращаем ТОЛЬКО priceLow/priceHigh. Не подмешиваем bandFor(base) —
+// иначе maxRate/maxQty затирались бы дефолтами при каждом обновлении котировки
+// (котировка приходит асинхронно и перезаписывала введённый пользователем
+// Max qty/rate обратно на дефолт). Объём/скорость — поля пользователя.
 const bandFromQuote = (base, ref) => {
-  if (!ref || !Number.isFinite(Number(ref))) return bandFor(base);
   const r = Number(ref);
-  return { ...bandFor(base), priceLow: roundPrice(r * 0.995), priceHigh: roundPrice(r * 1.005) };
+  if (!Number.isFinite(r) || r <= 0) return {};  // нет котировки → band не трогаем
+  return { priceLow: roundPrice(r * 0.995), priceHigh: roundPrice(r * 1.005) };
 };
 // Шаг стрелок: 0.5% от значения (разумный тик), не меньше минимального.
 const stepOf = (v) => {
