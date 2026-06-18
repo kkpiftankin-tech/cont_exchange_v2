@@ -1131,6 +1131,17 @@ function proxyHeaders(req) {
     }
   }
   headers["x-forwarded-by"] = "frontend-api";
+  // Dev BFF identity: replay endpoints on the gateway require a present
+  // X-User-Id (or Authorization) header. The web app does not yet attach a
+  // logged-in identity to replay calls, so inject a default dev user when the
+  // browser sent none. With REPLAY_RBAC_ENFORCEMENT=false this user is allowed;
+  // production should forward the real authenticated identity instead.
+  const hasUser = Object.keys(headers).some(
+    (k) => k.toLowerCase() === "x-user-id" || k.toLowerCase() === "authorization",
+  );
+  if (!hasUser) {
+    headers["x-user-id"] = process.env.REPLAY_DEV_USER_ID || "demo-user";
+  }
   return headers;
 }
 

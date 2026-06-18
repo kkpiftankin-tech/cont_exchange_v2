@@ -454,7 +454,8 @@
       "liveUpdated": "Last event: {{time}}",
       "liveWaiting": "Waiting for live events",
       "prev": "Prev",
-      "next": "Next"
+      "next": "Next",
+      "range": "Range"
     },
     "status": {
       "pending": "Pending",
@@ -490,7 +491,8 @@
       "equity": "Equity curve",
       "batches": "By batches",
       "compare": "A/B compare",
-      "audit": "Audit mode"
+      "audit": "Audit mode",
+      "playback": "Playback"
     },
     "equity": {
       "title": "Equity curve",
@@ -636,6 +638,30 @@
       "dismiss": "Dismiss",
       "retryHint": "Run the replay again.",
       "badge": "Ephemeral"
+    },
+    "playback": {
+      "play": "Play",
+      "resume": "Resume",
+      "replay": "Replay",
+      "pause": "Pause",
+      "stop": "Stop",
+      "speed": "Speed",
+      "seek": "Seek to batch",
+      "batchOf": "Batch {{current}} / {{total}}",
+      "buffering": "Loading batches {{loaded}} / {{total}}…",
+      "noData": "This session has no saved batch data. Playback is only available for completed sessions with saved AgentLog rows.",
+      "loadError": "Failed to load batch data for playback.",
+      "retry": "Retry load",
+      "ended": "Playback finished.",
+      "cappedNotice": "Too many batches — loaded the first {{cap}} of {{total}}. Playback covers only the beginning of the session.",
+      "clearPrices": "Clearing prices",
+      "runningPnl": "Running PnL",
+      "fillRate": "Fill rate",
+      "residualNorm": "Residual norm",
+      "solveTime": "Solve time",
+      "riskStatus": "Risk status",
+      "equityTitle": "Equity (up to current batch)",
+      "sessionWindow": "Session window"
     }
   },
   "hedgeFlow": {

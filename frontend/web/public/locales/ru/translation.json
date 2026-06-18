@@ -454,7 +454,8 @@
       "liveUpdated": "Последнее событие: {{time}}",
       "liveWaiting": "Ожидание live-событий",
       "prev": "Назад",
-      "next": "Вперёд"
+      "next": "Вперёд",
+      "range": "Диапазон"
     },
     "status": {
       "pending": "Pending",
@@ -490,7 +491,8 @@
       "equity": "Equity curve",
       "batches": "По батчам",
       "compare": "Сравнение A/B",
-      "audit": "Audit mode"
+      "audit": "Audit mode",
+      "playback": "Playback"
     },
     "equity": {
       "title": "Equity curve",
@@ -636,6 +638,30 @@
       "dismiss": "Закрыть",
       "retryHint": "Запустите replay повторно.",
       "badge": "Ephemeral"
+    },
+    "playback": {
+      "play": "Воспроизвести",
+      "resume": "Продолжить",
+      "replay": "Повторить",
+      "pause": "Пауза",
+      "stop": "Стоп",
+      "speed": "Скорость",
+      "seek": "Перейти к батчу",
+      "batchOf": "Батч {{current}} / {{total}}",
+      "buffering": "Загрузка батчей {{loaded}} / {{total}}…",
+      "noData": "У этой сессии нет сохранённых данных по батчам. Playback доступен только для завершённых сессий с сохранёнными AgentLog.",
+      "loadError": "Не удалось загрузить батчи для playback.",
+      "retry": "Повторить загрузку",
+      "ended": "Воспроизведение завершено.",
+      "cappedNotice": "Слишком много батчей — загружено первые {{cap}} из {{total}}. Playback охватывает только начало сессии.",
+      "clearPrices": "Цены клиринга",
+      "runningPnl": "Накопленный PnL",
+      "fillRate": "Fill rate",
+      "residualNorm": "Residual norm",
+      "solveTime": "Solve time",
+      "riskStatus": "Risk status",
+      "equityTitle": "Equity (до текущего батча)",
+      "sessionWindow": "Окно сессии"
     }
   },
   "hedgeFlow": {
