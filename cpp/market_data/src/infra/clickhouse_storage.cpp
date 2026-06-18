@@ -357,6 +357,91 @@ std::string BuildGroupedLegFillsJsonRows(const fob::matching::v1::ExecutionGroup
   return rows.str();
 }
 
+std::string BuildGroupedQualityMetricsJsonRow(const fob::matching::v1::ExecutionGroup& eg) {
+  // combined_notional = Σ|exec_notional|, total_qty = Σexec_qty, combined_vwap =
+  // combined_notional / total_qty — всё в Decimal (§9, без float). VWAP по
+  // разнородным инструментам — агрегат (blended), для аналитики combo.
+  cex::common::Decimal notional = cex::common::Decimal::zero();
+  cex::common::Decimal qty = cex::common::Decimal::zero();
+  for (const auto& leg : eg.leg_results()) {
+    if (leg.has_exec_notional()) {
+      notional = cex::common::Decimal::add(notional, cex::common::Decimal::from_proto(leg.exec_notional()));
+    }
+    if (leg.has_exec_qty()) {
+      qty = cex::common::Decimal::add(qty, cex::common::Decimal::from_proto(leg.exec_qty()));
+    }
+  }
+  std::string combined_vwap = "0";
+  if (cex::common::Decimal::cmp(qty, cex::common::Decimal::zero()) != 0) {
+    combined_vwap = cex::common::Decimal::div(notional, qty, 18).to_string();
+  }
+  const uint32_t solve_time_ms =
+      eg.has_solver_diagnostics() ? eg.solver_diagnostics().group_solve_time_ms() : 0;
+
+  std::ostringstream row;
+  row << "{";
+  row << "\"execution_group_id\":\"" << JsonEscape(eg.execution_group_id()) << "\",";
+  row << "\"parent_order_id\":\"" << JsonEscape(eg.parent_order_id()) << "\",";
+  row << "\"batch_id\":\"" << JsonEscape(eg.batch_id()) << "\",";
+  row << "\"user_id\":\"" << JsonEscape(eg.user_id()) << "\",";
+  row << "\"combo_type\":\"\",";
+  row << "\"atomicity_policy\":\""
+      << StripEnumPrefix(fob::orders::v1::AtomicityPolicy_Name(eg.atomicity_policy()),
+                         "ATOMICITY_POLICY_") << "\",";
+  row << "\"group_status\":\""
+      << StripEnumPrefix(fob::matching::v1::GroupStatus_Name(eg.group_status()),
+                         "GROUP_STATUS_") << "\",";
+  row << "\"execution_scale\":\""
+      << JsonEscape(eg.has_execution_scale() ? DecimalStr(eg.execution_scale()) : "0") << "\",";
+  row << "\"combined_vwap\":\"" << JsonEscape(combined_vwap) << "\",";
+  row << "\"combined_notional\":\"" << JsonEscape(notional.to_string()) << "\",";
+  // combined_is_bps требует arrival/decision price reference — нет в событии → null.
+  row << "\"combined_is_bps\":null,";
+  row << "\"ratio_deviation_bps\":" << static_cast<int32_t>(eg.ratio_deviation_bps()) << ",";
+  row << "\"fallback_action\":\"" << JsonEscape(eg.fallback_action()) << "\",";
+  row << "\"leg_count\":" << eg.leg_results_size() << ",";
+  row << "\"violated_constraint_count\":" << eg.violated_constraints_size() << ",";
+  row << "\"solve_time_ms\":" << solve_time_ms << ",";
+  row << "\"event_time_ms\":" << GroupEventTimeMs(eg);
+  row << "}";
+  return row.str();
+}
+
+std::string BuildGroupedRatioDeviationJsonRows(const fob::matching::v1::ExecutionGroup& eg) {
+  std::ostringstream rows;
+  const int64_t event_time_ms = GroupEventTimeMs(eg);
+  // binding ids — по факту matching кладёт сюда instrument symbol ИЛИ leg_id;
+  // помечаем ногу binding при совпадении любого из них (AC-F09-002).
+  const auto is_binding = [&eg](const std::string& leg_id, const std::string& symbol) -> int {
+    if (!eg.has_solver_diagnostics()) return 0;
+    for (const auto& b : eg.solver_diagnostics().binding_leg_ids()) {
+      if (b == leg_id || b == symbol) return 1;
+    }
+    return 0;
+  };
+  for (const auto& leg : eg.leg_results()) {
+    rows << "{";
+    rows << "\"execution_group_id\":\"" << JsonEscape(eg.execution_group_id()) << "\",";
+    rows << "\"parent_order_id\":\"" << JsonEscape(eg.parent_order_id()) << "\",";
+    rows << "\"batch_id\":\"" << JsonEscape(eg.batch_id()) << "\",";
+    rows << "\"user_id\":\"" << JsonEscape(eg.user_id()) << "\",";
+    rows << "\"leg_id\":\"" << JsonEscape(leg.leg_id()) << "\",";
+    rows << "\"instrument_symbol\":\"" << JsonEscape(leg.instrument_symbol()) << "\",";
+    // target_weight/target_ratio живут в combo_order_legs (PG), не в событии → null.
+    rows << "\"target_weight\":null,";
+    rows << "\"target_ratio\":null,";
+    rows << "\"actual_exec_qty\":\""
+         << JsonEscape(leg.has_exec_qty() ? DecimalStr(leg.exec_qty()) : "0") << "\",";
+    rows << "\"actual_exec_notional\":\""
+         << JsonEscape(leg.has_exec_notional() ? DecimalStr(leg.exec_notional()) : "0") << "\",";
+    rows << "\"deviation_bps\":" << static_cast<int32_t>(eg.ratio_deviation_bps()) << ",";
+    rows << "\"is_binding_leg\":" << is_binding(leg.leg_id(), leg.instrument_symbol()) << ",";
+    rows << "\"event_time_ms\":" << event_time_ms;
+    rows << "}\n";
+  }
+  return rows.str();
+}
+
 std::string BuildExecutionReportV2JsonRow(const fob::execution::v1::ExecutionReport& evt) {
   const int64_t event_time_ms =
       (evt.has_meta() && evt.meta().has_ts_event()) ? TimestampToUnixMs(evt.meta().ts_event()) : 0;
@@ -641,6 +726,52 @@ bool ClickHouseBatchStorage::EnsureSchema() {
       "ORDER BY (execution_group_id, leg_id, fill_id, event_time_ms) "
       "TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY";
 
+  const std::string create_grouped_quality =
+      "CREATE TABLE IF NOT EXISTS " + GroupedQualityMetricsTableName() + " ("
+      "execution_group_id String,"
+      "parent_order_id String,"
+      "batch_id String,"
+      "user_id String,"
+      "combo_type LowCardinality(String),"
+      "atomicity_policy LowCardinality(String),"
+      "group_status LowCardinality(String),"
+      "execution_scale Decimal128(18),"
+      "combined_vwap Decimal128(18),"
+      "combined_notional Decimal128(18),"
+      "combined_is_bps Nullable(Int64),"
+      "ratio_deviation_bps Nullable(Int32),"
+      "fallback_action LowCardinality(String),"
+      "leg_count UInt16,"
+      "violated_constraint_count UInt16,"
+      "solve_time_ms UInt32,"
+      "event_time_ms Int64,"
+      "ingested_at DateTime DEFAULT now()"
+      ") ENGINE = ReplacingMergeTree(event_time_ms) "
+      "PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000))) "
+      "ORDER BY (parent_order_id, execution_group_id, event_time_ms) "
+      "TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY";
+
+  const std::string create_grouped_ratio_dev =
+      "CREATE TABLE IF NOT EXISTS " + GroupedRatioDeviationTableName() + " ("
+      "execution_group_id String,"
+      "parent_order_id String,"
+      "batch_id String,"
+      "user_id String,"
+      "leg_id String,"
+      "instrument_symbol LowCardinality(String),"
+      "target_weight Nullable(Decimal128(18)),"
+      "target_ratio Nullable(Decimal128(18)),"
+      "actual_exec_qty Decimal128(18),"
+      "actual_exec_notional Decimal128(18),"
+      "deviation_bps Int32,"
+      "is_binding_leg UInt8,"
+      "event_time_ms Int64,"
+      "ingested_at DateTime DEFAULT now()"
+      ") ENGINE = MergeTree() "
+      "PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000))) "
+      "ORDER BY (parent_order_id, event_time_ms, leg_id) "
+      "TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY";
+
   return ExecQuery(create_db) &&
          ExecQuery(create_batchresults) &&
          ExecQuery(create_fills) &&
@@ -648,7 +779,9 @@ bool ClickHouseBatchStorage::EnsureSchema() {
          ExecQuery(create_execution_reports) &&
          ExecQuery(create_hedge_pnl) &&
          ExecQuery(create_grouped_events) &&
-         ExecQuery(create_grouped_leg_fills);
+         ExecQuery(create_grouped_leg_fills) &&
+         ExecQuery(create_grouped_quality) &&
+         ExecQuery(create_grouped_ratio_dev);
 }
 
 bool ClickHouseBatchStorage::SaveBatchResult(const fob::matching::v1::BatchResult& evt) {
@@ -673,13 +806,23 @@ bool ClickHouseBatchStorage::SaveExecutionGroup(
       "INSERT INTO " + GroupedExecutionEventsTableName() + " FORMAT JSONEachRow";
   const bool ev_ok = ExecQuery(ev_query, BuildGroupedEventJsonRow(evt) + "\n");
 
+  // grouped_quality_metrics — один агрегат на группу (combined notional/VWAP).
+  const std::string qm_query =
+      "INSERT INTO " + GroupedQualityMetricsTableName() + " FORMAT JSONEachRow";
+  const bool qm_ok = ExecQuery(qm_query, BuildGroupedQualityMetricsJsonRow(evt) + "\n");
+
   bool legs_ok = true;
+  bool dev_ok = true;
   if (evt.leg_results_size() > 0) {
     const std::string legs_query =
         "INSERT INTO " + GroupedLegFillsTableName() + " FORMAT JSONEachRow";
     legs_ok = ExecQuery(legs_query, BuildGroupedLegFillsJsonRows(evt));
+    // grouped_ratio_deviation — per-leg actual exec + is_binding_leg (AC-F09-002).
+    const std::string dev_query =
+        "INSERT INTO " + GroupedRatioDeviationTableName() + " FORMAT JSONEachRow";
+    dev_ok = ExecQuery(dev_query, BuildGroupedRatioDeviationJsonRows(evt));
   }
-  return ev_ok && legs_ok;
+  return ev_ok && qm_ok && legs_ok && dev_ok;
 }
 
 bool ClickHouseBatchStorage::SaveExecutionReport(
@@ -833,6 +976,14 @@ std::string ClickHouseBatchStorage::GroupedExecutionEventsTableName() const {
 
 std::string ClickHouseBatchStorage::GroupedLegFillsTableName() const {
   return cfg_.database + "." + cfg_.grouped_leg_fills_table;
+}
+
+std::string ClickHouseBatchStorage::GroupedQualityMetricsTableName() const {
+  return cfg_.database + "." + cfg_.grouped_quality_metrics_table;
+}
+
+std::string ClickHouseBatchStorage::GroupedRatioDeviationTableName() const {
+  return cfg_.database + "." + cfg_.grouped_ratio_deviation_table;
 }
 
 bool ClickHouseBatchStorage::SaveHedgePnL(

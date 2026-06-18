@@ -197,8 +197,9 @@ State–action–reward логи агентских политик (matching, ri
 ## F-09: Batch/Combo/Multi-leg Orders (OLAP)
 
 > Source: IN-011 (F-09 v2 corrected §14.2), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md).
-> Ingestion: `execution.groups` → `grouped_execution_events` (1 строка/группа) + `grouped_leg_fills` (1 строка/нога) — **реализовано** в `market_data` (`ClickHouseBatchStorage::SaveExecutionGroup`, потребитель топика `execution.groups`, ReplacingMergeTree идемпотентно по `event_time_ms`); `backtest.execution.groups` → `grouped_replay_results`.
-> ⚠️ Отложено (follow-up): `grouped_ratio_deviation` (требует per-leg target ratio/weight, которых нет в `ExecutionGroup` — нужен join с `combo_order_legs` или обогащение события) и `grouped_quality_metrics` (MV ещё не определён в init.sql).
+> Ingestion (**реализовано** в `market_data`, `ClickHouseBatchStorage::SaveExecutionGroup`, потребитель `execution.groups`, идемпотентно по `event_time_ms`): один `ExecutionGroup` → 4 записи —
+> `grouped_execution_events` (1/группа), `grouped_leg_fills` (1/нога), `grouped_quality_metrics` (1/группа: combined_notional/VWAP считаются в Decimal из leg_results, §9), `grouped_ratio_deviation` (1/нога: actual exec + `is_binding_leg` из `solver_diagnostics.binding_leg_ids`). `backtest.execution.groups` → `grouped_replay_results`.
+> ⚠️ Частично выводимо из события: `grouped_quality_metrics.combined_is_bps` = `null` (нужен arrival/decision price); `grouped_ratio_deviation.target_weight/target_ratio` = `null` (живут в `combo_order_legs` PG, не в событии). `deviation_bps` — group-level (per-leg в событии нет). MV для quality_metrics не используется — пишем строку напрямую.
 > Полный DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); зеркалится в `market_data` `EnsureSchema`. Денежные/количественные поля — `Decimal128(18)` (CLAUDE.md §9).
 
 ### Таблица `grouped_execution_events`

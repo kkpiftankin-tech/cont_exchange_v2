@@ -34,6 +34,8 @@ struct ClickHouseConfig {
   // F-09 observability: grouped combo execution OLAP tables (infra/clickhouse/init.sql).
   std::string grouped_execution_events_table{"grouped_execution_events"};
   std::string grouped_leg_fills_table{"grouped_leg_fills"};
+  std::string grouped_quality_metrics_table{"grouped_quality_metrics"};
+  std::string grouped_ratio_deviation_table{"grouped_ratio_deviation"};
   int liquidity_curves_retention_days{90};
   std::string user{"default"};
   std::string password{};
@@ -82,6 +84,8 @@ class ClickHouseBatchStorage final : public app::IBatchOutputsStorage,
   std::string HedgePnLTableName() const;
   std::string GroupedExecutionEventsTableName() const;
   std::string GroupedLegFillsTableName() const;
+  std::string GroupedQualityMetricsTableName() const;
+  std::string GroupedRatioDeviationTableName() const;
 
   ClickHouseConfig cfg_;
 };
