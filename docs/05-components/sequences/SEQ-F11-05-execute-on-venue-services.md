@@ -19,7 +19,7 @@ Service Interaction Sequence
 ## Use Case
 
 - [UC-F11-05](../../02-system/use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md)
-- [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md) (cross-link)
+- [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md) (cross-link)
 
 ## Purpose
 

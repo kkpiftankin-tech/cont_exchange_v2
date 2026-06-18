@@ -107,9 +107,9 @@ sequenceDiagram
 | Step | Transport | Contract / Message | Location |
 | --- | --- | --- | --- |
 | M → EP (validate) | gRPC | `ExecutionPlanningService/ValidateExternalExecution` | docs/06-api/grpc/execution-planning-validate-external.md (TODO contract) |
-| M → Kafka (intents) | Kafka | `execution.intents` (key=`parentOrderId`\|`legId`) | docs/06-api/messaging/execution-topics.md |
+| M → Kafka (intents) | Kafka | `execution.intents` (key=`parentOrderId`\|`legId`) | docs/06-api/messaging/topics.md |
 | VEA → External Venue | External API | Venue-specific REST/FIX (venue_native or single-leg) | docs/06-api/rest/external-venue-adapter.md (TODO contract) |
-| VEA → Kafka (reports) | Kafka | `execution.venue` (key=`intentId`, `ExecutionReport`) | docs/06-api/messaging/execution-topics.md |
+| VEA → Kafka (reports) | Kafka | `execution.venue` (key=`intentId`, `ExecutionReport`) | docs/06-api/messaging/topics.md |
 | M → Kafka (groups) | Kafka | `execution.groups` (key=`parentOrderId`, `ExecutionGroup`) | docs/06-api/messaging/execution-groups.md |
 | LDG consumes | Kafka | `execution.groups` (idempotent by `executionGroupId`) | docs/06-api/messaging/execution-groups.md |
 | RISK consumes | Kafka | `execution.groups` | docs/06-api/messaging/execution-groups.md |
@@ -136,7 +136,7 @@ sequenceDiagram
 ## Related Contracts
 
 - `ExecutionPlanningService/ValidateExternalExecution` — docs/06-api/grpc/execution-planning-validate-external.md (TODO contract)
-- [execution.intents / execution.venue](../../06-api/messaging/execution-topics.md)
+- [execution.intents / execution.venue](../../06-api/messaging/topics.md)
 - [execution.groups](../../06-api/messaging/execution-groups.md)
 - [topics.md (risk.alerts)](../../06-api/messaging/topics.md)
 

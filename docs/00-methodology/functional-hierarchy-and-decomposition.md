@@ -175,7 +175,7 @@ decomposed-into:
 
 > В проекте используется `feature.yaml` (а не frontmatter); поле `level`
 > добавляется в YAML на верхнем уровне или внутри `feature:` блока.
-> Шаблон обновлён в [`02-system/features/_template/feature.yaml`](../../02-system/features/_template/feature.yaml).
+> Шаблон обновлён в [`02-system/features/_template/feature.yaml`](../02-system/features/_template/feature.yaml).
 
 ### Use Case (L1)
 
@@ -307,7 +307,7 @@ L2 Comp Seq ──expands-step─────► L1 service seq #step-N
 | L0 sequence | `matching->>risk: PreTradeCheck(...)` | `Note over System: step-2: Pre-trade risk gate` |
 | L1 sequence | `matching->>BatchSolver: solveBatch()` | `Note over matching: step-3: solveBatch (см. L2)` |
 | L2 sequence | `S->>Risk: Risk.applyMargin()` (раскрывает Risk внутри) | `S->>RA: checkLimits(result)` где RA — internal adapter |
-| Любой | `[ссылка](file.md)` внутри mermaid | Markdown-таблица после блока |
+| Любой | `[ссылка] (file.md)` внутри mermaid | Markdown-таблица после блока |
 
 ## 10. Open questions / non-changes
 
@@ -316,7 +316,7 @@ L2 Comp Seq ──expands-step─────► L1 service seq #step-N
 | Backfill `level:` во ВСЕ существующие 22 feature.yaml | **Не сейчас**, по запросу | Большой объём, не блокирует новые feature; F-04/F-09/F-12 обновляются по мере касания |
 | Перенос L1 sequence в `03-architecture/system-sequences/` (как в IN-013) | **Не делать** | Существующая convention `05-components/sequences/SEQ-{F}-{UC}-services.md` уже принята; перенос ломает 50+ существующих ссылок |
 | `docs/04-domain/` единое или по компонентам | **Оставить единое** | Текущий `04-domain/entities.md` — system-wide ubiquitous language; component-specific domain (когда появится) → `05-components/{component}/domain/` |
-| Запрет `[text](url)` в mermaid-блоках | **Принят** | IN-013 corrects observed bug-prone pattern |
+| Запрет `[text] (url)` в mermaid-блоках | **Принят** | IN-013 corrects observed bug-prone pattern |
 
 ## 11. Drill-down navigation: канонический пример F-04
 

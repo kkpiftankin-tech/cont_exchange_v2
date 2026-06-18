@@ -17,7 +17,7 @@
 Реальность на ветке `feature/F-15-ephemeral-persist` (и далее по большинству feature-branches):
 
 - [`.claude/settings.json`](../../../.claude/settings.json) (shared, committed) — содержит только `PostToolUse` hook, **никакого `UserPromptSubmit`**.
-- [`.claude/settings.local.json`](../../../.claude/settings.local.json) (per-user, gitignored) — у текущего пользователя содержит только `permissions.allow` блок, тоже **без `UserPromptSubmit`**.
+- `.claude/settings.local.json` (per-user, gitignored) — у текущего пользователя содержит только `permissions.allow` блок, тоже **без `UserPromptSubmit`**.
 - Сам скрипт [`tools/auto-archive-attachments.py`](../../../tools/auto-archive-attachments.py) существует, но **никем не вызывается** автоматически.
 
 Результат: на свежем clone репозитория, на CI, у нового разработчика — `<document>` блоки в чатах не архивируются. Pipeline ingest сломан до того, как ingest-docs skill запустится. Документация лжёт.

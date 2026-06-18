@@ -41,7 +41,7 @@ SEQ-{F-ID}-{UC-ID}-services.md
 | [SEQ-F09-UC-F09-01-services](SEQ-F09-UC-F09-01-services.md) | F-09 | UC-F09-01 |
 | [SEQ-F10-UC-F10-01-services](SEQ-F10-UC-F10-01-services.md) | F-10 | UC-F10-01 |
 | [SEQ-F11-UC-F11-01-services](SEQ-F11-UC-F11-01-services.md) | F-11 | UC-F11-01 |
-| [SEQ-F12-UC-F12-01-services](SEQ-F12-UC-F12-01-services.md) | F-12 | UC-F12-01 |
+| [SEQ-F12-01-auto-hedge-services](SEQ-F12-01-auto-hedge-services.md) | F-12 | UC-F12-01 |
 | [SEQ-F13-UC-F13-01-services](SEQ-F13-UC-F13-01-services.md) | F-13 | UC-F13-01 |
 | [SEQ-F14-UC-F14-01-services](SEQ-F14-UC-F14-01-services.md) | F-14 | UC-F14-01 |
 | [SEQ-F15-UC-F15-01-services](SEQ-F15-UC-F15-01-services.md) | F-15 | UC-F15-01 |

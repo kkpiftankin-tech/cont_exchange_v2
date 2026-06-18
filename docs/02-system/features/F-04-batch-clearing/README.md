@@ -53,8 +53,8 @@
 | [matching-fob-core](../../../05-components/matching-fob-core/overview.md) | Solver + batch loop (owner of F-04) | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
 | [market-data](../../../05-components/market-data/) | Reference prices (gRPC) | (L2 TBD) |
 | [ledger](../../../05-components/ledger/) | Apply fills → balances | (L2 TBD) |
-| [risk](../../../05-components/risk/) | Post-trade alerts (consumer of `batch.outputs`) | (L2 TBD) |
-| [observability](../../../05-components/observability/) | Metrics + alerts | (L2 TBD) |
+| [risk](../../../05-components/risk-manager/) | Post-trade alerts (consumer of `batch.outputs`) | (L2 TBD) |
+| [observability](../../../05-components/observability-reporting/) | Metrics + alerts | (L2 TBD) |
 
 ## ☁️ L0 — System view (preview)
 

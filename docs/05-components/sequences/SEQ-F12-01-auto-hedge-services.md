@@ -96,8 +96,8 @@ sequenceDiagram
 | Step | Transport | Contract | Location |
 | --- | --- | --- | --- |
 | M → K1 | Kafka | `execution.intents` (`fob.execution.v1.ExecutionIntent`) | [../../06-api/messaging/execution-intents.md](../../06-api/messaging/execution-intents.md) |
-| K2 → PLAN (in) | Kafka | `venue.liquidity.fob` (`fob.venue.v1.SideLiquidityCurve`) | [../../06-api/messaging/venue-liquidity-fob.md](../../06-api/messaging/venue-liquidity-fob.md) (F-11) |
-| K2 → PLAN (in) | Kafka | `venue.health` (status, latency_ms) | [../../06-api/messaging/venue-health.md](../../06-api/messaging/venue-health.md) (F-11) |
+| K2 → PLAN (in) | Kafka | `venue.liquidity.fob` (`fob.venue.v1.SideLiquidityCurve`) | [../../06-api/messaging/venue-topics.md](../../06-api/messaging/venue-topics.md) (F-11) |
+| K2 → PLAN (in) | Kafka | `venue.health` (status, latency_ms) | [../../06-api/messaging/venue-topics.md](../../06-api/messaging/venue-topics.md) (F-11) |
 | PLAN → RISK | gRPC | `fob.risk.v1.RiskService.PreHedgeCheck` | [../../06-api/grpc/risk-pre-hedge-check.md](../../06-api/grpc/risk-pre-hedge-check.md) |
 | PLAN → ADP | internal | ExecutionIntent + RoutingPlan | (in-process / IPC TBD) |
 | ADP → PG (W) | SQL | `INSERT INTO hedgeflows` | [../../07-data/hedgeflows.md](../../07-data/hedgeflows.md) |

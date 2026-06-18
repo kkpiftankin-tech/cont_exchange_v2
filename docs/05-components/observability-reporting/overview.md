@@ -6,7 +6,7 @@
 
 - [cpp/observability/](../../../cpp/observability/) — каталог
 - [src/main.cpp](../../../cpp/observability/src/main.cpp) — entrypoint
-- [src/app/obs_loop.cpp](../../../cpp/observability/src/app/obs_loop.cpp) — один поток на все топики
+- [src/app/obs_loop.cpp](../../../cpp/observability/src/main.cpp) — один поток на все топики
 
 ## Что слушает
 

@@ -139,7 +139,7 @@ PARTIALLY_FILLED becomes a normal transient state.
 
 - [F-12. Execution Hedge](../02-system/features/F-12-execution-hedge/) — primary.
 - [F-13. Post-Trade Report](../02-system/features/F-13-posttrade-report/) — детализация исполнения.
-- [F-16. Operator Console](../02-system/features/F-16-operator-panel-and-kill-switch/) — drill-down per venue.
+- [F-16. Operator Console](../02-system/features/F-16-operator-console/) — drill-down per venue.
 
 ## Source Fragments
 

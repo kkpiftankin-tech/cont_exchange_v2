@@ -28,9 +28,9 @@ related:
 
 В текущем коде эти обязанности физически живут внутри `cpp/venues/src/`:
 
-- [`cpp/venues/src/app/execute_on_venue.cpp`](../../cpp/venues/src/app/execute_on_venue.cpp);
-- [`cpp/venues/src/infra/execution_intents_consumer.cpp`](../../cpp/venues/src/infra/execution_intents_consumer.cpp);
-- [`cpp/venues/src/infra/execution_report_producer.cpp`](../../cpp/venues/src/infra/execution_report_producer.cpp);
+- [`cpp/venues/src/app/execute_on_venue.cpp`](../../../cpp/venues/src/app/execute_on_venue.cpp);
+- [`cpp/venues/src/infra/execution_intents_consumer.cpp`](../../../cpp/venues/src/infra/execution_intents_consumer.cpp);
+- [`cpp/venues/src/infra/execution_report_producer.cpp`](../../../cpp/venues/src/infra/execution_report_producer.cpp);
 - venue adapters (CexWsRest, DexAmmRpc, VenueSim) — это и есть EVC.
 
 Таким образом, `cpp/venues/` совмещает две роли:

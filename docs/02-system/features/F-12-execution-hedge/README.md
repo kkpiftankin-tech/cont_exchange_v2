@@ -102,7 +102,7 @@ $$
   - [hedge_execution_intents_publisher.cpp](../../../../cpp/matching/src/app/hedge_execution_intents_publisher.cpp) — publish в Kafka.
   - [external_venue_filter.cpp](../../../../cpp/matching/src/app/external_venue_filter.cpp) — фильтр allowed venues.
   - [position_snapshot_calculator.cpp](../../../../cpp/matching/src/app/position_snapshot_calculator.cpp) — netQty из BatchResult.
-  - [execution_planning_uc.hpp](../../../../cpp/matching/src/app/execution_planning_uc.hpp) — интерфейс (stub).
+  - [execution_planning_uc.hpp](../../../../cpp/venues/src/app/execution_planning_uc.hpp) — интерфейс (stub).
 - venues (хостит Venue Execution Adapter + EVC):
   - [execute_on_venue.cpp](../../../../cpp/venues/src/app/execute_on_venue.cpp) — исполнение child order через VenueAdapter.
   - [execution_intents_consumer.cpp](../../../../cpp/venues/src/infra/execution_intents_consumer.cpp) — Kafka consumer.

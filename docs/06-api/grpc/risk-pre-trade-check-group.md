@@ -92,7 +92,7 @@ message PreTradeCheckGroupResponse {
 ## Used In Features
 
 - [F-09](../../02-system/features/F-09-batch-combo-orders/)
-- [F-07](../../02-system/features/F-07-pretrade-risk-control/)
+- [F-07](../../02-system/features/F-07-pretrade-risk/)
 
 ## Source Fragments
 

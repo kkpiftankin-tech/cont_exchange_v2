@@ -71,7 +71,7 @@ $$
 - $\text{qty}[v]$ округляется к `lot_size[venue]` через `floor`.
 - $\text{qty}[v] \leq \text{maxOrderSize}[venue]$ (берётся из VenueSnapshot).
 
-Реализация: целевая в Execution Planning (см. [05-components/execution-planning/](../05-components/execution-planning/overview.md), интерфейс [`IExecutionPlanningUseCases`](../../cpp/matching/src/app/execution_planning_uc.hpp)).
+Реализация: целевая в Execution Planning (см. [05-components/execution-planning/](../05-components/execution-planning/overview.md), интерфейс [`IExecutionPlanningUseCases`](../../cpp/venues/src/app/execution_planning_uc.hpp)).
 
 ### Pre-hedge Risk Check (×3)
 

@@ -80,7 +80,7 @@ Matching определяет ноги, требующие внешней лик
 
 ## Related Contracts
 
-- [execution.intents / execution.venue](../../../06-api/messaging/execution-topics.md)
+- [execution.intents / execution.venue](../../../06-api/messaging/topics.md)
 - [execution.groups](../../../06-api/messaging/execution-groups.md)
 - [risk.alerts](../../../06-api/messaging/topics.md)
 

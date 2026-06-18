@@ -141,7 +141,7 @@ sequenceDiagram
 - [execution-planning](../execution-planning/overview.md)
 - [ledger](../ledger/overview.md)
 - [risk-manager](../risk-manager/overview.md)
-- [observability](../observability/overview.md)
+- [observability](../observability-reporting/overview.md)
 
 ## Related Contracts
 

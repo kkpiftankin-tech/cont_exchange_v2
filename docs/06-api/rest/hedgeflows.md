@@ -167,7 +167,7 @@ contract once the read-side migrates to gateway; until then,
 ## Used In Features
 
 - [F-12. Execution Hedge](../../02-system/features/F-12-execution-hedge/)
-- [F-16. Operator Console](../../02-system/features/F-16-operator-panel-and-kill-switch/) — Manual Override UI и Cancel/Retry actions.
+- [F-16. Operator Console](../../02-system/features/F-16-operator-console/) — Manual Override UI и Cancel/Retry actions.
 - [F-17. Monitoring](../../02-system/features/F-17-monitoring-and-alerts/) — Reconciliation Alerts dashboard.
 
 ## Used In Use Cases

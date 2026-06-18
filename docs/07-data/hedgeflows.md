@@ -163,7 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_underfilled ON hedgeflows (stat
 - [F-12. Execution Hedge](../02-system/features/F-12-execution-hedge/) — primary.
 - [F-13. Post-Trade Report](../02-system/features/F-13-posttrade-report/) — join по `hedge_flow_id`.
 - [F-15. Backtest / Replay](../02-system/features/F-15-backtest-replay/).
-- [F-16. Operator Console](../02-system/features/F-16-operator-panel-and-kill-switch/) — Reconciliation Alerts.
+- [F-16. Operator Console](../02-system/features/F-16-operator-console/) — Reconciliation Alerts.
 - [F-17. Monitoring](../02-system/features/F-17-monitoring-and-alerts/) — fill rate, latency metrics.
 
 ## Source Fragments

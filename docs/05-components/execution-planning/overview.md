@@ -6,7 +6,7 @@ Routing planner для хеджа. Принимает `ExecutionIntent` от Mat
 
 | Целевая ответственность                                            | Реализовано?    | Где                                                                                              |
 | ------------------------------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------ |
-| Consume `execution.intents`                                        | ⚠️ stub          | интерфейс [`IExecutionPlanningUseCases`](../../../cpp/matching/src/app/execution_planning_uc.hpp); реализация отсутствует |
+| Consume `execution.intents`                                        | ⚠️ stub          | интерфейс [`IExecutionPlanningUseCases`](../../../cpp/venues/src/app/execution_planning_uc.hpp); реализация отсутствует |
 | Consume `venue.liquidity.fob` / `venue.health`                     | ❌              | нет consumer'а                                                                                   |
 | Routing plan: `qty[v] = L(v) / Sum L * targetQty`                  | ❌              | формула задокументирована (см. [04-domain/business-rules.md](../../04-domain/business-rules.md#routing-plan)), кода нет |
 | Filter allowed_venues / venue.health=CONNECTED                     | ⚠️ частично      | [`ExternalVenueFilter`](../../../cpp/matching/src/app/external_venue_filter.cpp) фильтрует venues, но не объединён с health |
@@ -42,7 +42,7 @@ Pre-hedge risk check (IN-005 §6, F12-8):
 
 ## Код
 
-- [`cpp/matching/src/app/execution_planning_uc.hpp`](../../../cpp/matching/src/app/execution_planning_uc.hpp) — абстрактный интерфейс.
+- [`cpp/venues/src/app/execution_planning_uc.hpp`](../../../cpp/venues/src/app/execution_planning_uc.hpp) — абстрактный интерфейс.
 - [`cpp/matching/src/app/external_venue_filter.cpp`](../../../cpp/matching/src/app/external_venue_filter.cpp) — фильтрация allowed_venues.
 - [`cpp/matching/src/app/planner_inputs_cache.cpp`](../../../cpp/matching/src/app/planner_inputs_cache.cpp) — кэш для venue inputs.
 
@@ -92,8 +92,8 @@ Pre-hedge risk check (IN-005 §6, F12-8):
 ## Consumed Events
 
 - [execution.intents](../../06-api/messaging/execution-intents.md)
-- [venue.liquidity.fob](../../06-api/messaging/venue-liquidity-fob.md) (F-11)
-- [venue.health](../../06-api/messaging/venue-health.md) (F-11)
+- [venue.liquidity.fob](../../06-api/messaging/venue-topics.md) (F-11)
+- [venue.health](../../06-api/messaging/venue-topics.md) (F-11)
 
 ## Data Access
 
