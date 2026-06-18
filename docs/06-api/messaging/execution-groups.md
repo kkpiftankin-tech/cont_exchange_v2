@@ -3,7 +3,7 @@
 | Свойство | Значение |
 |---|---|
 | Producer | `matching` (Matching Backend) |
-| Consumers | `ledger`, `risk` (post-trade), `order_flow` (parent/leg status update), `observability`, UI stream, `backtest` (replay) |
+| Consumers | `ledger`, `risk` (post-trade), `order_flow` (parent/leg status update), `observability`, `market_data` (ClickHouse `grouped_*` OLAP sink), UI stream, `backtest` (replay) |
 | Message type | `fob.matching.v1.ExecutionGroup` |
 | Partition key | `parentOrderId` |
 | Delivery | at-least-once + idempotent consumer (по `executionGroupId`) |
@@ -203,6 +203,7 @@ grouped solve для каждой активной `ComboOrder` в каждом 
 | `risk` | Post-trade risk check группы; оповещение при violated_constraints |
 | `order_flow` | Обновить parent/leg статусы; запустить child graph transitions (OCO cancel-siblings, bracket resize) |
 | `observability` | Запись метрик: grouped solve time, ratio deviation, degraded/orphan incidents |
+| `market_data` | OLAP-ingestion в ClickHouse: 1 строка `grouped_execution_events` + N строк `grouped_leg_fills` на группу (ReplacingMergeTree, идемпотентно по `event_time_ms`). Через `ClickHouseBatchStorage::SaveExecutionGroup` |
 | UI stream | Обновление статуса группы и ног в интерфейсе |
 | `backtest` | Replay grouped execution (AC-F09-010) |
 

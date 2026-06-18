@@ -6,6 +6,7 @@
 
 #include "app/market_data_uc.hpp"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "fob/marketdata/v1/marketdata_raw.pb.h"
 #include "fob/common/v1/common.pb.h"
 #include "google/protobuf/timestamp.pb.h"
@@ -30,6 +31,9 @@ struct ClickHouseConfig {
   std::string marketdata_table{"marketdata"};
   std::string liquidity_curves_table{"liquidity_curves"};
   std::string hedge_pnl_table{"hedge_pnl_agg"};
+  // F-09 observability: grouped combo execution OLAP tables (infra/clickhouse/init.sql).
+  std::string grouped_execution_events_table{"grouped_execution_events"};
+  std::string grouped_leg_fills_table{"grouped_leg_fills"};
   int liquidity_curves_retention_days{90};
   std::string user{"default"};
   std::string password{};
@@ -44,6 +48,7 @@ class ClickHouseBatchStorage final : public app::IBatchOutputsStorage,
   bool EnsureSchema();
   bool SaveBatchResult(const fob::matching::v1::BatchResult& evt) override;
   bool SaveFills(const fob::matching::v1::BatchResult& evt) override;
+  bool SaveExecutionGroup(const fob::matching::v1::ExecutionGroup& evt) override;
   bool SaveExecutionReport(const fob::execution::v1::ExecutionReport& evt) override;
   
   // Метод для сохранения hedge PnL
@@ -75,6 +80,8 @@ class ClickHouseBatchStorage final : public app::IBatchOutputsStorage,
   std::string ExecutionVenueTableName() const;
   std::string ExecutionReportsTableName() const;
   std::string HedgePnLTableName() const;
+  std::string GroupedExecutionEventsTableName() const;
+  std::string GroupedLegFillsTableName() const;
 
   ClickHouseConfig cfg_;
 };

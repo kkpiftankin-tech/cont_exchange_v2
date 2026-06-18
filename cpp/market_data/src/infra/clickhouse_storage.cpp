@@ -247,6 +247,116 @@ std::string SideToCanonicalString(fob::common::v1::Side s) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// F-09 observability: ExecutionGroup → grouped_* OLAP JSON rows.
+// ---------------------------------------------------------------------------
+std::string StripEnumPrefix(const std::string& name, const std::string& prefix) {
+  return (name.rfind(prefix, 0) == 0) ? name.substr(prefix.size()) : name;
+}
+
+// Decimal128 columns: serialize as exact decimal string (no float — §9).
+std::string DecimalStr(const fob::common::v1::Decimal& d) {
+  return cex::common::Decimal::from_proto(d).to_string();
+}
+
+int64_t GroupEventTimeMs(const fob::matching::v1::ExecutionGroup& eg) {
+  if (eg.has_meta() && eg.meta().has_ts_event()) return TimestampToUnixMs(eg.meta().ts_event());
+  if (eg.has_created_at()) return TimestampToUnixMs(eg.created_at());
+  return 0;
+}
+
+std::string BuildGroupedEventJsonRow(const fob::matching::v1::ExecutionGroup& eg) {
+  std::ostringstream vc;
+  vc << "[";
+  for (int i = 0; i < eg.violated_constraints_size(); ++i) {
+    if (i != 0) vc << ",";
+    vc << "\"" << JsonEscape(eg.violated_constraints(i)) << "\"";
+  }
+  vc << "]";
+
+  std::ostringstream diag;
+  if (eg.has_solver_diagnostics()) {
+    const auto& d = eg.solver_diagnostics();
+    diag << "{\"groupSolveTimeMs\":" << d.group_solve_time_ms()
+         << ",\"groupResidualNorm\":" << d.group_residual_norm() << ",\"bindingLegs\":[";
+    for (int i = 0; i < d.binding_leg_ids_size(); ++i) {
+      if (i != 0) diag << ",";
+      diag << "\"" << JsonEscape(d.binding_leg_ids(i)) << "\"";
+    }
+    diag << "],\"bindingConstraints\":[";
+    for (int i = 0; i < d.binding_constraint_ids_size(); ++i) {
+      if (i != 0) diag << ",";
+      diag << "\"" << JsonEscape(d.binding_constraint_ids(i)) << "\"";
+    }
+    diag << "]}";
+  } else {
+    diag << "{}";
+  }
+
+  std::ostringstream row;
+  row << "{";
+  row << "\"execution_group_id\":\"" << JsonEscape(eg.execution_group_id()) << "\",";
+  row << "\"batch_id\":\"" << JsonEscape(eg.batch_id()) << "\",";
+  row << "\"parent_order_id\":\"" << JsonEscape(eg.parent_order_id()) << "\",";
+  row << "\"user_id\":\"" << JsonEscape(eg.user_id()) << "\",";
+  // combo_type не переносится на ExecutionGroup (живёт в combo_orders) — пусто.
+  row << "\"combo_type\":\"\",";
+  row << "\"execution_mode\":\""
+      << StripEnumPrefix(fob::orders::v1::ExecutionMode_Name(eg.execution_mode()),
+                         "EXECUTION_MODE_") << "\",";
+  row << "\"group_status\":\""
+      << StripEnumPrefix(fob::matching::v1::GroupStatus_Name(eg.group_status()),
+                         "GROUP_STATUS_") << "\",";
+  row << "\"atomicity_policy\":\""
+      << StripEnumPrefix(fob::orders::v1::AtomicityPolicy_Name(eg.atomicity_policy()),
+                         "ATOMICITY_POLICY_") << "\",";
+  row << "\"atomicity_scope\":\""
+      << StripEnumPrefix(fob::orders::v1::AtomicityScope_Name(eg.atomicity_scope()),
+                         "ATOMICITY_SCOPE_") << "\",";
+  row << "\"fallback_action\":\"" << JsonEscape(eg.fallback_action()) << "\",";
+  row << "\"execution_scale\":\""
+      << JsonEscape(eg.has_execution_scale() ? DecimalStr(eg.execution_scale()) : "0") << "\",";
+  row << "\"ratio_deviation_bps\":" << static_cast<int32_t>(eg.ratio_deviation_bps()) << ",";
+  row << "\"violated_constraints\":\"" << JsonEscape(vc.str()) << "\",";
+  row << "\"solver_diagnostics\":\"" << JsonEscape(diag.str()) << "\",";
+  row << "\"leg_count\":" << eg.leg_results_size() << ",";
+  row << "\"event_time_ms\":" << GroupEventTimeMs(eg);
+  row << "}";
+  return row.str();
+}
+
+std::string BuildGroupedLegFillsJsonRows(const fob::matching::v1::ExecutionGroup& eg) {
+  std::ostringstream rows;
+  const int64_t event_time_ms = GroupEventTimeMs(eg);
+  const std::string group_policy = StripEnumPrefix(
+      fob::orders::v1::AtomicityPolicy_Name(eg.atomicity_policy()), "ATOMICITY_POLICY_");
+  for (const auto& leg : eg.leg_results()) {
+    rows << "{";
+    rows << "\"fill_id\":\"" << JsonEscape(leg.fill_id()) << "\",";
+    rows << "\"execution_group_id\":\"" << JsonEscape(eg.execution_group_id()) << "\",";
+    rows << "\"parent_order_id\":\"" << JsonEscape(eg.parent_order_id()) << "\",";
+    rows << "\"leg_id\":\"" << JsonEscape(leg.leg_id()) << "\",";
+    rows << "\"batch_id\":\"" << JsonEscape(eg.batch_id()) << "\",";
+    rows << "\"user_id\":\"" << JsonEscape(eg.user_id()) << "\",";
+    rows << "\"instrument_symbol\":\"" << JsonEscape(leg.instrument_symbol()) << "\",";
+    rows << "\"side\":\"" << SideToCanonicalString(leg.side()) << "\",";
+    rows << "\"exec_qty\":\"" << JsonEscape(leg.has_exec_qty() ? DecimalStr(leg.exec_qty()) : "0")
+         << "\",";
+    rows << "\"exec_price\":\""
+         << JsonEscape(leg.has_exec_price() ? DecimalStr(leg.exec_price()) : "0") << "\",";
+    rows << "\"exec_notional\":\""
+         << JsonEscape(leg.has_exec_notional() ? DecimalStr(leg.exec_notional()) : "0") << "\",";
+    rows << "\"group_policy\":\"" << group_policy << "\",";
+    rows << "\"liquidity_source\":\""
+         << JsonEscape(leg.liquidity_source().empty() ? "internal" : leg.liquidity_source())
+         << "\",";
+    rows << "\"venue_id\":\"\",";
+    rows << "\"event_time_ms\":" << event_time_ms;
+    rows << "}\n";
+  }
+  return rows.str();
+}
+
 std::string BuildExecutionReportV2JsonRow(const fob::execution::v1::ExecutionReport& evt) {
   const int64_t event_time_ms =
       (evt.has_meta() && evt.meta().has_ts_event()) ? TimestampToUnixMs(evt.meta().ts_event()) : 0;
@@ -482,12 +592,63 @@ bool ClickHouseBatchStorage::EnsureSchema() {
       ") ENGINE = SummingMergeTree() "
       "ORDER BY (batch_time, venue, instrument)";
 
+  // F-09 observability: grouped combo OLAP tables (mirror infra/clickhouse/init.sql).
+  // Created here too so market_data is self-sufficient even if init.sql not applied.
+  const std::string create_grouped_events =
+      "CREATE TABLE IF NOT EXISTS " + GroupedExecutionEventsTableName() + " ("
+      "execution_group_id String,"
+      "batch_id String,"
+      "parent_order_id String,"
+      "user_id String,"
+      "combo_type LowCardinality(String),"
+      "execution_mode LowCardinality(String),"
+      "group_status LowCardinality(String),"
+      "atomicity_policy LowCardinality(String),"
+      "atomicity_scope LowCardinality(String),"
+      "fallback_action LowCardinality(String),"
+      "execution_scale Decimal128(18),"
+      "ratio_deviation_bps Nullable(Int32),"
+      "violated_constraints String,"
+      "solver_diagnostics String,"
+      "leg_count UInt16,"
+      "event_time_ms Int64,"
+      "ingested_at DateTime DEFAULT now()"
+      ") ENGINE = ReplacingMergeTree(event_time_ms) "
+      "PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000))) "
+      "ORDER BY (parent_order_id, execution_group_id, event_time_ms) "
+      "TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY";
+
+  const std::string create_grouped_leg_fills =
+      "CREATE TABLE IF NOT EXISTS " + GroupedLegFillsTableName() + " ("
+      "fill_id String,"
+      "execution_group_id String,"
+      "parent_order_id String,"
+      "leg_id String,"
+      "batch_id String,"
+      "user_id String,"
+      "instrument_symbol LowCardinality(String),"
+      "side LowCardinality(String),"
+      "exec_qty Decimal128(18),"
+      "exec_price Decimal128(18),"
+      "exec_notional Decimal128(18),"
+      "group_policy LowCardinality(String),"
+      "liquidity_source LowCardinality(String),"
+      "venue_id String,"
+      "event_time_ms Int64,"
+      "ingested_at DateTime DEFAULT now()"
+      ") ENGINE = ReplacingMergeTree(event_time_ms) "
+      "PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000))) "
+      "ORDER BY (execution_group_id, leg_id, fill_id, event_time_ms) "
+      "TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY";
+
   return ExecQuery(create_db) &&
          ExecQuery(create_batchresults) &&
          ExecQuery(create_fills) &&
          ExecQuery(create_execution_venue) &&
          ExecQuery(create_execution_reports) &&
-         ExecQuery(create_hedge_pnl);
+         ExecQuery(create_hedge_pnl) &&
+         ExecQuery(create_grouped_events) &&
+         ExecQuery(create_grouped_leg_fills);
 }
 
 bool ClickHouseBatchStorage::SaveBatchResult(const fob::matching::v1::BatchResult& evt) {
@@ -502,6 +663,23 @@ bool ClickHouseBatchStorage::SaveFills(const fob::matching::v1::BatchResult& evt
   const std::string query =
       "INSERT INTO " + FillsTableName() + " FORMAT JSONEachRow";
   return ExecQuery(query, BuildFillsJsonRows(evt));
+}
+
+bool ClickHouseBatchStorage::SaveExecutionGroup(
+    const fob::matching::v1::ExecutionGroup& evt) {
+  // F-09 observability: one grouped_execution_events row + N grouped_leg_fills.
+  // ReplacingMergeTree(event_time_ms) → повторная ingestion идемпотентна.
+  const std::string ev_query =
+      "INSERT INTO " + GroupedExecutionEventsTableName() + " FORMAT JSONEachRow";
+  const bool ev_ok = ExecQuery(ev_query, BuildGroupedEventJsonRow(evt) + "\n");
+
+  bool legs_ok = true;
+  if (evt.leg_results_size() > 0) {
+    const std::string legs_query =
+        "INSERT INTO " + GroupedLegFillsTableName() + " FORMAT JSONEachRow";
+    legs_ok = ExecQuery(legs_query, BuildGroupedLegFillsJsonRows(evt));
+  }
+  return ev_ok && legs_ok;
 }
 
 bool ClickHouseBatchStorage::SaveExecutionReport(
@@ -647,6 +825,14 @@ std::string ClickHouseBatchStorage::ExecutionVenueTableName() const {
 
 std::string ClickHouseBatchStorage::HedgePnLTableName() const {
   return cfg_.database + "." + cfg_.hedge_pnl_table;
+}
+
+std::string ClickHouseBatchStorage::GroupedExecutionEventsTableName() const {
+  return cfg_.database + "." + cfg_.grouped_execution_events_table;
+}
+
+std::string ClickHouseBatchStorage::GroupedLegFillsTableName() const {
+  return cfg_.database + "." + cfg_.grouped_leg_fills_table;
 }
 
 bool ClickHouseBatchStorage::SaveHedgePnL(

@@ -66,6 +66,23 @@ void MarketDataUseCases::OnBatchResult(const fob::matching::v1::BatchResult& bat
   update_uc_.OnBatchResult(batch);
 }
 
+void MarketDataUseCases::OnExecutionGroup(const fob::matching::v1::ExecutionGroup& eg) {
+  // F-09 observability: ingest grouped combo execution into ClickHouse
+  // (grouped_execution_events + grouped_leg_fills). Reuses the same analytics
+  // storage as batch.outputs — idempotent (ReplacingMergeTree on event_time_ms).
+  if (batch_storage_ == nullptr) {
+    cex::common::log_json("WARN", "Batch output storage is not configured (execution.groups)",
+                          {{"execution_group_id", eg.execution_group_id()}});
+    return;
+  }
+  const bool ok = batch_storage_->SaveExecutionGroup(eg);
+  cex::common::log_json(ok ? "INFO" : "ERROR", "MarketData processed execution.groups",
+                        {{"execution_group_id", eg.execution_group_id()},
+                         {"parent_order_id", eg.parent_order_id()},
+                         {"legs", std::to_string(eg.leg_results_size())},
+                         {"saved", ok ? "true" : "false"}});
+}
+
 void MarketDataUseCases::OnExecutionReport(
     const fob::execution::v1::ExecutionReport& report) {
   if (execution_storage_ == nullptr) {

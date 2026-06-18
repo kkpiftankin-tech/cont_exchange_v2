@@ -7,6 +7,7 @@
 
 #include "fob/marketdata/v1/marketdata_raw.pb.h"
 #include "fob/matching/v1/batch.pb.h"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/venue/v1/venue.pb.h"
 
@@ -27,6 +28,8 @@ class IBatchOutputsStorage {
   virtual ~IBatchOutputsStorage() = default;
   virtual bool SaveBatchResult(const fob::matching::v1::BatchResult& evt) = 0;
   virtual bool SaveFills(const fob::matching::v1::BatchResult& evt) = 0;
+  // F-09 observability: grouped combo execution → ClickHouse grouped_* OLAP.
+  virtual bool SaveExecutionGroup(const fob::matching::v1::ExecutionGroup& evt) = 0;
 };
 
 class IExecutionVenueStorage {
@@ -54,6 +57,8 @@ class MarketDataUseCases {
 
   void OnMarketDataRaw(const fob::marketdata::v1::MarketDataRaw& evt);
   void OnBatchResult(const fob::matching::v1::BatchResult& batch);
+  // F-09 observability: persist grouped combo execution to ClickHouse grouped_*.
+  void OnExecutionGroup(const fob::matching::v1::ExecutionGroup& eg);
   void OnExecutionReport(const fob::execution::v1::ExecutionReport& report);
   void OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCurve& curve);
   void OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot);

@@ -29,6 +29,13 @@ struct FakeBatchStorage final : public cex::market_data::app::IBatchOutputsStora
     last_batch_id = evt.batch_id();
     return true;
   }
+
+  int save_group_calls{0};
+  bool SaveExecutionGroup(const fob::matching::v1::ExecutionGroup& evt) override {
+    ++save_group_calls;
+    last_batch_id = evt.batch_id();
+    return true;
+  }
 };
 
 struct FakeOrderBookStorage final : public cex::market_data::domain::IOrderBookStorage {
@@ -112,6 +119,22 @@ int main() {
     return EXIT_FAILURE;
   }
   if (!Check(storage.last_batch_id == batch_id, "batch id must be passed to storage")) {
+    return EXIT_FAILURE;
+  }
+
+  // F-09 observability: grouped combo execution → SaveExecutionGroup.
+  fob::matching::v1::ExecutionGroup eg;
+  const auto eg_batch_id = boost::uuids::to_string(gen());
+  eg.set_execution_group_id(boost::uuids::to_string(gen()));
+  eg.set_parent_order_id(boost::uuids::to_string(gen()));
+  eg.set_batch_id(eg_batch_id);
+  eg.add_leg_results()->set_leg_id(boost::uuids::to_string(gen()));
+  eg.add_leg_results()->set_leg_id(boost::uuids::to_string(gen()));
+  uc.OnExecutionGroup(eg);
+  if (!Check(storage.save_group_calls == 1, "SaveExecutionGroup must be called exactly once")) {
+    return EXIT_FAILURE;
+  }
+  if (!Check(storage.last_batch_id == eg_batch_id, "execution group batch id must reach storage")) {
     return EXIT_FAILURE;
   }
 

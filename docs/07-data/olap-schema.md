@@ -189,6 +189,7 @@ State–action–reward логи агентских политик (matching, ri
 | `marketdata.raw` | `marketdata` |
 | `risk.alerts` | `risk_events` |
 | `execution.reports` | `execution_reports` |
+| `execution.groups` | `grouped_execution_events`, `grouped_leg_fills` (F-09, через `market_data`) |
 | (planned) `agent.logs` | `agent_logs` |
 
 Реализация: ClickHouse `Kafka` engine table + materialized view → MergeTree target. См. [data-flow.md](data-flow.md).
@@ -196,8 +197,9 @@ State–action–reward логи агентских политик (matching, ri
 ## F-09: Batch/Combo/Multi-leg Orders (OLAP)
 
 > Source: IN-011 (F-09 v2 corrected §14.2), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md).
-> Ingestion: `execution.groups` → `grouped_execution_events`, `grouped_ratio_deviation`; `fills` (расширенный) → `grouped_leg_fills`; computed → `grouped_quality_metrics`; `backtest.execution.groups` → `grouped_replay_results`.
-> Полный DDL применяет devops #14 в `infra/clickhouse/init.sql`. Денежные/количественные поля — `Decimal128(18)` (CLAUDE.md §9).
+> Ingestion: `execution.groups` → `grouped_execution_events` (1 строка/группа) + `grouped_leg_fills` (1 строка/нога) — **реализовано** в `market_data` (`ClickHouseBatchStorage::SaveExecutionGroup`, потребитель топика `execution.groups`, ReplacingMergeTree идемпотентно по `event_time_ms`); `backtest.execution.groups` → `grouped_replay_results`.
+> ⚠️ Отложено (follow-up): `grouped_ratio_deviation` (требует per-leg target ratio/weight, которых нет в `ExecutionGroup` — нужен join с `combo_order_legs` или обогащение события) и `grouped_quality_metrics` (MV ещё не определён в init.sql).
+> Полный DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); зеркалится в `market_data` `EnsureSchema`. Денежные/количественные поля — `Decimal128(18)` (CLAUDE.md §9).
 
 ### Таблица `grouped_execution_events`
 

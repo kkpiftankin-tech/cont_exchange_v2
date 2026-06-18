@@ -1,5 +1,6 @@
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/batch_outputs.pb.h"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/venue/v1/venue.pb.h"
 
@@ -46,13 +47,13 @@ void MarketDataKafkaConsumer::loop() {
     // F-11 integration path: Market Data Service consumes raw market data,
     // normalized snapshots and FOB curves.
     if (!consumer.subscribe(
-            {"marketdata.raw", "batch.outputs", "venue.liquidity.fob", "venue.snapshots", "execution.venue"})) {
+            {"marketdata.raw", "batch.outputs", "venue.liquidity.fob", "venue.snapshots", "execution.venue", "execution.groups"})) {
       cex::common::log_json("ERROR", "MarketData Kafka subscribe failed; retrying");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       continue;
     }
     cex::common::log_json("INFO", "MarketData Kafka subscribed",
-                          {{"topics", "batch.outputs,venue.liquidity.fob,venue.snapshots,execution.venue"},
+                          {{"topics", "marketdata.raw,batch.outputs,venue.liquidity.fob,venue.snapshots,execution.venue,execution.groups"},
                            {"group_id", "marketdata"},
                            {"auto_commit", "true"}});
 
@@ -82,6 +83,17 @@ void MarketDataKafkaConsumer::loop() {
                   return;
                 }
                 uc_->OnBatchResult(batch);
+                return;
+              }
+
+              // F-09 observability: grouped combo execution → ClickHouse grouped_*.
+              if (topic == "execution.groups") {
+                fob::matching::v1::ExecutionGroup eg;
+                if (!cex::common::from_bytes(payload, eg)) {
+                  cex::common::log_json("ERROR", "Failed to parse execution.groups ExecutionGroup");
+                  return;
+                }
+                uc_->OnExecutionGroup(eg);
                 return;
               }
 

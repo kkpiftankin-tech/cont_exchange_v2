@@ -30,7 +30,7 @@ related:
 | `execution.intents` | matching | venues | `fob.execution.v1.ExecutionIntent` | 7 d | hedge_flow_id |
 | `execution.venue` | venues | ledger, observability, risk | `fob.execution.v1.ExecutionReport` | 7 d | hedge_flow_id |
 | `execution.reports` | venues (legacy mirror of `execution.venue`) | ledger | same as `execution.venue` | 7 d | intent_id |
-| `execution.groups` | matching | ledger, risk, order-flow, observability, backtest | `fob.matching.v1.ExecutionGroup` (F-09, ADR-033) | 7 d | parentOrderId |
+| `execution.groups` | matching | ledger, risk, order-flow, observability, market_data (CH `grouped_*` sink), backtest | `fob.matching.v1.ExecutionGroup` (F-09, ADR-033) | 7 d | parentOrderId |
 
 ## External venues (F-11)
 
