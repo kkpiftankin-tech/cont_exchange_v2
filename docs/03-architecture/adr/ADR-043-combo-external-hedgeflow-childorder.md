@@ -87,4 +87,4 @@ BuildExternalIntent + парсинг префикса. Данные `child_order
   `cpp/matching/src/app/matching_loop.cpp` (on_external_execution_report),
   venues `postgres_child_order_repository.cpp` / `postgres_hedgeflow_repository.cpp`.
 - Data: `docs/07-data/child-orders.md`, `docs/07-data/hedgeflows.md`.
-- Related: [ADR-037](ADR-037-... ), модель continuous_order_market (qRate flow limit).
+- Related: [ADR-037](ADR-037-external-leg-execution-compensation.md), модель continuous_order_market (qRate flow limit).

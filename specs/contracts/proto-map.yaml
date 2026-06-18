@@ -119,6 +119,18 @@ protoContracts:
       - GroupSolverDiagnostics
       - GroupStatus
 
+  compensation:
+    files:
+      - contracts/proto/fob/matching/v1/compensation.proto
+    features:
+      - F-09
+    components:
+      - matching
+      - order-flow
+    entities:
+      - CompensationService
+      - PendingCompensation
+
   marketdata:
     files:
       - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
