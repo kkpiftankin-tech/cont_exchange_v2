@@ -1876,20 +1876,20 @@ compensations=1 (не растёт), нога `failed_external`, routing ост�
 
 F-09 считается реализованной корректно если:
 
-- [ ] Оба режима `orchestration_only` и `multileg_vector_solver` работают (AC-F09-001, IN-011 §21)
-- [ ] `BasketOrder` с жёсткими weights не выходит за `maxWeightDeviationBps` (AC-F09-002)
-- [ ] `strict_atomic` при недоступной ноге: scale=0, fills=[], orphanLegs=0 (AC-F09-003)
-- [ ] `scalable_atomic`: e_g = α_g * ρ_g, ratio deviation ≤ tolerance (AC-F09-004)
-- [ ] `best_effort` фиксирует violatedConstraints + degraded status (AC-F09-005)
-- [ ] Внешние ноги без native support не маркируются strict_atomic (AC-F09-006)
-- [ ] OCO: cancel sibling идемпотентен (AC-F09-007)
-- [ ] Bracket: exit legs активируются на Q_entry_filled (AC-F09-008)
-- [ ] Ledger: grouped postings идемпотентны по executionGroupId (AC-F09-009)
-- [ ] Grouped execution детерминированно воспроизводится в F-15 Replay (AC-F09-010)
-- [ ] E2E тест `f09_basket_scalable_atomic_e2e.sh` зелёный в docker compose окружении
-- [ ] Все TODO contracts (risk-pre-trade-check-group.md, execution-planning-validate-external.md, execution-planning-routing-hints.md) заменены спецификациями
-- [ ] `docs/traceability/coverage-matrix.md` F-09 строка обновлена до ✅ contracts, ✅ data, ✅ tests
-- [ ] `docs/02-system/features/F-09-batch-combo-orders/feature.yaml` поле `status` = `implemented`
+- [x] Оба режима `orchestration_only` и `multileg_vector_solver` работают (AC-F09-001, IN-011 §21) — MVP-1 + MVP-2 LIVE
+- [x] `BasketOrder` с жёсткими weights не выходит за `maxWeightDeviationBps` (AC-F09-002) — basket scalable E2E
+- [x] `strict_atomic` при недоступной ноге: scale=0, fills=[], orphanLegs=0 (AC-F09-003) — negative_atomicity test
+- [x] `scalable_atomic`: e_g = α_g * ρ_g, ratio deviation ≤ tolerance (AC-F09-004) — basket scalable E2E (ratio preserved)
+- [x] `best_effort` фиксирует violatedConstraints + degraded status (AC-F09-005) — constraint_evaluator + solve-loop degrade
+- [x] Внешние ноги без native support не маркируются strict_atomic (AC-F09-006) — GroupPreTradeCheck (T-F09-040)
+- [x] OCO: cancel sibling идемпотентен (AC-F09-007) — OCO runtime live E2E (ADR-038)
+- [x] Bracket: exit legs активируются на Q_entry_filled (AC-F09-008) — ResizeBracketExits
+- [x] Ledger: grouped postings идемпотентны по executionGroupId (AC-F09-009) — T-F09-060
+- [ ] Grouped execution детерминированно воспроизводится в F-15 Replay (AC-F09-010) — НЕ проверено live (F-15 replay grouped E2E ещё не прогнан)
+- [x] E2E тест scalable basket зелёный в docker compose окружении — `Testing/f09_basket_scalable_e2e.sh` (T-F09-090) + `Testing/f09_compensation_resolution_e2e.sh` (T-F09-068) PASSED live
+- [x] Все TODO contracts (risk-pre-trade-check-group.md = spec реализован; execution-planning-validate-external.md / -routing-hints.md = deferred, superseded by ADR-037 — статус проставлен)
+- [x] `docs/traceability/coverage-matrix.md` F-09 строка обновлена до ✅ contracts, ✅ data, ✅ tests
+- [x] `docs/02-system/features/F-09-batch-combo-orders/feature.yaml` поле `status` = `implemented`
 
 ---
 

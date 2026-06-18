@@ -2,8 +2,12 @@
 
 ## Status
 
-TODO / planned — proposed schema sketch. Компонент Execution Planning (§12.7
-F-09 v2). Материализуется code-implementer #11.
+**Deferred — design sketch.** Отдельный `ExecutionPlanningService` не реализован.
+В MVP feasible caps по ногам считает сам matching (`ComputeFeasibleCaps`:
+`min(remaining, q_rate, q_liq, q_risk, q_venue)` с учётом venue liquidity из
+`venue.liquidity.fob`), без отдельного planning-сервиса и pre-solve RPC. Схема ниже
+сохранена как design-эскиз на случай будущего выделения routing-hints в сервис.
+См. [ADR-037](../../03-architecture/adr/ADR-037-external-leg-execution-compensation.md).
 
 ## Purpose
 

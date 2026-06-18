@@ -2,7 +2,16 @@
 
 ## Status
 
-TODO / planned — proposed schema sketch. Материализуется code-implementer #11.
+**Deferred — superseded for MVP by [ADR-037](../../03-architecture/adr/ADR-037-external-leg-execution-compensation.md).**
+Отдельный `ExecutionPlanningService` не реализован. Валидация atomicityScope
+(INTERNAL_BATCH запрещает внешние ноги; EXTERNAL_COMPENSATING → best-effort +
+компенсация) в MVP enforced инлайн: order_flow `GroupPreTradeCheck`
+(см. [risk-pre-trade-check-group.md](risk-pre-trade-check-group.md), ComboPolicy
+flags/limits) + matching grouped solver (`grouped_solver_bisection`,
+EXTERNAL_COMPENSATING ⇒ внутренние ноги kBlocked без counter-liquidity). Внешние
+ноги маршрутизируются напрямую (`cpp/matching/src/app/combo_external_routing.cpp`
+→ `execution.intents` → venues), без отдельного planning-сервиса. Схема ниже
+сохранена как design-эскиз на случай будущего выделения сервиса.
 
 ## Purpose
 

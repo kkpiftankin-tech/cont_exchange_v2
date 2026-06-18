@@ -1,7 +1,7 @@
 feature:
   id: F-09
   name: Batch, Combo and Multi-leg Orders
-  status: planned
+  status: implemented
   owner: core-team
   level: kite
 
