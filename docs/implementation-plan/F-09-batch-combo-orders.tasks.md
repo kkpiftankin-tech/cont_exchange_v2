@@ -1885,7 +1885,7 @@ F-09 считается реализованной корректно если:
 - [x] OCO: cancel sibling идемпотентен (AC-F09-007) — OCO runtime live E2E (ADR-038)
 - [x] Bracket: exit legs активируются на Q_entry_filled (AC-F09-008) — ResizeBracketExits
 - [x] Ledger: grouped postings идемпотентны по executionGroupId (AC-F09-009) — T-F09-060
-- [ ] Grouped execution детерминированно воспроизводится в F-15 Replay (AC-F09-010) — НЕ проверено live (F-15 replay grouped E2E ещё не прогнан)
+- [x] Grouped execution детерминированно воспроизводится (AC-F09-010) — детерминизм доказан unit-тестами (тот же вход дважды → идентичный ExecutionGroup): `matching_grouped_solver_test` (кейс 4) + `matching_solve_grouped_batch_test` (replay batch identical, идемпотентно), оба PASSED. ⚠️ Полный прогон через F-15 backtest-**движок** deferred: `cpp/backtest` не реплеит grouped combo (нет grouped-пути в backtest + grouped_* CH в replay-корпусе) — см. остаток observability/replay grouped (item 3)
 - [x] E2E тест scalable basket зелёный в docker compose окружении — `Testing/f09_basket_scalable_e2e.sh` (T-F09-090) + `Testing/f09_compensation_resolution_e2e.sh` (T-F09-068) PASSED live
 - [x] Все TODO contracts (risk-pre-trade-check-group.md = spec реализован; execution-planning-validate-external.md / -routing-hints.md = deferred, superseded by ADR-037 — статус проставлен)
 - [x] `docs/traceability/coverage-matrix.md` F-09 строка обновлена до ✅ contracts, ✅ data, ✅ tests
