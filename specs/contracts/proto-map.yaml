@@ -134,6 +134,7 @@ protoContracts:
   marketdata:
     files:
       - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
       - contracts/proto/fob/marketdata/v1/bbo.proto
     features:
       - F-04
