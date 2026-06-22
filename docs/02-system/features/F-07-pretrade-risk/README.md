@@ -1,5 +1,37 @@
 # F-07 — Pre-trade Risk Control
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F07-01](../../use-cases/UC-F07-01-pretrade-risk-check/use-case.md) | Pretrade Risk Check | [SEQ-UC-F07-01-system](../../use-cases/UC-F07-01-pretrade-risk-check/sequences/SEQ-UC-F07-01-system.md) | [SEQ-F07-UC-F07-01-services](../../../05-components/sequences/SEQ-F07-UC-F07-01-services.md) |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| `risk` (overview pending) | (L2 sequences pending) |
+| [order-flow](../../../05-components/order-flow/overview.md) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Описание
 
 Синхронный гейт перед резервом средств. Cинусоидальный вызов из order_flow в risk перед каждым CreateFlowOrder.

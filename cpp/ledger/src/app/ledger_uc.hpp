@@ -12,6 +12,7 @@
 #include "app/persistence_ports.hpp"
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
 
 namespace cex::ledger::app {
@@ -72,6 +73,10 @@ class LedgerUseCases {
       const fob::ledger::v1::ApplyBatchResultRequest& req);
   void RememberExecutionIntent(const fob::execution::v1::ExecutionIntent& intent);
   void ApplyExecutionReport(const fob::ledger::v1::ApplyExecutionReportRequest& req);
+  // F-09 (T-F09-060): применяет grouped execution (ExecutionGroup) к позициям —
+  // по каждой LegResult (user_id + symbol + side + qty + price). Идемпотентно по
+  // execution_group_id (at-least-once safe). Пустой leg_results — no-op.
+  void ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup& eg);
   void SetIdempotencyRepo(std::shared_ptr<IdempotencyRepositoryPort> repo) {
     idempotency_repo_ = std::move(repo);
   }
@@ -168,6 +173,7 @@ class LedgerUseCases {
   std::unordered_map<std::string, std::vector<fob::execution::v1::ExecutionReport>> pending_execution_reports_;
   std::unordered_map<std::string, ExecutionLedgerState> execution_states_; // intent_id|order_key -> state
   std::unordered_set<std::string> seen_execution_report_keys_;
+  std::unordered_set<std::string> seen_execution_group_ids_;  // F-09 idempotency
   ExecutionReconciliationStats exec_recon_stats_;
 
   std::shared_ptr<PositionsRepositoryPort> positions_repo_;

@@ -74,3 +74,32 @@ Machine-readable source-of-truth for components and features lives in [`specs/do
 | IN-003 | IN-003-FR-024 | NON_FUNCTIONAL_REQUIREMENT | `docs/02-system/non-functional-requirements.md` (Таблица 6) | merged | complete |
 | IN-003 | IN-003-FR-025 | TEST_REQUIREMENT | `docs/10-testing/features/F-04-test-plan.md` | created | complete |
 | IN-003 | IN-003-FR-026 | IMPLEMENTATION_HINT | `docs/implementation-plan/F-04-batch-clearing.tasks.md` (Definition of Done IN-003) | merged | complete |
+| IN-011 | IN-011-ARCH-001..004 | BUSINESS_RULE, FEATURE | `docs/03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md`, `docs/02-system/features/F-09-batch-combo-orders/feature.yaml` | created | complete |
+| IN-011 | IN-011-DM-001..009 | DOMAIN_ENTITY, DATA_MODEL | `docs/04-domain/entities.md`, `docs/07-data/oltp-schema.md` | merged | complete |
+| IN-011 | IN-011-BR-001..008 | BUSINESS_REQUIREMENT | `docs/02-system/features/F-09-batch-combo-orders/acceptance-criteria.md`, `docs/03-architecture/adr/ADR-031..032` | created | complete |
+| IN-011 | IN-011-UC-001..003 | USE_CASE, SEQUENCE_HINT | `docs/02-system/use-cases/UC-F09-0{1,2,3}-*`, `docs/05-components/sequences/SEQ-F09-UC-F09-0{1,2,3}-services.md` | created | complete |
+| IN-011 | IN-011-MATH-001..006, POL-001..005, INV | DOMAIN_FORMULAS, BUSINESS_RULE | `docs/04-domain/business-rules.md` §F-09 | created | complete |
+| IN-011 | IN-011-EVT-002, DATA-001..002 | KAFKA_TOPIC, DATA_MODEL | `docs/06-api/messaging/execution-groups.md`, `docs/06-api/messaging/topics.md`, `docs/07-data/oltp-schema.md`, `docs/07-data/olap-schema.md`, ADR-033 | created | complete |
+| IN-011 | IN-011-ALG-002, CONTRACT | GRPC_CONTRACT | `docs/06-api/grpc/order-flow-create-combo-order.md` (+5 TODO contracts) | created | complete |
+| IN-011 | IN-011-T-001..028 | TEST_REQUIREMENT | `docs/10-testing/features/F-09-test-plan.md` | created | complete |
+| IN-011 | IN-011-FINAL, OOS | IMPLEMENTATION_HINT | `docs/implementation-plan/F-09-batch-combo-orders.tasks.md` | created | complete |
+| IN-012 | F-01, F-02 | DOMAIN_ENTITY | `docs/04-domain/entities.md` §Continuous-Order Primitives (state variables, CurveRepresentation enum) | merged | complete |
+| IN-012 | F-03, F-05..F-10 | BUSINESS_RULE | `docs/04-domain/business-rules.md` §Clearing Mechanics (R-CLR-001..008) | merged | complete |
+| IN-012 | F-04 | GLOSSARY | `docs/01-business/glossary.md` (12 терминов), `docs/04-domain/ubiquitous-language.md` (mapping table) | merged | complete |
+| IN-012 | F-11, F-18, F-20, F-22 | IMPLEMENTATION_HINT | `docs/09-implementation/solver-foundation.md` (new), `cpp/matching/src/domain/solver_impl.cpp` header reference | created | complete |
+| IN-012 | F-12..F-17 | DOMAIN_ENTITY | `docs/04-domain/entities.md` §1D agents (4 classes), §2D agents (8 classes) | merged | complete |
+| IN-012 | F-19 | TEST_REQUIREMENT | `cpp/matching/tests/domain/continuous_market_replica_test.cpp` (new) + CMake registration | created | complete |
+| IN-012 | F-21 (5 conclusions) | METHODOLOGY | `docs/03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md` (new) — context + decision + alternatives + 3 open questions | created | complete |
+| IN-012 | (cross-feature linking) | FEATURE_LINK | `docs/02-system/features/F-04-batch-clearing/feature.yaml` §theoreticalFoundation, `F-10-mm-curves` §theoreticalFoundation, `F-11-external-venues-lob-to-fob` §theoreticalFoundation | merged | complete |
+
+> Полная карта фрагментов IN-011 (все §1–§21 + Доп. пояснения) — в [`incoming-docs/IN-011.fragment-map.md`](../../incoming-docs/IN-011.fragment-map.md).
+> Полная карта фрагментов IN-012 (все F-01..F-24) — в [`incoming-docs/IN-012.fragment-map.md`](../../incoming-docs/IN-012.fragment-map.md).
+
+| IN-013 | F-01, F-02, F-06 | METHODOLOGY, REPO_STRUCTURE | `docs/00-methodology/functional-hierarchy-and-decomposition.md` (new) §1–§3 (two-axis model + Cockburn levels + mapping IN-013↔repo paths) | created | complete |
+| IN-013 | F-03, F-08 | METHODOLOGY | `docs/00-methodology/sequence-diagram-rules.md` (L0/L1/L2 intro table) + `CLAUDE.md` §26a (level annotations + no-links-in-mermaid rule) | merged | complete |
+| IN-013 | F-04, F-05, F-07, F-10 | METHODOLOGY | `docs/00-methodology/functional-hierarchy-and-decomposition.md` §4–§9 (bidirectional links, frontmatter, checklists, prohibitions) | created | complete |
+| IN-013 | F-05 (templates) | METHODOLOGY | `docs/00-methodology/artifact-templates.md` §Decomposition level + `02-system/features/_template/feature.yaml` + `02-system/use-cases/_template/use-case.md` + `02-system/use-cases/_template/sequences/SEQ-UC-FXX-NN-system.md` + `05-components/sequences/_template/SEQ-FXX-UC-FXX-NN-services.md` (all with `level:` field) | merged | complete |
+| IN-013 | F-06 (placement) | REPO_STRUCTURE | `CLAUDE.md` §0c (placement table with L0/L1/L2) | merged | complete |
+| IN-013 | F-09 (full example) | METHODOLOGY | `docs/traceability/feature-to-uc.md` (new, all 18 features), `docs/traceability/uc-to-sequences.md` (new, ~33 UCs L0/L1/L2 inventory), `docs/traceability/sequence-to-code.md` (new, L2→cpp/) | created | complete |
+
+> Полная карта фрагментов IN-013 (все F-01..F-10) — в [`incoming-docs/IN-013.fragment-map.md`](../../incoming-docs/IN-013.fragment-map.md).

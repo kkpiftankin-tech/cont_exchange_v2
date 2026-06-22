@@ -1,3 +1,46 @@
+// ============================================================================
+// depth_curve_builder.cpp — F-11 LOB→FOB liquidity curve builder.
+//
+// Назначение и физический смысл:
+//   Внешний venue даёт нам "сырой" order book (BookLevel'ы с price/size).
+//   FOB matching solver хочет работать с двумя гладкими непрерывными
+//   функциями для каждой стороны (bid/ask):
+//
+//     S(q)  — "cost layer": сколько quote-currency мы заплатим (или
+//             получим) за исполнение q base-currency. Это интеграл
+//             price * dq по price-ladder venue. Выпуклая, неубывающая.
+//
+//     L(v)  — "Lagrangian curve": сколько base мы исполним при скорости
+//             v (price-pressure variable, dual к qty). Это Legendre-
+//             преобразование S(q): L(v) = sup_q (v*q - S(q)). Также
+//             используется как "speed-cost" в континуальном FOB-solver.
+//
+//   Эти кривые — то, что matching видит как "ликвидность venue X для
+//   symbol Y" и подмешивает в clearing-задачу через external liquidity
+//   path (см. cpp/matching/src/domain/solver_impl.cpp §allocate_external_side).
+//
+// Алгоритмический pipeline (BuildDepthSideCurvesImpl):
+//   1. Конвертация BookLevel[] → raw S(q) точки (накопительные price*size).
+//   2. PAV (Pool Adjacent Violators) convexification — гарантирует выпуклость
+//      cost layer (если venue дала "грязные" уровни, мы их сглаживаем).
+//   3. Tikhonov regularization через CG (conjugate gradient) — устраняет
+//      зазубрины + регуляризирует вторую разность.
+//   4. Fenchel-Legendre transform S(q) → L(v) — для построения dual curve.
+//   5. Monotone Lagrangian interpolation на subdivision-grid.
+//   6. Все промежуточные вычисления в double → финальный round в Decimal
+//      с явными scale'ами (kSpeedScale, kConvexCostScale и т.п.).
+//
+// Финансовая дисциплина:
+//   Внутренние вычисления — double (numerical algorithms требуют). Выход —
+//   cex::common::Decimal с фиксированным scale через ToDecimalWithScale().
+//   Это допустимо потому что это построение кривой, не settlement.
+//
+// Связанные документы:
+//   - F-11 feature.yaml — internal vs external liquidity curve flow.
+//   - ADR на LOB→FOB conversion (если есть).
+//   - cpp/matching/src/domain/solver_impl.cpp — consumer этих кривых.
+// ============================================================================
+
 #include "domain/depth_curve_builder.hpp"
 
 #include <algorithm>
@@ -12,6 +55,10 @@ namespace cex::venues::domain {
 
 namespace {
 
+// ----- Канонические scale'ы для финальных Decimal-полей кривых ----------
+// Все промежуточные вычисления — double; round в Decimal происходит на
+// последнем шаге через ToDecimalWithScale(). 6 знаков после точки = micro-
+// единицы, достаточно для всех практических обозначений ликвидности.
 constexpr int32_t kSpeedScale = 6;
 constexpr int32_t kLagrangianScale = 6;
 constexpr std::size_t kDefaultInterpolationSubdivisions = 8;
@@ -19,12 +66,17 @@ constexpr int32_t kConvexCostScale = 6;
 constexpr int32_t kDualPriceScale = 6;
 constexpr int32_t kDualValueScale = 6;
 
+/// 10^power как __int128 (не переполняется для power ≤ 38).
+/// Используется в DivideDecimal для безопасного rescale numerator/denominator.
 __int128 pow10_i128(const int32_t power) {
   __int128 out = 1;
   for (int32_t i = 0; i < power; ++i) out *= 10;
   return out;
 }
 
+/// Делит num / den с round-half-up в Decimal с явным out_scale.
+/// __int128 buffer защищает от overflow при rescale до target scale.
+/// Saturates на int64_t границах вместо UB.
 cex::common::Decimal DivideDecimal(const cex::common::Decimal& numerator,
                                    const cex::common::Decimal& denominator,
                                    int32_t out_scale) {
@@ -61,6 +113,9 @@ cex::common::Decimal DivideDecimal(const cex::common::Decimal& numerator,
   };
 }
 
+/// double → Decimal с round-half-up к ближайшей единице.
+/// Saturates на int64_t границах. Используется на финальном шаге кривых,
+/// где численные вычисления done и нужно зафиксировать canonical scale.
 cex::common::Decimal ToDecimalWithScale(const double value, const int32_t scale) {
   const double mul = std::pow(10.0, static_cast<double>(scale));
   const double scaled = std::round(value * mul);
@@ -74,6 +129,11 @@ cex::common::Decimal ToDecimalWithScale(const double value, const int32_t scale)
   return cex::common::Decimal{static_cast<int64_t>(scaled), scale};
 }
 
+/// Гарантирует монотонность price-ladder относительно side.
+/// BUY-side: цены растут (плохие цены в конце ladder).
+/// SELL-side: цены падают.
+/// Если venue прислал out-of-order уровень — clamp к предыдущей цене
+/// (защита от "зазубрин" в feed).
 cex::common::Decimal MonotonicPrice(const cex::common::Decimal& previous,
                                     const cex::common::Decimal& current,
                                     const ExecutionSide side) {
@@ -83,6 +143,11 @@ cex::common::Decimal MonotonicPrice(const cex::common::Decimal& previous,
   return cex::common::Decimal::min(previous, current);     // non-increasing
 }
 
+/// Строит точки L(v) по дискретной cost-curve через monotone interpolation
+/// между knot-точками. На каждом knot-сегменте делает subdivision
+/// (kDefaultInterpolationSubdivisions = 8 sub-точек), обеспечивает
+/// монотонность slope. Это даёт solver'у достаточную плотность точек,
+/// чтобы reconstruct'ить L(v) без артефактов.
 std::vector<LOfVPoint> BuildMonotoneLagrangianInterpolationImpl(
     const std::vector<LOfVPoint>& knots,
     std::size_t subdivisions_per_segment) {
@@ -180,6 +245,11 @@ struct ConvexRange {
   bool valid{false};
 };
 
+/// Выбирает longest convex range из накопительной S(q) curve через
+/// проверку выпуклости вторых разностей. Возвращает [begin_idx, end_idx]
+/// внутри которого PAV-convexify будет работать (за пределами — данные
+/// уже монотонно-неубывающие или невыпуклые сегменты, требующие отдельной
+/// обработки).
 ConvexRange SelectConvexRange(const std::vector<SOfQPoint>& s_of_q,
                               const ConvexificationConfig& config) {
   ConvexRange range;
@@ -221,6 +291,11 @@ ConvexRange SelectConvexRange(const std::vector<SOfQPoint>& s_of_q,
   return range;
 }
 
+/// Pool Adjacent Violators (PAV) — классический изотонический regression
+/// алгоритм. Идёт слева направо: если slope_i < slope_{i-1} (нарушает
+/// monotonicity), сливает их в weighted-average pool. O(n) amortized.
+/// Для cost-curve это гарантирует convex shape (cost растёт монотонно
+/// и не быстрее линейно на каждом отрезке).
 std::vector<double> ConvexifySlopesPav(const std::vector<double>& slopes,
                                        const std::vector<double>& weights) {
   struct Block {
@@ -270,6 +345,10 @@ std::vector<double> ConvexifySlopesPav(const std::vector<double>& slopes,
   return out;
 }
 
+/// Convexify cost layer S(q): применяет PAV к slopes, потом интегрирует
+/// обратно в S(q) точки. Это финальный шаг pipeline — гарантирует что
+/// solver видит математически "чистую" cost-curve без нарушений
+/// convexity/monotonicity.
 std::vector<SOfQPoint> ConvexifyCostLayerImpl(
     const std::vector<SOfQPoint>& s_of_q,
     const ConvexificationConfig& config) {
@@ -511,6 +590,15 @@ std::vector<double> BuildFenchelPriceGrid(const std::vector<SOfQPoint>& s_of_q,
   return UniqueSortedWithTolerance(std::move(grid), 1e-10);
 }
 
+/// Fenchel-Legendre transform: S(q) → L(v).
+///
+/// Математика: L(v) = sup_q (v*q - S(q)) — dual problem к primal cost curve.
+/// Геометрически: tangent line с наклоном v касается S(q) в некоторой точке
+/// q*(v); L(v) = q*(v) — "сколько units мы исполним при цене-pressure v".
+///
+/// Численно: на price-grid (BuildFenchelPriceGrid) ищем supremum по q,
+/// возвращаем точки {v, L(v)}. Это даёт solver dual представление кривой
+/// для continuous matching формулировки.
 FenchelLegendreLayer BuildFenchelLegendreLayerImpl(
     const std::vector<SOfQPoint>& s_of_q,
     const FenchelLegendreConfig& config) {
@@ -613,6 +701,15 @@ void ApplyTikhonovSystemMatrix(const std::vector<double>& z,
   }
 }
 
+/// Conjugate-gradient solver для Tikhonov-regularization задачи:
+///   minimize  ||z - y||^2 + λ * ||D²z||^2
+/// где D² — оператор второй разности (penalty за "зазубрины"). Это
+/// сглаживает cost-curve, оставляя её close к raw data y но без шума
+/// от mid-range venue noise.
+///
+/// CG итерирует до tolerance или max_iterations — для типичной кривой
+/// сходится за < 50 итераций. Не выходит за рамки feasible region
+/// потому что задача strictly convex.
 std::vector<double> SolveTikhonovCg(const std::vector<double>& y,
                                     const double lambda,
                                     const std::size_t max_iterations,
@@ -821,6 +918,18 @@ DepthSideCurves RebuildCurvesFromCostLayer(const DepthSideCurves& curves,
   return out;
 }
 
+// ============================================================================
+// BuildDepthSideCurvesImpl — главный pipeline construction.
+//
+// Берёт raw BookLevel[] от venue, проходит все стадии (raw → PAV-convexify →
+// Tikhonov-smooth → Fenchel-Legendre dual → monotone interpolation) и
+// возвращает финальный DepthSideCurves (содержит s_of_q и l_of_v точки
+// в Decimal с фиксированными scale'ами).
+//
+// tau_sec — masked time-scale параметр: используется для разрезания общего
+// cost-impact на "velocity" в continuous matching. tau=1 → mean-revert
+// мгновенно; tau большое → "slow" liquidity (impact размазан по времени).
+// ============================================================================
 DepthSideCurves BuildDepthSideCurvesImpl(const std::vector<BookLevel>& levels,
                                          const ExecutionSide side,
                                          const cex::common::Decimal& tau_sec) {
@@ -910,6 +1019,17 @@ DepthSideCurves BuildDepthSideCurvesImpl(const std::vector<BookLevel>& levels,
 
 }  // namespace
 
+// ============================================================================
+// Public API — 4 entry points для построения depth curves.
+//
+// Два input format'а:
+//   - BookLevel[]            — pre-extracted per-side levels.
+//   - CanonicalOrderBook     — full book; extract по side внутри.
+//
+// Каждый — с tau_sec и без (default tau=1.0 sec для legacy callers).
+// ============================================================================
+
+/// Default tau=1 sec — backward-compatible signature.
 DepthSideCurves BuildDepthSideCurvesFromLevels(const std::vector<BookLevel>& levels,
                                                const ExecutionSide side) {
   return BuildDepthSideCurvesImpl(levels, side, cex::common::Decimal{1, 0});

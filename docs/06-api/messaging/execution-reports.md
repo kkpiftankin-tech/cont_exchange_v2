@@ -33,10 +33,10 @@
 
 ## Used In Use Cases
 
-- [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md)
+- [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)
 - [UC-F17-01](../../02-system/use-cases/UC-F17-01-fire-alert/use-case.md)
 
 ## Used In Sequence Diagrams
 
-- [SEQ-F12-UC-F12-01-services](../../05-components/sequences/SEQ-F12-UC-F12-01-services.md)
+- [SEQ-F12-01-auto-hedge-services](../../05-components/sequences/SEQ-F12-01-auto-hedge-services.md)
 - [SEQ-F17-UC-F17-01-services](../../05-components/sequences/SEQ-F17-UC-F17-01-services.md)

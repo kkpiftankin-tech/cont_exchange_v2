@@ -200,6 +200,8 @@ std::optional<app::CreateReplaySession::Request> BuildCreateRequest(
   req.reward_config_inline_json = DumpObject(body, {"rewardconfig", "reward_config"});
   req.random_seed = GetInt64(body, {"randomseed", "random_seed"});
   req.tolerance = GetDouble(body, {"tolerance"});
+  // F15-PERSIST: absent key ⇒ true (backward-compat; existing tests omit field).
+  req.persist = body.value("persist", true);
 
   if (body.contains("sessionconfigsnapshot") && body["sessionconfigsnapshot"].is_object()) {
     const auto& snap = body["sessionconfigsnapshot"];
@@ -335,8 +337,16 @@ void ReplayCommandsKafkaConsumer::loop() {
             run_req.config_request = ToConfigRequest(*create_req);
             run_req.history_config.from_ms = ToEpochMs(create_req->date_range_from);
             run_req.history_config.to_ms = ToEpochMs(create_req->date_range_to);
-            std::thread([runner = uc_.run, run_req]() mutable {
+            std::thread([runner = uc_.run,
+                          reg = uc_.ephemeral_registry,
+                          run_req]() mutable {
               runner->Run(run_req);
+              // F15-PERSIST: evict ephemeral sessions after Run() returns so
+              // they don't accumulate in the registry after reaching terminal
+              // state. EvictIfTerminal is a no-op for non-ephemeral ids.
+              if (reg != nullptr) {
+                reg->EvictIfTerminal(run_req.session_id);
+              }
             }).detach();
           } catch (const std::exception& ex) {
             PublishCreateFailure(uc_.events, msg.session_id, "invalid_json", ex.what());
@@ -353,6 +363,12 @@ void ReplayCommandsKafkaConsumer::loop() {
                                     {{"session_id", msg.session_id},
                                      {"error_code", result.error_code},
                                      {"error_message", result.error_message}});
+            }
+            // A pending ephemeral session cancelled before its run thread
+            // starts never passes through the run-thread eviction, so evict
+            // here. No-op for persisted ids and for non-terminal sessions.
+            if (uc_.ephemeral_registry != nullptr) {
+              uc_.ephemeral_registry->EvictIfTerminal(msg.session_id);
             }
           }
           break;
@@ -394,8 +410,16 @@ void ReplayCommandsKafkaConsumer::loop() {
                   ToEpochMs(result.created_session->date_range_from);
               run_req.history_config.to_ms =
                   ToEpochMs(result.created_session->date_range_to);
-              std::thread([runner = uc_.run, run_req]() mutable {
+              std::thread([runner = uc_.run,
+                           reg = uc_.ephemeral_registry,
+                           run_req]() mutable {
                 runner->Run(run_req);
+                // Evict ephemeral retry sessions once terminal so the
+                // in-memory registry does not grow unbounded. No-op for
+                // persisted ids.
+                if (reg != nullptr) {
+                  reg->EvictIfTerminal(run_req.session_id);
+                }
               }).detach();
             }
           }

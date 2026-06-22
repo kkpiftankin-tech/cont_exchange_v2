@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F17-01. Сгенерировать alert и нотифицировать on-call
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-17-monitoring-and-alerts](../../features/F-17-monitoring-and-alerts/) |
+| ☁️ L0 system sequence | [SEQ-UC-F17-01-system](sequences/SEQ-UC-F17-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F17-UC-F17-01-services](../../../05-components/sequences/SEQ-F17-UC-F17-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

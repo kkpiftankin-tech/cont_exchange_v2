@@ -77,7 +77,7 @@
       "copy": "Copy",
       "copied": "Copied!"
     },
-    "chart" : {
+    "chart": {
       "volume_hour": "volume per hour",
       "volume": "Volume",
       "clearing": "Clearing",
@@ -215,12 +215,12 @@
       "health": "Health",
       "executionQuality": "Execution quality",
       "latency": "Latency",
-    "spread": "Execution spread",
-    "volume": "24h Volume",
-    "action": "Routing",
-    "controls": "Controls",
-    "details": "Details"
-  },
+      "spread": "Execution spread",
+      "volume": "24h Volume",
+      "action": "Routing",
+      "controls": "Controls",
+      "details": "Details"
+    },
     "actions": {
       "openDetails": "Open",
       "backToList": "Back to list"
@@ -436,7 +436,10 @@
       "numberError": "Use a numeric value.",
       "run": "Run replay",
       "creating": "Creating...",
-      "refresh": "Refresh"
+      "refresh": "Refresh",
+      "persist": "Save results to DB",
+      "persistHelperEphemeral": "Ephemeral mode: results are visible only via the live stream. The session will not appear in the list and summary / agent logs are unavailable via REST.",
+      "persistHelperSaved": "Persisted mode: the session is saved to the DB, appears in the list, and summary / agent logs are accessible via REST after completion."
     },
     "sessions": {
       "caption": "Live queue",
@@ -451,7 +454,8 @@
       "liveUpdated": "Last event: {{time}}",
       "liveWaiting": "Waiting for live events",
       "prev": "Prev",
-      "next": "Next"
+      "next": "Next",
+      "range": "Range"
     },
     "status": {
       "pending": "Pending",
@@ -487,7 +491,8 @@
       "equity": "Equity curve",
       "batches": "By batches",
       "compare": "A/B compare",
-      "audit": "Audit mode"
+      "audit": "Audit mode",
+      "playback": "Playback"
     },
     "equity": {
       "title": "Equity curve",
@@ -618,7 +623,45 @@
       "pending": "Session is queued and waiting to start.",
       "liveRunning": "Replay is running and metrics are updating live.",
       "waitingForLogs": "Replay has started. AgentLog rows will appear after the first batches.",
-      "noAgentLogs": "No AgentLog rows yet."
+      "noAgentLogs": "No AgentLog rows yet.",
+      "ephemeralStarted": "Ephemeral replay started. Results are available only via the live stream.",
+      "ephemeralCompleted": "Ephemeral replay completed. Results were not saved to the DB.",
+      "ephemeralStreamLost": "Live stream was interrupted before completion. Partial results are unavailable.",
+      "ephemeralNoAgentLogs": "Agent logs are not saved — enable \"Save results to DB\" to access logs.",
+      "ephemeralNoEquity": "Equity curve is not available in ephemeral mode.",
+      "ephemeralNoCompare": "Comparison is unavailable — the session was not saved.",
+      "ephemeralNoAudit": "Audit mode is unavailable — the session was not saved.",
+      "noSessions": "No sessions found."
+    },
+    "ephemeral": {
+      "panelTitle": "Current run",
+      "dismiss": "Dismiss",
+      "retryHint": "Run the replay again.",
+      "badge": "Ephemeral"
+    },
+    "playback": {
+      "play": "Play",
+      "resume": "Resume",
+      "replay": "Replay",
+      "pause": "Pause",
+      "stop": "Stop",
+      "speed": "Speed",
+      "seek": "Seek to batch",
+      "batchOf": "Batch {{current}} / {{total}}",
+      "buffering": "Loading batches {{loaded}} / {{total}}…",
+      "noData": "This session has no saved batch data. Playback is only available for completed sessions with saved AgentLog rows.",
+      "loadError": "Failed to load batch data for playback.",
+      "retry": "Retry load",
+      "ended": "Playback finished.",
+      "cappedNotice": "Too many batches — loaded the first {{cap}} of {{total}}. Playback covers only the beginning of the session.",
+      "clearPrices": "Clearing prices",
+      "runningPnl": "Running PnL",
+      "fillRate": "Fill rate",
+      "residualNorm": "Residual norm",
+      "solveTime": "Solve time",
+      "riskStatus": "Risk status",
+      "equityTitle": "Equity (up to current batch)",
+      "sessionWindow": "Session window"
     }
   },
   "hedgeFlow": {

@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F11-02-publish-snapshot-services
+level: sea
+---
+-->
+
 # SEQ-F11-02-publish-snapshot-services. Publish VenueSnapshot: service view
 
 ## Type

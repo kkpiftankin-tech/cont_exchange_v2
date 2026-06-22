@@ -68,6 +68,10 @@ class CreateReplaySession {
 
     std::optional<int64_t> random_seed;
     std::optional<double> tolerance;
+
+    // F15-PERSIST: false ⇒ ephemeral run — no PG/CH writes.
+    // Default true preserves backward-compatible behaviour.
+    bool persist{true};
   };
 
   struct Result {

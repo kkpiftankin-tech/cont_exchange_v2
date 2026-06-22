@@ -66,6 +66,7 @@ foreach(PROTO ${PROTO_FILES})
   add_custom_command(
     OUTPUT ${PB_CC} ${PB_H} ${GRPC_CC} ${GRPC_H}
     COMMAND ${PROTOC}
+      --experimental_allow_proto3_optional
       --proto_path=${PROTO_ROOT}
       --cpp_out=${GEN_DIR}
       --grpc_out=${GEN_DIR}

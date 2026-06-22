@@ -15,6 +15,10 @@ class RiskClient {
   fob::risk::v1::PreTradeCheckResponse CheckNewOrder(
       const fob::risk::v1::PreTradeCheckRequest& req);
 
+  // F-09 (T-F09-040): групповой pre-trade check.
+  fob::risk::v1::PreTradeCheckGroupResponse PreTradeCheckGroup(
+      const fob::risk::v1::PreTradeCheckGroupRequest& req);
+
  private:
   std::unique_ptr<fob::risk::v1::RiskService::Stub> stub_;
 };

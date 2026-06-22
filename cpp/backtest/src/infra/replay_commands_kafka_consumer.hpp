@@ -9,6 +9,7 @@
 #include "app/create_replay_session_uc.hpp"
 #include "app/retry_replay_session_uc.hpp"
 #include "app/run_replay_session_uc.hpp"
+#include "infra/ephemeral_session_registry.hpp"
 
 namespace cex::backtest::infra {
 
@@ -22,6 +23,9 @@ class ReplayCommandsKafkaConsumer {
     app::RunReplaySession* run{nullptr};
     app::RetryReplaySessionUseCase* retry{nullptr};
     app::IReplayEventPublisher* events{nullptr};
+    // F15-PERSIST: optional — if non-null, ephemeral sessions are evicted after
+    // the Run use case completes and the session reaches a terminal state.
+    EphemeralSessionRegistry* ephemeral_registry{nullptr};
   };
 
   ReplayCommandsKafkaConsumer(UseCases uc,

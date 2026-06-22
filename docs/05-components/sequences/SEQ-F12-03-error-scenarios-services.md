@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F12-03-error-scenarios-services
+level: sea
+---
+-->
+
 # SEQ-F12-03-error-scenarios-services. Error Scenarios (Timeout / Overfill / Risk Reject): service view
 
 ## Type

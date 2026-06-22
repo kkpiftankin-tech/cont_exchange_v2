@@ -1,3 +1,25 @@
+// ============================================================================
+// backtest/main.cpp — entry point сервиса backtest (F-15 backtest/replay).
+//
+// Что делает:
+//   - PG repositories: replay sessions, RBAC, replay configs.
+//   - ClickHouse читает historical batchresults/marketdata для replay input.
+//   - Запускает Kafka consumers для replay.commands (operator-driven) и
+//     venue events (для parity check'ов).
+//   - Publisher для replay.results (progress/completed/failed/cancelled).
+//   - In-memory shadow ledger (in_memory_shadow_ledger.cpp) — изолирует
+//     replay PnL от live ledger state (ADR-015 sim/live isolation pattern).
+//   - gRPC ReplayBatchExecutor (для isolation matching service).
+//   - HTTP routes (Crow):
+//       * /healthz                 — liveness probe.
+//       * /metrics                  — Prometheus.
+//       * Replay retry session API.
+//
+// CLAUDE.md §15 §17: replay должен deterministic — тот же input даёт
+// тот же output. Replay использует isolation matching solver (cpp/matching
+// GrpcIsolationSolverService) чтобы не trogать live state.
+// ============================================================================
+
 #include <chrono>
 #include <exception>
 #include <memory>
@@ -33,6 +55,11 @@
 #include "infra/postgres/postgres_replay_session_repository.hpp"
 #include "infra/replay_commands_kafka_consumer.hpp"
 #include "infra/venue_kafka_consumer.hpp"
+// F15-PERSIST: routing wrappers + ephemeral registry
+#include "infra/ephemeral_session_registry.hpp"
+#include "infra/routing_replay_session_repository.hpp"
+#include "infra/routing_summary_store.hpp"
+#include "infra/routing_agent_log_writer.hpp"
 
 int main() {
   const std::string brokers =
@@ -136,8 +163,27 @@ int main() {
                             {{"error", ex.what()}});
     }
   }
+
+  // F15-PERSIST: in-memory registry for ephemeral (persist=false) sessions +
+  // transparent routing wrappers that intercept all port calls and route
+  // based on the session's persist flag.  All use-case deps below use the
+  // routing wrappers so the use cases themselves stay unchanged.
+  auto ephemeral_registry =
+      std::make_unique<cex::backtest::infra::EphemeralSessionRegistry>();
+  auto routing_session_repo =
+      std::make_unique<cex::backtest::infra::RoutingReplaySessionRepository>(
+          pg_session_repo.get(), ephemeral_registry.get());
+  auto routing_summary_store =
+      std::make_unique<cex::backtest::infra::RoutingReplaySummaryStore>(
+          static_cast<cex::backtest::app::IReplaySummaryStore*>(pg_session_repo.get()),
+          ephemeral_registry.get());
+  auto routing_agent_log_writer =
+      std::make_unique<cex::backtest::infra::RoutingAgentLogWriter>(
+          static_cast<cex::backtest::app::IAgentLogWriter*>(&storage),
+          ephemeral_registry.get());
+
   cex::backtest::app::CreateReplaySession::Dependencies create_replay_deps;
-  create_replay_deps.session_repo = pg_session_repo.get();
+  create_replay_deps.session_repo = routing_session_repo.get();
   create_replay_deps.config_builder = &config_snapshot_builder;
   create_replay_deps.historical_loader =
       static_cast<cex::backtest::app::IHistoricalBatchLoader*>(&storage);
@@ -164,24 +210,23 @@ int main() {
   // event; running cancels set a session-scoped token that RunReplaySession
   // observes at the next safe point.
   cex::backtest::app::CancelReplaySession::Dependencies cancel_deps;
-  cancel_deps.session_repo = pg_session_repo.get();
-  cancel_deps.summary_store = pg_session_repo.get();
+  cancel_deps.session_repo = routing_session_repo.get();
+  cancel_deps.summary_store = routing_summary_store.get();
   cancel_deps.event_publisher = &replay_event_publisher;
   cex::backtest::app::CancelReplaySession cancel_replay_session_uc(cancel_deps);
 
   cex::backtest::app::RetryReplaySessionUseCase::Dependencies retry_deps;
-  retry_deps.session_repo = pg_session_repo.get();
+  retry_deps.session_repo = routing_session_repo.get();
   cex::backtest::app::RetryReplaySessionUseCase retry_replay_session_uc(retry_deps);
 
   cex::backtest::app::RunReplaySession::Dependencies run_replay_deps;
-  run_replay_deps.session_repo = pg_session_repo.get();
+  run_replay_deps.session_repo = routing_session_repo.get();
   run_replay_deps.config_builder = &config_snapshot_builder;
   run_replay_deps.shadow_init = &shadow_namespace_uc;
   run_replay_deps.shadow_ledger = &shadow_ledger;
   run_replay_deps.history_loader = &hist_loader_uc;
-  run_replay_deps.agent_log_writer =
-      static_cast<cex::backtest::app::IAgentLogWriter*>(&storage);
-  run_replay_deps.summary_store = pg_session_repo.get();
+  run_replay_deps.agent_log_writer = routing_agent_log_writer.get();
+  run_replay_deps.summary_store = routing_summary_store.get();
   run_replay_deps.event_publisher = &replay_event_publisher;
   run_replay_deps.runtime_metrics = &replay_metrics;
   run_replay_deps.cancellation_token = &cancel_replay_session_uc;
@@ -215,6 +260,7 @@ int main() {
   replay_cmd_ucs.run = &run_replay_session_uc;
   replay_cmd_ucs.retry = &retry_replay_session_uc;
   replay_cmd_ucs.events = &replay_event_publisher;
+  replay_cmd_ucs.ephemeral_registry = ephemeral_registry.get();
   cex::backtest::infra::ReplayCommandsKafkaConsumer replay_commands_consumer(
       replay_cmd_ucs, brokers,
       cex::common::Env::get_string("REPLAY_COMMANDS_TOPIC", "replay.commands"));

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -9,6 +12,18 @@
 #include "infra/postgres/postgres_rbac_repository.hpp"
 
 namespace cex::backtest::app {
+
+// Reads REPLAY_RBAC_ENFORCEMENT env var. Defaults to true (secure). Returns
+// false only when explicitly set to a falsy value (false/0/off/no). Used as a
+// dev/demo bypass until per-user replay roles are seeded.
+inline bool RbacEnforcementEnabled() {
+  const char* raw = std::getenv("REPLAY_RBAC_ENFORCEMENT");
+  if (raw == nullptr || *raw == '\0') return true;
+  std::string v(raw);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return !(v == "false" || v == "0" || v == "off" || v == "no");
+}
 
 using PostgresRbacRepository = infra::postgres::PostgresRbacRepository;
 
@@ -28,7 +43,9 @@ class RbacEngine {
 
   explicit RbacEngine(std::shared_ptr<PostgresRbacRepository> repository,
                       Clock clock = nullptr)
-      : repository_(std::move(repository)), clock_(std::move(clock)) {
+      : repository_(std::move(repository)),
+        clock_(std::move(clock)),
+        enforcement_enabled_(RbacEnforcementEnabled()) {
     if (!clock_) {
       clock_ = []() { return std::chrono::system_clock::now(); };
     }
@@ -40,6 +57,12 @@ class RbacEngine {
                                  const std::string& resource_id = "") {
     (void)resource_type;
     (void)resource_id;
+
+    // Dev/demo bypass: roles not yet seeded. Re-enable with
+    // REPLAY_RBAC_ENFORCEMENT=true (default).
+    if (!enforcement_enabled_) {
+      return AuthorizationResult{true, std::nullopt};
+    }
 
     if (user_id.empty()) {
       return AuthorizationResult{false, "User ID is required"};
@@ -93,6 +116,7 @@ class RbacEngine {
                         const std::string& session_id,
                         const std::string& session_owner_id) {
     (void)session_id;
+    if (!enforcement_enabled_) return true;
     auto ctx = GetUserContext(user_id);
     if (ctx && ctx->IsAdmin()) return true;
     return user_id == session_owner_id;
@@ -120,6 +144,7 @@ class RbacEngine {
 
   std::shared_ptr<PostgresRbacRepository> repository_;
   Clock clock_;
+  bool enforcement_enabled_ = true;
 };
 
 }  // namespace cex::backtest::app

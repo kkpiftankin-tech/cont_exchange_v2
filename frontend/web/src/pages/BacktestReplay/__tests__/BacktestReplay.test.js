@@ -19,6 +19,9 @@ const translate = (key, options = {}) => {
   if (key === 'replay.sessions.liveConnected') return `live:${options.transport}`;
   if (key === 'replay.sessions.liveUpdated') return `updated:${options.time}`;
   if (key === 'replay.audit.loaded') return `audit:${options.count}`;
+  if (key === 'replay.playback.batchOf') return `batch:${options.current}/${options.total}`;
+  if (key === 'replay.playback.buffering') return `buffering:${options.loaded}/${options.total}`;
+  if (key === 'replay.playback.cappedNotice') return `capped:${options.cap}/${options.total}`;
   return key;
 };
 
@@ -139,7 +142,9 @@ describe('BacktestReplay UI', () => {
 
     expect(await screen.findByText('replay.states.pending')).toBeInTheDocument();
     expect(screen.getAllByText('0 / 10').length).toBeGreaterThan(0);
-    expect(screen.getByText('live:sse')).toBeInTheDocument();
+    // Live SSE subscription now activates once the (active) session is selected,
+    // not eagerly on mount, so await the connection indicator.
+    expect(await screen.findByText('live:sse')).toBeInTheDocument();
 
     phase = 'running';
     await act(async () => {
@@ -390,8 +395,8 @@ describe('BacktestReplay UI', () => {
     expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({
       name: 'BTC replay validation',
       instruments: ['BTCUSDT'],
-      daterangefrom: '2026-04-01',
-      daterangeto: '2026-04-07',
+      daterangefrom: '2026-05-25',
+      daterangeto: '2026-05-26',
       solverconfigid: 'solver-prod-v4',
       risklimitsid: 'risk-standard',
       feemodel: { production: true },
@@ -427,6 +432,127 @@ describe('BacktestReplay UI', () => {
       target: { name: 'solverConfigJson', value: '{"batchintervalms":1000}' },
     });
     expect(runButton).toBeDisabled();
+  });
+
+  test('persist toggle is OFF by default', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const { container } = renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    const persistCheckbox = container.querySelector('input[name="persist"]');
+    expect(persistCheckbox).toBeInTheDocument();
+    expect(persistCheckbox.checked).toBe(false);
+  });
+
+  test('payload contains persist:false by default and persist:true when checked', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const { container } = renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    // Default: persist=false => ephemeral create
+    fireEvent.click(await screen.findByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+    expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({ persist: false });
+
+    mockCreateReplaySession.mockClear();
+
+    // Check the persist checkbox => persist:true
+    const persistCheckbox = container.querySelector('input[name="persist"]');
+    fireEvent.click(persistCheckbox);
+    expect(persistCheckbox.checked).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+    expect(mockCreateReplaySession.mock.calls[0][0]).toMatchObject({ persist: true });
+  });
+
+  test('ephemeral run does not add to sessions list and renders summary from stream event', async () => {
+    mockListReplaySessions.mockResolvedValue({ items: [], total: 0 });
+    mockGetReplaySummary.mockResolvedValue({});
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    const ephemeralCreatedSession = makeSession({
+      sessionid: 'eph-001',
+      name: 'Ephemeral run',
+      status: 'running',
+    });
+    mockCreateReplaySession.mockResolvedValue({ session: ephemeralCreatedSession });
+
+    let ephemeralSubscription = null;
+    mockSubscribeReplayResults.mockImplementation((callbacks) => {
+      // Track only the ephemeral subscription (sessionid = eph-001)
+      if (callbacks.sessionid === 'eph-001') {
+        ephemeralSubscription = callbacks;
+      } else {
+        lastSubscription = callbacks;
+        callbacks.onOpen?.({ transport: 'sse' });
+      }
+      return jest.fn();
+    });
+
+    renderReplayPage();
+    await waitFor(() => {
+      expect(mockListReplaySessions).toHaveBeenCalled();
+    });
+
+    // persist is OFF by default: run the form
+    fireEvent.click(await screen.findByRole('button', { name: 'replay.form.run' }));
+    await waitFor(() => {
+      expect(mockCreateReplaySession).toHaveBeenCalled();
+    });
+
+    // The session must NOT appear in the sessions list
+    expect(screen.queryByText('eph-001')).not.toBeInTheDocument();
+
+    // The ephemeral panel should appear
+    expect(await screen.findByText('replay.ephemeral.panelTitle')).toBeInTheDocument();
+    expect(screen.getAllByText('replay.states.ephemeralStarted').length).toBeGreaterThan(0);
+
+    // Simulate stream completion event with summary
+    const streamSummary = {
+      totalpnl: 42.5,
+      avgis: -1.1,
+      sharpe: 1.3,
+      fillrate: 88,
+      maxdrawdown: 0.5,
+      avgsolvetime: 25,
+      totalbatches: 10,
+      totalfillevents: 55,
+      processedbatches: 10,
+      failedbatches: 0,
+      partial: false,
+      nodata: false,
+    };
+    await act(async () => {
+      ephemeralSubscription?.onEvent({
+        type: 'replay.completed',
+        sessionid: 'eph-001',
+        status: 'completed',
+        summary: streamSummary,
+      });
+    });
+
+    expect(await screen.findByText('replay.states.ephemeralCompleted')).toBeInTheDocument();
+    // No REST call for loadResults (getReplaySummary should NOT be called for eph-001)
+    expect(mockGetReplaySummary).not.toHaveBeenCalledWith('eph-001');
+
+    // Dismiss button closes the panel
+    fireEvent.click(screen.getByRole('button', { name: 'replay.ephemeral.dismiss' }));
+    expect(screen.queryByText('replay.ephemeral.panelTitle')).not.toBeInTheDocument();
   });
 
   test('requests AgentLog pagination and filters from backend', async () => {
@@ -495,6 +621,181 @@ describe('BacktestReplay UI', () => {
         batchseq: '5',
         offset: 0,
       }));
+    });
+  });
+
+  // ===== Playback tests =====
+
+  test('playback tab appears only for completed sessions and advances frames on Play', async () => {
+    jest.useFakeTimers();
+
+    const completedSession = makeSession({
+      sessionid: 'rpl-pb-1',
+      name: 'Playback Session',
+      status: 'completed',
+      progressbatches: 3,
+      totalbatches: 3,
+      progress: 100,
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-pb-1', totalpnl: 10 });
+    mockGetReplayAgentLogs.mockImplementation(async (_sessionid, opts) => {
+      if (opts && opts.limit === 200) {
+        // Playback buffer fetch
+        return {
+          items: [
+            { batchseq: 1, pnl: 1, fillrate: 80, solvetime_ms: 10, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60000 } } },
+            { batchseq: 2, pnl: 2, fillrate: 85, solvetime_ms: 12, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60100 } } },
+            { batchseq: 3, pnl: 3, fillrate: 90, solvetime_ms: 15, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: { clearprices: { BTCUSDT: 60200 } } },
+          ],
+          total: 3,
+        };
+      }
+      // Normal batch page fetch
+      return { items: [], total: 0 };
+    });
+
+    renderReplayPage();
+
+    // Wait for sessions to load
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    // Playback tab should be present for completed session
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    expect(playbackTab).toBeInTheDocument();
+
+    // Open Playback tab — triggers buffer load
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    // Wait for buffer to finish loading (status goes idle)
+    await waitFor(() => {
+      expect(mockGetReplayAgentLogs).toHaveBeenCalledWith(
+        'rpl-pb-1',
+        expect.objectContaining({ limit: 200, offset: 0 })
+      );
+    });
+
+    // Play button should be visible
+    const playBtn = await screen.findByRole('button', { name: 'replay.playback.play' });
+    expect(playBtn).toBeInTheDocument();
+
+    // batch:1/3 should be shown (cursor=0 means first batch)
+    expect(await screen.findByText('batch:1/3')).toBeInTheDocument();
+
+    // Click Play
+    await act(async () => {
+      fireEvent.click(playBtn);
+    });
+
+    // Advance one tick (1 second at 1x speed)
+    await act(async () => {
+      jest.advanceTimersByTime(1100);
+    });
+
+    // cursor should have advanced to batch 2
+    await waitFor(() => {
+      expect(screen.getByText('batch:2/3')).toBeInTheDocument();
+    });
+
+    jest.useRealTimers();
+  });
+
+  test('playback tab is hidden for non-completed sessions', async () => {
+    const pendingSession = makeSession({ sessionid: 'rpl-pending-1', status: 'pending' });
+    mockListReplaySessions.mockResolvedValue({ items: [pendingSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-pending-1' });
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    // Should NOT have a playback tab
+    await waitFor(() => {
+      expect(screen.queryByRole('tab', { name: 'replay.tabs.playback' })).not.toBeInTheDocument();
+    });
+  });
+
+  test('playback shows noData message when agent logs are empty', async () => {
+    const completedSession = makeSession({
+      sessionid: 'rpl-empty-1',
+      status: 'completed',
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-empty-1' });
+    mockGetReplayAgentLogs.mockResolvedValue({ items: [], total: 0 });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('replay.playback.noData')).toBeInTheDocument();
+    });
+  });
+
+  test('playback scrubber seek updates the displayed frame', async () => {
+    const completedSession = makeSession({
+      sessionid: 'rpl-seek-1',
+      status: 'completed',
+      cancancel: false,
+      canretry: false,
+    });
+
+    mockListReplaySessions.mockResolvedValue({ items: [completedSession], total: 1 });
+    mockGetReplaySummary.mockResolvedValue({ sessionid: 'rpl-seek-1' });
+    mockGetReplayAgentLogs.mockImplementation(async (_sessionid, opts) => {
+      if (opts && opts.limit === 200) {
+        return {
+          items: [
+            { batchseq: 1, pnl: 1, fillrate: 80, solvetime_ms: 10, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+            { batchseq: 2, pnl: 2, fillrate: 85, solvetime_ms: 12, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+            { batchseq: 3, pnl: 3, fillrate: 90, solvetime_ms: 15, residualnorm: 0.001, riskstatus: 'OK', solvererrorflag: false, batchresult: {} },
+          ],
+          total: 3,
+        };
+      }
+      return { items: [], total: 0 };
+    });
+
+    renderReplayPage();
+
+    await waitFor(() => expect(mockListReplaySessions).toHaveBeenCalled());
+
+    const playbackTab = await screen.findByRole('tab', { name: 'replay.tabs.playback' });
+    await act(async () => {
+      fireEvent.click(playbackTab);
+    });
+
+    // Wait for buffer loaded (idle state, play button visible)
+    const playBtn = await screen.findByRole('button', { name: 'replay.playback.play' });
+    expect(playBtn).toBeInTheDocument();
+
+    // Initially at batch 1
+    expect(screen.getByText('batch:1/3')).toBeInTheDocument();
+
+    // Seek to index 2 (batch 3)
+    const scrubber = screen.getByLabelText('replay.playback.seek');
+    await act(async () => {
+      fireEvent.change(scrubber, { target: { value: '2' } });
+    });
+
+    // Should show batch 3
+    await waitFor(() => {
+      expect(screen.getByText('batch:3/3')).toBeInTheDocument();
     });
   });
 });

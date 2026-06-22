@@ -1,3 +1,19 @@
+// ============================================================================
+// venues/main.cpp — entry point сервиса venues (F-11, F-12, F-20).
+//
+// Что делает:
+//   - PG repositories: hedgeflows / child_orders / sim_sessions / venue_configs.
+//   - ClickHouse writer для snapshot persistence.
+//   - VenuesLoop — главный orchestrator (см. cpp/venues/src/app/venues_loop.cpp).
+//   - SimSessionManager — F-20 lifecycle SimSession (create/update/complete).
+//   - HTTP admin endpoints (Crow):
+//       * /v1/venues/configs — operator API для добавления venues.
+//       * /v1/sim/sessions    — F-20 SimSession CRUD.
+//       * /healthz             — liveness probe.
+//       * /metrics              — Prometheus.
+//   - VENUES_AUTO_SIM_MODE env — auto-создание SimSession при cold start
+//     (safe-default: всё что hedge'ится идёт в sim, не в production CEX/DEX).
+// ============================================================================
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/decimal.hpp"

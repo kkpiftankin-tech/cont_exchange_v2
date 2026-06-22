@@ -1,3 +1,16 @@
+// ============================================================================
+// matching/main.cpp — entry point сервиса matching (F-04, F-09, F-12).
+//
+// Что делает:
+//   - Опционально PG repos для flow_orders (читает заявки на каждый тик)
+//     и solver_config (hot-reload параметров без рестарта).
+//   - gRPC-клиент к market_data для reference prices.
+//   - Запускает MatchingLoop (background threads: orders Kafka consumer,
+//     venue.liquidity.fob consumer, venue.health consumer, batch timer).
+//   - Запускает gRPC IsolationMatching для F-15 backtest replay (отдельный
+//     solver instance, не trogает live state).
+//   - HTTP /healthz + /metrics (Prometheus) + /orders/<id> для UI.
+// ============================================================================
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -17,6 +30,8 @@
 #include "infra/postgres/postgres_flow_order_repository.hpp"
 #include "infra/postgres/postgres_solver_config_repository.hpp"
 #include "transport/grpc_isolation_matching_service.hpp"
+#include "transport/grpc_compensation_service.hpp"
+#include "infra/postgres_combo_compensation_repository.hpp"
 #include "crow.h"
 
 int main() {
@@ -58,7 +73,9 @@ int main() {
 
   cex::matching::app::SolverMetrics metrics;
   cex::matching::app::MatchingLoop loop(brokers, interval_ms,
-    flow_order_repository, std::move(solver_config_repo), market_data_client, metrics);
+    flow_order_repository, std::move(solver_config_repo), market_data_client, metrics,
+    // F-09 (T-F09-048): тот же DSN включает grouped combo-цикл.
+    postgres_dsn.value_or(std::string()));
   loop.start();
 
   const std::string isolation_listen =
@@ -68,6 +85,21 @@ int main() {
   grpc::ServerBuilder isolation_builder;
   isolation_builder.AddListeningPort(isolation_listen, grpc::InsecureServerCredentials());
   isolation_builder.RegisterService(&isolation_service);
+
+  // F-09 MVP-6 (T-F09-065, ADR-040): CompensationService на том же gRPC-сервере.
+  // Доступен только когда есть PG-DSN (combo_compensations владеет matching).
+  std::unique_ptr<cex::matching::infra::PostgresComboCompensationRepository> compensation_repo;
+  std::unique_ptr<cex::matching::transport::GrpcCompensationService> compensation_service;
+  if (postgres_dsn.has_value() && !postgres_dsn->empty()) {
+    compensation_repo =
+        std::make_unique<cex::matching::infra::PostgresComboCompensationRepository>(*postgres_dsn);
+    compensation_service =
+        std::make_unique<cex::matching::transport::GrpcCompensationService>(compensation_repo.get());
+    isolation_builder.RegisterService(compensation_service.get());
+    cex::common::log_json("INFO", "Matching CompensationService gRPC enabled",
+                          {{"addr", isolation_listen}});
+  }
+
   auto isolation_server = isolation_builder.BuildAndStart();
   if (isolation_server) {
     cex::common::log_json("INFO", "Matching isolation gRPC listening",
@@ -111,7 +143,8 @@ int main() {
   [[maybe_unused]] auto metrics_server =
       metrics_app.port(metrics_port).run_async();
 
-  // run forever
+  // run forever — все важное работает в background threads (MatchingLoop,
+  // metrics HTTP, isolation gRPC). main thread просто блокирует.
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(60));
   }

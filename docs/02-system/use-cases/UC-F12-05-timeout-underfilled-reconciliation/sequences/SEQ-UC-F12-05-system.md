@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F12-05-system
+level: kite
+---
+-->
+
 # SEQ-UC-F12-05-system. Timeout / Underfilled / Reconciliation: system view
 
 ## Type

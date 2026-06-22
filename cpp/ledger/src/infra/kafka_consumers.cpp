@@ -20,6 +20,7 @@ void KafkaConsumers::start() {
   t1_ = std::thread([this] { loop_batch_outputs(); });
   t2_ = std::thread([this] { loop_execution_intents(); });
   t3_ = std::thread([this] { loop_execution_reports(); });
+  t4_ = std::thread([this] { loop_execution_groups(); });
 }
 
 void KafkaConsumers::stop() {
@@ -27,6 +28,34 @@ void KafkaConsumers::stop() {
   if (t1_.joinable()) t1_.join();
   if (t2_.joinable()) t2_.join();
   if (t3_.joinable()) t3_.join();
+  if (t4_.joinable()) t4_.join();
+}
+
+// F-09 (T-F09-060): consume execution.groups → ApplyExecutionGroup (grouped postings).
+void KafkaConsumers::loop_execution_groups() {
+  cex::common::KafkaConsumer consumer({
+      .brokers = brokers_,
+      .group_id = "ledger-execution-groups",
+      .client_id = "ledger",
+      .enable_auto_commit = false,
+  });
+  consumer.subscribe({"execution.groups"});
+
+  while (running_.load()) {
+    bool ok = consumer.poll_once(
+        500, [this](const std::string& topic, const std::string& key,
+                    const std::string& payload) {
+          (void)topic;
+          (void)key;
+          fob::matching::v1::ExecutionGroup eg;
+          if (!cex::common::from_bytes(payload, eg)) {
+            cex::common::log_json("ERROR", "Failed to parse execution.groups payload");
+            return;
+          }
+          uc_->ApplyExecutionGroup(eg);
+        });
+    if (!ok) break;
+  }
 }
 
 void KafkaConsumers::loop_batch_outputs() {

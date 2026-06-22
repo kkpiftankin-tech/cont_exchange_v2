@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F10-UC-F10-01-services
+level: sea
+---
+-->
+
 # SEQ-F10-UC-F10-01-services. MM Curve: service view
 
 ## Type

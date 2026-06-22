@@ -3,6 +3,47 @@
 > **Статус:** in-progress, MVP-сервис реализован, UI отсутствует. Самая
 > зрелая фича из тройки F-11/F-12/F-15 по покрытию кода.
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F15-01](../../use-cases/UC-F15-01-create-replay-session/use-case.md) | Create Replay Session | [SEQ-UC-F15-01-system](../../use-cases/UC-F15-01-create-replay-session/sequences/SEQ-UC-F15-01-system.md) | [SEQ-F15-UC-F15-01-services](../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md) |
+| [UC-F15-01](../../use-cases/UC-F15-01-replay-historical-batch/use-case.md) | Replay Historical Batch | [SEQ-UC-F15-01-system](../../use-cases/UC-F15-01-replay-historical-batch/sequences/SEQ-UC-F15-01-system.md) | [SEQ-F15-UC-F15-01-services](../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md) |
+| [UC-F15-02](../../use-cases/UC-F15-02-cancel-replay-session/use-case.md) | Cancel Replay Session | [SEQ-UC-F15-02-system](../../use-cases/UC-F15-02-cancel-replay-session/sequences/SEQ-UC-F15-02-system.md) | [SEQ-F15-02-replay-cycle-services](../../../05-components/sequences/SEQ-F15-02-replay-cycle-services.md) |
+| [UC-F15-03](../../use-cases/UC-F15-03-ab-compare-sessions/use-case.md) | Ab Compare Sessions | [SEQ-UC-F15-03-system](../../use-cases/UC-F15-03-ab-compare-sessions/sequences/SEQ-UC-F15-03-system.md) | [SEQ-F15-03-cancel-services](../../../05-components/sequences/SEQ-F15-03-cancel-services.md) |
+| [UC-F15-04](../../use-cases/UC-F15-04-audit-mode-replay/use-case.md) | Audit Mode Replay | [SEQ-UC-F15-04-system](../../use-cases/UC-F15-04-audit-mode-replay/sequences/SEQ-UC-F15-04-system.md) | [SEQ-F15-04-audit-mode-services](../../../05-components/sequences/SEQ-F15-04-audit-mode-services.md) |
+| [UC-F15-05](../../use-cases/UC-F15-05-retry-failed-session/use-case.md) | Retry Failed Session | [SEQ-UC-F15-05-system](../../use-cases/UC-F15-05-retry-failed-session/sequences/SEQ-UC-F15-05-system.md) | — |
+| [UC-F15-06](../../use-cases/UC-F15-06-replay-determinism-check/use-case.md) | Replay Determinism Check | [SEQ-UC-F15-06-system](../../use-cases/UC-F15-06-replay-determinism-check/sequences/SEQ-UC-F15-06-system.md) | — |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [backtest-service](../../../05-components/backtest-service/overview.md) | [SEQ-BACKTEST-01-create-session](../../../05-components/backtest-service/sequences/SEQ-BACKTEST-01-create-session.md), [SEQ-BACKTEST-02-batch-replay-step](../../../05-components/backtest-service/sequences/SEQ-BACKTEST-02-batch-replay-step.md) |
+| [matching-fob-core](../../../05-components/matching-fob-core/overview.md) | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
+| [risk-manager](../../../05-components/risk-manager/overview.md) | (L2 sequences pending) |
+| `settlement-ledger` (overview pending) | (L2 sequences pending) |
+| [market-data](../../../05-components/market-data/overview.md) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Бизнес-смысл
 
 Backtest/Replay даёт три ключевых возможности:

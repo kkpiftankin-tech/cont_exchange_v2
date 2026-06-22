@@ -28,7 +28,7 @@ IN-005 описывает **Execution Planning** как самостоятель
 - retry с urgency upgrade при reconciliation gap;
 - передача `ExecutionIntent + RoutingPlan` в Venue Execution Adapter.
 
-В текущем коде есть только абстрактный интерфейс [`IExecutionPlanningUseCases`](../../cpp/matching/src/app/execution_planning_uc.hpp) в `cpp/matching/src/app/`. Реализации нет.
+В текущем коде есть только абстрактный интерфейс [`IExecutionPlanningUseCases`](../../../cpp/venues/src/app/execution_planning_uc.hpp) в `cpp/matching/src/app/`. Реализации нет.
 
 Вопрос: где разместить реализацию?
 

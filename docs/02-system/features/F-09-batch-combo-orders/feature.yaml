@@ -1,44 +1,162 @@
 feature:
   id: F-09
-  name: Batch and Combo Orders
-  status: not-implemented
+  name: Batch, Combo and Multi-leg Orders
+  status: implemented
   owner: core-team
+  level: kite
 
 description: >
-  Multi-leg FlowOrder и комбо-ордера: одна заявка покрывает несколько активов
-  с весами w_i. Требует расширения proto FlowOrder и поддержки в matching.
+  Заявки, в которых пользовательский торговый intent относится не к одному
+  инструменту, а к связанной группе ног (BatchOrder / ComboOrder / pair /
+  basket / spread / OCO / bracket / factor-, budget-, risk-constrained).
+  Группа исполняется как единый бизнес-объект. F-09 явно различает два режима:
+  orchestration_only (оркестрация независимых ног, без гарантий) и
+  multileg_vector_solver (настоящее многоногое исполнение согласованным
+  вектором e_g в одном ExecutionGroup). Источник: IN-011 (F-09 v2 corrected).
+
+source:
+  in: IN-011
+  file: incoming-docs/2026-06-05-F-09-batch-combo-orders-v2.md
+  fragmentMap: incoming-docs/IN-011.fragment-map.md
+
+executionModes:
+  - id: orchestration_only
+    note: >
+      Parent object для группы; ноги живут как независимые FlowOrder.
+      Не гарантирует weights/ratio/spread/portfolio exposure. Требует явного
+      выбора пользователя + предупреждение.
+  - id: multileg_vector_solver
+    note: >
+      Matching решает grouped problem, выбирает согласованный вектор e_g.
+      Обязателен для weights/ratio/spread/factor/budget/leverage/margin/risk
+      ограничений (IN-011 §3, §21).
+
+atomicityPolicies: [strict_atomic, scalable_atomic, best_effort, sequential_fallback, external_compensating]
+atomicityScopes: [internal_batch, venue_native, external_compensating, none]
+comboTypes: [pair, basket, spread, conditional, oco, bracket]
 
 primaryComponents:
   - order-flow
   - matching
   - risk
   - ledger
+  - market-data
+  - venues
+  - observability
 
 protoContracts:
-  - contracts/proto/fob/orders/v1/orders.proto
-  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/orders/v1/order_flow_service.proto   # +CreateComboOrder/CreateBatchOrder/PreviewComboOrder/CancelComboOrder/GetComboOrder
+  - contracts/proto/fob/orders/v1/combo.proto                 # new: BatchOrder, ComboOrder, Leg, MultiLegConstraint, ConditionalLink, enums
+  - contracts/proto/fob/matching/v1/execution_group.proto     # new: ExecutionGroup, LegFill, GroupSolverDiagnostics
 
-codePaths: []
+codePaths: []   # not implemented — см. implementation-plan/F-09-batch-combo-orders.tasks.md
 
 kafkaTopics:
-  produces: []
-  consumes: []
+  produces:
+    - execution.groups        # matching → ExecutionGroup (key parentOrderId), ADR-033
+    - orders.normalized       # order_flow → grouped payload (parent+legs+constraints+graph+mode+policy)
+  consumes:
+    - orders.normalized       # matching reads grouped orders
+    - execution.groups        # ledger/risk/order_flow/observability/backtest
+    - batch.outputs           # matching cycle context
+    - risk.alerts             # orphan/degraded/compensation signals
 
 grpcServices:
-  exposes: []
-  calls: []
+  exposes:
+    - OrderFlowService/CreateComboOrder
+    - OrderFlowService/CreateBatchOrder
+    - OrderFlowService/PreviewComboOrder
+    - OrderFlowService/CancelComboOrder
+    - OrderFlowService/GetComboOrder
+  calls:
+    - RiskService/PreTradeCheckGroup
+    - MarketDataService/GetReferencePrices
+
+postgresTables:
+  - batch_orders
+  - combo_orders
+  - combo_order_legs        # расширяет flow_order_legs
+  - combo_constraints
+  - conditional_links
+  - execution_groups
+  - group_state_transitions
+
+clickhouseTables:
+  - grouped_execution_events
+  - grouped_leg_fills
+  - grouped_quality_metrics
+  - grouped_ratio_deviation
+  - grouped_replay_results
+
+relatedAdrs:
+  - ADR-031   # execution modes & atomicity
+  - ADR-032   # parent/child order model
+  - ADR-033   # execution.groups topic
+  - ADR-022   # batch clearing solver & replay (grouped determinism)
+  - ADR-025   # risk manager boundaries (grouped checks)
+
+relatedFeatures: [F-02, F-04, F-05, F-06, F-07, F-11, F-12, F-15]
 
 acceptanceCriteria:
-  - "FlowOrder поддерживает массив legs: [{asset, weight}]"
-  - "matching корректно балансирует veka между ногами"
-  - "ledger применяет mirror legs (positive/negative qty)"
+  - id: AC-F09-001
+    text: "Заявка с executionMode=multileg_vector_solver исполняется grouped solve; matching не имеет права исполнять ноги как независимые FlowOrder."
+  - id: AC-F09-002
+    text: "BasketOrder с жёсткими target weights: итоговое исполнение не выводит портфель за maxWeightDeviationBps."
+  - id: AC-F09-003
+    text: "strict_atomic при недоступности обязательной ноги: executionScale=0, fills=[], group cancelled_by_atomicity|waiting_next_batch, orphanLegs=0."
+  - id: AC-F09-004
+    text: "scalable_atomic при ограничении одной ноги: e_g=α_g·ρ_g, ratio deviation ≤ tolerance."
+  - id: AC-F09-005
+    text: "best_effort фиксирует violatedConstraints, fallbackAction, ratioDeviation и user-visible degraded status."
+  - id: AC-F09-006
+    text: "Внешние ноги без native atomic support не маркируются strict_atomic."
+  - id: AC-F09-007
+    text: "OCO: исполнение одной ветви идемпотентно отменяет sibling-ветви."
+  - id: AC-F09-008
+    text: "Bracket: exit-ветви (TP/SL) активируются только на фактически исполненный entry volume."
+  - id: AC-F09-009
+    text: "Ledger применяет grouped execution по ноге, по parent, по fees, PnL, margin impact."
+  - id: AC-F09-010
+    text: "История grouped execution детерминированно воспроизводится в F-15 Replay (ExecutionGroup, leg fills, status transitions, solver diagnostics)."
+
+outOfScope:
+  - cross-venue true atomic execution без native venue support
+  - complex options strategy solver
+  - non-linear Greeks-based constraints
+  - RL-based routing
+  - full rollback of already executed external trades
+  - prime-broker style settlement netting
 
 knownIssues:
-  - id: proto-extension-needed
+  - id: not-implemented
     severity: blocker
-    description: Требуется расширение proto FlowOrder полем legs[]; пока не реализовано
+    description: >
+      F-09 не реализована. Нет proto combo/execution_group, нет grouped solver
+      в matching, нет таблиц combo_*/execution_groups, нет топика
+      execution.groups. План — implementation-plan/F-09-batch-combo-orders.tasks.md.
+  - id: solver-formulation-open
+    severity: major
+    description: >
+      Open question: per-symbol bisection vs QP-библиотека (OSQP/Eigen) для
+      A_g e=b_g α, G_g e≤h. Решается в фазе F task plan.
+  - id: legs-table-merge
+    severity: minor
+    description: >
+      combo_order_legs расширяет существующую flow_order_legs — выбор
+      «расширить vs новая таблица» влияет на F-02/F-04 (ADR-032).
+
+conflictNotes:
+  - id: CN-IN011-01
+    summary: "Stub: combo=атомарный набор FlowOrder. IN-011: два режима + 5 политик. Резолюция — ADR-031."
+  - id: CN-IN011-02
+    summary: "Stub: flow_orders+flow_order_legs(weight). IN-011: parent/child иерархия. Резолюция — ADR-032."
+  - id: CN-IN011-03
+    summary: "F-04: batch.outputs. IN-011: новый ExecutionGroup в execution.groups. Резолюция — ADR-033."
+  - id: CN-IN011-04
+    summary: "Внешний strict_atomic без venue_native запрещён. Резолюция — ADR-031, UC-F09-03, AC-F09-006."
 
 tests:
   unit: []
   integration: []
   contract: []
+  plan: docs/10-testing/features/F-09-test-plan.md

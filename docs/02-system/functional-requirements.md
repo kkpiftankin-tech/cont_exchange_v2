@@ -145,7 +145,7 @@ Acceptance: F-14 ([UC-F14-01](use-cases/UC-F14-01-deposit-funds/use-case.md)).
 
 При достижении внутреннего inventory threshold система формирует `ExecutionIntent` (venue, symbol, side, qty, urgency).
 
-Acceptance: F-12 ([UC-F12-01](use-cases/UC-F12-01-execute-hedge/use-case.md)).
+Acceptance: F-12 ([UC-F12-01](use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)).
 
 ### FR-HEDGE-002. Размещение и учёт
 

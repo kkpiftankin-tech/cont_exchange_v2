@@ -3,6 +3,7 @@ feature:
   name: Operator Console & Kill-Switch
   status: partially-implemented-in-risk
   owner: core-team
+  level: kite
 
 description: >
   Панель оператора: обзор состояния всех сервисов, метрик batch

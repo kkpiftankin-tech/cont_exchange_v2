@@ -26,8 +26,10 @@ color: cyan
 
 # Источники
 
-Прочитай:
+Прочитай (для трассируемости — сначала исходный документ фичи, потом нормализованные артефакты):
 
+- **Исходный архивный документ фичи** — `incoming-docs/YYYY-MM-DD-<slug>.md` (путь из поля **Source File** в `IN-NNN.meta.md`). Первичный источник требований; use cases / sequence diagrams / acceptance criteria выводятся из него, а не выдумываются.
+- `incoming-docs/IN-NNN.meta.md` + `IN-NNN.fragment-map.md` — какие фрагменты исходника уже разнесены и куда (чтобы не дублировать и сохранять `IN-NNN-FR-MMM`-трассировку).
 - `docs/01-business/`
 - `docs/02-system/features/F-XX-*/feature.yaml`
 - `docs/02-system/use-cases/UC-*-*/use-case.md`

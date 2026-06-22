@@ -1,3 +1,23 @@
+// ============================================================================
+// gateway/main.cpp — entry point HTTP gateway сервиса (edge для всех F-XX).
+//
+// Что делает:
+//   - REST HTTP server на Crow framework.
+//   - Routes:
+//       * POST /v1/flow-orders   — proxy в order_flow gRPC (F-02).
+//       * POST /v1/combo-orders  — F-09 combo orders.
+//       * GET  /v1/market-data/* — proxy в market_data gRPC (F-05).
+//       * F-15 replay endpoints  — sessions, compare, results.
+//       * /healthz                — liveness probe.
+//   - F-15 replay infrastructure:
+//       * Replay sessions PG repo + RBAC.
+//       * SSE/long-poll streaming для replay.results через ReplayResultsHub.
+//       * Kafka publisher для replay.commands.
+//   - Auth middleware (см. transport/auth_middleware.hpp) — JWT/header-based.
+//
+// Это edge service — единственный публичный entrypoint снаружи.
+// CLAUDE.md §22: prod требует mTLS/TLS termination перед gateway.
+// ============================================================================
 #include <algorithm>
 #include <chrono>
 #include <cmath>

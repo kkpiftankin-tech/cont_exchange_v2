@@ -34,6 +34,10 @@ struct ReplaySession {
   std::optional<std::chrono::system_clock::time_point> completed_at;
   std::optional<std::string> error_details;
   std::optional<std::string> retry_parent_id;
+  // F15-PERSIST: false ⇒ ephemeral session — lives in-memory only (no PG/CH
+  // writes). Default true preserves backward-compatible behaviour for callers
+  // that omit the field.
+  bool persist{true};
 };
 
 struct ReplaySessionListFilter {

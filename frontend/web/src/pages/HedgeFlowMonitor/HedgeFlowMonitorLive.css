@@ -21,6 +21,16 @@
   color: var(--hedge-text);
 }
 
+/* Явный тёмный фон панели и таблицы — НЕ полагаемся только на var(--hedge-panel).
+ * .hedge-summary-card имеет собственный explicit-градиент (потому карточки тёмные
+ * всегда), а .hedge-list-panel зависит лишь от переменной. Если var не
+ * разрезолвится (другой scope / устаревший кэш), панель становится прозрачной, а
+ * текст строк td — почти белый (#ffffffeb) → числовые значения исчезают на светлом
+ * фоне (видны лишь цветные BUY/бейджи). Даём гарантированно тёмную базу. */
+.hedge-list-panel {
+  background: linear-gradient(180deg, #1e1237f0, #0d071af5);
+}
+
 .hedge-live-table-wrap {
   overflow-x: auto;
   margin-top: 12px;
@@ -31,6 +41,7 @@
   border-collapse: collapse;
   font-size: 13px;
   font-family: 'Roboto Mono', 'Menlo', monospace;
+  background: #120a26;
 }
 
 .hedge-live-table thead th {

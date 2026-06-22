@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F15-02-system
+level: kite
+---
+-->
+
 # SEQ-UC-F15-02-system. Cancel Replay Session: system view
 
 ## Type
@@ -24,7 +31,7 @@ sequenceDiagram
     alt session.status == pending
         S->>S: status = cancelled (immediate)
     else session.status == running
-        S->>S: set cancellation token; finish current batch
+        S->>S: set cancellation token, finish current batch
         S->>S: save partial AgentLog + partial Summary
         S->>S: status = cancelled
     else terminal status

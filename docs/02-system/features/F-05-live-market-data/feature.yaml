@@ -3,6 +3,7 @@ feature:
   name: Live Market Data
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Market Data Service вычисляет и публикует рыночные данные в реальном времени.

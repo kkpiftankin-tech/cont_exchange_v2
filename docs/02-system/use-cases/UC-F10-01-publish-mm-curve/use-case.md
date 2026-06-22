@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F10-01. Опубликовать MM-кривую ликвидности
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-10-mm-curves](../../features/F-10-mm-curves/) |
+| ☁️ L0 system sequence | [SEQ-UC-F10-01-system](sequences/SEQ-UC-F10-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F10-UC-F10-01-services](../../../05-components/sequences/SEQ-F10-UC-F10-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

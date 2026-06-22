@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace cex::common {
 
@@ -107,6 +108,33 @@ int Decimal::cmp(const Decimal& a, const Decimal& b) {
   if (lhs < rhs) return -1;
   if (lhs > rhs) return 1;
   return 0;
+}
+
+Decimal Decimal::div(const Decimal& a, const Decimal& b, int32_t result_scale) {
+  if (b.units == 0) {
+    throw std::invalid_argument("Decimal::div division by zero");
+  }
+  // result ≈ a/b с result_scale знаками:
+  //   result_units = round( a.units / b.units * 10^(result_scale - a.scale + b.scale) ).
+  // Чтобы остаться в целых числах, домножаем числитель (k>=0) или знаменатель (k<0).
+  const int32_t k = result_scale - a.scale + b.scale;
+  __int128 num = a.units;
+  __int128 den = b.units;
+  if (k >= 0) {
+    num *= pow10_i128(k);
+  } else {
+    den *= pow10_i128(-k);
+  }
+  // Округление half-up (от нуля), знак учитываем отдельно от модулей.
+  const bool negative = (num < 0) ^ (den < 0);
+  const __int128 abs_num = num < 0 ? -num : num;
+  const __int128 abs_den = den < 0 ? -den : den;
+  __int128 quotient = abs_num / abs_den;
+  const __int128 remainder = abs_num % abs_den;
+  if (2 * remainder >= abs_den) {
+    quotient += 1;
+  }
+  return normalize_i128(negative ? -quotient : quotient, result_scale);
 }
 
 Decimal Decimal::min(const Decimal& a, const Decimal& b) {

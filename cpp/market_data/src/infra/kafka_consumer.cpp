@@ -1,6 +1,7 @@
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/batch_outputs.pb.h"
 #include "fob/matching/v1/fill_event.pb.h"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/orders/v1/orders.pb.h"
 #include "fob/venue/v1/venue.pb.h"
@@ -52,13 +53,14 @@ void MarketDataKafkaConsumer::loop() {
     if (!consumer.subscribe(
             {"marketdata.raw", "batch.outputs", "fills",
              "orders.normalized",   // F5-3: FlowOrder для FOB aggregate curves
-             "venue.liquidity.fob", "venue.snapshots", "execution.venue"})) {
+             "venue.liquidity.fob", "venue.snapshots", "execution.venue",
+             "execution.groups"})) {   // F-09: grouped combo execution
       cex::common::log_json("ERROR", "MarketData Kafka subscribe failed; retrying");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       continue;
     }
     cex::common::log_json("INFO", "MarketData Kafka subscribed",
-                          {{"topics", "batch.outputs,venue.liquidity.fob,venue.snapshots,execution.venue"},
+                          {{"topics", "marketdata.raw,batch.outputs,venue.liquidity.fob,venue.snapshots,execution.venue,execution.groups"},
                            {"group_id", "marketdata"},
                            {"auto_commit", "true"}});
 
@@ -131,6 +133,17 @@ void MarketDataKafkaConsumer::loop() {
                 const auto ts = std::chrono::system_clock::now();
                 const std::string fid = !ev.fill_id().empty() ? ev.fill_id() : key;
                 uc_->OnFillEvent(fill, fid, ev.batch_id(), ts);
+                return;
+              }
+
+              // F-09 observability: grouped combo execution → ClickHouse grouped_*.
+              if (topic == "execution.groups") {
+                fob::matching::v1::ExecutionGroup eg;
+                if (!cex::common::from_bytes(payload, eg)) {
+                  cex::common::log_json("ERROR", "Failed to parse execution.groups ExecutionGroup");
+                  return;
+                }
+                uc_->OnExecutionGroup(eg);
                 return;
               }
 

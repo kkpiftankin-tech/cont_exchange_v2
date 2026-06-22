@@ -60,6 +60,30 @@ message PreTradeCheckResponse {
   fob.common.v1.Decimal max_loss_estimate = 21;
 }
 
+// F-09 (T-F09-040): grouped pre-trade risk — проверка combo-группы целиком.
+message GroupRiskLegInput {
+  string instrument_symbol = 1;
+  fob.common.v1.Decimal notional = 2;  // |qty * price| в quote currency
+  bool external = 3;                    // нога требует внешней venue (F-12)
+}
+
+message PreTradeCheckGroupRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  // Строковые значения из combo.proto (без import): strict_atomic/scalable_atomic/
+  // best_effort/sequential_fallback/external_compensating.
+  string atomicity_policy = 3;
+  // internal_batch/venue_native/external_compensating/none.
+  string atomicity_scope = 4;
+  repeated GroupRiskLegInput legs = 5;
+}
+
+message PreTradeCheckGroupResponse {
+  fob.common.v1.EventMeta meta = 1;
+  RiskDecision decision = 2;
+  fob.common.v1.Error error = 3;  // reason на REJECT
+}
+
 message KillSwitchRequest {
   fob.common.v1.EventMeta meta = 1;
 
@@ -182,6 +206,9 @@ message PreHedgeVenueHealth {
 service RiskService {
   // Pre-trade risk check (sync)
   rpc CheckNewOrder(PreTradeCheckRequest) returns (PreTradeCheckResponse);
+
+  // F-09 (T-F09-040): grouped pre-trade risk check для combo-группы.
+  rpc PreTradeCheckGroup(PreTradeCheckGroupRequest) returns (PreTradeCheckGroupResponse);
 
   // Pre-hedge risk check (sync). Called by Execution Planning before any
   // ExecutionIntent is fulfilled. See PreHedgeCheckRequest for details.

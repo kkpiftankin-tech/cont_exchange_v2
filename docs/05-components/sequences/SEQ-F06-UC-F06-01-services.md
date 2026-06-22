@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F06-UC-F06-01-services
+level: sea
+---
+-->
+
 # SEQ-F06-UC-F06-01-services. Positions / PnL / Margin: service view
 
 ## Type

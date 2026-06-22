@@ -81,4 +81,16 @@ create_topic sim.alerts "$(retention_for_topic sim.alerts 2592000000)" # key = s
 create_topic logs "$(retention_for_topic logs 604800000)"
 create_topic metrics "$(retention_for_topic metrics 604800000)"
 
+# F-09: Batch/Combo/Multi-leg Orders (ADR-032, ADR-033)
+# execution.groups: grouped execution results published by matching per ComboOrder per batch cycle.
+# Key = parentOrderId (all groups for one parent stay in one partition, preserving order).
+# Retention 7d — same as batch.outputs (audit trail, replay-friendly, AC-F09-009/010).
+create_topic execution.groups "$(retention_for_topic execution.groups 604800000)"
+
+# backtest.execution.groups: isolated replay-only topic for F-15 backtest replay of grouped execution.
+# Analogous to backtest.execution.venue (ADR-015 sim isolation pattern).
+# Feeds grouped_replay_results ClickHouse table; never mixed with live execution.groups consumers.
+# Key = parentOrderId. Retention 7d.
+create_topic backtest.execution.groups "$(retention_for_topic backtest.execution.groups 604800000)"
+
 echo "Done."

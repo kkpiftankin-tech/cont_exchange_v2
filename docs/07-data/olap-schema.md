@@ -189,9 +189,175 @@ State–action–reward логи агентских политик (matching, ri
 | `marketdata.raw` | `marketdata` |
 | `risk.alerts` | `risk_events` |
 | `execution.reports` | `execution_reports` |
+| `execution.groups` | `grouped_execution_events`, `grouped_leg_fills` (F-09, через `market_data`) |
 | (planned) `agent.logs` | `agent_logs` |
 
 Реализация: ClickHouse `Kafka` engine table + materialized view → MergeTree target. См. [data-flow.md](data-flow.md).
+
+## F-09: Batch/Combo/Multi-leg Orders (OLAP)
+
+> Source: IN-011 (F-09 v2 corrected §14.2), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md).
+> Ingestion (**реализовано** в `market_data`, `ClickHouseBatchStorage::SaveExecutionGroup`, потребитель `execution.groups`, идемпотентно по `event_time_ms`): один `ExecutionGroup` → 4 записи —
+> `grouped_execution_events` (1/группа), `grouped_leg_fills` (1/нога), `grouped_quality_metrics` (1/группа: combined_notional/VWAP считаются в Decimal из leg_results, §9), `grouped_ratio_deviation` (1/нога: actual exec + `is_binding_leg` из `solver_diagnostics.binding_leg_ids`). `backtest.execution.groups` → `grouped_replay_results`.
+> ⚠️ Частично выводимо из события: `grouped_quality_metrics.combined_is_bps` = `null` (нужен arrival/decision price); `grouped_ratio_deviation.target_weight/target_ratio` = `null` (живут в `combo_order_legs` PG, не в событии). `deviation_bps` — group-level (per-leg в событии нет). MV для quality_metrics не используется — пишем строку напрямую.
+> Полный DDL — [`infra/clickhouse/init.sql`](../../infra/clickhouse/init.sql); зеркалится в `market_data` `EnsureSchema`. Денежные/количественные поля — `Decimal128(18)` (CLAUDE.md §9).
+
+### Таблица `grouped_execution_events`
+
+История событий grouped execution: один `ExecutionGroup` на строку. Источник — `execution.groups` (producer `matching`, ADR-033).
+
+```sql
+CREATE TABLE IF NOT EXISTS grouped_execution_events (
+    execution_group_id   String,
+    batch_id             String,
+    parent_order_id      String,
+    user_id              String,
+    combo_type           LowCardinality(String),
+    execution_mode       LowCardinality(String),
+    group_status         LowCardinality(String),
+    atomicity_policy     LowCardinality(String),
+    atomicity_scope      LowCardinality(String),
+    fallback_action      LowCardinality(String),
+    execution_scale      Decimal128(18),
+    ratio_deviation_bps  Nullable(Int32),
+    violated_constraints String,   -- JSON
+    solver_diagnostics   String,   -- JSON: groupSolveTimeMs, bindingLegs[], bindingConstraints[]
+    leg_count            UInt16,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+```
+
+### Таблица `grouped_leg_fills`
+
+История leg fills с привязкой к группе. Источник — расширенный топик `fills` (`parentOrderId`, `executionGroupId`, `legId`).
+
+```sql
+CREATE TABLE IF NOT EXISTS grouped_leg_fills (
+    fill_id              String,
+    execution_group_id   String,
+    parent_order_id      String,
+    leg_id               String,
+    batch_id             String,
+    user_id              String,
+    instrument_symbol    LowCardinality(String),
+    side                 LowCardinality(String),
+    exec_qty             Decimal128(18),
+    exec_price           Decimal128(18),
+    exec_notional        Decimal128(18),
+    group_policy         LowCardinality(String),
+    liquidity_source     LowCardinality(String),
+    venue_id             String,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (execution_group_id, leg_id, fill_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+```
+
+### Таблица `grouped_quality_metrics`
+
+Агрегаты качества по ExecutionGroup: combined VWAP/IS, ratio deviation. MV из `grouped_execution_events` + `grouped_leg_fills`.
+
+```sql
+CREATE TABLE IF NOT EXISTS grouped_quality_metrics (
+    execution_group_id   String,
+    parent_order_id      String,
+    batch_id             String,
+    user_id              String,
+    combo_type           LowCardinality(String),
+    atomicity_policy     LowCardinality(String),
+    group_status         LowCardinality(String),
+    execution_scale      Decimal128(18),
+    combined_vwap        Decimal128(18),
+    combined_notional    Decimal128(18),
+    combined_is_bps      Nullable(Int64),
+    ratio_deviation_bps  Nullable(Int32),
+    fallback_action      LowCardinality(String),
+    leg_count            UInt16,
+    violated_constraint_count UInt16,
+    solve_time_ms        UInt32,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+```
+
+### Таблица `grouped_ratio_deviation`
+
+История отклонений ratio/weight по batch cycle; выявление binding legs (AC-F09-002).
+
+```sql
+CREATE TABLE IF NOT EXISTS grouped_ratio_deviation (
+    execution_group_id   String,
+    parent_order_id      String,
+    batch_id             String,
+    user_id              String,
+    leg_id               String,
+    instrument_symbol    LowCardinality(String),
+    target_weight        Nullable(Decimal128(18)),
+    target_ratio         Nullable(Decimal128(18)),
+    actual_exec_qty      Decimal128(18),
+    actual_exec_notional Decimal128(18),
+    deviation_bps        Int32,
+    is_binding_leg       UInt8,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (parent_order_id, event_time_ms, leg_id)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
+```
+
+### Таблица `grouped_replay_results`
+
+Результаты F-15 Backtest Replay для многоногих заявок; replay determinism (AC-F09-010). Источник — изолированный топик `backtest.execution.groups` (по аналогии с `backtest.execution.venue`).
+
+```sql
+CREATE TABLE IF NOT EXISTS grouped_replay_results (
+    replay_session_id    String,
+    execution_group_id   String,
+    batch_id             String,
+    parent_order_id      String,
+    user_id              String,
+    combo_type           LowCardinality(String),
+    execution_mode       LowCardinality(String),
+    group_status         LowCardinality(String),
+    atomicity_policy     LowCardinality(String),
+    execution_scale      Decimal128(18),
+    ratio_deviation_bps  Nullable(Int32),
+    combined_vwap        Nullable(Decimal128(18)),
+    combined_notional    Nullable(Decimal128(18)),
+    violated_constraints String,
+    solver_diagnostics   String,
+    leg_results          String,
+    event_time_ms        Int64,
+    ingested_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (replay_session_id, parent_order_id, execution_group_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 90 DAY;
+```
+
+### Kafka → ClickHouse (F-09)
+
+| Kafka topic | → ClickHouse | Примечания |
+| --- | --- | --- |
+| `execution.groups` | `grouped_execution_events`, `grouped_ratio_deviation` | producer `matching`; key `parentOrderId` (ADR-033) |
+| `fills` (расширенный) | `grouped_leg_fills` | поля `parentOrderId`/`executionGroupId`/`legId` |
+| computed/MV | `grouped_quality_metrics` | из events + leg_fills |
+| `backtest.execution.groups` | `grouped_replay_results` | только replay, изолирован от live |
 
 ## Связанные документы
 
@@ -202,3 +368,4 @@ State–action–reward логи агентских политик (matching, ri
 ## Source Fragments
 
 - IN-001-FR-030
+- IN-011 §14.2 (F-09 grouped_* OLAP tables)

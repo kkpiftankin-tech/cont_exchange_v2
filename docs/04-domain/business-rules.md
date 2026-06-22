@@ -71,7 +71,7 @@ $$
 - $\text{qty}[v]$ округляется к `lot_size[venue]` через `floor`.
 - $\text{qty}[v] \leq \text{maxOrderSize}[venue]$ (берётся из VenueSnapshot).
 
-Реализация: целевая в Execution Planning (см. [05-components/execution-planning/](../05-components/execution-planning/overview.md), интерфейс [`IExecutionPlanningUseCases`](../../cpp/matching/src/app/execution_planning_uc.hpp)).
+Реализация: целевая в Execution Planning (см. [05-components/execution-planning/](../05-components/execution-planning/overview.md), интерфейс [`IExecutionPlanningUseCases`](../../cpp/venues/src/app/execution_planning_uc.hpp)).
 
 ### Pre-hedge Risk Check (×3)
 
@@ -427,8 +427,234 @@ production Collateral Ledger.
 7. `partial=true` ⇔ статус сессии в `{cancelled, failed}` и хотя бы один
    батч обработан.
 
+## F-09 — Batch / Combo / Multi-leg Orders
+
+Источники: IN-011 §2, §9, §10, §11, §20; [ADR-031](../03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md), [ADR-032](../03-architecture/adr/ADR-032-parent-child-order-model.md), [ADR-033](../03-architecture/adr/ADR-033-execution-groups-topic.md). Деньги — `Decimal`; `double` только для `solver_diagnostics`.
+
+### F-09.1 Математика группового исполнения
+
+Вектор исполнений группы \(g\) и отображение в активы:
+
+\[
+e_g = (e_{g,1},\dots,e_{g,L_g})^T,\qquad \Delta x_g = B_g\,e_g,\qquad v_g = \frac{B_g\,e_g}{\Delta t}
+\]
+
+Ratio/basket — общий масштаб:
+
+\[
+e_g = \alpha_g\,\rho_g
+\]
+
+Пересчёт цели по notional weight и остаток:
+
+\[
+Q^{target}_{g,\ell}(t) = \frac{w_{g,\ell}\,N_g}{P^{ref}_{\ell}(t)},\qquad
+Q^{remaining}_{g,\ell} = \max\!\left(Q^{target}_{g,\ell}-Q^{filled}_{g,\ell},\,0\right)
+\]
+
+Feasible caps и итоговый масштаб:
+
+\[
+Q^{feasible}_{g,\ell} = \min\!\left(Q^{remaining}_{g,\ell},Q^{rate}_{g,\ell},Q^{liq}_{g,\ell},Q^{risk}_{g,\ell},Q^{venue}_{g,\ell}\right)
+\]
+
+\[
+\alpha_g^{liq} = \min_{\ell}\frac{Q^{feasible}_{g,\ell}}{Q^{target}_{g,\ell}},\qquad
+\alpha_g^* = \min\!\left(\alpha_g^{solver},\alpha_g^{liq},\alpha_g^{risk},\alpha_g^{venue},1\right)
+\]
+
+Общие линейные ограничения и spread:
+
+\[
+A_g\,e_g = b_g\,\alpha_g,\qquad G_g\,e_g \le h_g,\qquad L_g \le c_g^T P \le U_g
+\]
+
+Встраивание в клиринг непрерывной биржи (рядом с обычными FlowOrder):
+
+\[
+\sum_i v_i + \sum_g \frac{B_g\,e_g}{\Delta t} = 0
+\]
+
+\[
+\min_{\{v_i\},\{e_g\}}\left[\sum_i L_i(Q_i,v_i)+\sum_g \Phi_g(e_g,\alpha_g)+\sum_g \mathrm{Penalty}_g(e_g)\right]
+\]
+
+Группы `orchestration_only` в joint solver не участвуют — каждая нога как независимая FlowOrder.
+
+### F-09.2 Политики исполнения
+
+- **strict_atomic:** все обязательные ноги в пропорции или ничего; \(\alpha_g<\alpha_g^{min}\Rightarrow\alpha_g=0\); orphan legs запрещены; для внешних площадок только при `venue_native` или internal_batch.
+- **scalable_atomic:** \(e_g^*=\alpha_g^*\rho_g\); ratio/weights в пределах `max_ratio_deviation_bps`; иначе `waiting_next_batch` (не молчаливая деградация).
+- **best_effort:** \(e_{g,\ell}^*=\alpha_g^*\rho_{g,\ell}+\delta_{g,\ell},\;|\delta_{g,\ell}|\le\varepsilon_{g,\ell}\); обязательна фиксация `violatedConstraints`, `fallbackAction`, `ratioDeviation`, `degraded`.
+- **sequential_fallback:** только по явному разрешению user/Risk/policy; молчаливый перевод strict/scalable запрещён.
+- **external_compensating:** без strict-гарантии; при нарушении структуры — compensating action; статусы `degraded/compensating/rollback_pending/rolledback`; \(\text{external\_compensating}\ne\text{strict\_atomic}\).
+
+### F-09.3 Ключевые инварианты (§20)
+
+1. \(Q^{remaining}_{g,\ell}=\max(Q^{target}-Q^{filled},0)\ge 0\).
+2. \(\text{strict\_atomic}\Rightarrow \text{orphanLegs}=0\).
+3. \(\text{scalable\_atomic}\Rightarrow e_g=\alpha_g^*\rho_g\) (в пределах tolerance).
+4. \(\text{best\_effort}\wedge\exists\,\text{нарушение}\Rightarrow \text{violatedConstraints}\ne\varnothing\).
+5. \(\text{external\_compensating}\ne\text{strict\_atomic}\).
+6. `ExecutionGroup` фиксируется в `group_state_transitions` до публикации `LegFill`; ledger идемпотентен по `execution_group_id`.
+7. \(p^{low}_{\ell}\le \text{exec\_price}\le p^{high}_{\ell}\) (наследие F-04).
+8. \(\sum_{\text{batches}}\text{exec\_qty}_{g,\ell}\le Q^{max}_{g,\ell}\).
+
+### F-09.4 Child graph transitions (§11.6)
+
+- **OCO:** исполнение ветви ⇒ siblings → `cancelled`, идемпотентно (`group_state_transitions`).
+- **Bracket:** \(Q_{tp}^{max}=Q_{sl}^{max}=Q_{entry}^{filled}\); при частичном entry exits resize инкрементально; TP↔SL взаимная отмена.
+- Все переходы идемпотентны по `(executionGroupId, legId)`; зависимости от wall-clock/thread scheduling запрещены (replay determinism, AC-F09-010).
+
+### F-09.5 Таксономия как единая модель
+
+`MultiLegVectorOrder = Legs + Constraints + StateGraph + ExecutionPolicy`. Специализации:
+
+| Тип | Ограничение |
+| --- | --- |
+| Basket | \(\sum_i w_i=1;\ Q_i^{target}=w_i N/P_i^{ref}\) (строки \(A_g\)) |
+| Pair | \(Q_1=kQ_2\) (строка \(A_g\)) |
+| Spread | \(L_g\le c_g^T P\le U_g\) (строки \(G_g\)) |
+| Factor | \(FQ=0\) (строки \(A_g\)) |
+| Budget | \(\sum_i P_iQ_i\le N\) (строка \(G_g\)) |
+| Risk | \(R(Q)\le R_{max}\) (строки \(G_g\)) |
+| OCO / Bracket | `ConditionalLink` граф (не линейные ограничения) |
+
+Комбинации допустимы (`Basket+Factor+Budget` → несколько строк \(A_g\)/\(G_g\)).
+
+### F-09.6 Связи
+
+F-04 (grouped solver встроен в batch cycle; `batch_id` связывает `ExecutionGroup`↔`BatchResult`); F-06 (leg-level positions/PnL, combined PnL); F-07/F-08 (pre/post-trade grouped checks); F-11 (`venue.liquidity.fob` → \(Q^{liq}\)); F-12 (`external_compensating` через ExecutionIntent/Report); F-15 (replay determinism, AC-F09-010). MVP-рекомендация: decoupled solver (F-04 даёт clearPrices как reference) — см. open question в [implementation-plan/F-09](../implementation-plan/F-09-batch-combo-orders.tasks.md).
+
+## Clearing Mechanics (IN-012)
+
+> Математическая основа matching engine. Canonical reference —
+> [`incoming-docs/2026-04-15-continuous-order-market-academic-v1.md`](../../incoming-docs/2026-04-15-continuous-order-market-academic-v1.md)
+> (IN-012). См. также
+> [entities.md §Continuous-Order Market Primitives](entities.md#continuous-order-market-primitives-in-012)
+> и [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md).
+
+### R-CLR-001 Curve Forms Equivalence
+
+**Правило**: пусть `L_i(Q_i, ·)` собственна, замкнута и строго выпукла.
+Тогда четыре представления кривой агента эквивалентны:
+`V_form ⟺ P_form ⟺ L_form ⟺ H_form` (IN-012 Предложение 3.2).
+
+**Следствие**: solver внутренне работает в `H_form` (гамильтониан → QP),
+пользовательский API — `L_form` (`FlowOrder` параметры). Конвертация
+валидна тогда и только тогда, когда выполнено strict convexity.
+
+### R-CLR-002 Market Aggregation
+
+Совокупный рынок задаётся канонически (IN-012 Предложение 4.1):
+
+```text
+H(Q, P)  = Σ_i H_i(Q_i, P)                          (canonical sum)
+L(Q, Q̇) = inf_{Σ_i v_i = Q̇}  Σ_i L_i(Q_i, v_i)   (infimal convolution)
+V(Q, P)  = Σ_i V_i(Q_i, P)
+```
+
+**Дуальная эквивалентность** (R-CLR-002a):
+`Q̇ ∈ ∂_P H(Q, P)  ⟺  P ∈ ∂_Q̇ L(Q, Q̇)`.
+
+### R-CLR-003 Clearing Price Semantics
+
+**Определение**: рыночная цена клиринга `P*(Q)` — **общий множитель
+Лагранжа** для ограничения баланса потоков `Σ_i Q̇_i = 0` (IN-012 §4.3).
+
+**Три эквивалентные характеристики**:
+
+1. **Flow conservation**: `Σ_i Q̇_i(Q_i, P*) = 0` (4.2).
+2. **Lagrange multiplier**: `P* ∈ ∂_Q̇ L(Q, 0)` (4.7).
+3. **Hamiltonian minimum**: `P*(Q) ∈ arg min_P H(Q, P)` (4.15).
+
+Все три используются как corectness invariants в determinism tests F-15.
+
+### R-CLR-004 Solver Preconditions
+
+Достаточные условия существования и единственности клиринга (IN-012
+Предложение 4.3):
+
+1. `L_i(Q_i, ·)` собственна, полунепрерывна снизу, **суперлинейна**.
+2. `μ_i`-сильно выпукла по скорости, `μ_i > 0`.
+
+Тогда `H(Q, ·)` строго выпукл и коэрцитивен, цена клиринга существует
+и единственна.
+
+**Инвариант** (R-CLR-004a): все агенты, попадающие в matching solver,
+должны иметь `M_i ≻ 0` (positive-definite inertia matrix). Сингулярные
+классы (`InfiniteInertiaAgent`, `PerfectLiquidityAgent`) — предельные
+случаи, обрабатываемые регуляризацией (R-CLR-008).
+
+### R-CLR-005 Quadratic Closed-Form
+
+Для класса `L_i(Q_i, Q̇_i) = (1/2) Q̇_i^⊤ M_i Q̇_i + ψ_i(Q_i) − a_i^⊤ Q̇_i`,
+`M_i ≻ 0`, цена клиринга в замкнутом виде (IN-012 §4.5):
+
+```text
+B := Σ_i M_i^(-1)
+b := Σ_i M_i^(-1) a_i
+
+P*(Q) = − B^(-1) b
+V(Q, P) = B P + b
+H(Q, P) = (1/2) P^⊤ B P + b^⊤ P + const
+```
+
+Цена клиринга = взвешенный средний внешний якорь, веса обратно
+пропорциональны "инерциям" агентов. Используется как **reference vector**
+в unit-тестах solver'а
+([continuous_market_replica_test.cpp](../../cpp/matching/tests/domain/)).
+
+### R-CLR-006 N-Agent Aggregation
+
+Для N стандартных одномерных агентов (IN-012 Предложение 6.1):
+
+```text
+m* = (Σ_i 1/m_i)^(-1)
+a* = m* · Σ_i (a_i / m_i)
+p* = a*
+```
+
+Вес каждого внешнего якоря **обратно пропорционален индивидуальной
+инерции**. Closed-form check в determinism tests.
+
+### R-CLR-007 Multi-Asset Replication
+
+Любой quadratic market `H(P) = (1/2)(P − A)^⊤ Λ (P − A)`, `Λ ≻ 0`,
+реализуется `n + r*(Λ)` агентами через `Λ = D + UU^⊤` (IN-012 §6.3.1).
+В 2D `r*(Λ) ≤ 1` ⇒ **всегда достаточно 3 агентов**.
+
+**Реализационная импликация**: N-asset solver должен поддерживать
+произвольную `Λ ≻ 0`, не делая diagonal assumption. Текущая реализация
+`solver_impl.cpp` это делает через sparse `W` matrix.
+
+### R-CLR-008 Singular Regularization
+
+Сингулярные предельные случаи (IN-012 §A) обрабатываются регуляризацией:
+
+- Идеально ликвидный агент (`m → 0`) → добавляем `ε q̇² / 2` к `L_i`.
+- Бесконечная инерция (`m → ∞`) → клампируем `M_i ≼ M_max·I`.
+- Чистый позиционный штраф без скорости → малый `ε q̇²` для численной
+  стабильности.
+
+Текущий `solver_impl.cpp` использует `reg = 1e-12 * diag_max` в normal
+equation `W · diag(η) · W^⊤` — согласовано с рекомендацией IN-012 §A.
+
+### Использование Continuous-Order Primitives по features
+
+| Feature | Primitives | IN-012 § |
+| --- | --- | --- |
+| F-04 (Batch Clearing) | StandardAgent, LinearFeeAgent, Aggregation, Clearing | §4, §5.1, §6.1 |
+| F-09 (Combo / Multi-leg) | PortfolioAgent, Multi-Asset Replication | §5.2.8, §6.3.1 |
+| F-10 (MM Curves) | PortfolioAgent (factor `w`) | §5.2.8 |
+| F-11 (LOB → FOB) | 1D + 2D agent typology для curve calibration | §5.1, §5.2 |
+
 ## Source Fragments
 
 - IN-005 §6 «Формулы расчётов» (все 15 формул F-12)
 - IN-005 §1 (термины ExecutionIntent, HedgeFlow, ChildOrder, ExecutionReport, Urgency)
 - IN-006 § Канонические сущности и термины, Метрики качества исполнения (F-15)
+- IN-011 §2, §9, §10, §11, §20 — F-09 vector solver math, политики, инварианты
+- IN-012 §3, §4, §5, §6, §A — Continuous-Order Market clearing mechanics
+  (fragments F-03, F-05..F-11, F-18, F-20, F-22 в
+  [IN-012.fragment-map.md](../../incoming-docs/IN-012.fragment-map.md))

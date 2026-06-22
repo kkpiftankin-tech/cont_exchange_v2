@@ -8,12 +8,19 @@
     "What this file does:",
     "  - permissions.deny: blocks destructive operations regardless of",
     "    individual allow rules. Cannot be overridden by settings.local.json.",
+    "  - hooks.UserPromptSubmit: runs tools/auto-archive-attachments.py BEFORE",
+    "    each user prompt is shown to the assistant; parses <document> blocks",
+    "    and stores each attachment under incoming-docs/YYYY-MM-DD-<slug>-",
+    "    <sha8>.md (dedup by SHA1). Documented in CLAUDE.md §0a 'Auto-archive",
+    "    of chat attachments'. Registered here (not in settings.local.json)",
+    "    per AUDIT-001 T-AUDIT-004 so every developer gets archiving out of",
+    "    the box.",
     "  - hooks.PostToolUse: runs scripts/hooks/post_edit_hint.sh after every",
     "    Edit/Write to surface project-specific reminders (rebuild, init.sql",
     "    semantics, bundle hash verification, etc).",
     "",
-    "  Encodes the lessons of PR-F02-001..016 — every footgun we hit",
-    "  becomes a hook reminder or a deny rule."
+    "  Encodes the lessons of PR-F02-001..016 + PR-AUDIT-004 — every footgun",
+    "  we hit becomes a hook reminder or a deny rule."
   ],
   "permissions": {
     "deny": [
@@ -40,6 +47,16 @@
     ]
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/auto-archive-attachments.py\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",

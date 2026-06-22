@@ -130,6 +130,41 @@ Target:
 
 References: AC-N5 в [acceptance-criteria.md](../02-system/features/F-15-backtest-replay/acceptance-criteria.md#2-нефункциональные-требования).
 
+### T-F15-007. Лимит/таймаут на SSE-стримы replay в gateway
+
+**Status:** ✅ реализовано 2026-06-04 (gateway + frontend).
+
+Сделано:
+- Gateway (`cpp/gateway/src/transport/http_gateway.cpp`): `/results/stream`
+  переведён в bounded long-poll — `res.is_alive()` рвёт цикл при дисконнекте,
+  `REPLAY_SSE_MAX_DURATION_S` (30s) ограничивает удержание треда, кап
+  `REPLAY_SSE_MAX_STREAMS` (32) на одновременные стримы (503 + Retry-After),
+  резюм по `Last-Event-ID`. Пул Crow поднят до `REPLAY_GW_THREADS` (64).
+- Frontend (`38342b67`): SSE открывается только для активных (pending/running)
+  сессий.
+- Env задокументированы в `infra/env/.env-example`.
+
+Изначальная проблема (для истории): эндпоинт `GET /api/v1/replay/results/stream` (SSE) в `cpp/gateway/src/transport/http_gateway.cpp`
+держит соединение открытым без idle/max-duration таймаута и без лимита на число
+одновременных стримов. Долгоживущие SSE-соединения (проксируются `frontend-api` для
+каждой открытой вкладки `/replay`, плюс реконнекты) накапливаются и исчерпывают пул
+обработчиков Crow → gateway перестаёт принимать новые соединения (healthz и create
+начинают таймаутить, `502 "operation was aborted"` со стороны frontend-api). Воспроизведено:
+после серии прогонов `healthz` отдавал `HTTP=000`, лечилось `docker restart infra-gateway-1`.
+
+Target:
+
+- Ввести idle-timeout и max-duration на SSE-хэндлер (`/results/stream`), закрывать
+  завершённые/протухшие стримы.
+- Ограничить число одновременных SSE-подписок (per-session и глобально); лишние —
+  `429`/`503` с Retry-After.
+- Рассмотреть неблокирующую отдачу стрима, чтобы один стрим не занимал воркер-тред Crow.
+- Добавить метрики: число активных SSE-стримов, отклонённых по лимиту, средняя длительность.
+- Тест: открыть N стримов > пула, убедиться что `healthz`/create продолжают отвечать.
+
+References: обнаружено при валидации [docs/06-api/rest/replay.md](../06-api/rest/replay.md) (`persist`),
+наблюдаемость — F-17.
+
 ## Definition of Done (IN-006)
 
 См. [acceptance-criteria.md §4](../02-system/features/F-15-backtest-replay/acceptance-criteria.md#4-definition-of-done--соответствие-in-006-22-пункта). Покрытие 19/22 ✅, 2/22 ⚠ (WebSocket, user-guide), 1/22 ❌ (Web UI).

@@ -3,6 +3,7 @@
 #include "cex/common/kafka.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
+#include "fob/matching/v1/execution_group.pb.h"
 #include "infra/mappers/venue_health.hpp"
 #include "infra/mappers/venue_liquidity_curve.hpp"
 
@@ -28,7 +29,7 @@ void KafkaConsumer::loop() {
       .client_id = "observability",
       .enable_auto_commit = false,
   });
-  consumer.subscribe({"venue.health", "venue.liquidity.fob"});
+  consumer.subscribe({"venue.health", "venue.liquidity.fob", "execution.groups"});
 
   auto handler = [this](const std::string &topic, const std::string &, const std::string &payload) {
     if (topic == "venue.health") {
@@ -50,6 +51,22 @@ void KafkaConsumer::loop() {
         return;
       }
       service_.OnVenueLiquidityCurve(mappers::FromProto(curve));
+      return;
+    }
+
+    // F-09 (MVP-4): structured-summary grouped-исполнения (§6/§19 observability).
+    if (topic == "execution.groups") {
+      fob::matching::v1::ExecutionGroup eg;
+      if (!common::from_bytes(payload, eg)) {
+        common::log_json("ERROR", "Failed to parse ExecutionGroup");
+        return;
+      }
+      common::log_json("INFO", "Grouped execution observed",
+                       {{"execution_group_id", eg.execution_group_id()},
+                        {"parent_order_id", eg.parent_order_id()},
+                        {"user_id", eg.user_id()},
+                        {"group_status", std::to_string(static_cast<int>(eg.group_status()))},
+                        {"legs", std::to_string(eg.leg_results_size())}});
       return;
     }
 

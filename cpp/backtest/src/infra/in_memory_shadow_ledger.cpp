@@ -1,3 +1,31 @@
+// ============================================================================
+// in_memory_shadow_ledger.cpp — F-15 isolated ledger для replay sessions.
+//
+// Назначение и физический смысл:
+//   Replay session нуждается в собственном accounting state, который НЕ
+//   должен trogать live LedgerUseCases. Этот класс — in-memory shadow:
+//   тот же API что у LedgerUseCases (ApplyBatchResult, GetBalances, etc.),
+//   но всё persistent state живёт только в session lifetime.
+//
+//   ADR-015 isolation pattern: каждый replay run = свой ShadowLedger
+//   instance. Между runs state не сохраняется (есть PG-backed replay_results
+//   таблица для итоговых aggregates).
+//
+// Что хранит:
+//   - balances per (user, currency).
+//   - positions per (user, instrument).
+//   - hedge_pnl_records.
+//   - Idempotency set (batch_id) — защита от double-apply при replay reset.
+//
+// Не хранит:
+//   - reservations (replay не делает reserve/release flow).
+//   - PG persistence (всё in-memory).
+//
+// Scales (kQtyScale=8, kPriceScale=8, etc) — заведомо больше production
+// (которое использует 2/8/18) — replay требует precision для accurate
+// parity checks с production stored values.
+// ============================================================================
+
 #include "infra/in_memory_shadow_ledger.hpp"
 
 #include <algorithm>

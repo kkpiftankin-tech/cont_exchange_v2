@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F11-04-health-routing-services
+level: sea
+---
+-->
+
 # SEQ-F11-04-health-routing-services. Venue health & routing: service view
 
 ## Type

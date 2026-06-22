@@ -23,6 +23,7 @@ class KafkaConsumers {
   void loop_batch_outputs();
   void loop_execution_intents();
   void loop_execution_reports();
+  void loop_execution_groups();  // F-09 (T-F09-060): execution.groups → ApplyExecutionGroup
 
   app::LedgerUseCases* uc_;
   std::string brokers_;
@@ -31,6 +32,7 @@ class KafkaConsumers {
   std::thread t1_;
   std::thread t2_;
   std::thread t3_;
+  std::thread t4_;
 };
 
 }  // namespace cex::ledger::infra

@@ -3,6 +3,7 @@ feature:
   name: FlowOrder Lifecycle (Amend / Cancel)
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Изменение параметров активного FlowOrder и его отмена.

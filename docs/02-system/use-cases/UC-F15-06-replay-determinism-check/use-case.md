@@ -1,4 +1,20 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F15-06. Проверка детерминизма replay
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-15-backtest-replay](../../features/F-15-backtest-replay/) |
+| ☁️ L0 system sequence | [SEQ-UC-F15-06-system](sequences/SEQ-UC-F15-06-system.md) — system как чёрный ящик |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

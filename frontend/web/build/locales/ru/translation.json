@@ -7,6 +7,9 @@
     "hedgeflows": "hedge",
     "hedgePnl": "pnl",
     "executionLive": "live",
+    "reconciliationAlerts": "alerts",
+    "manualOverride": "override",
+    "policyConfig": "policy",
     "replay": "replay",
     "logout": "Выйти",
     "about": "О нас",
@@ -50,7 +53,7 @@
     "minPrice": "мин. цена",
     "maxPrice": "макс. цена",
     "amount": "количество BTC для {{action}}",
-    "speed": "скорость покупки (акций/час)",
+    "speed": "макс. скорость исполнения (BTC/сек)",
     "proceed": "продолжить",
     "withdraw": "вывести",
     "deposit": "пополнить",
@@ -74,7 +77,7 @@
       "copy": "Копировать",
       "copied": "Скопировано!"
     },
-    "chart" : {
+    "chart": {
       "volume_hour": "объём в час",
       "volume": "Объём",
       "clearing": "Цена Клиринга",
@@ -119,7 +122,7 @@
     "table": {
       "minPrice": "Минимальная цена",
       "maxPrice": "Максимальная цена",
-      "buySpeed": "Скорость покупки",
+      "buySpeed": "Скорость исполнения (BTC/сек)",
       "spentAmount": "Полная стоимость",
       "date": "Дата",
       "type": "Тип",
@@ -212,12 +215,12 @@
       "health": "Health",
       "executionQuality": "Execution quality",
       "latency": "Latency",
-    "spread": "Исполнимый спред",
-    "volume": "24h Volume",
-    "action": "Routing",
-    "controls": "Управление",
-    "details": "Детали"
-  },
+      "spread": "Исполнимый спред",
+      "volume": "24h Volume",
+      "action": "Routing",
+      "controls": "Управление",
+      "details": "Детали"
+    },
     "actions": {
       "openDetails": "Открыть",
       "backToList": "К списку"
@@ -433,7 +436,10 @@
       "numberError": "Укажите число.",
       "run": "Запустить replay",
       "creating": "Создание...",
-      "refresh": "Обновить"
+      "refresh": "Обновить",
+      "persist": "Сохранять результаты в БД",
+      "persistHelperEphemeral": "Ephemeral режим: результаты видны только в live-потоке. Сессия не появится в списке, summary и agent logs через REST будут недоступны.",
+      "persistHelperSaved": "Persisted режим: сессия сохраняется в БД, появляется в списке, summary и agent logs доступны через REST после завершения."
     },
     "sessions": {
       "caption": "Live queue",
@@ -448,7 +454,8 @@
       "liveUpdated": "Последнее событие: {{time}}",
       "liveWaiting": "Ожидание live-событий",
       "prev": "Назад",
-      "next": "Вперёд"
+      "next": "Вперёд",
+      "range": "Диапазон"
     },
     "status": {
       "pending": "Pending",
@@ -484,7 +491,8 @@
       "equity": "Equity curve",
       "batches": "По батчам",
       "compare": "Сравнение A/B",
-      "audit": "Audit mode"
+      "audit": "Audit mode",
+      "playback": "Playback"
     },
     "equity": {
       "title": "Equity curve",
@@ -509,7 +517,9 @@
       "filterSolverError": "solver_error: true",
       "filterSolverOk": "solver_error: false",
       "details": "AgentLog details",
-      "closeDetails": "Закрыть details"
+      "closeDetails": "Закрыть details",
+      "prev": "Назад",
+      "next": "Вперёд"
     },
     "compare": {
       "title": "A/B compare",
@@ -532,9 +542,12 @@
       "metrics": {
         "avgis": "avgIS",
         "totalpnl": "Total PnL",
+        "avgpnl": "Avg PnL",
+        "stdpnl": "Std PnL",
         "sharpe": "Sharpe",
         "fillrate": "Fill rate",
         "maxdrawdown": "Max drawdown",
+        "avgvwap": "Avg VWAP",
         "avgsolvetime": "Avg solve time"
       },
       "errors": {
@@ -610,7 +623,45 @@
       "pending": "Сессия в очереди и ждёт запуска.",
       "liveRunning": "Replay выполняется, прогресс и метрики обновляются в реальном времени.",
       "waitingForLogs": "Replay уже запущен, AgentLog появится после первых батчей.",
-      "noAgentLogs": "AgentLog пока пуст."
+      "noAgentLogs": "AgentLog пока пуст.",
+      "ephemeralStarted": "Ephemeral replay запущен. Результаты доступны только через live-поток.",
+      "ephemeralCompleted": "Ephemeral replay завершён. Результаты не сохранены в БД.",
+      "ephemeralStreamLost": "Live-поток прерван до завершения. Частичные результаты недоступны.",
+      "ephemeralNoAgentLogs": "Agent logs не сохранены — включите «Сохранять результаты в БД» для доступа к логам.",
+      "ephemeralNoEquity": "Equity curve недоступна в ephemeral режиме.",
+      "ephemeralNoCompare": "Сравнение недоступно — сессия не сохранена.",
+      "ephemeralNoAudit": "Audit mode недоступен — сессия не сохранена.",
+      "noSessions": "Сессии не найдены."
+    },
+    "ephemeral": {
+      "panelTitle": "Текущий запуск",
+      "dismiss": "Закрыть",
+      "retryHint": "Запустите replay повторно.",
+      "badge": "Ephemeral"
+    },
+    "playback": {
+      "play": "Воспроизвести",
+      "resume": "Продолжить",
+      "replay": "Повторить",
+      "pause": "Пауза",
+      "stop": "Стоп",
+      "speed": "Скорость",
+      "seek": "Перейти к батчу",
+      "batchOf": "Батч {{current}} / {{total}}",
+      "buffering": "Загрузка батчей {{loaded}} / {{total}}…",
+      "noData": "У этой сессии нет сохранённых данных по батчам. Playback доступен только для завершённых сессий с сохранёнными AgentLog.",
+      "loadError": "Не удалось загрузить батчи для playback.",
+      "retry": "Повторить загрузку",
+      "ended": "Воспроизведение завершено.",
+      "cappedNotice": "Слишком много батчей — загружено первые {{cap}} из {{total}}. Playback охватывает только начало сессии.",
+      "clearPrices": "Цены клиринга",
+      "runningPnl": "Накопленный PnL",
+      "fillRate": "Fill rate",
+      "residualNorm": "Residual norm",
+      "solveTime": "Solve time",
+      "riskStatus": "Risk status",
+      "equityTitle": "Equity (до текущего батча)",
+      "sessionWindow": "Окно сессии"
     }
   },
   "hedgeFlow": {
@@ -740,6 +791,12 @@
       "venue": "Venue",
       "provider": "Provider"
     },
+    "analytics": {
+      "notional": "Нотационал",
+      "filledQty": "Исполнено",
+      "flows": "Flows / reports",
+      "spread": "Средний price spread"
+    },
     "summary": {
       "netPnl": "Net PnL",
       "netPnlMeta": "Итоговый hedge PnL после fees",
@@ -854,8 +911,208 @@
       "loading": "Загрузка Execution Live Feed...",
       "error": "Не удалось загрузить Execution Live Feed.",
       "badMessage": "Получено некорректное WebSocket-сообщение.",
+      "streamError": "WebSocket Execution Live Feed отключился. Переподключаемся...",
       "empty": "Для текущих фильтров нет ExecutionReport.",
       "select": "Выберите событие в ленте, чтобы увидеть детали."
+    }
+  },
+  "reconciliationAlerts": {
+    "kicker": "F-12 Alerts",
+    "title": "Reconciliation Alerts",
+    "subtitle": "Операторский экран `risk.alerts` для UNDERFILLED и отклоненных HedgeFlow: gap, timestamp, маршрут по venue и следующий шаг.",
+    "live": "Обновление каждые {{seconds}}с",
+    "lastUpdated": "Обновлено: {{time}}",
+    "actions": {
+      "refresh": "Обновить alerts",
+      "openHedgeflows": "Открыть HedgeFlow Monitor",
+      "openManualOverride": "Запустить manual override"
+    },
+    "filters": {
+      "all": "Все",
+      "severity": "Severity",
+      "status": "Статус",
+      "type": "Тип",
+      "symbol": "Символ",
+      "venue": "Venue",
+      "provider": "Provider",
+      "search": "Поиск",
+      "searchPlaceholder": "hedgeFlowId, batchId, provider, причина"
+    },
+    "severity": {
+      "critical": "critical",
+      "warning": "warning",
+      "info": "info"
+    },
+    "summary": {
+      "total": "Alerts",
+      "totalMeta": "Активные reconciliation alerts",
+      "critical": "Critical",
+      "criticalMeta": "Risk reject или большой gap",
+      "underfilled": "Underfilled",
+      "underfilledMeta": "События HEDGE_UNDERFILL",
+      "rejected": "Rejected",
+      "rejectedMeta": "События HEDGE_RISK_REJECT",
+      "gap": "Total gap",
+      "gapMeta": "Остаточный объем по alerts",
+      "avgGap": "Avg gap",
+      "avgGapMeta": "Средний процент gap"
+    },
+    "list": {
+      "title": "Очередь alerts",
+      "subtitle": "Найдено alerts: {{count}}",
+      "topic": "Kafka risk.alerts"
+    },
+    "table": {
+      "time": "Время",
+      "alert": "Alert",
+      "flow": "Flow",
+      "gap": "Gap",
+      "route": "Маршрут",
+      "status": "Статус"
+    },
+    "inspector": {
+      "kicker": "Reconciliation",
+      "gap": "Gap qty",
+      "gapPct": "Gap %",
+      "target": "Target",
+      "filled": "Filled",
+      "slippage": "Slippage",
+      "pnl": "Hedge PnL",
+      "nextAction": "Следующий шаг",
+      "batch": "Batch",
+      "provider": "Provider",
+      "venues": "Venues",
+      "timeout": "Timeout",
+      "risk": "Risk",
+      "mode": "Mode"
+    },
+    "states": {
+      "loading": "Загружаем reconciliation alerts...",
+      "error": "Не удалось загрузить Reconciliation Alerts.",
+      "empty": "По текущим фильтрам reconciliation alerts нет.",
+      "select": "Выберите alert, чтобы посмотреть детали reconciliation."
+    }
+  },
+  "manualOverride": {
+    "kicker": "F-12 Operator UI",
+    "title": "Manual Override",
+    "subtitle": "Создание ручного ExecutionIntent для операторского хеджа: venue routing, urgency, qty и причина для аудита.",
+    "lastUpdated": "Обновлено: {{time}}",
+    "actions": {
+      "refresh": "Обновить контекст"
+    },
+    "summary": {
+      "alerts": "Source alerts",
+      "alertsMeta": "Открытые reconciliation alerts",
+      "recent": "Recent",
+      "recentMeta": "Manual intents в этой сессии",
+      "accepted": "Accepted",
+      "acceptedMeta": "Mock risk разрешил",
+      "rejected": "Rejected",
+      "rejectedMeta": "Mock risk отклонил"
+    },
+    "form": {
+      "title": "ExecutionIntent",
+      "subtitle": "Ручной операторский hedge request.",
+      "sourceAlert": "Source alert",
+      "noSourceAlert": "Без source alert",
+      "symbol": "Symbol",
+      "side": "Side",
+      "targetQty": "Target qty",
+      "provider": "Provider",
+      "priceConstraint": "Price constraint",
+      "timeoutMs": "Timeout ms",
+      "urgency": "Urgency",
+      "venues": "Venues",
+      "reason": "Причина оператора",
+      "submit": "Создать ExecutionIntent",
+      "submitting": "Создаем..."
+    },
+    "preview": {
+      "notional": "Target notional",
+      "riskLimit": "Текущая mock hedge policy",
+      "maxSlippage": "Max slippage",
+      "urgency": "Политика urgency {{urgency}}",
+      "route": "Route",
+      "routeMeta": "Выбранный venue split"
+    },
+    "side": {
+      "title": "Override trail",
+      "subtitle": "Source alert, созданный intent и последние действия оператора.",
+      "source": "Source alert",
+      "gap": "Gap",
+      "gapPct": "Gap %",
+      "created": "Created intent",
+      "recent": "Recent intents"
+    },
+    "states": {
+      "loading": "Загружаем Manual Override context...",
+      "error": "Не удалось загрузить Manual Override context.",
+      "submitError": "Не удалось создать ручной ExecutionIntent.",
+      "created": "Создан {{intentId}}.",
+      "noRecent": "Manual override intents пока нет."
+    }
+  },
+  "policyConfig": {
+    "kicker": "F-12 Admin UI",
+    "title": "Policy Config",
+    "subtitle": "Редактирование solverconfig: hedge thresholds, urgency routing policy, slippage caps и risk limits с причиной для аудита.",
+    "lastUpdated": "Сгенерировано: {{time}}",
+    "actions": {
+      "refresh": "Обновить config",
+      "reset": "Сбросить draft",
+      "save": "Сохранить policy",
+      "saving": "Сохраняем..."
+    },
+    "summary": {
+      "revision": "Revision",
+      "revisionMeta": "Текущая версия solverconfig",
+      "eligible": "Eligible flows",
+      "eligibleMeta": "Запустят auto hedge",
+      "slippage": "Avg slippage cap",
+      "slippageMeta": "По urgency tiers",
+      "exposure": "Exposure limit",
+      "exposureMeta": "Mock risk budget"
+    },
+    "form": {
+      "title": "solverconfig",
+      "subtitle": "Runtime policy values для hedge execution.",
+      "general": "General limits",
+      "generalMeta": "Общий risk envelope для auto и manual hedges.",
+      "solverConfigId": "Solver config id",
+      "hedgeExposureLimit": "Hedge exposure limit",
+      "maxNotionalPerHedge": "Max notional per hedge",
+      "thresholds": "Trigger thresholds",
+      "thresholdsMeta": "Net residual qty, после которого auto hedge становится eligible.",
+      "urgency": "Urgency policy",
+      "urgencyMeta": "Gap percent, order type, timeout и slippage caps по tier.",
+      "reason": "Причина для аудита"
+    },
+    "table": {
+      "urgency": "Urgency",
+      "minGap": "Min gap %",
+      "maxSlippage": "Max slippage bps",
+      "timeout": "Timeout ms",
+      "orderType": "Order type"
+    },
+    "side": {
+      "title": "Impact preview",
+      "subtitle": "Текущие hedge flows, рассчитанные против этой policy.",
+      "impact": "Flow eligibility",
+      "threshold": "threshold {{value}}",
+      "skip": "SKIP",
+      "audit": "Audit trail",
+      "revision": "rev {{revision}}",
+      "risk": "Risk view",
+      "maxThreshold": "Max threshold qty",
+      "avgSlippage": "Avg slippage cap",
+      "coverage": "Eligible coverage"
+    },
+    "states": {
+      "loading": "Загружаем Policy Config...",
+      "error": "Не удалось загрузить Policy Config.",
+      "saveError": "Не удалось сохранить Policy Config.",
+      "saved": "Сохранена revision {{revision}}."
     }
   },
   "common": {

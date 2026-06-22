@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-HEALTH-001-circuit-breaker-fsm
+level: fish
+component: venue-health-routing
+---
+-->
+
 # SEQ-HEALTH-001. Circuit Breaker FSM
 
 ## Type
@@ -27,7 +35,7 @@ Internal Component Sequence (venue-health-routing)
 
 ```mermaid
 sequenceDiagram
-    participant SVC as Service::OnRawReport
+    participant SVC as Service.OnRawReport
     participant ST as VenueState
     participant CB as CircuitBreaker
     participant PUB as Publisher

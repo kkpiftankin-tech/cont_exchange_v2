@@ -36,6 +36,10 @@ struct CexWsRestAdapterConfig {
   bool rest_ticker_volume_enabled{false};
   bool simulate_orders{false};
   std::string simulated_order_id_prefix{"SIM-CEX-"};
+  // F-09 T-F09-068: реальная биржа может ОТКЛОНИТЬ дискретный ордер. CSV символов
+  // (например "ETH/USDT,SOL/USDT"), которые simulate-путь возвращает как REJECTED
+  // (status на execution.venue → matching пишет combo_compensations(pending)).
+  std::string simulate_reject_symbols;
 
   double rest_requests_per_sec{10.0};
   double rest_burst{10.0};

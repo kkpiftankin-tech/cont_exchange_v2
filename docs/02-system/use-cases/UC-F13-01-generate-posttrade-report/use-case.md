@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F13-01. Получить post-trade отчёт
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-13-posttrade-report](../../features/F-13-posttrade-report/) |
+| ☁️ L0 system sequence | [SEQ-UC-F13-01-system](sequences/SEQ-UC-F13-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F13-UC-F13-01-services](../../../05-components/sequences/SEQ-F13-UC-F13-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

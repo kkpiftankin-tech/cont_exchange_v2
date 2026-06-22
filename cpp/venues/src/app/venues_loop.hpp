@@ -113,6 +113,9 @@ class VenuesLoop {
   void md_publish_loop();
   void exec_consume_loop();
   void sim_config_consume_loop();
+  // F-09 UX: лёгкий тикер-фид по доп. символам (VENUES_FEED_SYMBOLS) — отдельно от
+  // core md_publish_loop, чтобы не задеть F-11/F-12. Публикует только тикеры.
+  void extra_ticker_loop();
   // F-20 Phase 4 — SIM/SHADOW fork: simulate the child order against the
   // cached live LOB and publish the sim ExecutionReport + SimExecutionAnnotation
   // to the isolated sim.* topics (ADR-015). Applies the sampled venue latency
@@ -166,6 +169,10 @@ class VenuesLoop {
   std::thread t_md_;
   std::thread t_exec_;
   std::thread t_sim_config_;
+  std::thread t_extra_ticker_;
+  // Сериализует RequestSnapshot между md_publish_loop и extra_ticker_loop
+  // (общий binance-адаптер; rest_client_->Get не потокобезопасен на shared handle).
+  std::mutex snapshot_mu_;
 };
 
 }  // namespace cex::venues::app

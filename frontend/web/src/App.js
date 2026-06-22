@@ -20,6 +20,8 @@ import ReconciliationAlertsLive from './pages/ReconciliationAlerts/Reconciliatio
 import ManualOverrideLive from './pages/ManualOverride/ManualOverrideLive';
 import PolicyConfigLive from './pages/PolicyConfig/PolicyConfigLive';
 import SimSessionsLive from './pages/SimSessions/SimSessionsLive';
+import ComboCompensationLive from './pages/ComboCompensation/ComboCompensationLive';
+import ComboOrderLive from './pages/ComboOrder/ComboOrderLive';
 import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
 import ManualOverride from './pages/ManualOverride/ManualOverride';
@@ -58,6 +60,8 @@ function App() {
         <Route path="/manual-override-live" element={<AuthRoute><ManualOverrideLive /></AuthRoute>} />
         <Route path="/policy-config-live" element={<AuthRoute><PolicyConfigLive /></AuthRoute>} />
         <Route path="/sim-sessions" element={<AuthRoute><SimSessionsLive /></AuthRoute>} />
+        <Route path="/combo-order-live" element={<AuthRoute><ComboOrderLive /></AuthRoute>} />
+        <Route path="/combo-compensation-live" element={<AuthRoute><ComboCompensationLive /></AuthRoute>} />
         <Route path="/execution-live" element={<AuthRoute><ExecutionLiveFeed /></AuthRoute>} />
         <Route path="/reconciliation-alerts" element={<AuthRoute><ReconciliationAlerts /></AuthRoute>} />
         <Route path="/manual-override" element={<AuthRoute><ManualOverride /></AuthRoute>} />

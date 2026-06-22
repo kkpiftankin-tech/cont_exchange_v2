@@ -1,6 +1,42 @@
+// ============================================================================
+// http_gateway.cpp — HTTP REST endpoints для gateway сервиса.
+//
+// Назначение:
+//   Внешний REST API для UI и операторов. Routes:
+//
+//   F-02 (Create FlowOrder):
+//     POST /v1/flow-orders                — proxy → order_flow gRPC.
+//     POST /v1/flow-orders/:id/cancel     — proxy → order_flow gRPC.
+//     GET  /v1/flow-orders/:id             — proxy → order_flow gRPC.
+//     GET  /v1/flow-orders                  — list (по user_id из auth).
+//
+//   F-09 (Combo Orders):
+//     POST /v1/combo-orders                  — proxy → order_flow CreateCombo.
+//     POST /v1/combo-orders/:id/cancel       — proxy → order_flow CancelCombo.
+//
+//   F-15 (Backtest / Replay):
+//     POST /v1/replay/sessions               — create replay session.
+//     POST /v1/replay/sessions/:id/cancel    — cancel.
+//     POST /v1/replay/sessions/:id/retry     — retry failed session.
+//     GET  /v1/replay/sessions/:id           — get session info.
+//     GET  /v1/replay/sessions/:id/compare   — compare 2 sessions (parity).
+//     SSE/long-poll /v1/replay/sessions/:id/results — streaming events.
+//
+//   Health:
+//     GET /healthz                            — liveness probe.
+//
+// Auth middleware:
+//   transport/auth_middleware.hpp — JWT / header-based. CLAUDE.md §22:
+//   production требует mTLS termination перед gateway.
+//
+// CLAUDE.md §10 layering: gateway не имеет бизнес-логики — только marshalling
+// HTTP/JSON ↔ gRPC. Все use cases живут в order_flow/backtest/etc.
+// ============================================================================
+
 #include "transport/http_gateway.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <chrono>
@@ -13,6 +49,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/replay_kafka.hpp"
 #include "cex/common/time.hpp"
@@ -28,12 +65,16 @@ namespace {
 
 using json = nlohmann::json;
 
+/// Текущее время в epoch milliseconds — используется в audit JSON-полях
+/// (created_at_ms и т.п.).
 int64_t now_millis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
 
+/// Canonical error response: {"error":{"code":...,"message":...}}.
+/// HTTP status + JSON body — оба согласованы. Используется во всех handler'ах.
 crow::response json_error(int status,
                           const std::string& code,
                           const std::string& message) {
@@ -128,6 +169,8 @@ bool is_supported_reward_mode(const std::string& raw) {
          mode == "shortfall";
 }
 
+/// Валидация reward_mode из replay session create payload.
+/// Допустимые: "pnl", "vwap", "fill_rate". CASE-insensitive, normalized.
 bool validate_reward_mode_payload(const json& body, std::string* error) {
   for (const char* key : {"rewardmode", "reward_mode"}) {
     if (body.contains(key) && !body[key].is_null() && !body[key].is_string()) {
@@ -181,6 +224,8 @@ bool require_number(const json& object,
   return true;
 }
 
+/// Generic JSON validator: field в body должен быть числом > 0.
+/// Используется для валидации qty/price/notional полей.
 bool validate_positive_number(const json& object,
                               const char* key,
                               const std::string& field,
@@ -987,10 +1032,38 @@ void HttpGateway::run(uint16_t port) {
           return crow::response(503, "Replay results hub unavailable");
         }
 
+        // T-F15-007: bound concurrent SSE streams so they cannot exhaust the
+        // Crow worker pool and starve REST endpoints. Capacity is kept below
+        // the pool size (REPLAY_GW_THREADS) so REST always has headroom.
+        static std::atomic<int> active_streams{0};
+        const int max_streams =
+            cex::common::Env::get_int("REPLAY_SSE_MAX_STREAMS", 32);
+        if (active_streams.fetch_add(1) + 1 > max_streams) {
+          active_streams.fetch_sub(1);
+          crow::response busy(503, "Too many active replay streams");
+          busy.set_header("Retry-After", "5");
+          return busy;
+        }
+        struct ActiveStreamGuard {
+          std::atomic<int>& counter;
+          ~ActiveStreamGuard() { counter.fetch_sub(1); }
+        } active_stream_guard{active_streams};
+
         const char* session_id_raw = req.url_params.get("session_id");
         if (session_id_raw == nullptr) session_id_raw = req.url_params.get("sessionid");
         const std::string session_id = session_id_raw == nullptr ? "" : session_id_raw;
         uint64_t after_sequence = get_uint64_param(req, "after_seq", 0);
+        // On native EventSource reconnect the cursor arrives as the
+        // Last-Event-ID header, not the query param — honour it so the client
+        // resumes instead of replaying from sequence 0.
+        const std::string last_event_id = req.get_header_value("Last-Event-ID");
+        if (!last_event_id.empty()) {
+          try {
+            after_sequence =
+                std::max<uint64_t>(after_sequence, std::stoull(last_event_id));
+          } catch (...) {
+          }
+        }
 
         crow::response res;
         res.code = 200;
@@ -1000,10 +1073,21 @@ void HttpGateway::run(uint16_t port) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Credentials", "true");
 
-        while (true) {
+        // Bounded long-poll: hold the connection at most REPLAY_SSE_MAX_DURATION_S
+        // and break immediately if the client disconnects (res.is_alive() reads
+        // the socket state). The browser EventSource reconnects automatically,
+        // so this delivers events with low latency while guaranteeing the worker
+        // thread is released — abandoned streams no longer pin a thread forever.
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(
+                cex::common::Env::get_int("REPLAY_SSE_MAX_DURATION_S", 30));
+        bool wrote_event = false;
+        while (std::chrono::steady_clock::now() < deadline && res.is_alive()) {
           infra::ReplayResultsHub::EventEnvelope envelope;
           if (!replay_results_->WaitNext(session_id, after_sequence,
-                                         std::chrono::milliseconds(15000), &envelope)) {
+                                         std::chrono::milliseconds(2000), &envelope)) {
+            if (wrote_event) break;  // delivered a batch already → return now
             res.write(": keepalive\n\n");
             continue;
           }
@@ -1011,6 +1095,7 @@ void HttpGateway::run(uint16_t port) {
           res.write("id: " + std::to_string(envelope.sequence) + "\n");
           res.write("event: replay\n");
           res.write("data: " + cex::common::ReplayResultMessageToJson(envelope.message) + "\n\n");
+          wrote_event = true;
         }
         return res;
       });
@@ -1715,8 +1800,18 @@ void HttpGateway::run(uint16_t port) {
         return crow::response(200, out);
       });
 
-  cex::common::log_json("INFO", "Gateway starting", {{"port", std::to_string(port)}});
-  app.port(port).multithreaded().run();
+  // T-F15-007: size the Crow worker pool explicitly. Default 64 leaves ample
+  // headroom for REST once SSE streams are capped (REPLAY_SSE_MAX_STREAMS=32),
+  // instead of multithreaded()'s hardware_concurrency (often 4-8) which a
+  // handful of long-poll streams could exhaust.
+  const int gw_threads = std::max(
+      4, cex::common::Env::get_int("REPLAY_GW_THREADS", 64));
+  cex::common::log_json("INFO", "Gateway starting",
+                        {{"port", std::to_string(port)},
+                         {"threads", std::to_string(gw_threads)}});
+  app.port(port)
+      .concurrency(static_cast<std::uint16_t>(gw_threads))
+      .run();
 }
 
 }  // namespace cex::gateway::transport

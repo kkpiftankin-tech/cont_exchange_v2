@@ -1,4 +1,20 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F12-04. Rejection + Fallback
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-12-execution-hedge](../../features/F-12-execution-hedge/) |
+| ☁️ L0 system sequence | [SEQ-UC-F12-04-system](sequences/SEQ-UC-F12-04-system.md) — system как чёрный ящик |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

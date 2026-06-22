@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F15-04. Audit-mode replay одного batch
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-15-backtest-replay](../../features/F-15-backtest-replay/) |
+| ☁️ L0 system sequence | [SEQ-UC-F15-04-system](sequences/SEQ-UC-F15-04-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F15-04-audit-mode-services](../../../05-components/sequences/SEQ-F15-04-audit-mode-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

@@ -34,7 +34,15 @@ const BatchDiagnosticsTable = ({
           const { slaState, reasons } = getBatchDiagnostics(batch, t);
           return (
             <div className={`batch-table-row ${getBatchRowClass(slaState)}`} key={batch.batchId}>
-              <div>{batch.batchId}</div>
+              <div>
+                {batch.batchId}
+                {batch.kind === 'combo_group' && (
+                  <span style={{ marginLeft: 6, fontSize: 10, padding: '1px 5px', borderRadius: 4,
+                                 background: '#6d28d9', color: '#fff', verticalAlign: 'middle' }}>
+                    combo
+                  </span>
+                )}
+              </div>
               <div>{formatBatchTime(batch.time)}</div>
               <div className={`batch-status ${getBatchStatusClass(batch.status)}`}>{batch.status}</div>
               <div>{formatSolveTime(batch.solveTimeMs)}</div>

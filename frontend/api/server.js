@@ -26,6 +26,12 @@ const MS_PER_HOUR = 3600 * 1000;
 // Ledger gRPC configuration
 // Путь к proto внутри контейнера
 const LEDGER_ADDR = process.env.LEDGER_GRPC_ADDR || 'ledger:50053';
+// F-09 MVP-6 slice 4: combo compensation console.
+const MATCHING_GRPC_ADDR = process.env.MATCHING_GRPC_ADDR || 'matching:50053';
+const ORDER_FLOW_GRPC_ADDR = process.env.ORDER_FLOW_GRPC_ADDR || 'order_flow:50051';
+// F-09 UX: per-symbol котировка для дефолтных границ band.
+const MARKET_DATA_GRPC_ADDR = process.env.MARKET_DATA_GRPC_ADDR || 'market_data:50054';
+const MARKET_DATA_VENUE = process.env.MARKET_DATA_REFERENCE_VENUE || 'binance';
 const GATEWAY_ADDR = process.env.GATEWAY_HTTP_ADDR || 'http://gateway:8080';
 const REPLAY_FAKE_REQUESTED = String(process.env.REPLAY_FAKE_ENABLED || "0") === "1";
 const REPLAY_FAKE_ENABLED = REPLAY_FAKE_REQUESTED && NODE_ENV !== "production";
@@ -44,6 +50,10 @@ const FRONTEND_POSTGRES_DSN = process.env.FRONTEND_POSTGRES_DSN || '';
 const PROTO_DIR = join(__dirname, 'proto');
 const LEDGER_PROTO = join(PROTO_DIR, 'fob/ledger/v1/ledger.proto');
 const COMMON_PROTO = join(PROTO_DIR, 'fob/common/v1/common.proto');
+// F-09 MVP-6 slice 4 protos.
+const COMPENSATION_PROTO = join(PROTO_DIR, 'fob/matching/v1/compensation.proto');
+const ORDER_FLOW_PROTO = join(PROTO_DIR, 'fob/orders/v1/order_flow_service.proto');
+const MARKETDATA_PROTO = join(PROTO_DIR, 'fob/marketdata/v1/marketdata_raw.proto');
 
 let ledgerClient = null;
 
@@ -734,6 +744,348 @@ function parseBody(req) {
   });
 }
 
+// ── F-09 MVP-6 slice 4: combo compensation BFF ─────────────────────────────
+// GET list → matching CompensationService; POST resolve → order_flow
+// OrderFlowService (ADR-040). См. docs/06-api/rest/combo-compensations.md.
+let compensationClient = null;
+let orderFlowClient = null;
+
+function initCompensationClient() {
+  if (compensationClient) return compensationClient;
+  try {
+    const pd = protoLoader.loadSync([COMPENSATION_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    compensationClient = new proto.fob.matching.v1.CompensationService(
+      MATCHING_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] CompensationService client created, target=${MATCHING_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create CompensationService client:', err.message);
+  }
+  return compensationClient;
+}
+
+function initOrderFlowClient() {
+  if (orderFlowClient) return orderFlowClient;
+  try {
+    const pd = protoLoader.loadSync([ORDER_FLOW_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    orderFlowClient = new proto.fob.orders.v1.OrderFlowService(
+      ORDER_FLOW_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] OrderFlowService client created, target=${ORDER_FLOW_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create OrderFlowService client:', err.message);
+  }
+  return orderFlowClient;
+}
+
+let marketDataClient = null;
+function initMarketDataClient() {
+  if (marketDataClient) return marketDataClient;
+  try {
+    const pd = protoLoader.loadSync([MARKETDATA_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR]
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    marketDataClient = new proto.fob.marketdata.v1.MarketDataService(
+      MARKET_DATA_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] MarketDataService client created, target=${MARKET_DATA_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create MarketDataService client:', err.message);
+  }
+  return marketDataClient;
+}
+
+// Decimal proto → number (для отображения котировки / band; не money settlement).
+function decimalToNum(d) {
+  if (!d || d.units === undefined || d.units === null) return 0;
+  return Number(d.units) / Math.pow(10, Number(d.scale || 0));
+}
+
+// GET /api/v1/quote?symbol=BTC/USDT — текущая котировка (mid bid/ask или last).
+async function handleQuote(req, res, pathname, query) {
+  if (req.method !== 'GET' || pathname !== '/api/v1/quote') return false;
+  const symbol = (query && query.symbol) || '';
+  const venue = (query && query.venue) || MARKET_DATA_VENUE;
+  if (!symbol) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'symbol required' } }); return true; }
+  const client = initMarketDataClient();
+  if (!client) { writeJson(res, 200, { symbol, found: false, price: 0 }); return true; }
+  const request = { venue, symbol };
+  const result = await new Promise((resolve) => {
+    client.GetLastTicker(request, (err, response) => {
+      if (err) { return resolve({ error: err.message }); }
+      resolve({ response });
+    });
+  });
+  if (result.error) { writeJson(res, 200, { symbol, found: false, price: 0 }); return true; }
+  const r = result.response || {};
+  const tk = r.ticker || {};
+  const bid = decimalToNum(tk.bid), ask = decimalToNum(tk.ask), last = decimalToNum(tk.last);
+  const mid = (bid > 0 && ask > 0) ? (bid + ask) / 2 : (last > 0 ? last : (bid > 0 ? bid : ask));
+  writeJson(res, 200, { symbol, venue, found: !!r.found && mid > 0, price: mid, bid, ask, last });
+  return true;
+}
+
+// Decimal proto → каноническая строка. БЕЗ float (CLAUDE.md §9).
+function decimalToString(d) {
+  if (!d || d.units === undefined || d.units === null) return '0';
+  const units = String(d.units);
+  const scale = Number(d.scale || 0);
+  if (scale <= 0) return units;
+  const neg = units.startsWith('-');
+  let digits = neg ? units.slice(1) : units;
+  while (digits.length <= scale) digits = '0' + digits;
+  const intPart = digits.slice(0, digits.length - scale);
+  const frac = digits.slice(digits.length - scale).replace(/0+$/, '');
+  const s = frac ? `${intPart}.${frac}` : intPart;
+  return neg ? '-' + s : s;
+}
+
+// ── F-09: combo orders (create / list / status / cancel) ───────────────────
+// Создание/отмена → order_flow gRPC; статус/результат → PG (combo_orders +
+// combo_order_legs + execution_groups + combo_compensations). gateway combo не
+// проксирует, поэтому весь combo-flow для фронта живёт здесь.
+
+// Десятичная строка/число → proto Decimal {units, scale} БЕЗ float (CLAUDE.md §9).
+function numToDecimal(v) {
+  let s = String(v == null ? '' : v).trim();
+  if (s === '') return { units: 0, scale: 0 };
+  const neg = s.startsWith('-'); if (neg) s = s.slice(1);
+  let [intp, frac = ''] = s.split('.');
+  frac = frac.replace(/0+$/, '');
+  const scale = frac.length;
+  let digits = (intp + frac).replace(/^0+/, '');
+  if (digits === '') digits = '0';
+  let units = parseInt(digits, 10);
+  if (neg) units = -units;
+  return { units, scale };
+}
+
+async function comboStatusFromPg(comboId) {
+  const pool = getPgPool();
+  if (!pool) return null;
+  const combo = await pool.query(
+    `SELECT combo_order_id, combo_type, execution_mode, status, atomicity_policy,
+            atomicity_scope, ratio_basis, created_at, updated_at
+     FROM combo_orders WHERE combo_order_id = $1`, [comboId]);
+  if (combo.rowCount === 0) return null;
+  const legs = await pool.query(
+    `SELECT leg_id, instrument_symbol, side, filled_cum::text, q_max::text, status,
+            array_to_string(venue_preferences, ',') AS venue_prefs
+     FROM combo_order_legs WHERE parent_order_id = $1 ORDER BY leg_id`, [comboId]);
+  const groups = await pool.query(
+    `SELECT execution_group_id, group_status, execution_scale::text, ratio_deviation_bps,
+            leg_results, created_at
+     FROM execution_groups WHERE parent_order_id = $1 ORDER BY created_at DESC LIMIT 10`, [comboId]);
+  const comps = await pool.query(
+    `SELECT compensation_id, leg_id, reason, status, COALESCE(operator_id,'') AS operator_id
+     FROM combo_compensations WHERE parent_order_id = $1 ORDER BY created_at DESC`, [comboId]);
+  const c = combo.rows[0];
+  return {
+    comboId: c.combo_order_id,
+    comboType: c.combo_type,
+    executionMode: c.execution_mode,
+    status: c.status,
+    atomicityPolicy: c.atomicity_policy,
+    atomicityScope: c.atomicity_scope,
+    ratioBasis: c.ratio_basis,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    legs: legs.rows.map(l => ({
+      legId: l.leg_id, symbol: l.instrument_symbol, side: l.side,
+      filledCum: l.filled_cum, qMax: l.q_max, status: l.status, venuePreferences: l.venue_prefs
+    })),
+    executionGroups: groups.rows.map(g => ({
+      executionGroupId: g.execution_group_id, groupStatus: g.group_status,
+      executionScale: g.execution_scale, ratioDeviationBps: g.ratio_deviation_bps,
+      legResults: g.leg_results, createdAt: g.created_at
+    })),
+    compensations: comps.rows.map(cc => ({
+      compensationId: cc.compensation_id, legId: cc.leg_id, reason: cc.reason,
+      status: cc.status, operatorId: cc.operator_id
+    }))
+  };
+}
+
+async function handleComboOrders(req, res, pathname, query) {
+  // POST /api/v1/combo-orders — создать многоногую заявку.
+  if (req.method === 'POST' && pathname === '/api/v1/combo-orders') {
+    let body;
+    try { body = await parseBody(req); } catch (e) { writeJson(res, 400, { error: { code: 'BAD_BODY', message: e.message } }); return true; }
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const legs = Array.isArray(body.legs) ? body.legs : [];
+    if (legs.length < 2) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'combo requires >= 2 legs' } }); return true; }
+    const request = {
+      meta: createEventMeta('create-combo-order'),
+      client_combo_id: body.clientComboId || `ui-combo-${Date.now()}`,
+      user_id: body.userId || 'demo-user',
+      account_id: body.accountId || 'demo-acct',
+      combo_type: body.comboType || 'COMBO_TYPE_BASKET',
+      execution_mode: body.executionMode || 'EXECUTION_MODE_MULTILEG_VECTOR_SOLVER',
+      atomicity_policy: body.atomicityPolicy || 'ATOMICITY_POLICY_SCALABLE_ATOMIC',
+      atomicity_scope: body.atomicityScope || 'ATOMICITY_SCOPE_INTERNAL_BATCH',
+      fallback_policy: body.fallbackPolicy || 'scale_down',
+      ratio_basis: body.ratioBasis || 'RATIO_BASIS_NOTIONAL_WEIGHT',
+      legs: legs.map(l => {
+        const leg = {
+          instrument: { symbol: l.symbol, base: l.base || (l.symbol || '').split('/')[0] || '', quote: l.quote || (l.symbol || '').split('/')[1] || '' },
+          side: l.side || 'SIDE_BUY',
+          price_low: numToDecimal(l.priceLow),
+          price_high: numToDecimal(l.priceHigh),
+          max_rate: numToDecimal(l.maxRate),
+          max_qty: numToDecimal(l.maxQty),
+          venue_preferences: Array.isArray(l.venuePreferences) ? l.venuePreferences
+            : (l.venue ? [l.venue] : ['internal'])
+        };
+        // Домен: ровно одно из {ratio, weight} (XOR). QUANTITY → ratio, иначе weight.
+        if ((body.ratioBasis || 'RATIO_BASIS_NOTIONAL_WEIGHT') === 'RATIO_BASIS_QUANTITY') {
+          leg.ratio = numToDecimal(l.ratio != null ? l.ratio : (l.weight != null ? l.weight : 0));
+        } else {
+          leg.weight = numToDecimal(l.weight != null ? l.weight : 0);
+        }
+        return leg;
+      })
+    };
+    const result = await new Promise((resolve) => {
+      client.CreateComboOrder(request, (err, response) => {
+        if (err) { console.error('[grpc] CreateComboOrder error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const r = result.response || {};
+    writeJson(res, 200, {
+      accepted: !!r.accepted,
+      comboId: r.combo_id || '',
+      status: r.status,
+      executionGuarantees: r.execution_guarantees || '',
+      ratioGuaranteed: !!r.ratio_guaranteed,
+      legOrderIds: r.leg_order_ids || {},
+      error: (r.error && r.error.code) ? { code: r.error.code, message: r.error.message } : null
+    });
+    return true;
+  }
+
+  // GET /api/v1/combo-orders — недавние combo (PG).
+  if (req.method === 'GET' && pathname === '/api/v1/combo-orders') {
+    const pool = getPgPool();
+    if (!pool) { writeJson(res, 502, { error: { code: 'NO_PG', message: 'PG unavailable' } }); return true; }
+    const rows = await pool.query(
+      `SELECT combo_order_id, combo_type, execution_mode, status, atomicity_scope, created_at
+       FROM combo_orders ORDER BY created_at DESC LIMIT 25`);
+    writeJson(res, 200, {
+      combos: rows.rows.map(c => ({
+        comboId: c.combo_order_id, comboType: c.combo_type, executionMode: c.execution_mode,
+        status: c.status, atomicityScope: c.atomicity_scope, createdAt: c.created_at
+      })), generatedAt: new Date().toISOString()
+    });
+    return true;
+  }
+
+  // POST /api/v1/combo-orders/{id}/cancel
+  const cm = pathname.match(/^\/api\/v1\/combo-orders\/([^/]+)\/cancel$/);
+  if (req.method === 'POST' && cm) {
+    const comboId = decodeURIComponent(cm[1]);
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const request = { meta: createEventMeta('cancel-combo-order'), combo_id: comboId };
+    const result = await new Promise((resolve) => {
+      client.CancelComboOrder(request, (err, response) => {
+        if (err) { console.error('[grpc] CancelComboOrder error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    writeJson(res, 200, { cancelled: true });
+    return true;
+  }
+
+  // GET /api/v1/combo-orders/{id} — статус/результат (PG).
+  const gm = pathname.match(/^\/api\/v1\/combo-orders\/([^/]+)$/);
+  if (req.method === 'GET' && gm) {
+    const comboId = decodeURIComponent(gm[1]);
+    const status = await comboStatusFromPg(comboId);
+    if (!status) { writeJson(res, 404, { error: { code: 'NOT_FOUND', message: 'combo not found' } }); return true; }
+    writeJson(res, 200, status);
+    return true;
+  }
+  return false;
+}
+
+async function handleComboCompensations(req, res, pathname, query) {
+  // GET /api/v1/combo-compensations?status=pending
+  if (req.method === 'GET' && pathname === '/api/v1/combo-compensations') {
+    const client = initCompensationClient();
+    if (!client) {
+      writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'CompensationService unavailable' } });
+      return true;
+    }
+    const request = {
+      meta: createEventMeta('list-pending-compensations'),
+      parent_order_id: (query && query.parent_order_id) || ''
+    };
+    const result = await new Promise((resolve) => {
+      client.ListPendingCompensations(request, (err, response) => {
+        if (err) { console.error('[grpc] ListPendingCompensations error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const comps = (result.response.compensations || []).map((c) => ({
+      compensationId: c.compensation_id,
+      parentOrderId: c.parent_order_id,
+      legId: c.leg_id,
+      reason: c.reason,
+      internalFilledQty: decimalToString(c.internal_filled_qty)
+    }));
+    writeJson(res, 200, { compensations: comps, generatedAt: new Date().toISOString() });
+    return true;
+  }
+
+  // POST /api/v1/combo-compensations/{id}/resolve
+  const m = pathname.match(/^\/api\/v1\/combo-compensations\/([^/]+)\/resolve$/);
+  if (req.method === 'POST' && m) {
+    const compensationId = decodeURIComponent(m[1]);
+    let body;
+    try { body = await parseBody(req); } catch (e) { writeJson(res, 400, { error: { code: 'BAD_BODY', message: e.message } }); return true; }
+    const action = String(body.action || '').trim();
+    const operatorId = String(body.operatorId || '').trim();
+    if (!action) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'action required' } }); return true; }
+    if (!operatorId) { writeJson(res, 400, { error: { code: 'INVALID_ARGUMENT', message: 'operatorId required' } }); return true; }
+    const client = initOrderFlowClient();
+    if (!client) { writeJson(res, 502, { error: { code: 'NO_CLIENT', message: 'OrderFlowService unavailable' } }); return true; }
+    const request = {
+      meta: createEventMeta('resolve-compensation'),
+      compensation_id: compensationId,
+      action,
+      operator_id: operatorId
+    };
+    const result = await new Promise((resolve) => {
+      client.ResolveCompensation(request, (err, response) => {
+        if (err) { console.error('[grpc] ResolveCompensation error:', err.message); return resolve({ error: err.message }); }
+        resolve({ response });
+      });
+    });
+    if (result.error) { writeJson(res, 502, { error: { code: 'GRPC_ERROR', message: result.error } }); return true; }
+    const r = result.response || {};
+    const hasErr = r.error && r.error.code;
+    writeJson(res, 200, {
+      applied: !!r.applied,
+      reversingOrderIds: r.reversing_order_ids || [],
+      error: hasErr ? { code: r.error.code, message: r.error.message } : null
+    });
+    return true;
+  }
+  return false;
+}
+
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -779,6 +1131,17 @@ function proxyHeaders(req) {
     }
   }
   headers["x-forwarded-by"] = "frontend-api";
+  // Dev BFF identity: replay endpoints on the gateway require a present
+  // X-User-Id (or Authorization) header. The web app does not yet attach a
+  // logged-in identity to replay calls, so inject a default dev user when the
+  // browser sent none. With REPLAY_RBAC_ENFORCEMENT=false this user is allowed;
+  // production should forward the real authenticated identity instead.
+  const hasUser = Object.keys(headers).some(
+    (k) => k.toLowerCase() === "x-user-id" || k.toLowerCase() === "authorization",
+  );
+  if (!hasUser) {
+    headers["x-user-id"] = process.env.REPLAY_DEV_USER_ID || "demo-user";
+  }
   return headers;
 }
 
@@ -3732,6 +4095,9 @@ async function handleMatching(req, res, pathname, query) {
 // the real batch_ids matching emitted, plus the actual solve_time_ms,
 // residual_norm, num_active_orders, fills_count.
 async function fetchBatchesFromClickHouse(limit = 100) {
+  // F-09: batch_results_unified — единый read-слой ClickHouse: single_leg
+  // (batchresults) + combo_group (federation из PG execution_groups). Колонка
+  // kind различает их; status уже посчитан во view.
   const query = [
     "SELECT",
     "  batch_id,",
@@ -3739,8 +4105,13 @@ async function fetchBatchesFromClickHouse(limit = 100) {
     "  solve_time_ms,",
     "  residual_norm,",
     "  num_active_orders,",
-    "  fills_count",
-    `FROM ${CLICKHOUSE_DB}.batchresults`,
+    "  fills_count,",
+    "  status,",
+    "  kind,",
+    "  parent_order_id,",
+    "  execution_scale,",
+    "  ratio_deviation_bps",
+    `FROM ${CLICKHOUSE_DB}.batch_results_unified`,
     "ORDER BY event_time_ms DESC",
     `LIMIT ${Math.max(1, Math.min(500, Number(limit) || 100))}`,
     "FORMAT JSONEachRow"
@@ -3758,15 +4129,15 @@ async function fetchBatchesFromClickHouse(limit = 100) {
     const row = JSON.parse(line);
     const residual = parseNumeric(row.residual_norm, 0);
     const fills = parseNumeric(row.fills_count, 0);
-    // Heuristic status mapping consistent with what the simulator emitted,
-    // so the existing UI badge styles keep working: residual_norm > 0.1
-    // signals solver instability (FAILED), 0.01–0.1 signals partial
-    // convergence (PARTIAL), and below that with at least one fill is
-    // SUCCESS. Empty batches (fills_count=0) are also SUCCESS — the
-    // solver just had nothing to do.
-    let status = "SUCCESS";
-    if (residual > 0.1) status = "FAILED";
-    else if (residual > 0.01) status = "PARTIAL";
+    // status уже посчитан во view (для combo — из group_status, для single_leg —
+    // из residual_norm). Fallback на эвристику, если поле отсутствует.
+    let status = row.status;
+    if (!status) {
+      status = "SUCCESS";
+      if (residual > 0.1) status = "FAILED";
+      else if (residual > 0.01) status = "PARTIAL";
+    }
+    const kind = row.kind || "single_leg";
     return {
       batchId: row.batch_id,
       time: new Date(parseNumeric(row.event_time_ms, 0)).toISOString(),
@@ -3774,7 +4145,11 @@ async function fetchBatchesFromClickHouse(limit = 100) {
       solveTimeMs: parseNumeric(row.solve_time_ms, 0),
       residualNorm: residual,
       numActiveOrders: parseNumeric(row.num_active_orders, 0),
-      fillsCount: fills
+      fillsCount: fills,
+      kind,
+      comboId: kind === "combo_group" ? (row.parent_order_id || "") : undefined,
+      executionScale: kind === "combo_group" ? (row.execution_scale || "") : undefined,
+      ratioDeviationBps: row.ratio_deviation_bps != null ? Number(row.ratio_deviation_bps) : undefined
     };
   });
 }
@@ -6619,6 +6994,26 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/v1/hedge/policy-config") {
       const handled = await handlePolicyConfigV1(req, res, pathname);
+      if (handled !== false) return;
+    }
+
+    // F-09 UX: per-symbol котировка.
+    if (pathname === "/api/v1/quote") {
+      const handled = await handleQuote(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    // F-09: combo orders (create / list / status / cancel).
+    if (pathname === "/api/v1/combo-orders" ||
+        pathname.startsWith("/api/v1/combo-orders/")) {
+      const handled = await handleComboOrders(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    // F-09 MVP-6 slice 4: combo compensation console.
+    if (pathname === "/api/v1/combo-compensations" ||
+        pathname.startsWith("/api/v1/combo-compensations/")) {
+      const handled = await handleComboCompensations(req, res, pathname, query);
       if (handled !== false) return;
     }
 

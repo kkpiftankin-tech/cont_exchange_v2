@@ -45,6 +45,37 @@ protoContracts:
       - CancelFlowOrderRequest
       - GetFlowOrderRequest
 
+  combo:
+    files:
+      - contracts/proto/fob/orders/v1/combo.proto
+    features:
+      - F-09
+    components:
+      - order-flow
+      - gateway
+      - matching
+      - risk
+      - ledger
+    entities:
+      - Leg
+      - ComboOrder
+      - BatchOrder
+      - MultiLegConstraint
+      - ConditionalLink
+      - ChildRef
+      - ExecutionMode
+      - AtomicityPolicy
+      - AtomicityScope
+      - ComboType
+      - RatioBasis
+      - LegStatus
+      - ParentOrderStatus
+      - CreateBatchOrderRequest
+      - CreateComboOrderRequest
+      - PreviewComboOrderRequest
+      - CancelComboOrderRequest
+      - GetComboOrderRequest
+
   matching:
     files:
       - contracts/proto/fob/matching/v1/batch.proto
@@ -69,6 +100,36 @@ protoContracts:
       - BatchOutputs
       - BatchRequest
       - Solver
+
+  execution_groups:
+    files:
+      - contracts/proto/fob/matching/v1/execution_group.proto
+    features:
+      - F-09
+      - F-15
+    components:
+      - matching
+      - ledger
+      - risk
+      - order-flow
+      - observability
+    entities:
+      - ExecutionGroup
+      - LegResult
+      - GroupSolverDiagnostics
+      - GroupStatus
+
+  compensation:
+    files:
+      - contracts/proto/fob/matching/v1/compensation.proto
+    features:
+      - F-09
+    components:
+      - matching
+      - order-flow
+    entities:
+      - CompensationService
+      - PendingCompensation
 
   marketdata:
     files:
@@ -273,3 +334,30 @@ protoContracts:
       - ReplayCompletedEvent
       - ReplayFailedEvent
       - ReplayCancelledEvent
+
+  # AUDIT-001 follow-up (2026-06-08): sim.proto was unmapped despite being
+  # used by F-20 venues simulator. Surfaced by proto-contract-auditor.
+  sim:
+    files:
+      - contracts/proto/fob/sim/v1/sim.proto
+    features:
+      - F-20
+    components:
+      - venues
+      - observability
+    entities:
+      - RoutingMode
+      - SimSessionStatus
+      - LatencyDistribution
+      - ImpactModelType
+      - PartialFillMode
+      - SimAlertType
+      - SimConfigEventType
+      - LatencyModel
+      - ImpactModel
+      - FeeModel
+      - RejectionModel
+      - SimSession
+      - SimConfigEvent
+      - SimAlert
+      - SimExecutionAnnotation

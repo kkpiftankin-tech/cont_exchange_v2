@@ -1,3 +1,11 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-EXEC-ADAPT-001-intent-to-report
+level: fish
+component: venue-execution-adapter
+---
+-->
+
 # SEQ-EXEC-ADAPT-001. ExecutionIntent → ExecutionReport (adapter view)
 
 ## Type

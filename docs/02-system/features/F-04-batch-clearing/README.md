@@ -4,6 +4,80 @@
 > `fills` топик, PostgreSQL источник, multi-leg legs в схеме — все есть. Pending
 > зоны выделены ниже отдельно.
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз**. Каждый уровень имеет
+свой ответ на «что/как», и каждая ссылка ведёт на следующий уровень
+детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница (overview + L0 sequence ниже) │
+   │ для внешнего мира?     │                                            │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequence (ниже)                 │
+🐟 L2 │ Из каких классов       │ Component overview + L2 sequences          │
+   │ состоит сервис?        │ → matching-fob-core/overview.md            │
+   │ Как функция исполняется │ Per-UC L2 sequences (в use-case.md)        │
+   │ через классы?          │                                            │
+💻 src │ Код                    │ cpp/matching/src/...                       │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+**Быстрый старт по drill-down:**
+
+1. **L0 ☁️** Прочитайте описание ниже + откройте
+   [L0 system sequence](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md)
+   — система как чёрный ящик, видны только внешние эффекты.
+2. **L1 🌊** Перейдите к Use Cases (таблица ниже) → каждый UC раскрывает
+   одну функцию фичи. Для UC-F04-01 откройте
+   [L1 service sequence](../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md)
+   — видны сервисы matching/risk/ledger/market_data и контракты между ними.
+3. **L2 🐟** Откройте
+   [matching-fob-core component overview](../../../05-components/matching-fob-core/overview.md)
+   — увидите классы внутри сервиса. Затем
+   [L2 solver-cycle sequence](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md)
+   — как один цикл клиринга проходит через классы.
+4. **💻 Код** — [cpp/matching/](../../../../cpp/matching/) (ссылки на конкретные файлы внизу).
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 | Status |
+| --- | --- | --- | --- | --- |
+| [UC-F04-01](../../use-cases/UC-F04-01-run-batch-clearing/use-case.md) | Run Batch Clearing Cycle | [SEQ-UC-F04-01-system](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md) | [SEQ-F04-UC-F04-01-services](../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md) | in-progress |
+
+## 🏗 Components Involved
+
+| Component | Role | Drill-down → L2 🐟 |
+| --- | --- | --- |
+| [matching-fob-core](../../../05-components/matching-fob-core/overview.md) | Solver + batch loop (owner of F-04) | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
+| [market-data](../../../05-components/market-data/) | Reference prices (gRPC) | (L2 TBD) |
+| [ledger](../../../05-components/ledger/) | Apply fills → balances | (L2 TBD) |
+| [risk](../../../05-components/risk-manager/) | Post-trade alerts (consumer of `batch.outputs`) | (L2 TBD) |
+| [observability](../../../05-components/observability-reporting/) | Metrics + alerts | (L2 TBD) |
+
+## ☁️ L0 — System view (preview)
+
+Полная диаграмма с описанием шагов — в
+[SEQ-UC-F04-01-system.md](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md).
+
+```mermaid
+sequenceDiagram
+    actor Scheduler as Internal Timer
+    actor Trader
+    participant System as Continuous Exchange System
+
+    Scheduler->>System: Tick (every batch_interval_ms)
+    Note over System: step-1: Load active FlowOrders
+    Note over System: step-2: Fetch reference prices
+    Note over System: step-3: Solve batch (clearing)
+    Note over System: step-4: Publish results
+    System-->>Trader: Order status update (filled / partially filled)
+```
+
+> ⚠️ Эта диаграмма — preview уровня L0. Согласно IN-013 §3 (sequence rules),
+> на L0 запрещено упоминать внутренние сервисы. Их видно на L1 — см. ниже.
+
 ## Описание
 
 Периодический батч-клиринг активных FlowOrder. Каждые `batchIntervalMs` мс solver вычисляет клиринговые цены и скорости исполнения, формирует `BatchResult` и набор `FillEvent`, публикует в Kafka.

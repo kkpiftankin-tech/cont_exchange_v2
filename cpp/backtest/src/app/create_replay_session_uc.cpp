@@ -658,6 +658,8 @@ CreateReplaySession::Result CreateReplaySession::Run(const Request& request) con
   pending.started_at = std::nullopt;
   pending.completed_at = std::nullopt;
   pending.error_details = std::nullopt;
+  // F15-PERSIST: propagate ephemeral flag before repo routing.
+  pending.persist = request.persist;
 
   try {
     Result result;

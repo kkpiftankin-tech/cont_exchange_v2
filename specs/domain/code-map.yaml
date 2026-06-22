@@ -219,8 +219,9 @@ codeMap:
       - F-15
     keyFiles:
       - cpp/observability/src/main.cpp
-      - cpp/observability/src/app/obs_loop.cpp
-      - cpp/observability/src/app/obs_loop.hpp
+      # AUDIT-001 follow-up (2026-06-08): was obs_loop.{cpp,hpp} — renamed to service.{cpp,hpp}.
+      - cpp/observability/src/app/service.cpp
+      - cpp/observability/src/app/service.hpp
       - cpp/observability/CMakeLists.txt
     grpcPort: null
     kafkaProduces: []

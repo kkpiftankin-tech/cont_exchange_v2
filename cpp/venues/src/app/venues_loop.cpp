@@ -1,3 +1,51 @@
+// ============================================================================
+// venues_loop.cpp — главный orchestrator сервиса venues (F-11 + F-12 + F-20).
+//
+// Назначение и физический смысл:
+//   VenuesLoop оркеструет 4+ background thread'а одновременно:
+//
+//     md_publish_loop()         — market data publisher. Берёт snapshots/curves
+//                                 от venue адаптеров (CEX, DEX, sim) и
+//                                 публикует в Kafka venue.snapshots /
+//                                 venue.liquidity.fob / venue.health.
+//
+//     exec_consume_loop()       — execution.intents consumer. Принимает
+//                                 hedge-intents от matching/risk, routes их
+//                                 в подходящий venue adapter (CEX REST,
+//                                 DEX RPC, sim), и публикует ExecutionReport
+//                                 в execution.venue (+ legacy execution.reports).
+//
+//     sim_config_consume_loop() — sim.config consumer (F-20). Принимает
+//                                 SimConfigEvent (lifecycle SimSession) и
+//                                 hot-reload'ит VenueSimRouter без рестарта.
+//
+//     reconcile_loop()          — periodic reconciliation: state PG hedgeflows
+//                                 + child_orders с venue actual state, чтобы
+//                                 ловить stale/lost orders.
+//
+//   Дополнительно: VenueConfigRecord-based runtime config (UpsertVenueConfig /
+//   DeleteVenueConfig / ForceReconnect) — operator API для гибкой настройки
+//   venues без рестарта сервиса.
+//
+// Архитектурный паттерн (CLAUDE.md §10):
+//   transport/  — gRPC venues service + Kafka producers/consumers
+//   app/        — этот файл (VenuesLoop) — orchestration
+//   domain/     — VenueSubscription, VenueRawSnapshot, depth_curve_builder
+//   infra/      — CEX/DEX/Sim adapters (cex_ws_rest_adapter, etc.)
+//
+// Ключевые исторические PR'ы:
+//   - F-11 PR-серии: первоначальное построение LOB→FOB pipeline.
+//   - F-12 PR-F12-3a/3c: VenueExecutionAdapter, hedgeflow PnL sink.
+//   - F-20 PR-F20-*: VenueSimRouter + sim.* topics ADR-015 isolation.
+//   - PR-F02-016: surfacing venue confirmations в Profile (frontend-api consumer).
+//
+// CRITICAL invariants:
+//   - sim.execution.venue НЕ должен публиковаться в live execution.venue (ADR-015).
+//   - exec_consume_loop НЕ должен blocking-вызывать adapter — иначе один
+//     медленный venue заблокирует hedge для всех остальных.
+//   - Все money — cex::common::Decimal (см. PublishSimExecution для conversion).
+// ============================================================================
+
 #include "app/venues_loop.hpp"
 
 #include "app/sim_config_applier.hpp"
@@ -683,6 +731,10 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     binance_cfg.rest_base_url = cex::common::Env::get_string(
         "BINANCE_REST_BASE_URL", "https://api.binance.com");
     apply_real_cex_defaults(&binance_cfg);
+    // F-09 T-F09-068: symbols this venue (in simulate) returns as REJECTED —
+    // моделирует отказ реальной биржи на дискретный ордер (combo external-leg E2E).
+    binance_cfg.simulate_reject_symbols =
+        cex::common::Env::get_string("BINANCE_SIMULATE_REJECT_SYMBOLS", "");
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(binance_cfg));
 
     infra::CexWsRestAdapterConfig coinbase_cfg;
@@ -1035,6 +1087,16 @@ void VenuesLoop::apply_runtime_config_locked(const VenueConfigRecord& config) {
   }
 }
 
+// ============================================================================
+// UpsertVenueConfig / DeleteVenueConfig / ForceReconnect — operator runtime API.
+//
+// Позволяет добавлять / убирать venues / форсировать reconnect без рестарта
+// сервиса. Используется gateway → grpc admin endpoints.
+//
+// Concurrency: mutates internal map'у под lock; reload_producers_locked()
+// и apply_runtime_config_locked() — suffix _locked указывает что caller
+// должен удерживать mutex.
+// ============================================================================
 bool VenuesLoop::UpsertVenueConfig(const VenueConfigRecord& in_config, std::string* error) {
   if (in_config.venue_id.empty()) {
     if (error != nullptr) *error = "venue_id must not be empty";
@@ -1179,19 +1241,34 @@ std::vector<fob::orders::v1::SyntheticFlowOrder> VenuesLoop::GetVenueSynthetics(
   return {history.end() - static_cast<std::ptrdiff_t>(count), history.end()};
 }
 
+// ============================================================================
+// start — запуск всех background threads.
+//
+// Порядок:
+//   1. running_ → true.
+//   2. Connect default venues (CEX/DEX adapters), subscribe на topics.
+//   3. Spawn threads: t_md_publish, t_exec_consume, t_sim_config_consume,
+//      t_reconcile.
+//
+// CRITICAL: вызывать один раз. Повторный start без stop() leak'нет threads.
+// ============================================================================
 void VenuesLoop::start() {
   running_.store(true);
   connect_and_subscribe_defaults();
   t_md_ = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
+  t_extra_ticker_ = std::thread([this] { extra_ticker_loop(); });
 }
 
+/// Graceful shutdown: clear running_ flag, ждём все threads.
+/// joinable() check — защита от double-stop без crash'а.
 void VenuesLoop::stop() {
   running_.store(false);
   if (t_md_.joinable()) t_md_.join();
   if (t_exec_.joinable()) t_exec_.join();
   if (t_sim_config_.joinable()) t_sim_config_.join();
+  if (t_extra_ticker_.joinable()) t_extra_ticker_.join();
 }
 
 // F-20 Phase 4 — consume `sim.config` (SimConfigEvent) and apply each to the
@@ -1200,6 +1277,17 @@ void VenuesLoop::stop() {
 // (next wiring step) reads it. auto_offset_reset defaults to "earliest" so a
 // restarted consumer replays the config stream and rebuilds the registry
 // (UPSERT/DELETE are idempotent and order-stable).
+// ============================================================================
+// sim_config_consume_loop — F-20 SimSession config hot-reload.
+//
+// Подписывается на sim.config Kafka topic. На каждый SimConfigEvent (create/
+// update/pause/resume/complete/abort SimSession):
+//   1. Apply через SimConfigApplier → VenueSimRouter::Reconfigure().
+//   2. Update local state map sim_sessions_.
+//   3. Log change для observability.
+//
+// Идempotency: version_monotonic strict ordering — late events ignored.
+// ============================================================================
 void VenuesLoop::sim_config_consume_loop() {
   const std::string group = cex::common::Env::get_string(
       "VENUES_SIM_CONFIG_CONSUMER_GROUP", "venues_sim_config");
@@ -1249,6 +1337,81 @@ void VenuesLoop::sim_config_consume_loop() {
   cex::common::log_json("INFO", "Venues sim.config consumer loop stopped");
 }
 
+// ============================================================================
+// extra_ticker_loop — F-09 UX. Лёгкий тикер-фид по доп. символам (на одной venue,
+// по умолчанию binance): RequestSnapshot(symbol) → publish_raw_ticker, чтобы
+// market_data кэшировал last ticker и /api/v1/quote отдавал цену не только для
+// BTC/USDT. Изолирован от core md_publish_loop (только тикеры; без curves/snapshot
+// store) — не влияет на F-11/F-12.
+// ============================================================================
+void VenuesLoop::extra_ticker_loop() {
+  const std::string venue = cex::common::Env::get_string("VENUES_FEED_VENUE", "binance");
+  const std::string list = cex::common::Env::get_string(
+      "VENUES_FEED_SYMBOLS",
+      "ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,AVAX/USDT,LINK/USDT,LTC/USDT");
+  const int interval_ms = cex::common::Env::get_int("VENUES_FEED_INTERVAL_MS", 5000);
+
+  // CSV "BASE/QUOTE,..." → VenueSnapshotRequest[] (venue_symbol = BASEQUOTE для binance).
+  std::vector<domain::VenueSnapshotRequest> reqs;
+  std::size_t pos = 0;
+  while (pos < list.size()) {
+    const std::size_t comma = list.find(',', pos);
+    std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+    while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+    const std::size_t slash = tok.find('/');
+    if (!tok.empty() && slash != std::string::npos) {
+      domain::VenueSnapshotRequest req;
+      const std::string base = tok.substr(0, slash);
+      const std::string quote = tok.substr(slash + 1);
+      req.instrument.set_symbol(tok);
+      req.instrument.set_base(base);
+      req.instrument.set_quote(quote);
+      req.venue_symbol = base + quote;
+      reqs.push_back(std::move(req));
+    }
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+
+  cex::common::log_json("INFO", "Venues extra-ticker loop starting",
+                        {{"venue", venue}, {"symbols", std::to_string(reqs.size())},
+                         {"interval_ms", std::to_string(interval_ms)}});
+
+  while (running_.load()) {
+    domain::VenueAdapter* adapter = find_adapter(venue);
+    if (adapter != nullptr) {
+      for (const auto& req : reqs) {
+        if (!running_.load()) break;
+        try {
+          std::optional<domain::VenueRawSnapshot> snap;
+          {
+            std::lock_guard<std::mutex> lk(snapshot_mu_);
+            snap = adapter->RequestSnapshot(req);
+          }
+          if (snap.has_value()) publish_raw_ticker(&producer_, *snap);
+        } catch (const std::exception& e) {
+          cex::common::log_json("WARN", "extra-ticker snapshot failed",
+                                {{"symbol", req.instrument.symbol()}, {"error", e.what()}});
+        }
+      }
+    }
+    for (int slept = 0; slept < interval_ms && running_.load(); slept += 200) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }
+  cex::common::log_json("INFO", "Venues extra-ticker loop stopped", {});
+}
+
+// ============================================================================
+// PublishSimExecution — F-20 sim ExecutionReport publisher.
+//
+// CRITICAL ADR-015: публикует ТОЛЬКО в sim.execution.venue, НЕ в live
+// execution.venue. Также эмиттит sim.execution.annotations (sidecar telemetry
+// correlated by report_id) и опционально sim.alerts при triggers.
+//
+// venue_order_id обязан иметь SIM- prefix — защита от случайного смешения.
+// ============================================================================
 void VenuesLoop::PublishSimExecution(
     const fob::execution::v1::ExecutionIntent& intent,
     const RouteDecision& decision) {
@@ -1454,6 +1617,22 @@ domain::VenueAdapter* VenuesLoop::find_adapter(const std::string& venue_id) {
   return nullptr;
 }
 
+// ============================================================================
+// md_publish_loop — Market Data publisher thread (F-11).
+//
+// Цикл:
+//   1. Polls every VENUES_MD_LOOP_INTERVAL_MS (default 5000 ms).
+//   2. Для каждого активного venue adapter — берёт latest snapshot.
+//   3. Нормализует через VenueSnapshot/CanonicalOrderBook.
+//   4. Строит DepthSideCurves через depth_curve_builder (S(q) + L(v)).
+//   5. Публикует в Kafka:
+//        - venue.snapshots (raw normalized LOB)
+//        - venue.liquidity.fob (LOB→FOB кривые)
+//        - venue.health (circuit-breaker state)
+//
+// Throttling: STALE_THRESHOLD_MS (default 15000) — если snapshot старее,
+// venue помечается STALE и удаляется из health-allow list.
+// ============================================================================
 void VenuesLoop::md_publish_loop() {
   using namespace std::chrono;
 
@@ -1524,8 +1703,11 @@ void VenuesLoop::md_publish_loop() {
           continue;
         }
 
-        const std::optional<domain::VenueRawSnapshot> snapshot =
-            adapter->RequestSnapshot(request);
+        std::optional<domain::VenueRawSnapshot> snapshot;
+        {
+          std::lock_guard<std::mutex> lk(snapshot_mu_);
+          snapshot = adapter->RequestSnapshot(request);
+        }
         if (!snapshot.has_value()) {
           cex::common::log_json("WARN", "Adapter returned empty snapshot",
                                 {{"venue", adapter->VenueId()}});
@@ -1685,6 +1867,28 @@ void VenuesLoop::md_publish_loop() {
   }
 }
 
+// ============================================================================
+// exec_consume_loop — Execution Intent consumer thread (F-12).
+//
+// Цикл:
+//   1. Poll Kafka execution.intents (500ms timeout).
+//   2. Parse ExecutionIntent (intent_id, hedge_flow_id, target_qty, venue,
+//      limit_price, strategy, urgency, etc).
+//   3. Routing:
+//        - Если VENUES_SIMULATE_ORDERS=1 — route в VenueSimRouter (sim).
+//        - SimSession.mode=sim_only — то же самое (operator override).
+//        - SimSession.mode=shadow — dual-send: реальный venue + sim parallel.
+//        - Иначе — real CEX/DEX adapter (cex_ws_rest_adapter / dex_amm_rpc).
+//   4. ExecutionReport публикуется:
+//        - sim → sim.execution.venue (ADR-015 isolation, никогда не в live).
+//        - live → execution.venue + legacy execution.reports.
+//
+// Idempotency: intent_id используется как key, повторный intent
+// дедуплицируется на venue-стороне через client_order_id.
+//
+// Error handling: timeout / venue error → ExecutionException ExecutionReport
+// (status=REJECTED, error.code, error.message). См. make_execution_exception_report.
+// ============================================================================
 void VenuesLoop::exec_consume_loop() {
   cex::common::log_json(
       "INFO",

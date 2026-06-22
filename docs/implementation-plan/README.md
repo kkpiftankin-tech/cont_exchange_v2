@@ -50,5 +50,6 @@ Each tasks file MUST begin with a checklist that confirms the documentation chai
 ## Related
 
 - Coverage matrix: [`../traceability/coverage-matrix.md`](../traceability/coverage-matrix.md)
+- **Definition of "covered"** (covered-docs / covered-code / covered-runtime — AUDIT-001 T-AUDIT-010): [`../00-methodology/feature-development-process.md §7.4.1`](../00-methodology/feature-development-process.md)
 - Feature index: [`../02-system/features/feature-index.md`](../02-system/features/feature-index.md)
 - Ingestion skill: [`../../.claude/skills/ingest-docs/SKILL.md`](../../.claude/skills/ingest-docs/SKILL.md)

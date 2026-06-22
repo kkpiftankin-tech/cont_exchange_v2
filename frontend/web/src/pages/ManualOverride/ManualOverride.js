@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import NavBar from "../../components/NavBar";
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { isAuthenticated, logout } from '../../api/authService';
@@ -207,25 +208,7 @@ const ManualOverride = () => {
 
   return (
     <div className="manual-page">
-      <nav className="navbar-main manual-navbar">
-        <div className="logo">
-          <img src={logo} alt="Logo" className="logo-purple" />
-          <span>{t('navbar.logo')}</span>
-        </div>
-        <div className="nav-links">
-          <a href="/main">{t('navbar.trade')}</a>
-          <a href="/profile">{t('navbar.profile')}</a>
-          <a href="/venues">{t('navbar.venues')}</a>
-          <a href="/hedgeflows">{t('navbar.hedgeflows')}</a>
-          <a href="/hedge-pnl">{t('navbar.hedgePnl')}</a>
-          <a href="/execution-live">{t('navbar.executionLive')}</a>
-          <a href="/reconciliation-alerts">{t('navbar.reconciliationAlerts')}</a>
-          <a href="/manual-override" className="active">{t('navbar.manualOverride')}</a>
-          <a href="/policy-config">{t('navbar.policyConfig')}</a>
-          <a href="/replay">{t('navbar.replay')}</a>
-          <button onClick={handleLogout} className="logout-btn">{t('navbar.logout')}</button>
-        </div>
-      </nav>
+      <NavBar />
 
       <main className="manual-shell">
         <section className="manual-hero">

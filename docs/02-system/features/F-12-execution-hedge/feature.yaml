@@ -3,6 +3,7 @@ feature:
   name: Execution Hedge
   status: doc-complete-impl-partial
   owner: core-team
+  level: kite
 
 description: >
   Автоматическое хеджирование нетто-позиций провайдера на внешних площадках
@@ -54,7 +55,9 @@ codePaths:
   - cpp/matching/src/app/external_venue_filter.hpp
   - cpp/matching/src/app/position_snapshot_calculator.cpp
   - cpp/matching/src/app/position_snapshot_calculator.hpp
-  - cpp/matching/src/app/execution_planning_uc.hpp          # interface stub
+  # AUDIT-001 follow-up (2026-06-08): stub `execution_planning_uc.hpp` was never
+  # created; real execution-planning interface lives in execution_planner.{cpp,hpp}.
+  - cpp/matching/src/app/execution_planner.hpp
   # venues currently hosts Venue Execution Adapter + EVC concerns (Conflict Note C-1)
   - cpp/venues/src/app/execute_on_venue.cpp
   - cpp/venues/src/app/execute_on_venue.hpp
@@ -823,7 +826,7 @@ knownIssues:
       + venue.health (формула qty[v] = L(v)/Sum L(v') * targetQty) ещё
       не имплементирована. Интерфейс `IExecutionPlanningUseCases` присутствует,
       но без полной реализации.
-    location: cpp/matching/src/app/execution_planning_uc.hpp
+    location: cpp/matching/src/app/execution_planner.hpp
   - id: venues-sim-zero-execution-price
     severity: dev-limitation
     description: >

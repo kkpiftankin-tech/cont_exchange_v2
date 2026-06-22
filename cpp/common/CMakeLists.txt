@@ -37,6 +37,7 @@ add_library(cex_common STATIC
         src/decimal.cpp
         src/kafka.cpp
         src/replay_kafka.cpp
+        src/compensation_reversal.cpp
         include/cex/common/defer.hpp
 )
 
@@ -52,3 +53,18 @@ target_link_libraries(cex_common PUBLIC
 )
 
 target_compile_options(cex_common PRIVATE -Wall -Wextra -Wpedantic)
+
+# F-09 (T-F09-044 prereq): unit-тест Decimal::div (деньги — §9, покрываем тестом).
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(cex_common_decimal_test tests/decimal_test.cpp)
+  target_link_libraries(cex_common_decimal_test PRIVATE cex_common)
+  target_compile_options(cex_common_decimal_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME cex_common_decimal_test COMMAND cex_common_decimal_test)
+
+  # F-09 MVP-6 (ADR-039 / ADR-040 §4): pure ComputeReversals (перенесён из matching).
+  add_executable(cex_common_compensation_reversal_test tests/compensation_reversal_test.cpp)
+  target_link_libraries(cex_common_compensation_reversal_test PRIVATE cex_common)
+  target_compile_options(cex_common_compensation_reversal_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME cex_common_compensation_reversal_test COMMAND cex_common_compensation_reversal_test)
+endif()

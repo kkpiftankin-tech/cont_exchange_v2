@@ -3,6 +3,7 @@ feature:
   name: Pre-trade Risk Control
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Синхронные pre-trade проверки нового FlowOrder: kill-switch, sanity checks,

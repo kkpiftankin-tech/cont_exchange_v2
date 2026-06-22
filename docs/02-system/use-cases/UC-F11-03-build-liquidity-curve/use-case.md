@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F11-03. Построить VenueLiquidityCurve (LOB → FOB)
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-11-external-venues-lob-to-fob](../../features/F-11-external-venues-lob-to-fob/) |
+| ☁️ L0 system sequence | [SEQ-UC-F11-03-system](sequences/SEQ-UC-F11-03-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F11-03-build-curve-services](../../../05-components/sequences/SEQ-F11-03-build-curve-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

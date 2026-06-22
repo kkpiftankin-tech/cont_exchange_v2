@@ -10,6 +10,22 @@ For working starter files used during ingestion, see the existing template direc
 
 Templates below extend these with sections required by the ingestion workflow (Source Fragments, External Message Table, Implementation Task structure).
 
+## Decomposition level (IN-013)
+
+Каждый артефакт обязан иметь поле `level:` (Cockburn). Полное описание —
+[`functional-hierarchy-and-decomposition.md`](functional-hierarchy-and-decomposition.md).
+
+| Артефакт | `level:` | Symbol |
+| --- | --- | --- |
+| Feature (`feature.yaml`) | `kite` | ☁️ |
+| Use Case (`use-case.md` frontmatter) | `sea` | 🌊 |
+| L0 System sequence (`SEQ-{UC}-system.md` frontmatter) | `kite` | ☁️ |
+| L1 Service sequence (`SEQ-{F}-{UC}-services.md` frontmatter) | `sea` | 🌊 |
+| L2 Component-internal sequence (`SEQ-{COMP}-NNN-*.md` frontmatter) | `fish` | 🐟 |
+
+Существующие артефакты дополняются `level:` при следующем касании.
+Backfill всех 22 features — отдельная задача (не в этом цикле).
+
 ## Feature Template
 
 **Target:** `docs/02-system/features/F-XX-short-name/README.md` (+ `feature.yaml`).

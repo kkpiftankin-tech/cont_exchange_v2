@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F03-01. Изменить или отменить FlowOrder
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-03-order-lifecycle](../../features/F-03-order-lifecycle/) |
+| ☁️ L0 system sequence | [SEQ-UC-F03-01-system](sequences/SEQ-UC-F03-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F03-UC-F03-01-services](../../../05-components/sequences/SEQ-F03-UC-F03-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

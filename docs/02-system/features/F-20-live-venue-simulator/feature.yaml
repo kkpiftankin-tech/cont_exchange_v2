@@ -3,6 +3,7 @@ feature:
   name: Live Venue Simulator
   status: draft           # documentation only; no implementation yet
   owner: core-team
+  level: kite
 
 description: >
   Гибридный режим работы системы: приём живых LOB-снапшотов от внешних

@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F11-05-system
+level: kite
+---
+-->
+
 # SEQ-UC-F11-05-system. Execute hedge on venue: system view
 
 ## Type

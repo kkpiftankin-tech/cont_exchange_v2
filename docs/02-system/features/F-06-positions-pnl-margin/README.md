@@ -1,5 +1,38 @@
 # F-06 — Positions / PnL / Margin
 
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз** для фичи.
+Каждый уровень имеет свой ответ на «что/как», и каждая ссылка
+ведёт на следующий уровень детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница + L0 system sequence(s) ниже  │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequences (per-UC)              │
+🐟 L2 │ Из каких классов       │ Component overviews + L2 sequences         │
+   │ состоит сервис?        │                                            │
+💻 src │ Код                    │ cpp/<component>/src/...                    │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
+| --- | --- | --- | --- |
+| [UC-F06-01](../../use-cases/UC-F06-01-show-positions/use-case.md) | Show Positions | [SEQ-UC-F06-01-system](../../use-cases/UC-F06-01-show-positions/sequences/SEQ-UC-F06-01-system.md) | [SEQ-F06-UC-F06-01-services](../../../05-components/sequences/SEQ-F06-UC-F06-01-services.md) |
+
+## 🏗 Components Involved
+
+| Component | Drill-down → component overview / L2 sequences |
+| --- | --- |
+| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
+| `risk` (overview pending) | (L2 sequences pending) |
+| [gateway](../../../05-components/gateway/overview.md) | (L2 sequences pending) |
+
+> См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
+
 ## Описание
 
 Учёт балансов, позиций, PnL и маржинальных требований пользователей. Бэкенд: `cpp/ledger` (балансы) + `cpp/risk` (margin TODO).

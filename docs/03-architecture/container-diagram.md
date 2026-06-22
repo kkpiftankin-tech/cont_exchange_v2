@@ -139,7 +139,7 @@ graph TB
 | BatchClearing | внутренний таймер | Kafka | [SEQ-F04-UC-F04-01-services](../05-components/sequences/SEQ-F04-UC-F04-01-services.md) |
 | Live MD | EV → Kafka → MD → UI | Kafka + WS | [SEQ-F05-UC-F05-01-services](../05-components/sequences/SEQ-F05-UC-F05-01-services.md) |
 | Pre-trade risk | OF → RISK | gRPC | [SEQ-F07-UC-F07-01-services](../05-components/sequences/SEQ-F07-UC-F07-01-services.md) |
-| Execution hedge | SRC → EV → CEX | Kafka + venue SDK | [SEQ-F12-UC-F12-01-services](../05-components/sequences/SEQ-F12-UC-F12-01-services.md) |
+| Execution hedge | SRC → EV → CEX | Kafka + venue SDK | [SEQ-F12-01-auto-hedge-services](../05-components/sequences/SEQ-F12-01-auto-hedge-services.md) |
 
 ## Связанные документы
 

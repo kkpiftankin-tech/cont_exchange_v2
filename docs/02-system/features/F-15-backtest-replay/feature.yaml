@@ -3,6 +3,7 @@ feature:
   name: Backtest / Replay
   status: in-progress-impl
   owner: core-team
+  level: kite
 
 description: >
   Backtest и shadow-replay исторических батчей через тот же solver, risk
@@ -192,6 +193,26 @@ acceptanceCriteria:
   - "Hard failure (сессия): отсутствие исторических данных / crash — status=failed с error_details (F15-39)."
   - "Shadow isolation: production Collateral Ledger не задет операциями replay (NFR)."
   - "RBAC: проверка ролей admin/analyst/viewer на каждом endpoint; audit_log на каждое действие (F15-RBAC-*)."
+  # F15-PERSIST acceptance criteria
+  - id: F15-PERSIST-1
+    description: >
+      persist=false (ephemeral): ни одна строка не пишется в PostgreSQL
+      replay_sessions/replay_summaries и ClickHouse replay_agentlogs во время
+      всего жизненного цикла сессии.
+  - id: F15-PERSIST-2
+    description: >
+      persist=false (ephemeral): GET /sessions/{id}, GET /sessions/{id}/summary,
+      GET /sessions/{id}/agentlogs, POST /sessions/{id}/retry возвращают 404 или
+      no-data для ephemeral id после завершения (eviction) сессии.
+  - id: F15-PERSIST-3
+    description: >
+      persist=false (ephemeral): сессия не возвращается в GET /sessions (список).
+      Только персистентные сессии присутствуют в листинге PostgreSQL.
+  - id: F15-PERSIST-4
+    description: >
+      persist=true или отсутствие поля: поведение не меняется относительно
+      существующей реализации. Все существующие тесты/скрипты, не передающие
+      `persist`, продолжают работать без изменений.
 
 nonFunctionalRequirements:
   - "Replay 1 000 батчей завершается за < 60 сек wall clock (single session)."
@@ -244,6 +265,15 @@ knownIssues:
     description: >
       UI экраны (Backtest / Replay form, Results, A/B compare, Audit-mode
       diff, Equity curve) ещё не реализованы — только REST API готов.
+  - id: persist-default-true-on-wire
+    severity: design-note
+    description: >
+      Поле persist имеет умолчание true на уровне C++ struct и wire (JSON).
+      Это необходимо для backward-compat: существующие тесты/скрипты, не
+      передающие `persist`, сохраняют поведение persist=true без изменений.
+      Frontend по умолчанию должен явно отправлять persist=false для
+      интерактивных ephemeral-запусков. Retire note: как только все клиенты
+      перейдут на явную передачу поля, можно рассмотреть смену умолчания.
 
 tests:
   unit:
@@ -274,6 +304,11 @@ tests:
     - cpp/backtest/tests/clickhouse_storage_test.cpp
     - cpp/backtest/tests/clickhouse_historical_queries_test.cpp
     - cpp/backtest/tests/app/retry_replay_session_uc_test.cpp
+    # F15-PERSIST unit tests
+    - cpp/backtest/tests/ephemeral_session_registry_test.cpp
+    - cpp/backtest/tests/routing_replay_session_repository_test.cpp
+    - cpp/backtest/tests/routing_summary_store_test.cpp
+    - cpp/backtest/tests/routing_agent_log_writer_test.cpp
   integration:
     - cpp/backtest/tests/infra/postgres_replay_session_repository_test.cpp
     - Testing/f15_test2_e2e.sh                                       # docker-compose E2E

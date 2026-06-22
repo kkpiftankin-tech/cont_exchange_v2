@@ -172,9 +172,87 @@ void test_apply_batch_result_empty_batch_keeps_balances() {
 
 }  // namespace
 
+// F-09 (T-F09-060): ApplyExecutionGroup постит ноги в позиции + идемпотентность.
+void test_apply_execution_group_updates_positions() {
+  cex::ledger::app::LedgerUseCases uc;
+
+  fob::matching::v1::ExecutionGroup eg;
+  eg.set_execution_group_id("eg-ledger-1");
+  eg.set_parent_order_id("parent-1");
+  eg.set_user_id("grp-user");
+
+  auto* lr1 = eg.add_leg_results();
+  lr1->set_instrument_symbol("BTCUSDT");
+  lr1->set_side(fob::common::v1::SIDE_BUY);
+  *lr1->mutable_exec_qty() = make_decimal(2, 0);    // 2.0
+  *lr1->mutable_exec_price() = make_decimal(100, 0);
+
+  auto* lr2 = eg.add_leg_results();
+  lr2->set_instrument_symbol("ETHUSDT");
+  lr2->set_side(fob::common::v1::SIDE_BUY);
+  *lr2->mutable_exec_qty() = make_decimal(3, 0);    // 3.0
+  *lr2->mutable_exec_price() = make_decimal(50, 0);
+
+  uc.ApplyExecutionGroup(eg);
+  const auto btc = uc.GetPosition("grp-user", "BTCUSDT");
+  const auto eth = uc.GetPosition("grp-user", "ETHUSDT");
+  assert(cex::common::Decimal::cmp(btc.amount, cex::common::Decimal{2, 0}) == 0);
+  assert(cex::common::Decimal::cmp(eth.amount, cex::common::Decimal{3, 0}) == 0);
+
+  // Идемпотентность: повтор той же группы → позиции не меняются (не x2).
+  uc.ApplyExecutionGroup(eg);
+  const auto btc2 = uc.GetPosition("grp-user", "BTCUSDT");
+  assert(cex::common::Decimal::cmp(btc2.amount, cex::common::Decimal{2, 0}) == 0);
+}
+
+// F-09: ApplyExecutionGroup должен двигать БАЛАНСЫ (а не только позиции), иначе
+// «личный счёт» на вкладке Торговля не меняется по combo. Combo не резервирует —
+// settle из available: BUY -quote +base.
+void test_apply_execution_group_settles_balances() {
+  cex::ledger::app::LedgerUseCases uc;  // seed demo-user: 10000.00 USDT, 2.5 BTC
+
+  fob::matching::v1::ExecutionGroup eg;
+  eg.set_execution_group_id("eg-bal-1");
+  eg.set_parent_order_id("parent-bal-1");
+  eg.set_user_id("demo-user");
+
+  auto* lr1 = eg.add_leg_results();           // BTC/USDT BUY 0.01 @ notional 50.00
+  lr1->set_instrument_symbol("BTC/USDT");
+  lr1->set_side(fob::common::v1::SIDE_BUY);
+  *lr1->mutable_exec_qty() = make_decimal(1'000'000, 8);   // 0.01 BTC
+  *lr1->mutable_exec_notional() = make_decimal(5'000, 2);  // 50.00 USDT
+
+  auto* lr2 = eg.add_leg_results();           // ETH/USDT BUY 1.0 @ notional 30.00
+  lr2->set_instrument_symbol("ETH/USDT");
+  lr2->set_side(fob::common::v1::SIDE_BUY);
+  *lr2->mutable_exec_qty() = make_decimal(100'000'000, 8); // 1.0 ETH
+  *lr2->mutable_exec_notional() = make_decimal(3'000, 2);  // 30.00 USDT
+
+  uc.ApplyExecutionGroup(eg);
+  auto bal = get_balances(uc, "demo-user");
+  const auto* usdt = find_balance(bal, "USDT");
+  const auto* btc = find_balance(bal, "BTC");
+  const auto* eth = find_balance(bal, "ETH");
+  assert(usdt && btc && eth);
+  // USDT: 10000.00 − 50.00 − 30.00 = 9920.00
+  assert(usdt->available().units() == 992'000 && usdt->available().scale() == 2);
+  // BTC: 2.50000000 + 0.01000000 = 2.51000000
+  assert(btc->available().units() == 251'000'000 && btc->available().scale() == 8);
+  // ETH: 0 + 1.00000000 = 1.00000000
+  assert(eth->available().units() == 100'000'000 && eth->available().scale() == 8);
+
+  // Идемпотентность: повтор той же группы не двоит балансы.
+  uc.ApplyExecutionGroup(eg);
+  auto bal2 = get_balances(uc, "demo-user");
+  assert(find_balance(bal2, "USDT")->available().units() == 992'000);
+  assert(find_balance(bal2, "BTC")->available().units() == 251'000'000);
+}
+
 int main() {
   test_apply_batch_result_buy_updates_balances();
   test_apply_batch_result_sell_updates_balances();
   test_apply_batch_result_empty_batch_keeps_balances();
+  test_apply_execution_group_updates_positions();
+  test_apply_execution_group_settles_balances();
   return 0;
 }

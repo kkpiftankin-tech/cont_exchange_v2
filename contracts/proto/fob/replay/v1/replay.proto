@@ -82,6 +82,10 @@ message ReplaySession {
   optional google.protobuf.Timestamp started_at = 15;
   optional google.protobuf.Timestamp completed_at = 16;
   optional string error_details = 17;          // причина ошибки при status=failed
+  // NOTE F15-PERSIST: field 18 is reserved for a future `bool persist` flag.
+  // Currently the flag lives only in the REST/Kafka JSON payload and the C++
+  // ReplaySession struct — no proto wire change needed yet.
+  // reserved 18;
 }
 
 

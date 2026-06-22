@@ -33,6 +33,10 @@ public:
 
   void OnBatchResult(const fob::risk::v1::PostTradeUpdateRequest &req);
 
+  // F-09 (T-F09-040): эмитит RiskAlert GROUPED_PRE_TRADE_REJECTED в risk.alerts
+  // при отклонении группового pre-trade check (для Observability / Operator UI).
+  void PublishGroupedRejectAlert(const std::string &user_id, const std::string &reason);
+
   void CurveChecks(const fob::venue::v1::VenueLiquidityCurve &curve);
   void HealthChecks(const fob::venue::v1::VenueHealth &health);
   void OnExecutionReport(const fob::execution::v1::ExecutionReport &report);

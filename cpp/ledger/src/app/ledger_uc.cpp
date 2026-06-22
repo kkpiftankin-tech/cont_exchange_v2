@@ -1,8 +1,47 @@
+// ============================================================================
+// ledger_uc.cpp — application use cases сервиса ledger.
+//
+// Назначение и физический смысл:
+//   Ledger — источник истины по балансам и позициям. Обрабатывает:
+//     * gRPC GetBalances / ReserveFunds / ReleaseFunds — для order_flow.
+//     * ApplyBatchResult — Kafka batch.outputs consumer (применяет fills).
+//     * ApplyExecutionReport — Kafka execution.* consumer (F-12 hedge).
+//     * GetPositions / GetUnrealisedPnL / GetRealisedPnL — UI views.
+//     * GetVenueBalances / UpdateVenueBalance — F-12 admin.
+//     * GetHedgePnL — F-12 DoD-6 hedge PnL agg.
+//
+// Двойная книга (двойная учётная запись):
+//   * balances_       — пользовательские balances per (user, currency)
+//                       с available/reserved разделением.
+//   * positions_       — пользовательские позиции per (user, instrument)
+//                       с amount/avg_entry_price/realised_pnl.
+//   * venue_balances_  — наши balances на внешних venues (F-12 hedge).
+//   * hedge_pnl_records_ — журнал hedge fills для DoD-6 reporting.
+//
+// Идempotency и контракты (CLAUDE.md §17 — Ledger rules):
+//   * Reservation идempotent по reservation_id (повторный Reserve — no-op).
+//   * Batch fills идempotent по batch_id через IsBatchProcessed.
+//   * Execution reports идempotent по composite key (intent_id + venue_order_id +
+//     status + filled_qty + remaining + price).
+//   * Status transitions проверяются (NEW → PARTIAL/FILLED/CANCEL/...).
+//
+// Concurrency:
+//   * mu_ — основной mutex, защищает все maps balances_/positions_/reservations_/
+//     execution_states_/venue_balances_/hedge_pnl_records_/...
+//   * Все mutating операции — под lock.
+//   * Repository ports (positions_repo_, entries_repo_, hedge_entries_repo_)
+//     вызываются ВНЕ lock'а — DB calls могут блокировать.
+//
+// CRITICAL: ВСЕ money — cex::common::Decimal. Никаких double для balance
+// math, только PnL calculations используют double как промежуточный вариант
+// (с явным rounding обратно в Decimal{scale=2}).
+// ============================================================================
+
 #include "app/ledger_uc.hpp"
 
-#include <cmath>
-#include <exception>
-#include <sstream>
+#include <cmath>          // std::pow, std::llround для PnL вычислений
+#include <exception>      // std::exception::what() в catch
+#include <sstream>        // std::ostringstream для composite key
 #include <utility>
 
 #include "cex/common/log.hpp"
@@ -15,6 +54,8 @@ using cex::common::Decimal;
 
 namespace {
 
+/// True если report.error содержит хотя бы code, message или details.
+/// Используется при normalize_execution_status для defaulting на REJECTED.
 bool has_non_empty_error(const fob::execution::v1::ExecutionReport& report) {
   return report.has_error() &&
       (!report.error().code().empty() ||
@@ -22,10 +63,18 @@ bool has_non_empty_error(const fob::execution::v1::ExecutionReport& report) {
        !report.error().details().empty());
 }
 
+/// True если value > 0 (используется для проверки filled_qty/remaining).
 bool is_positive(const fob::common::v1::Decimal& value) {
   return Decimal::cmp(Decimal::from_proto(value), Decimal::zero()) > 0;
 }
 
+/// Нормализация статуса execution report:
+/// * Если venue прислал status != NEW/UNSPECIFIED — используем как есть.
+/// * Иначе пытаемся вывести: error → REJECTED, filled>0 & remaining>0 → PARTIAL,
+///   filled>0 & remaining=0 → FILLED.
+///
+/// Нужно потому что некоторые venue (особенно DEX) не выставляют status
+/// явно — мы должны вывести из других полей.
 fob::execution::v1::ExecutionReportStatus normalize_execution_status(
     const fob::execution::v1::ExecutionReport& report) {
   const auto status = report.status();
@@ -44,6 +93,9 @@ fob::execution::v1::ExecutionReportStatus normalize_execution_status(
   return status;
 }
 
+/// Терминальные статусы execution: filled/cancelled/rejected/expired.
+/// После терминального — больше не принимаем обновлений (защита от
+/// rebroadcast'ов из venue).
 bool is_terminal_status(const fob::execution::v1::ExecutionReportStatus status) {
   switch (status) {
     case fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED:
@@ -56,6 +108,16 @@ bool is_terminal_status(const fob::execution::v1::ExecutionReportStatus status) 
   }
 }
 
+/// FSM-валидатор переходов статуса execution.
+/// Разрешённые переходы:
+///   UNSPECIFIED → любой (initial state).
+///   prev == next  — no-op, всегда OK.
+///   terminal → ничто (no transitions out).
+///   NEW → PARTIAL/FILLED/CANCELLED/REJECTED/EXPIRED.
+///   PARTIAL → FILLED/CANCELLED/PARTIAL.
+///
+/// Используется в apply_execution_report_locked для защиты от out-of-order
+/// rebroadcast (например, venue прислал FILLED, потом NEW по тому же order).
 bool is_allowed_status_transition(const fob::execution::v1::ExecutionReportStatus prev,
                                   const fob::execution::v1::ExecutionReportStatus next) {
   if (prev == fob::execution::v1::EXECUTION_REPORT_STATUS_UNSPECIFIED) return true;
@@ -76,6 +138,8 @@ bool is_allowed_status_transition(const fob::execution::v1::ExecutionReportStatu
   return false;
 }
 
+/// Удаляет '/' и whitespace из symbol. Используется для сравнения
+/// venue_symbol — разные биржи могут писать "BTC/USDT" / "BTCUSDT" / "BTC USDT".
 std::string normalize_symbol(const std::string& value) {
   std::string out;
   out.reserve(value.size());
@@ -86,6 +150,8 @@ std::string normalize_symbol(const std::string& value) {
   return out;
 }
 
+/// Извлекает base/quote из Instrument: prefer явные поля, fallback на
+/// разбор symbol по '/'. Возвращает {base, quote} или {"", ""}.
 std::pair<std::string, std::string> extract_base_quote(
     const fob::common::v1::Instrument& instrument) {
   if (!instrument.base().empty() || !instrument.quote().empty()) {
@@ -97,6 +163,9 @@ std::pair<std::string, std::string> extract_base_quote(
   return {symbol.substr(0, slash), symbol.substr(slash + 1)};
 }
 
+/// Проверка что intent и report ссылаются на тот же instrument.
+/// Сравнение либеральное — empty фолды OK (можно сопоставить если одна из сторон
+/// не выставила symbol).
 bool instrument_matches(const fob::execution::v1::ExecutionIntent& intent,
                         const fob::execution::v1::ExecutionReport& report) {
   const auto& lhs = intent.instrument();
@@ -109,12 +178,16 @@ bool instrument_matches(const fob::execution::v1::ExecutionIntent& intent,
   return true;
 }
 
+/// Ключ для отслеживания состояния execution (FSM state).
+/// Composite: intent_id + venue_order_id (fallback на client_order_id).
 std::string execution_state_key(const fob::execution::v1::ExecutionReport& report) {
   const std::string order_key =
       !report.venue_order_id().empty() ? report.venue_order_id() : report.client_order_id();
   return report.intent_id() + "|" + order_key;
 }
 
+/// Composite ключ для idempotency. Если report_id есть — используем его
+/// (canonical). Иначе строим из всех state-defining полей через ostringstream.
 std::string execution_report_key(const fob::execution::v1::ExecutionReport& report) {
   if (!report.report_id().empty()) return report.report_id();
   std::ostringstream out;
@@ -127,11 +200,13 @@ std::string execution_report_key(const fob::execution::v1::ExecutionReport& repo
   return out.str();
 }
 
+/// Timestamp report'а: prefer meta.ts_event, fallback на now().
 google::protobuf::Timestamp report_timestamp(const fob::execution::v1::ExecutionReport& report) {
   if (report.meta().has_ts_event()) return report.meta().ts_event();
   return cex::common::now_ts();
 }
 
+/// proto.Timestamp → system_clock::time_point с обработкой nanos.
 std::chrono::system_clock::time_point timestamp_to_time_point(
     const google::protobuf::Timestamp& ts) {
   const auto duration = std::chrono::seconds{ts.seconds()} +
@@ -142,6 +217,11 @@ std::chrono::system_clock::time_point timestamp_to_time_point(
 
 }  // namespace
 
+// ============================================================================
+// Constructor overload set — поддержка разных combinations:
+// без репо / с partial репо / с full репо / с hedge репо.
+// Каждый делегирует основному (4-arg) конструктору.
+// ============================================================================
 LedgerUseCases::LedgerUseCases() : LedgerUseCases(InitOptions{}, nullptr, nullptr) {}
 
 LedgerUseCases::LedgerUseCases(InitOptions options)
@@ -152,6 +232,7 @@ LedgerUseCases::LedgerUseCases(
     std::shared_ptr<LedgerEntriesRepositoryPort> entries_repo)
     : LedgerUseCases(InitOptions{}, std::move(positions_repo), std::move(entries_repo)) {}
 
+/// Главный конструктор. Опционально seed'ает demo-state (для dev/demo среды).
 LedgerUseCases::LedgerUseCases(
     InitOptions options,
     std::shared_ptr<PositionsRepositoryPort> positions_repo,
@@ -166,6 +247,8 @@ LedgerUseCases::LedgerUseCases(
   // user "demo-user" has 10k USDT and 1 BTC.
   std::lock_guard<std::mutex> lg(mu_);
 
+  // Decimal literal с separator '_' (C++14) — 10'00000 = 1 000 000 минимальных units.
+  // Со scale=2: 1 000 000 * 10^-2 = 10000.00 USDT.
   balances_["demo-user"]["USDT"].available = Decimal{10'00000, 2}; // 10000.00 USDT
   balances_["demo-user"]["USDT"].reserved  = Decimal{0, 2};
 
@@ -178,6 +261,9 @@ LedgerUseCases::LedgerUseCases(
   positions_["demo-user"]["BTC/USDT"].realised_pnl = Decimal{0, 2};
 }
 
+/// Расширенный конструктор с hedge_entries_repo (F-12 path).
+/// Дублирует demo-seed логику, что technically duplicated code но даёт
+/// independent constructor signatures для DI.
 LedgerUseCases::LedgerUseCases(
     InitOptions options,
     std::shared_ptr<PositionsRepositoryPort> positions_repo,
@@ -202,6 +288,7 @@ LedgerUseCases::LedgerUseCases(
   positions_["demo-user"]["BTC/USDT"].realised_pnl = Decimal{0, 2};
 }
 
+/// Прямая установка balance — для тестов и dev-инициализации.
 void LedgerUseCases::SeedBalance(const std::string& user_id,
                                  const std::string& currency,
                                  const Decimal& available,
@@ -212,6 +299,7 @@ void LedgerUseCases::SeedBalance(const std::string& user_id,
   bal.reserved = reserved;
 }
 
+/// Прямая установка позиции — для тестов.
 void LedgerUseCases::SeedPosition(const std::string& user_id,
                                   const std::string& instrument_symbol,
                                   const Decimal& amount,
@@ -224,6 +312,8 @@ void LedgerUseCases::SeedPosition(const std::string& user_id,
   pos.realised_pnl = realised_pnl;
 }
 
+/// Ленивое создание balance entry. Вызывать только под lock.
+/// operator[] на map создаёт default-конструированный entry если его нет.
 LedgerUseCases::Balance& LedgerUseCases::ensure_balance_locked(
     const std::string& user, const std::string& currency) {
   // Ensure both available/reserved exist with the same scale as existing values.
@@ -232,6 +322,9 @@ LedgerUseCases::Balance& LedgerUseCases::ensure_balance_locked(
   return b;
 }
 
+/// Ленивое создание position entry с инициализацией всех Decimal полей в zero.
+/// Проверка "amount.scale==0 && amount.units==0" — heuristic для определения
+/// just-created entry (default constructor дает 0/0).
 LedgerUseCases::Position& LedgerUseCases::ensure_position_locked(
     const std::string& user, const std::string& instrument) {
   auto& up = positions_[user];
@@ -246,14 +339,28 @@ LedgerUseCases::Position& LedgerUseCases::ensure_position_locked(
   return pos;
 }
 
+// ============================================================================
+// calculate_and_record_pnl — реализует SELL логику с realised PnL.
+//
+// Физический смысл:
+//   Продаём sell_qty по цене sell_price из существующей long-позиции.
+//   PnL = (sell_price - avg_entry_price) * sellable_qty.
+//
+//   sellable = min(sell_qty, pos.amount) — не можем продать больше чем есть.
+//   short selling пока НЕ поддерживается (документировано в WARN log).
+//
+// CRITICAL: использует double для PnL math, потом конвертирует обратно в
+// Decimal с scale=2 (USDT precision). Это TECHNICAL DEBT — для production
+// должно быть pure Decimal arithmetic. См. CLAUDE.md §9.
+// ============================================================================
 void LedgerUseCases::calculate_and_record_pnl(
     const std::string& user,
     const std::string& instrument,
     const Decimal& sell_qty,
     const Decimal& sell_price) {
-  
+
   Position& pos = ensure_position_locked(user, instrument);
-  
+
   // Only long positions have positive amount
   if (Decimal::cmp(pos.amount, Decimal{0, pos.amount.scale}) <= 0) {
     // No position to sell from (short selling not implemented yet)
@@ -263,35 +370,37 @@ void LedgerUseCases::calculate_and_record_pnl(
                            {"position_amount", pos.amount.to_string()}});
     return;
   }
-  
+
   // Calculate how much we can sell from this position
   Decimal sellable = Decimal::min(sell_qty, pos.amount);
-  
+
   // Convert to double for PnL calculation
+  // pow(10, scale) — стандартный приём для inverse scale.
   double sell_qty_d = static_cast<double>(sellable.units) / std::pow(10.0, sellable.scale);
   double sell_price_d = static_cast<double>(sell_price.units) / std::pow(10.0, sell_price.scale);
   double avg_price_d = static_cast<double>(pos.avg_entry_price.units) / std::pow(10.0, pos.avg_entry_price.scale);
-  
+
   // PnL = (sell_price - avg_entry_price) * sell_qty
   double pnl_d = (sell_price_d - avg_price_d) * sell_qty_d;
-  
+
   // Convert back to Decimal with scale 2 (USDT)
+  // llround — round-to-nearest int64. * 100 = scale 2 conversion.
   int64_t pnl_units = static_cast<int64_t>(std::llround(pnl_d * 100.0));
   Decimal pnl{pnl_units, 2};
-  
+
   // Update realised PnL
   pos.realised_pnl = Decimal::add(pos.realised_pnl, pnl);
-  
+
   // Reduce position amount
   double remaining_d = (static_cast<double>(pos.amount.units) / std::pow(10.0, pos.amount.scale)) - sell_qty_d;
   int64_t remaining_units = static_cast<int64_t>(std::llround(remaining_d * std::pow(10.0, pos.amount.scale)));
   pos.amount = Decimal{remaining_units, pos.amount.scale};
-  
+
   // If position fully closed, reset avg price
   if (Decimal::cmp(pos.amount, Decimal{0, pos.amount.scale}) == 0) {
     pos.avg_entry_price = Decimal{0, pos.avg_entry_price.scale};
   }
-  
+
   cex::common::log_json("INFO", "Realised PnL calculated",
                         {{"user", user},
                          {"instrument", instrument},
@@ -303,28 +412,95 @@ void LedgerUseCases::calculate_and_record_pnl(
                          {"remaining_position", pos.amount.to_string()}});
 }
 
+// ============================================================================
+// update_position_for_fill — основной диспетчер по side.
+// BUY → увеличиваем позицию + пересчитываем weighted-average entry price.
+// SELL → calculate_and_record_pnl (см. выше).
+//
+// F-09 (T-F09-060): применяет grouped execution к позициям владельца.
+void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup& eg) {
+  // Пустая группа (blocked / cancelled_by_atomicity) — постить нечего.
+  if (eg.leg_results_size() == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  // Идемпотентность по execution_group_id: повторная доставка не дублирует постинги.
+  if (!seen_execution_group_ids_.insert(eg.execution_group_id()).second) {
+    cex::common::log_json("INFO", "Ledger skipped duplicate ExecutionGroup",
+                          {{"execution_group_id", eg.execution_group_id()}});
+    return;
+  }
+  // Каждая нога → позиция владельца + settle баланса (переиспользуем single-leg
+  // математику для позиции).
+  for (const auto& lr : eg.leg_results()) {
+    fob::matching::v1::FlowFill fill;
+    fill.set_user_id(eg.user_id());
+    fill.mutable_instrument()->set_symbol(lr.instrument_symbol());
+    fill.set_side(lr.side());
+    *fill.mutable_executed_qty() = lr.exec_qty();
+    *fill.mutable_price() = lr.exec_price();
+    update_position_for_fill(fill);
+
+    // F-09: combo НЕ резервирует средства при создании, поэтому settle напрямую
+    // из available (как видит «личный счёт» на вкладке Торговля). Контраст с
+    // single-leg ApplyBatchResult, где списывается из reserved. §17 — только Decimal.
+    //   BUY  ноги: available(quote) -= notional; available(base)  += qty.
+    //   SELL ноги: available(base)  -= qty;      available(quote) += notional.
+    const std::string& sym = lr.instrument_symbol();
+    const auto slash = sym.find('/');
+    if (slash == std::string::npos || slash == 0 || slash + 1 >= sym.size()) continue;
+    const std::string base = sym.substr(0, slash);
+    const std::string quote = sym.substr(slash + 1);
+    const std::string& user = eg.user_id();
+    const Decimal qty = Decimal::from_proto(lr.exec_qty());
+    Decimal notional = Decimal::from_proto(lr.exec_notional());
+    if (Decimal::cmp(notional, Decimal{0, notional.scale}) <= 0) {
+      notional = Decimal::mul(qty, Decimal::from_proto(lr.exec_price()));
+    }
+    if (lr.side() == fob::common::v1::SIDE_BUY) {
+      auto& qbal = ensure_balance_locked(user, quote);
+      qbal.available = Decimal::sub(qbal.available, notional);
+      auto& bbal = ensure_balance_locked(user, base);
+      bbal.available = Decimal::add(bbal.available, qty);
+    } else if (lr.side() == fob::common::v1::SIDE_SELL) {
+      auto& bbal = ensure_balance_locked(user, base);
+      bbal.available = Decimal::sub(bbal.available, qty);
+      auto& qbal = ensure_balance_locked(user, quote);
+      qbal.available = Decimal::add(qbal.available, notional);
+    }
+  }
+  cex::common::log_json("INFO", "Ledger applied ExecutionGroup",
+                        {{"execution_group_id", eg.execution_group_id()},
+                         {"parent_order_id", eg.parent_order_id()},
+                         {"user_id", eg.user_id()},
+                         {"legs", std::to_string(eg.leg_results_size())}});
+}
+
+// Weighted avg формула: new_avg = (old_amount * old_avg + new_qty * new_price) / (old_amount + new_qty).
+// Также через double — TECHNICAL DEBT, см. above.
+// ============================================================================
 void LedgerUseCases::update_position_for_fill(const fob::matching::v1::FlowFill& fill) {
   const std::string user = fill.user_id();
   const std::string instrument = fill.instrument().symbol();
   Decimal qty = Decimal::from_proto(fill.executed_qty());
   Decimal price = Decimal::from_proto(fill.price());
-  
+
   Position& pos = ensure_position_locked(user, instrument);
-  
+
   if (fill.side() == fob::common::v1::SIDE_BUY) {
     // BUY: increase position, update average entry price
-    
+
     // Convert to double for calculation
     double old_amount_d = static_cast<double>(pos.amount.units) / std::pow(10.0, pos.amount.scale);
     double old_avg_d = static_cast<double>(pos.avg_entry_price.units) / std::pow(10.0, pos.avg_entry_price.scale);
     double qty_d = static_cast<double>(qty.units) / std::pow(10.0, qty.scale);
     double price_d = static_cast<double>(price.units) / std::pow(10.0, price.scale);
-    
+
     double old_value_d = old_amount_d * old_avg_d;
     double new_value_d = qty_d * price_d;
     double total_value_d = old_value_d + new_value_d;
     double total_amount_d = old_amount_d + qty_d;
-    
+
     if (total_amount_d > 1e-12) {
       double avg_price_d = total_value_d / total_amount_d;
       // Store with scale 2 (USDT price precision)
@@ -333,11 +509,11 @@ void LedgerUseCases::update_position_for_fill(const fob::matching::v1::FlowFill&
     } else {
       pos.avg_entry_price = Decimal{0, 2};
     }
-    
+
     // Store amount with original qty scale
     int64_t new_amount_units = static_cast<int64_t>(std::llround(total_amount_d * std::pow(10.0, qty.scale)));
     pos.amount = Decimal{new_amount_units, qty.scale};
-    
+
     cex::common::log_json("INFO", "Position increased (BUY)",
                           {{"user", user},
                            {"instrument", instrument},
@@ -351,6 +527,10 @@ void LedgerUseCases::update_position_for_fill(const fob::matching::v1::FlowFill&
   }
 }
 
+// ============================================================================
+// GetBalances — gRPC query. Возвращает все balances для user_id.
+// Вычисляет total = available + reserved.
+// ============================================================================
 fob::ledger::v1::GetBalancesResponse LedgerUseCases::GetBalances(
     const fob::ledger::v1::GetBalancesRequest& req) {
   fob::ledger::v1::GetBalancesResponse resp;
@@ -371,6 +551,15 @@ fob::ledger::v1::GetBalancesResponse LedgerUseCases::GetBalances(
   return resp;
 }
 
+// ============================================================================
+// ReserveFunds — резервирование balance под новую заявку (вызывается из
+// order_flow.CreateFlowOrder).
+//
+// Идempotency: если reservation_id уже есть — возвращаем success с
+// сохранённым amount.
+// Failure: INSUFFICIENT_FUNDS если available < want.
+// On success: available -= want, reserved += want, reservations_[id] = ...
+// ============================================================================
 fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
     const fob::ledger::v1::ReserveFundsRequest& req) {
   fob::ledger::v1::ReserveFundsResponse resp;
@@ -398,9 +587,12 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
     return resp;
   }
 
+  // Атомарно: available -= want, reserved += want.
   b.available = Decimal::sub(b.available, want);
   b.reserved  = Decimal::add(b.reserved, want);
 
+  // Сохраняем reservation для последующих lookup'ов в ApplyBatchResult и
+  // ReleaseFunds. designated initializer (C++20).
   reservations_[req.reservation_id()] = Reservation{
       .user_id=req.user_id(),
       .order_id=req.order_id(),
@@ -419,6 +611,11 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
   return resp;
 }
 
+// ============================================================================
+// ReleaseFunds — обратный поток к Reserve. Вызывается из CancelFlowOrder.
+// WARN + early return если reservation не найдена (могла быть consumed
+// ApplyBatchResult'ом или не существовать вовсе).
+// ============================================================================
 void LedgerUseCases::ReleaseFunds(const fob::ledger::v1::ReleaseFundsRequest& req) {
   std::lock_guard<std::mutex> lg(mu_);
 
@@ -430,6 +627,7 @@ void LedgerUseCases::ReleaseFunds(const fob::ledger::v1::ReleaseFundsRequest& re
   }
 
   auto& b = ensure_balance_locked(it->second.user_id, it->second.currency);
+  // Атомарно: reserved -= amount, available += amount.
   b.reserved = Decimal::sub(b.reserved, it->second.amount);
   b.available = Decimal::add(b.available, it->second.amount);
 
@@ -441,6 +639,22 @@ void LedgerUseCases::ReleaseFunds(const fob::ledger::v1::ReleaseFundsRequest& re
   reservations_.erase(it);
 }
 
+// ============================================================================
+// ApplyBatchResult — главный consumer batch.outputs. Обрабатывает fills:
+//
+// Для каждого fill:
+//   BUY:  reserved(quote) -= notional; available(base) += qty.
+//   SELL: reserved(base)  -= qty;      available(quote) += notional.
+//   reservations_[order_id].amount -= consumed (partial fills decrement).
+//   Position update: BUY → avg_entry_price recalc; SELL → realised_pnl.
+//   Fee: fee_currency.available -= fee_amount; pos.realised_pnl -= fee.
+//
+// Idempotency: idempotency_repo_->IsBatchProcessed(batch_id) check.
+// On success: MarkBatchProcessed(batch_id).
+//
+// Persistence: positions_repo_->ApplyFill и entries_repo_->CreateEntriesForFill
+// вызываются ВНЕ lock'а (DB calls могут блокировать).
+// ============================================================================
 fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     const fob::ledger::v1::ApplyBatchResultRequest& req) {
   fob::ledger::v1::ApplyBatchResultResponse resp;
@@ -449,6 +663,7 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
 
   const std::string batch_id = req.batch().batch_id();
 
+  // Idempotency gate: если этот batch уже был applied — skip без работы.
   if (idempotency_repo_ && idempotency_repo_->IsBatchProcessed(batch_id)) {
     cex::common::log_json("INFO", "Batch already processed, skipping",
                           {{"batch_id", batch_id}});
@@ -457,6 +672,7 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
   }
 
   {
+    // Большой lock-scope для всех balance/position mutations.
     std::lock_guard<std::mutex> lg(mu_);
 
     // For each internal fill:
@@ -476,6 +692,7 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
         auto& qbal = ensure_balance_locked(user, quote);
         qbal.reserved = Decimal::sub(qbal.reserved, notional);
         if (reservation_it != reservations_.end()) {
+          // Decrement reservation amount on partial fill.
           reservation_it->second.amount = Decimal::sub(reservation_it->second.amount, notional);
         }
 
@@ -495,22 +712,26 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
         qbal.available = Decimal::add(qbal.available, notional);
       }
 
+      // Если reservation полностью consumed (amount ≤ 0) — erase запись.
       if (reservation_it != reservations_.end() &&
           Decimal::cmp(reservation_it->second.amount,
                        Decimal{0, reservation_it->second.amount.scale}) <= 0) {
         reservations_.erase(reservation_it);
       }
-      
+
+      // Position update — BUY/SELL разные пути (см. update_position_for_fill).
       update_position_for_fill(fill);
 
+      // Fee processing: вычитаем из available + applies к realised_pnl (если в quote).
       if (fill.has_fee() && fill.fee().has_cost() && fill.fee().cost().has_amount()) {
         Decimal fee_amount = Decimal::from_proto(fill.fee().cost().amount());
         std::string fee_currency = fill.fee().cost().currency();
-        if (fee_currency.empty()) fee_currency = quote;
+        if (fee_currency.empty()) fee_currency = quote;   // default: quote
 
         auto& fee_bal = ensure_balance_locked(user, fee_currency);
         fee_bal.available = Decimal::sub(fee_bal.available, fee_amount);
 
+        // Fee в quote currency также влияет на realised PnL (как издержки).
         if (fee_currency == quote) {
           auto& pos = ensure_position_locked(user, fill.instrument().symbol());
           pos.realised_pnl = Decimal::sub(pos.realised_pnl, fee_amount);
@@ -519,11 +740,14 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     }
   }
 
+  // Persistence — outside of lock. DB calls могут блокировать,
+  // не хотим держать mu_ во время network I/O.
   for (const auto& fill : req.batch().fills()) {
     if (positions_repo_) {
       try {
         positions_repo_->ApplyFill(fill);
       } catch (const std::exception& ex) {
+        // Best-effort: log и continue. Не должно срывать весь batch'.
         cex::common::log_json(
             "ERROR", "PositionsRepositoryPort::ApplyFill failed",
             {{"batch_id", batch_id},
@@ -545,6 +769,7 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     }
   }
 
+  // Mark batch as processed — idempotency для next replay.
   if (idempotency_repo_) {
     try {
       idempotency_repo_->MarkBatchProcessed(batch_id);
@@ -560,6 +785,13 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
   return resp;
 }
 
+// ============================================================================
+// RememberExecutionIntent — сохраняет ExecutionIntent для последующего
+// сопоставления с ExecutionReport'ами.
+//
+// Pending reports flush: если этот intent_id был в pending_execution_reports_
+// (т.е. report пришёл ДО intent'а из-за Kafka reorder), сразу применяем их.
+// ============================================================================
 void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::ExecutionIntent& intent) {
   if (intent.intent_id().empty()) return;
 
@@ -569,6 +801,7 @@ void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::Execution
   auto pending_it = pending_execution_reports_.find(intent.intent_id());
   if (pending_it == pending_execution_reports_.end()) return;
 
+  // std::move pending vector чтобы не копировать — после erase reference invalid.
   auto pending = std::move(pending_it->second);
   pending_execution_reports_.erase(pending_it);
   for (const auto& report : pending) {
@@ -577,11 +810,20 @@ void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::Execution
   }
 }
 
+// ============================================================================
+// ApplyExecutionReport — главный entry point для execution.reports Kafka.
+//
+// Pipeline:
+//   1. Idempotency check через seen_execution_report_keys_ set.
+//   2. Intent lookup. Если intent ещё не пришёл — pending queue.
+//   3. apply_execution_report_locked — основная логика.
+// ============================================================================
 void LedgerUseCases::ApplyExecutionReport(const fob::ledger::v1::ApplyExecutionReportRequest& req) {
   const auto& report = req.report();
   const std::string report_key = execution_report_key(report);
 
   std::lock_guard<std::mutex> lg(mu_);
+  // unordered_set::insert returns pair<iterator, bool>. .second=false → key уже был.
   if (!seen_execution_report_keys_.insert(report_key).second) {
     ++exec_recon_stats_.duplicate_reports;
     cex::common::log_json("INFO", "Execution report already processed",
@@ -590,6 +832,7 @@ void LedgerUseCases::ApplyExecutionReport(const fob::ledger::v1::ApplyExecutionR
     return;
   }
 
+  // Если intent ещё не известен — pending queue. Применится в RememberExecutionIntent.
   if (report.intent_id().empty() ||
       execution_intents_.find(report.intent_id()) == execution_intents_.end()) {
     pending_execution_reports_[report.intent_id()].push_back(report);
@@ -605,25 +848,29 @@ void LedgerUseCases::ApplyExecutionReport(const fob::ledger::v1::ApplyExecutionR
   (void)apply_execution_report_locked(report);
 }
 
+/// Возвращает agg stats reconciliation (для observability / metrics).
 LedgerUseCases::ExecutionReconciliationStats
 LedgerUseCases::GetExecutionReconciliationStats() const {
   std::lock_guard<std::mutex> lg(mu_);
   return exec_recon_stats_;
 }
 
+// ============================================================================
+// GetPosition / GetPositions — read API для позиций.
+// ============================================================================
 LedgerUseCases::Position LedgerUseCases::GetPosition(const std::string& user_id, const std::string& instrument_symbol) const {
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   auto user_it = positions_.find(user_id);
   if (user_it == positions_.end()) {
-    return Position{};
+    return Position{};   // empty position для unknown user
   }
-  
+
   auto pos_it = user_it->second.find(instrument_symbol);
   if (pos_it == user_it->second.end()) {
     return Position{};
   }
-  
+
   return pos_it->second;
 }
 
@@ -635,50 +882,60 @@ std::unordered_map<std::string, LedgerUseCases::Position> LedgerUseCases::GetPos
   return user_it->second;
 }
 
+// ============================================================================
+// GetUnrealisedPnL — F-06.
+//
+// Формула: UPnL = (current_price - avg_entry_price) * position_amount.
+//
+// current_price берётся из переданного map current_prices. Fallback на
+// avg_entry_price (тогда UPnL = 0, signal "no market data").
+// ============================================================================
 fob::ledger::v1::GetUnrealisedPnLResponse LedgerUseCases::GetUnrealisedPnL(
     const fob::ledger::v1::GetUnrealisedPnLRequest& req,
     const std::unordered_map<std::string, Decimal>& current_prices) {
-  
+
   fob::ledger::v1::GetUnrealisedPnLResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
 
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   auto user_it = positions_.find(req.user_id());
   if (user_it == positions_.end()) {
     return resp;
   }
-  
+
   for (const auto& [instrument, pos] : user_it->second) {
     // Skip if position is zero or negligible
     if (Decimal::cmp(pos.amount, Decimal{0, pos.amount.scale}) == 0) {
       continue;
     }
-    
+
     // Filter by instrument if specified
     if (!req.instrument_symbol().empty() && instrument != req.instrument_symbol()) {
       continue;
     }
-    
+
     // Get current price
     Decimal current_price;
     std::string price_source;
-    
+
     auto price_it = current_prices.find(instrument);
     if (price_it != current_prices.end()) {
       current_price = price_it->second;
       price_source = "provided";
     } else {
       // Fallback: use avg_entry_price (unrealised PnL = 0)
+      // Сигнал клиенту: "у нас нет market price, UPnL = 0".
       current_price = pos.avg_entry_price;
       price_source = "fallback_to_avg";
     }
-    
+
     // Calculate unrealised PnL = (current_price - avg_entry_price) * position_amount
+    // Pure Decimal arithmetic — не используем double для этого расчёта.
     Decimal price_diff = Decimal::sub(current_price, pos.avg_entry_price);
     Decimal unrealised = Decimal::mul(price_diff, pos.amount);
-    
+
     auto* out = resp.add_positions();
     out->set_instrument_symbol(instrument);
     *out->mutable_position_amount() = pos.amount.to_proto();
@@ -686,7 +943,7 @@ fob::ledger::v1::GetUnrealisedPnLResponse LedgerUseCases::GetUnrealisedPnL(
     *out->mutable_current_price() = current_price.to_proto();
     *out->mutable_unrealised_pnl() = unrealised.to_proto();
     out->set_price_source(price_source);
-    
+
     cex::common::log_json("DEBUG", "Unrealised PnL calculated",
                           {{"user", req.user_id()},
                            {"instrument", instrument},
@@ -695,50 +952,60 @@ fob::ledger::v1::GetUnrealisedPnLResponse LedgerUseCases::GetUnrealisedPnL(
                            {"current_price", current_price.to_string()},
                            {"unrealised_pnl", unrealised.to_string()}});
   }
-  
+
   return resp;
 }
 
+// ============================================================================
+// GetRealisedPnL — F-06.
+// Возвращает накопленный realised PnL per instrument для user_id.
+// trade_count — TODO (нужен trade journal).
+// ============================================================================
 fob::ledger::v1::GetRealisedPnLResponse LedgerUseCases::GetRealisedPnL(
     const fob::ledger::v1::GetRealisedPnLRequest& req) {
-  
+
   fob::ledger::v1::GetRealisedPnLResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
 
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   auto user_it = positions_.find(req.user_id());
   if (user_it == positions_.end()) {
     return resp;
   }
-  
+
   for (const auto& [instrument, pos] : user_it->second) {
     // Filter by instrument if specified
     if (!req.instrument_symbol().empty() && instrument != req.instrument_symbol()) {
       continue;
     }
-    
+
     // Skip if no realised PnL
     if (Decimal::cmp(pos.realised_pnl, Decimal{0, pos.realised_pnl.scale}) == 0) {
       continue;
     }
-    
+
     auto* out = resp.add_positions();
     out->set_instrument_symbol(instrument);
     *out->mutable_total_realised_pnl() = pos.realised_pnl.to_proto();
     // trade_count would require storing trade history separately
     out->set_trade_count(0);  // TODO: implement trade counting
-    
+
     cex::common::log_json("DEBUG", "Realised PnL queried",
                           {{"user", req.user_id()},
                            {"instrument", instrument},
                            {"realised_pnl", pos.realised_pnl.to_string()}});
   }
-  
+
   return resp;
 }
 
+// ============================================================================
+// Venue balances (F-12 admin).
+// ============================================================================
+
+/// Ленивое создание venue balance entry (аналог ensure_balance_locked).
 LedgerUseCases::VenueBalanceEntry& LedgerUseCases::ensure_venue_balance_locked(
     const std::string& venue, const std::string& currency) {
   auto& vb = venue_balances_[venue];
@@ -754,52 +1021,56 @@ LedgerUseCases::VenueBalanceEntry& LedgerUseCases::ensure_venue_balance_locked(
   return entry;
 }
 
+/// Возвращает все venue balances с фильтрами по venue / currency.
 fob::ledger::v1::GetVenueBalancesResponse LedgerUseCases::GetVenueBalances(
     const fob::ledger::v1::GetVenueBalancesRequest& req) {
-  
+
   fob::ledger::v1::GetVenueBalancesResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
 
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   for (const auto& [venue, currencies] : venue_balances_) {
     // Filter by venue if specified
     if (!req.venue().empty() && venue != req.venue()) {
       continue;
     }
-    
+
     for (const auto& [currency, entry] : currencies) {
       // Filter by currency if specified
       if (!req.currency().empty() && currency != req.currency()) {
         continue;
       }
-      
+
       auto* out = resp.add_balances();
       out->set_venue(venue);
       out->set_currency(currency);
       *out->mutable_total() = entry.total.to_proto();
       *out->mutable_reserved() = entry.reserved.to_proto();
       *out->mutable_available() = entry.available.to_proto();
-      
+
+      // updated_at → proto.Timestamp (only seconds, ignore nanos).
       auto* ts = out->mutable_updated_at();
       auto secs = std::chrono::duration_cast<std::chrono::seconds>(
           entry.updated_at.time_since_epoch());
       ts->set_seconds(secs.count());
     }
   }
-  
+
   cex::common::log_json("INFO", "GetVenueBalances",
                         {{"venue_filter", req.venue()},
                          {"currency_filter", req.currency()},
                          {"results_count", std::to_string(resp.balances_size())}});
-  
+
   return resp;
 }
 
+/// Установка venue balance (operator/admin action).
+/// available автоматически = total - reserved.
 fob::ledger::v1::UpdateVenueBalanceResponse LedgerUseCases::UpdateVenueBalance(
     const fob::ledger::v1::UpdateVenueBalanceRequest& req) {
-  
+
   fob::ledger::v1::UpdateVenueBalanceResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
@@ -811,7 +1082,7 @@ fob::ledger::v1::UpdateVenueBalanceResponse LedgerUseCases::UpdateVenueBalance(
     e->set_message("Venue name cannot be empty");
     return resp;
   }
-  
+
   if (req.currency().empty()) {
     resp.set_success(false);
     auto* e = resp.mutable_error();
@@ -821,58 +1092,91 @@ fob::ledger::v1::UpdateVenueBalanceResponse LedgerUseCases::UpdateVenueBalance(
   }
 
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   auto& entry = ensure_venue_balance_locked(req.venue(), req.currency());
-  
+
   Decimal new_total = Decimal::from_proto(req.total());
   Decimal new_reserved = Decimal::from_proto(req.reserved());
   Decimal new_available = Decimal::sub(new_total, new_reserved);
-  
+
   entry.total = new_total;
   entry.reserved = new_reserved;
   entry.available = new_available;
   entry.updated_at = std::chrono::system_clock::now();
-  
+
   resp.set_success(true);
-  
+
   cex::common::log_json("INFO", "Updated venue balance",
                         {{"venue", req.venue()},
                          {"currency", req.currency()},
                          {"total", new_total.to_string()},
                          {"reserved", new_reserved.to_string()},
                          {"available", new_available.to_string()}});
-  
+
   return resp;
 }
 
+// ============================================================================
+// calculate_hedge_pnl — F-12 DoD-6.
+//
+// Формула: PnL = (executed_price - internal_price) * qty,
+//          с инверсией для BUY (мы платим, не получаем).
+//
+// Физический смысл:
+//   * SELL на venue: мы получаем executed_price за каждую unit базы.
+//     Если executed_price > internal_price — выигрываем (positive PnL).
+//   * BUY на venue: мы платим executed_price за каждую unit базы.
+//     Если executed_price < internal_price — выигрываем (positive PnL).
+//     Поэтому signed-flip для BUY.
+// ============================================================================
 cex::common::Decimal LedgerUseCases::calculate_hedge_pnl(
     fob::common::v1::Side side,
     const Decimal& executed_price,
     const Decimal& internal_price,
     const Decimal& qty) {
-  
+
   // Price difference: external - internal
   Decimal price_diff = Decimal::sub(executed_price, internal_price);
-  
+
   // PnL = price_diff * qty
   Decimal pnl = Decimal::mul(price_diff, qty);
-  
+
   // For BUY on external venue: profit when external price < internal price
   // So we need to flip the sign for BUY orders
   if (side == fob::common::v1::SIDE_BUY) {
     // pnl = -pnl  (multiply by -1)
     pnl.units = -pnl.units;
   }
-  
+
   return pnl;
 }
 
+// ============================================================================
+// apply_execution_report_locked — основная логика обработки execution report.
+//
+// Шаги:
+//   1. Найти intent по intent_id.
+//   2. Проверить совпадение venue / instrument / venue_symbol / client_order_id.
+//   3. Сравнить filled_qty с target_qty (не должно быть > target).
+//   4. Проверить FSM transition статуса (no regression).
+//   5. delta_qty = new_filled - state.filled_qty.
+//      Если > 0:
+//        * Обновить venue balance (base + delta, quote - delta * price).
+//        * Применить fee delta.
+//        * Сформировать HedgePnlRecord, добавить в hedge_pnl_records_.
+//        * Update hedgeflow_pnl_sink (F-12 DoD-6 PG sink).
+//   6. Сохранить state (status, filled_qty, remaining, average_price, fee).
+//
+// Возвращает true если report applied, false если skipped (mismatch/regression).
+// ============================================================================
 bool LedgerUseCases::apply_execution_report_locked(
     const fob::execution::v1::ExecutionReport& report) {
   auto plan_it = execution_intents_.find(report.intent_id());
   if (plan_it == execution_intents_.end()) return false;
   const auto& intent = plan_it->second;
 
+  // Cross-field validation: venue, instrument, venue_symbol, client_order_id.
+  // Любое mismatch → WARN, increment plan_mismatch_reports, return false.
   if (!intent.venue().empty() && !report.venue().empty() &&
       intent.venue() != report.venue()) {
     ++exec_recon_stats_.plan_mismatch_reports;
@@ -918,6 +1222,7 @@ bool LedgerUseCases::apply_execution_report_locked(
   const Decimal average_price = Decimal::from_proto(report.average_price());
   const auto status = normalize_execution_status(report);
 
+  // Filled > target — venue ошибся, report invalid.
   if (Decimal::cmp(filled_qty, target_qty) > 0) {
     ++exec_recon_stats_.plan_mismatch_reports;
     cex::common::log_json("WARN", "Execution report filled_qty exceeds plan",
@@ -927,7 +1232,9 @@ bool LedgerUseCases::apply_execution_report_locked(
     return false;
   }
 
+  // Lookup state по composite key для FSM tracking.
   auto& state = execution_states_[execution_state_key(report)];
+  // qty regression — defense против stale rebroadcast.
   if (Decimal::cmp(filled_qty, state.filled_qty) < 0) {
     ++exec_recon_stats_.qty_regression_reports;
     cex::common::log_json("WARN", "Execution report filled_qty regressed",
@@ -948,6 +1255,7 @@ bool LedgerUseCases::apply_execution_report_locked(
 
   const Decimal delta_qty = Decimal::sub(filled_qty, state.filled_qty);
   if (Decimal::cmp(delta_qty, Decimal::zero()) > 0) {
+    // ----- venue balance update + PnL ------------------------------------
     auto [base_ccy, quote_ccy] = extract_base_quote(intent.instrument());
     if (base_ccy.empty() || quote_ccy.empty()) {
       auto from_report = extract_base_quote(report.instrument());
@@ -955,12 +1263,14 @@ bool LedgerUseCases::apply_execution_report_locked(
       if (quote_ccy.empty()) quote_ccy = from_report.second;
     }
 
+    // internal_price: prefer intent.limit_price (если задан), fallback avg.
     const Decimal internal_price =
         (intent.has_limit_price() && intent.limit_price().units() != 0)
             ? Decimal::from_proto(intent.limit_price())
             : average_price;
     const Decimal quote_delta = Decimal::mul(delta_qty, average_price);
 
+    // Base currency на venue: BUY → +delta, SELL → -delta.
     if (!base_ccy.empty()) {
       auto& base = ensure_venue_balance_locked(report.venue(), base_ccy);
       if (intent.side() == fob::common::v1::SIDE_BUY) {
@@ -972,6 +1282,7 @@ bool LedgerUseCases::apply_execution_report_locked(
       base.updated_at = std::chrono::system_clock::now();
     }
 
+    // Quote currency: BUY → -quote_delta (платим), SELL → +quote_delta (получаем).
     if (!quote_ccy.empty()) {
       auto& quote = ensure_venue_balance_locked(report.venue(), quote_ccy);
       if (intent.side() == fob::common::v1::SIDE_BUY) {
@@ -983,6 +1294,7 @@ bool LedgerUseCases::apply_execution_report_locked(
       quote.updated_at = std::chrono::system_clock::now();
     }
 
+    // Fee processing: only delta fee (если total fee выросла с last report).
     Decimal fee_total = Decimal::zero();
     std::string fee_currency;
     if (report.has_fee_total()) {
@@ -1001,6 +1313,7 @@ bool LedgerUseCases::apply_execution_report_locked(
       fee_bal.updated_at = std::chrono::system_clock::now();
     }
 
+    // ----- HedgePnlRecord для DoD-6 reporting --------------------------------
     HedgePnlRecord record;
     record.hedge_id = execution_report_key(report);
     record.venue = report.venue();
@@ -1013,6 +1326,7 @@ bool LedgerUseCases::apply_execution_report_locked(
     record.timestamp = timestamp_to_time_point(report_timestamp(report));
     hedge_pnl_records_[record.venue].push_back(record);
 
+    // Cumulative agg per (venue, instrument).
     const std::string summary_key = record.venue + "|" + record.instrument_symbol;
     auto it = hedge_pnl_summary_.find(summary_key);
     if (it == hedge_pnl_summary_.end()) {
@@ -1053,6 +1367,7 @@ bool LedgerUseCases::apply_execution_report_locked(
     ++exec_recon_stats_.applied_reports;
   }
 
+  // Сохраняем new state (FSM update).
   state.status = status;
   state.filled_qty = filled_qty;
   state.remaining_qty = remaining_qty;
@@ -1072,6 +1387,12 @@ bool LedgerUseCases::apply_execution_report_locked(
   return true;
 }
 
+// ============================================================================
+// RecordHedgeExecution — manual entry point для записи hedge execution.
+// Используется legacy path / тесты. Production-путь — ApplyExecutionReport.
+//
+// Идempotency: проверка hedge_id в hedge_pnl_records_[venue].
+// ============================================================================
 fob::ledger::v1::RecordHedgeExecutionResponse LedgerUseCases::RecordHedgeExecution(
     const fob::ledger::v1::RecordHedgeExecutionRequest& req) {
 
@@ -1101,6 +1422,7 @@ fob::ledger::v1::RecordHedgeExecutionResponse LedgerUseCases::RecordHedgeExecuti
     std::lock_guard<std::mutex> lg(mu_);
 
     // Check for duplicate hedge_id (idempotency)
+    // Linear search OK для небольшого hedge_pnl_records_ per venue.
     for (const auto& existing : hedge_pnl_records_[hedge.venue()]) {
       if (existing.hedge_id == hedge.hedge_id()) {
         cex::common::log_json("INFO", "Hedge execution already recorded, skipping",
@@ -1161,7 +1483,7 @@ fob::ledger::v1::RecordHedgeExecutionResponse LedgerUseCases::RecordHedgeExecuti
                            {"hedge_pnl", hedge_pnl.to_string()}});
   }
 
-  // Persist to repository (outside of lock)
+  // Persist to repository (outside of lock) — DB call.
   if (hedge_entries_repo_) {
     try {
       hedge_entries_repo_->CreateHedgeEntry(hedge);
@@ -1175,76 +1497,82 @@ fob::ledger::v1::RecordHedgeExecutionResponse LedgerUseCases::RecordHedgeExecuti
   return resp;
 }
 
+// ============================================================================
+// GetHedgePnL — F-12 read API. Возвращает aggregated PnL per (venue, instrument)
+// с filters по time range, venue, instrument.
+// ============================================================================
 fob::ledger::v1::GetHedgePnLResponse LedgerUseCases::GetHedgePnL(
     const fob::ledger::v1::GetHedgePnLRequest& req) {
-  
+
   fob::ledger::v1::GetHedgePnLResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
 
   std::lock_guard<std::mutex> lg(mu_);
-  
+
   // Parse time filters if present
   bool has_from = req.has_from_time();
   bool has_to = req.has_to_time();
   std::chrono::system_clock::time_point from_time;
   std::chrono::system_clock::time_point to_time;
-  
+
   if (has_from) from_time = timestamp_to_time_point(req.from_time());
   if (has_to) to_time = timestamp_to_time_point(req.to_time());
-  
-  // Aggregate results
+
+  // Aggregate results — composite key venue|instrument.
   std::unordered_map<std::string, fob::ledger::v1::HedgePnL> agg_map;
-  
+
   for (const auto& [venue, records] : hedge_pnl_records_) {
     // Filter by venue
     if (!req.venue().empty() && venue != req.venue()) {
       continue;
     }
-    
+
     for (const auto& record : records) {
       // Filter by instrument
       if (!req.instrument_symbol().empty() && record.instrument_symbol != req.instrument_symbol()) {
         continue;
       }
-      
+
       // Filter by time range
       if (has_from && record.timestamp < from_time) continue;
       if (has_to && record.timestamp > to_time) continue;
-      
+
       std::string key = venue + "|" + record.instrument_symbol;
       auto& agg = agg_map[key];
-      
+
       if (agg.venue().empty()) {
+        // First record для этого key — initialize.
         agg.set_venue(venue);
         agg.set_instrument_symbol(record.instrument_symbol);
         *agg.mutable_total_hedge_pnl() = record.hedge_pnl.to_proto();
         agg.set_hedge_count(1);
         *agg.mutable_total_hedge_volume() = record.executed_qty.to_proto();
       } else {
+        // Subsequent — accumulate.
         Decimal existing_pnl = Decimal::from_proto(agg.total_hedge_pnl());
         Decimal new_pnl = Decimal::add(existing_pnl, record.hedge_pnl);
         *agg.mutable_total_hedge_pnl() = new_pnl.to_proto();
         agg.set_hedge_count(agg.hedge_count() + 1);
-        
+
         Decimal existing_vol = Decimal::from_proto(agg.total_hedge_volume());
         Decimal new_vol = Decimal::add(existing_vol, record.executed_qty);
         *agg.mutable_total_hedge_volume() = new_vol.to_proto();
       }
     }
   }
-  
-  // Convert map to response
+
+  // Convert map to response — порядок не определён.
   for (auto& [key, agg] : agg_map) {
     (void)key;
     *resp.add_results() = agg;
   }
-  
+
   cex::common::log_json("INFO", "GetHedgePnL",
                         {{"venue_filter", req.venue()},
                          {"instrument_filter", req.instrument_symbol()},
                          {"results_count", std::to_string(resp.results_size())}});
-  
+
   return resp;
 }
 

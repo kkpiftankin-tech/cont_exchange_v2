@@ -15,13 +15,13 @@ responsibility:
 
   conflictNote: >
     В коде есть только абстрактный интерфейс IExecutionPlanningUseCases
-    (cpp/matching/src/app/execution_planning_uc.hpp). Конкретной
+    (cpp/venues/src/app/execution_planning_uc.hpp). Конкретной
     реализации (routing-алгоритм, подписка на venue.liquidity.fob)
     нет. Кандидат на отдельный сервис — ADR-013.
 
 sourceTreeEvidence:
   app:
-    - cpp/matching/src/app/execution_planning_uc.hpp
+    - cpp/venues/src/app/execution_planning_uc.hpp
     - cpp/matching/src/app/external_venue_filter.hpp  # вспомогательный filter
     - cpp/matching/src/app/external_venue_filter.cpp
     - cpp/matching/src/app/planner_inputs_cache.hpp
@@ -82,7 +82,7 @@ knownIssues:
       Конкретной реализации Execution Planning нет. Routing plan,
       подписка на venue.liquidity.fob и venue.health, fallback-роутинг
       и retry-механизм требуют новой кодовой базы.
-    location: cpp/matching/src/app/execution_planning_uc.hpp
+    location: cpp/venues/src/app/execution_planning_uc.hpp
   - id: no-pre-hedge-rpc
     severity: feature-gap
     description: RiskService.PreHedgeCheck RPC ещё не добавлен в risk.proto.

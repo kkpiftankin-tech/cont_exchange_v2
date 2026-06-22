@@ -1,0 +1,473 @@
+syntax = "proto3";
+
+// T-F09-010: Batch/Combo/Multi-leg order contracts.
+// Авторизованный контракт: теги полей зафиксированы (ADR-031, ADR-032, ADR-033).
+// Изменение существующих тегов — breaking change, требует ADR.
+package fob.orders.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Режим исполнения группы ног (ADR-031).
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED            = 0;
+  // Ноги исполняются независимо: order_flow создаёт дочерние FlowOrder-ы
+  // и отслеживает их исполнение без группового solver-а.
+  EXECUTION_MODE_ORCHESTRATION_ONLY     = 1;
+  // Ноги исполняются вместе в рамках группового vector solver-а (F-04 расширение).
+  EXECUTION_MODE_MULTILEG_VECTOR_SOLVER = 2;
+}
+
+// Политика атомарности исполнения группы ног (ADR-031).
+enum AtomicityPolicy {
+  ATOMICITY_POLICY_UNSPECIFIED           = 0;
+  // Всё или ничего: группа исполняется только при наличии ликвидности по всем ногам.
+  ATOMICITY_POLICY_STRICT_ATOMIC         = 1;
+  // Масштабируемая атомарность: исполняется пропорциональная часть при ограничении ликвидности.
+  ATOMICITY_POLICY_SCALABLE_ATOMIC       = 2;
+  // Максимальное исполнение без учёта ограничений атомарности; нарушения фиксируются.
+  ATOMICITY_POLICY_BEST_EFFORT           = 3;
+  // Ноги исполняются последовательно; при сбое одной — следующая не запускается.
+  ATOMICITY_POLICY_SEQUENTIAL_FALLBACK   = 4;
+  // Компенсирующая внешняя транзакция: организуется обратная сделка при сбое.
+  ATOMICITY_POLICY_EXTERNAL_COMPENSATING = 5;
+}
+
+// Область применения гарантий атомарности (ADR-031).
+enum AtomicityScope {
+  ATOMICITY_SCOPE_UNSPECIFIED           = 0;
+  // Атомарность внутри одного batch cycle.
+  ATOMICITY_SCOPE_INTERNAL_BATCH        = 1;
+  // Атомарность гарантируется venue-нативными механизмами (OCO/bracket на бирже).
+  ATOMICITY_SCOPE_VENUE_NATIVE          = 2;
+  // Атомарность реализована внешней компенсирующей транзакцией.
+  ATOMICITY_SCOPE_EXTERNAL_COMPENSATING = 3;
+  // Нет гарантий атомарности (best-effort).
+  ATOMICITY_SCOPE_NONE                  = 4;
+}
+
+// Тип комбинированной заявки (ADR-032).
+enum ComboType {
+  COMBO_TYPE_UNSPECIFIED = 0;
+  // Пара инструментов (например, BTC/USDT + ETH/USDT) с заданным соотношением.
+  COMBO_TYPE_PAIR        = 1;
+  // Корзина инструментов с весами.
+  COMBO_TYPE_BASKET      = 2;
+  // Спред между двумя инструментами.
+  COMBO_TYPE_SPREAD      = 3;
+  // Условная заявка (активируется триггером).
+  COMBO_TYPE_CONDITIONAL = 4;
+  // One-Cancels-Other: исполнение одной ветви отменяет остальные.
+  COMBO_TYPE_OCO         = 5;
+  // Bracket: entry + take-profit + stop-loss.
+  COMBO_TYPE_BRACKET     = 6;
+}
+
+// Основа для задания соотношения ног.
+enum RatioBasis {
+  RATIO_BASIS_UNSPECIFIED     = 0;
+  // Соотношение задаётся в единицах базового актива каждой ноги.
+  RATIO_BASIS_QUANTITY        = 1;
+  // Веса считаются по номинальной стоимости (notional weight).
+  RATIO_BASIS_NOTIONAL_WEIGHT = 2;
+}
+
+// Степень жёсткости ограничения.
+enum ConstraintSeverity {
+  CONSTRAINT_SEVERITY_UNSPECIFIED = 0;
+  // Жёсткое: нарушение блокирует исполнение группы.
+  CONSTRAINT_SEVERITY_HARD        = 1;
+  // Мягкое: нарушение фиксируется, но не блокирует исполнение.
+  CONSTRAINT_SEVERITY_SOFT        = 2;
+}
+
+// Тип ребра графа активации/взаимоотмены.
+enum ConditionalLinkType {
+  CONDITIONAL_LINK_TYPE_UNSPECIFIED   = 0;
+  // OCO: исполнение source → отмена target.
+  CONDITIONAL_LINK_TYPE_OCO_SIBLING   = 1;
+  // Bracket: entry → TP/SL активируется после fill entry.
+  CONDITIONAL_LINK_TYPE_BRACKET_ENTRY = 2;
+  // Произвольное условие (trigger_condition содержит выражение).
+  CONDITIONAL_LINK_TYPE_CONDITIONAL   = 3;
+}
+
+// Статус одной ноги комбинированной заявки.
+enum LegStatus {
+  LEG_STATUS_UNSPECIFIED          = 0;
+  // Нога создана, но ещё не активирована.
+  LEG_STATUS_INACTIVE             = 1;
+  // Нога активна и участвует в matching.
+  LEG_STATUS_ACTIVE               = 2;
+  // Нога ожидает срабатывания триггера (bracket/conditional).
+  LEG_STATUS_WAITING_FOR_TRIGGER  = 3;
+  // Нога частично исполнена.
+  LEG_STATUS_PARTIALLY_FILLED     = 4;
+  // Нога полностью исполнена.
+  LEG_STATUS_FILLED               = 5;
+  // Нога отменена (вручную или OCO-отменой).
+  LEG_STATUS_CANCELLED            = 6;
+  // Нога временно заблокирована группой (ожидает ресурсов группы).
+  LEG_STATUS_BLOCKED_BY_GROUP     = 7;
+  // Нога заблокирована из-за нарушения политики атомарности.
+  LEG_STATUS_BLOCKED_BY_ATOMICITY = 8;
+  // Нога не исполнена из-за ошибки внешней площадки.
+  LEG_STATUS_FAILED_EXTERNAL      = 9;
+  // Нога компенсирована внешней транзакцией.
+  LEG_STATUS_COMPENSATED          = 10;
+}
+
+// Статус родительской заявки (ComboOrder или BatchOrder).
+enum ParentOrderStatus {
+  PARENT_ORDER_STATUS_UNSPECIFIED          = 0;
+  // Черновик: создан, но ещё не прошёл risk-проверку.
+  PARENT_ORDER_STATUS_DRAFT                = 1;
+  // Ожидает результата pre-trade risk check.
+  PARENT_ORDER_STATUS_RISK_PENDING         = 2;
+  // Активен: принят к исполнению.
+  PARENT_ORDER_STATUS_ACTIVE               = 3;
+  // Ожидает триггера для активации.
+  PARENT_ORDER_STATUS_WAITING_FOR_TRIGGER  = 4;
+  // Частично исполнен.
+  PARENT_ORDER_STATUS_PARTIALLY_FILLED     = 5;
+  // Полностью исполнен.
+  PARENT_ORDER_STATUS_FILLED               = 6;
+  // Отменён.
+  PARENT_ORDER_STATUS_CANCELLED            = 7;
+  // Истёк срок действия.
+  PARENT_ORDER_STATUS_EXPIRED              = 8;
+  // Деградирован: исполнен с нарушением мягких ограничений.
+  PARENT_ORDER_STATUS_DEGRADED             = 9;
+  // Ожидает откат внешних ног.
+  PARENT_ORDER_STATUS_ROLLBACK_PENDING     = 10;
+  // Откат завершён.
+  PARENT_ORDER_STATUS_ROLLEDBACK           = 11;
+  // Отклонён (risk reject / validation error).
+  PARENT_ORDER_STATUS_REJECTED             = 12;
+  // Ограничен по rate (order rate limit).
+  PARENT_ORDER_STATUS_THROTTLED            = 13;
+}
+
+// ---------------------------------------------------------------------------
+// Core messages
+// ---------------------------------------------------------------------------
+
+// Одна нога комбинированной заявки.
+// Теги 1..13 зафиксированы контрактом (ADR-032); изменение — breaking change.
+message Leg {
+  // Уникальный идентификатор ноги (UUID).
+  string leg_id                         = 1;
+  // Идентификатор родительской ComboOrder.
+  string parent_order_id                = 2;
+  // Торговый инструмент ноги.
+  fob.common.v1.Instrument instrument   = 3;
+  // Направление: buy base / sell base.
+  fob.common.v1.Side side               = 4;
+
+  // Соотношение ноги (при ratio_basis = QUANTITY).
+  // Знак кодируется через side; значение >= 0.
+  fob.common.v1.Decimal ratio           = 5;
+
+  // Целевой вес ноги (при ratio_basis = NOTIONAL_WEIGHT). Диапазон (0, 1].
+  fob.common.v1.Decimal weight          = 6;
+
+  // Ценовой диапазон исполнения (quote per base).
+  // Инвариант: price_low > 0, price_high >= price_low.
+  fob.common.v1.Decimal price_low       = 7;
+  fob.common.v1.Decimal price_high      = 8;
+
+  // Максимальная скорость исполнения (base units/sec).
+  // Инвариант: max_rate > 0.
+  fob.common.v1.Decimal max_rate        = 9;
+
+  // Максимальный объём ноги (base units).
+  // Инвариант: max_qty > 0.
+  fob.common.v1.Decimal max_qty         = 10;
+
+  // Кумулятивно исполненный объём ноги (base units).
+  // Инвариант: 0 <= filled_cum <= max_qty.
+  fob.common.v1.Decimal filled_cum      = 11;
+
+  // Предпочтения по источникам ликвидности (например, ["internal", "binance"]).
+  repeated string venue_preferences     = 12;
+
+  // Текущий статус ноги.
+  LegStatus status                      = 13;
+}
+
+// Общее ограничение группы ног.
+message MultiLegConstraint {
+  // Уникальный идентификатор ограничения.
+  string constraint_id   = 1;
+  // Идентификатор родительской ComboOrder.
+  string parent_order_id = 2;
+
+  // Тип ограничения (строка для гибкости расширения без proto changes):
+  // "ratio_eq", "max_weight_deviation", "spread_range",
+  // "max_total_notional", "factor_neutrality", "margin_cap".
+  string constraint_type = 3;
+
+  // Коэффициенты линейной комбинации по символу.
+  // Пример для spread: {"BTC/USDT": 1.0, "ETH/USDT": -15.0}.
+  // double допустим для solver coefficients (CLAUDE.md §9 — research/solver use only).
+  map<string, double> coefficients = 4;
+
+  // Нижняя допустимая граница значения комбинации. Decimal для финансовых границ.
+  fob.common.v1.Decimal lower_bound = 5;
+
+  // Верхняя допустимая граница значения комбинации. Decimal для финансовых границ.
+  fob.common.v1.Decimal upper_bound = 6;
+
+  // Степень жёсткости ограничения.
+  ConstraintSeverity severity = 7;
+}
+
+// Ребро графа активации / взаимоотмены (OCO, bracket, conditional).
+message ConditionalLink {
+  // Уникальный идентификатор ребра.
+  string link_id           = 1;
+  // Идентификатор родительской ComboOrder.
+  string parent_order_id   = 2;
+  // Тип связи.
+  ConditionalLinkType link_type    = 3;
+  // Источник в графе (leg_id или child combo_id).
+  string source_ref        = 4;
+  // Цель в графе (leg_id или child combo_id).
+  string target_ref        = 5;
+  // Свободный текст условия активации (например, "filled > 0").
+  string trigger_condition = 6;
+}
+
+// Ссылка на дочерний элемент BatchOrder.
+message ChildRef {
+  // Тип: "combo" | "flow_order" | "conditional_branch".
+  string child_type = 1;
+  // Идентификатор дочернего элемента.
+  string child_ref  = 2;
+}
+
+// Клиентский BatchOrder — родительский контейнер дочерних ComboOrder / FlowOrder.
+// ADR-032: parent/child модель.
+message BatchOrder {
+  // Уникальный идентификатор BatchOrder (UUID).
+  string batch_order_id                = 1;
+  string user_id                       = 2;
+  string account_id                    = 3;
+
+  // Тип: "batch", "combo", "basket", "spread", "conditional", "oco", "bracket".
+  string order_type                    = 4;
+
+  ExecutionMode execution_mode         = 5;
+  ParentOrderStatus status             = 6;
+
+  google.protobuf.Timestamp start_at   = 7;
+  google.protobuf.Timestamp end_at     = 8;
+
+  // Ссылки на дочерние элементы (combo_id или order_id).
+  repeated ChildRef child_refs         = 9;
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// ComboOrder — многоногая заявка с общими constraints, execution mode и atomicity policy.
+// ADR-031: режимы исполнения. ADR-032: parent/child модель.
+message ComboOrder {
+  // Уникальный идентификатор ComboOrder (UUID).
+  string combo_order_id                    = 1;
+  // Опционально: если входит в BatchOrder.
+  string batch_order_id                    = 2;
+  string user_id                           = 3;
+  string account_id                        = 4;
+
+  ComboType combo_type                     = 5;
+  ExecutionMode execution_mode             = 6;
+  AtomicityPolicy atomicity_policy         = 7;
+  AtomicityScope atomicity_scope           = 8;
+
+  // Политика резервного поведения при деградации.
+  // "scale_down" | "skip_batch" | "best_effort" | "cancel_group".
+  string fallback_policy                   = 9;
+
+  RatioBasis ratio_basis                   = 10;
+
+  // Минимально допустимый масштаб исполнения (0.0–1.0). Decimal для точности.
+  // Для strict_atomic не применяется.
+  // Для scalable_atomic: группа не исполняется если alpha < min_execution_scale.
+  fob.common.v1.Decimal min_execution_scale = 11;
+
+  // Максимально допустимое отклонение соотношения, в базисных пунктах.
+  uint32 max_ratio_deviation_bps           = 12;
+
+  repeated Leg legs                        = 13;
+  repeated MultiLegConstraint constraints  = 14;
+  repeated ConditionalLink graph_links     = 15;
+
+  ParentOrderStatus status                 = 16;
+
+  google.protobuf.Timestamp created_at     = 17;
+  google.protobuf.Timestamp updated_at     = 18;
+}
+
+// ---------------------------------------------------------------------------
+// Request / Response messages
+// ---------------------------------------------------------------------------
+
+// --- CreateBatchOrder ---
+
+message CreateBatchOrderRequest {
+  fob.common.v1.EventMeta meta     = 1;
+  // Idempotency key от клиента. Повторный вызов с тем же client_batch_id
+  // возвращает существующий batch_order_id без дублирования.
+  string client_batch_id           = 2;
+  string user_id                   = 3;
+  string account_id                = 4;
+  ExecutionMode execution_mode     = 5;
+  repeated ChildRef child_refs     = 6;
+  google.protobuf.Timestamp start_at = 7;
+  google.protobuf.Timestamp end_at   = 8;
+}
+
+message CreateBatchOrderResponse {
+  fob.common.v1.EventMeta meta  = 1;
+  bool accepted                 = 2;
+  string batch_order_id         = 3;
+  ParentOrderStatus status       = 4;
+  fob.common.v1.Error error     = 5;
+}
+
+// --- CreateComboOrder ---
+
+message CreateComboOrderRequest {
+  fob.common.v1.EventMeta meta          = 1;
+  // Idempotency key от клиента. Повторный вызов с тем же client_combo_id
+  // возвращает существующий combo_id; ноги не дублируются.
+  string client_combo_id                = 2;
+  string user_id                        = 3;
+  string account_id                     = 4;
+  // Опционально: привязать к существующему BatchOrder.
+  string batch_order_id                 = 5;
+  ComboType combo_type                  = 6;
+  ExecutionMode execution_mode          = 7;
+  AtomicityPolicy atomicity_policy      = 8;
+  AtomicityScope atomicity_scope        = 9;
+  string fallback_policy                = 10;
+  RatioBasis ratio_basis                = 11;
+  fob.common.v1.Decimal min_execution_scale = 12;
+  uint32 max_ratio_deviation_bps        = 13;
+  repeated Leg legs                     = 14;
+  repeated MultiLegConstraint constraints  = 15;
+  repeated ConditionalLink graph_links     = 16;
+}
+
+message CreateComboOrderResponse {
+  fob.common.v1.EventMeta meta  = 1;
+  bool accepted                 = 2;
+  string combo_id               = 3;
+  // leg_id → child FlowOrder id (для режима ORCHESTRATION_ONLY).
+  map<string, string> leg_order_ids = 4;
+  ParentOrderStatus status       = 5;
+  fob.common.v1.Error error     = 6;
+
+  // AC-F09-011 (honest-mode): фактические гарантии исполнения по executionMode.
+  // UI/клиент ОБЯЗАН показывать — нельзя выдавать orchestration_only за настоящий
+  // multi-leg. orchestration_only → нет гарантии ratio/weights/spread;
+  // multileg_vector_solver → гарантии в пределах policy/tolerance;
+  // external_compensating → не атомарно.
+  string execution_guarantees    = 7;  // human-readable
+  bool ratio_guaranteed          = 8;  // false для orchestration_only
+}
+
+// --- PreviewComboOrder ---
+
+message PreviewComboOrderRequest {
+  fob.common.v1.EventMeta meta      = 1;
+  // Tag 2 зарезервирован для расширения (совместимость с Request sketch).
+  string user_id                    = 3;
+  string account_id                 = 4;
+  // Tag 5 зарезервирован для расширения.
+  ComboType combo_type              = 6;
+  ExecutionMode execution_mode      = 7;
+  AtomicityPolicy atomicity_policy  = 8;
+  AtomicityScope atomicity_scope    = 9;
+  RatioBasis ratio_basis            = 10;
+  repeated Leg legs                 = 11;
+  repeated MultiLegConstraint constraints = 12;
+}
+
+// Прогноз исполнения одной ноги.
+message LegPreview {
+  string leg_id                           = 1;
+  fob.common.v1.Decimal expected_qty      = 2;
+  fob.common.v1.Decimal expected_price    = 3;
+  fob.common.v1.Decimal expected_notional = 4;
+  // Признак: эта нога ограничивает общий масштаб группы.
+  bool is_binding                         = 5;
+}
+
+message PreviewComboOrderResponse {
+  fob.common.v1.EventMeta meta                    = 1;
+  // Ожидаемый масштаб исполнения (0.0–1.0). Decimal для финансовой точности.
+  fob.common.v1.Decimal expected_execution_scale  = 2;
+  repeated LegPreview expected_leg_fills          = 3;
+  // Combined VWAP по всей группе в quote currency.
+  fob.common.v1.Decimal expected_combined_vwap    = 4;
+  // Ожидаемое отклонение от эталонной цены (IS), в quote currency.
+  fob.common.v1.Decimal expected_is               = 5;
+  // Ожидаемое отклонение соотношения, в базисных пунктах.
+  uint32 expected_ratio_deviation_bps             = 6;
+  // Ожидаемая маржинальная нагрузка в quote currency.
+  fob.common.v1.Decimal expected_margin_load      = 7;
+  // Ноги, ограничивающие общий масштаб.
+  repeated string binding_leg_ids                 = 8;
+  // Активные ограничения.
+  repeated string binding_constraint_ids          = 9;
+  // Признак: хотя бы одна нога требует внешнего исполнения.
+  bool has_external_execution_risk                = 10;
+  fob.common.v1.Error error                       = 11;
+}
+
+// --- CancelComboOrder ---
+
+message CancelComboOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id               = 2;
+  string combo_id              = 3;
+  string reason                = 4;
+}
+
+message CancelComboOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success                 = 2;
+  // Статус после отмены (cancelled / filled / already_terminal).
+  ParentOrderStatus status      = 3;
+  fob.common.v1.Error error    = 4;
+}
+
+// --- GetComboOrder ---
+
+message GetComboOrderRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id               = 2;
+  string combo_id              = 3;
+}
+
+// Read model представление ComboOrder для API-ответа.
+message ComboOrderView {
+  ComboOrder order                        = 1;
+  // Ссылка на последний ExecutionGroup этой заявки.
+  string last_execution_group_id          = 2;
+  // Суммарно исполненный масштаб с начала жизни заявки. Decimal.
+  fob.common.v1.Decimal cumulative_scale  = 3;
+  uint32 ratio_deviation_bps             = 4;
+  fob.common.v1.Error error              = 5;
+}
+
+message GetComboOrderResponse {
+  fob.common.v1.EventMeta meta = 1;
+  ComboOrderView view          = 2;
+}

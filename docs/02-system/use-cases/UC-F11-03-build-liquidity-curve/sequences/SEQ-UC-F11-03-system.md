@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F11-03-system
+level: kite
+---
+-->
+
 # SEQ-UC-F11-03-system. Build VenueLiquidityCurve: system view
 
 ## Type

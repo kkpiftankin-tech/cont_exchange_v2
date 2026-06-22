@@ -3,6 +3,7 @@ feature:
   name: Create FlowOrder
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Клиент создаёт FlowOrder через HTTP API gateway или напрямую через gRPC.
