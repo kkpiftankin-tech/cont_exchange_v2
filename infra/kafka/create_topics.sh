@@ -53,6 +53,8 @@ retention_for_topic() {
 # - venue.liquidity.fob: liquidity curves, keep moderate retention
 # - venue.synthetic: compatibility SyntheticFlowOrder stream for matching
 create_topic marketdata.raw "$(retention_for_topic marketdata.raw 3600000)"
+# F-05: MarketDataSnapshot после каждого batch-clearing; 7 дней retention, partition key = asset
+create_topic marketdata.snapshots "$(retention_for_topic marketdata.snapshots 604800000)"
 create_topic orders.normalized "$(retention_for_topic orders.normalized 604800000)"
 create_topic batch.outputs "$(retention_for_topic batch.outputs 604800000)"
 create_topic fills "$(retention_for_topic fills 604800000)"

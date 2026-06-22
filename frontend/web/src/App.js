@@ -24,6 +24,7 @@ import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
 import ManualOverride from './pages/ManualOverride/ManualOverride';
 import PolicyConfig from './pages/PolicyConfig/PolicyConfig';
+import MarketDataTest from './pages/MarketDataTest/MarketDataTest';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import './App.css';
 
@@ -34,6 +35,8 @@ function App() {
       <Routes>
         {/* F-20 dev/demo: open URL -> trader screen directly, no login. */}
         <Route path="/" element={<Navigate to="/main" replace />} />
+        {/* F-05: изолированная тест-страница, без авторизации */}
+        <Route path="/market-data-test" element={<MarketDataTest />} />
         <Route path="/about" element={<PublicRoute><About /></PublicRoute>} />
         <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
         <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />

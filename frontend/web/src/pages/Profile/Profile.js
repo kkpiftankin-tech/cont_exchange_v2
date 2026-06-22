@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { logout } from '../../api/authService';
 import {
@@ -57,6 +57,13 @@ const Profile = () => {
 
   useEffect(() => {
     loadData();
+  }, [loadData]);
+
+  // Автообновление истории каждые 5 сек (чтобы новые заявки появлялись сразу)
+  const pollRef = useRef(null);
+  useEffect(() => {
+    pollRef.current = setInterval(() => loadData(), 5000);
+    return () => clearInterval(pollRef.current);
   }, [loadData]);
 
   const buildTransactionFilters = () => {

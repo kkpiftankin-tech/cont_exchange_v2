@@ -288,3 +288,29 @@ CREATE TABLE IF NOT EXISTS sim_hedge_pnl (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (sim_session_id, venue_id, instrument_symbol)
 );
+
+-- ---------------------------------------------------------------------------
+-- F-05 Live Market Data: marketdata_config
+-- Per-instrument configuration for Market Data Service:
+-- snapshot interval, depth levels, spread alert threshold, kill-switch.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS marketdata_config (
+  asset                       VARCHAR(32) PRIMARY KEY,
+  snapshot_interval_ms        INTEGER         NOT NULL DEFAULT 1000,
+  depth_levels                INTEGER         NOT NULL DEFAULT 10,
+  volume_window_sec           INTEGER         NOT NULL DEFAULT 86400,
+  spread_alert_threshold_bps  NUMERIC(10, 4)  NOT NULL DEFAULT 50.0,
+  stale_threshold_sec         INTEGER         NOT NULL DEFAULT 30,
+  external_sources            JSONB           NOT NULL DEFAULT '[]',
+  is_active                   BOOLEAN         NOT NULL DEFAULT TRUE,
+  updated_at                  TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+-- Seed data: active instruments for dev environment
+INSERT INTO marketdata_config (asset, snapshot_interval_ms, depth_levels, is_active)
+VALUES
+  ('BTCUSDT', 500,  10, TRUE),
+  ('ETHUSDT', 500,  10, TRUE),
+  ('SOLUSDT', 1000, 5,  TRUE)
+ON CONFLICT (asset) DO NOTHING;
+

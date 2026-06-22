@@ -2098,6 +2098,8 @@ std::optional<domain::VenueRawSnapshot> DexAmmRpcAdapter::snapshot_from_cache_lo
   if (it == pool_cache_.end()) return std::nullopt;
 
   const SymbolPoolStateCache& cache = it->second;
+  // F-11: mid берётся из РЕАЛЬНОГО состояния пула (без синтетического дрейфа).
+  // Цена AMM меняется только на свопах — если пул тихий, mid честно статичен.
   const double mid = estimate_mid_price(cache.pool_state, cache.reserve_base, cache.reserve_quote);
   if (mid <= 0.0 || !std::isfinite(mid)) return std::nullopt;
 

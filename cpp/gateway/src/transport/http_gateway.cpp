@@ -495,6 +495,15 @@ bool can_read_replay_session(const GatewayUserContext& user,
 
 }  // namespace
 
+// F-05: контекст подписки на market data для каждого WS-соединения.
+// Вынесен из run() в namespace-уровень — Crow требует copyable/movable типы в хендлерах.
+struct MarketDataWsState {
+  std::unique_ptr<grpc::ClientContext> grpc_ctx;
+  std::atomic<bool> streaming{false};
+  std::string current_asset;
+  std::mutex mu;
+};
+
 static fob::common::v1::Decimal dec_from_double(double x, int32_t scale) {
   double factor = std::pow(10.0, static_cast<double>(scale));
   int64_t units = static_cast<int64_t>(std::llround(x * factor));
@@ -667,8 +676,18 @@ HttpGateway::HttpGateway(infra::OrderFlowClient order_flow_client,
       replay_results_(replay_results),
       auth_middleware_(std::move(auth_middleware)) {}
 
+struct CorsMiddleware {
+  struct context {};
+  void before_handle(crow::request& /*req*/, crow::response& /*res*/, context& /*ctx*/) {}
+  void after_handle(crow::request& /*req*/, crow::response& res, context& /*ctx*/) {
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, api_key");
+  }
+};
+
 void HttpGateway::run(uint16_t port) {
-  crow::SimpleApp app;
+  crow::App<CorsMiddleware> app;
 
   // Liveness/readiness probes.
   CROW_ROUTE(app, "/healthz")([] { return crow::response(200, "ok"); });
@@ -1412,6 +1431,289 @@ void HttpGateway::run(uint16_t port) {
         
         return crow::response(200, out);
     });
+
+  // ─── F-05 Live Market Data WebSocket ─────────────────────────────────────────
+  // Spec §4.5 WebSocket API:
+  //   Client connects to ws://host/api/v1/market (без asset в URL)
+  //   Client sends: {"action":"subscribe","asset":"BTCUSDT"}
+  //   Server sends: {"type":"snapshot","data":{...}} then {"type":"update","data":{...}}
+  //   Client sends: {"action":"unsubscribe","asset":"BTCUSDT"}
+  //
+  // Реализация: один gRPC stream per подписка, MVP N:N mapping.
+  // MarketDataWsState определён на namespace-уровне выше.
+
+  CROW_WEBSOCKET_ROUTE(app, "/api/v1/market")
+      .onaccept([](const crow::request&, void** userdata) -> bool {
+        *userdata = new MarketDataWsState();
+        return true;
+      })
+      .onopen([](crow::websocket::connection& conn) {
+        // Приветствие — клиент должен прислать subscribe
+        conn.send_text("{\"type\":\"connected\",\"msg\":\"send subscribe action\"}");
+      })
+      .onmessage([this](crow::websocket::connection& conn,
+                        const std::string& msg, bool /*is_binary*/) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (!state) return;
+
+        // Минимальный JSON-парсинг без внешней библиотеки
+        auto extract = [&](const std::string& key) -> std::string {
+          const std::string needle = "\"" + key + "\":\"";
+          auto pos = msg.find(needle);
+          if (pos == std::string::npos) return {};
+          pos += needle.size();
+          auto end = msg.find('"', pos);
+          return (end == std::string::npos) ? std::string{} : msg.substr(pos, end - pos);
+        };
+
+        const std::string action = extract("action");
+        const std::string asset  = extract("asset");
+
+        if (action == "subscribe" && !asset.empty()) {
+          // Отменяем предыдущий стрим если был
+          {
+            std::lock_guard<std::mutex> lg(state->mu);
+            if (state->grpc_ctx) {
+              state->grpc_ctx->TryCancel();
+            }
+            state->grpc_ctx   = std::make_unique<grpc::ClientContext>();
+            state->streaming  = true;
+            state->current_asset = asset;
+          }
+
+          // Стартуем gRPC stream в фоне
+          std::thread([this, asset, &conn, state]() mutable {
+            grpc::ClientContext* ctx_raw;
+            {
+              std::lock_guard<std::mutex> lg(state->mu);
+              ctx_raw = state->grpc_ctx.get();
+            }
+            if (!ctx_raw) return;
+
+            auto reader = market_data_.SubscribeMarketData(asset, ctx_raw);
+            if (!reader) {
+              try { conn.send_text("{\"type\":\"error\",\"msg\":\"stream unavailable\"}"); }
+              catch (...) {}
+              return;
+            }
+
+            fob::marketdata::v1::MarketDataStreamEvent event;
+            while (state->streaming.load() && reader->Read(&event)) {
+              std::string json;
+              if (event.has_snapshot()) {
+                const auto& s = event.snapshot();
+                auto d2s = [](const fob::common::v1::Decimal& d) -> std::string {
+                  double v = d.scale() == 0 ? static_cast<double>(d.units())
+                           : static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+                  return std::to_string(v);
+                };
+                auto depth2s = [&d2s](const auto& levels) -> std::string {
+                  std::string arr = "[";
+                  bool first = true;
+                  for (const auto& l : levels) {
+                    if (!first) arr += ",";
+                    first = false;
+                    arr += "{\"price\":" + d2s(l.price()) +
+                           ",\"qty\":" + d2s(l.qty()) + "}";
+                  }
+                  arr += "]";
+                  return arr;
+                };
+                json = "{\"type\":\"snapshot\",\"asset\":\"" + s.asset() +
+                       "\",\"mid\":" + d2s(s.mid()) +
+                       ",\"best_bid\":" + d2s(s.best_bid()) +
+                       ",\"best_ask\":" + d2s(s.best_ask()) +
+                       ",\"spread\":" + d2s(s.spread()) +
+                       ",\"spread_bps\":" + d2s(s.spread_bps()) +
+                       ",\"volume_24h\":" + d2s(s.volume_24h()) +
+                       ",\"clear_price\":" + d2s(s.clear_price()) +
+                       ",\"executed_rate\":" + d2s(s.executed_rate()) +
+                       ",\"bid_depth\":" + depth2s(s.bid_depth()) +
+                       ",\"ask_depth\":" + depth2s(s.ask_depth()) +
+                       ",\"batch_id\":\"" + s.batch_id() +
+                       "\",\"source\":\"" + s.source() +
+                       "\",\"stale\":" + (s.stale() ? "true" : "false") + "}";
+              } else if (event.has_update()) {
+                const auto& u = event.update();
+                json = "{\"type\":\"update\",\"asset\":\"" + u.asset() +
+                       "\",\"source\":\"" + u.source() + "\"}";
+              }
+              if (!json.empty()) {
+                try { conn.send_text(json); } catch (...) { break; }
+              }
+            }
+          }).detach();
+
+          conn.send_text("{\"type\":\"subscribed\",\"asset\":\"" + asset + "\"}");
+
+        } else if (action == "unsubscribe") {
+          std::lock_guard<std::mutex> lg(state->mu);
+          state->streaming = false;
+          if (state->grpc_ctx) {
+            state->grpc_ctx->TryCancel();
+            state->grpc_ctx.reset();
+          }
+          conn.send_text("{\"type\":\"unsubscribed\",\"asset\":\"" + asset + "\"}");
+
+        } else if (action == "ping") {
+          conn.send_text("{\"type\":\"pong\"}");
+        }
+      })
+      .onclose([](crow::websocket::connection& conn, const std::string&, uint16_t) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (state) {
+          state->streaming = false;
+          if (state->grpc_ctx) state->grpc_ctx->TryCancel();
+          delete state;
+          conn.userdata(nullptr);
+        }
+      })
+      .onerror([](crow::websocket::connection& conn, const std::string&) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (state) {
+          state->streaming = false;
+          if (state->grpc_ctx) state->grpc_ctx->TryCancel();
+          delete state;
+          conn.userdata(nullptr);
+        }
+      });
+
+  // ─── F-05 Live Market Data REST endpoints ───────────────────────────────────
+
+  // GET /api/v1/marketdata/{asset} — текущий snapshot, p95 < 50ms
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& /*req*/, const std::string& asset) {
+        const auto resp = market_data_.GetMarketDataSnapshot(asset);
+        if (!resp.found()) {
+          crow::json::wvalue err;
+          err["error"] = resp.has_error() ? resp.error().message() : "not found";
+          return crow::response(404, err);
+        }
+        const auto& snap = resp.snapshot();
+        // Конвертируем Decimal в double для читаемого JSON (scale=8 у всех полей)
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        auto depth_json = [&to_f](const auto& levels) {
+          crow::json::wvalue arr(crow::json::type::List);
+          size_t i = 0;
+          for (const auto& l : levels) {
+            arr[i]["price"] = to_f(l.price());
+            arr[i]["qty"]   = to_f(l.qty());
+            ++i;
+          }
+          return arr;
+        };
+        crow::json::wvalue out;
+        out["asset"]            = snap.asset();
+        out["mid"]              = to_f(snap.mid());
+        out["best_bid"]         = to_f(snap.best_bid());
+        out["best_ask"]         = to_f(snap.best_ask());
+        out["spread"]           = to_f(snap.spread());
+        out["spread_bps"]       = to_f(snap.spread_bps());
+        out["volume_24h"]       = to_f(snap.volume_24h());
+        out["volume_quote_24h"] = to_f(snap.volume_quote_24h());
+        out["clear_price"]      = to_f(snap.clear_price());
+        out["executed_rate"]    = to_f(snap.executed_rate());
+        out["bid_depth"]        = depth_json(snap.bid_depth());
+        out["ask_depth"]        = depth_json(snap.ask_depth());
+        out["source"]           = snap.source();
+        out["stale"]            = snap.stale();
+        out["batch_id"]         = snap.batch_id();
+        out["snapshot_id"]      = snap.snapshot_id();
+        return crow::response(200, out);
+      });
+
+  // GET /api/v1/marketdata/{asset}/history?limit=N — исторические снимки
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>/history").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& req, const std::string& asset) {
+        const int limit = [&] {
+          const auto lp = req.url_params.get("limit");
+          if (!lp) return 100;
+          try { return std::stoi(lp); } catch (...) { return 100; }
+        }();
+        const auto parse_unix = [&](const char* name) -> int64_t {
+          const auto v = req.url_params.get(name);
+          if (!v) return 0;
+          try { return std::stoll(v); } catch (...) { return 0; }
+        };
+        const auto resp = market_data_.GetMarketDataHistory(
+            asset, std::min(limit, 1000), parse_unix("from"), parse_unix("to"));
+        // Same Decimal→double scaling as the live /marketdata/{asset} endpoint,
+        // so history mid/spread_bps share its magnitude (not raw .units()).
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        crow::json::wvalue out;
+        out["asset"] = asset;
+        std::vector<crow::json::wvalue> items;
+        for (const auto& snap : resp.snapshots()) {
+          crow::json::wvalue s;
+          s["snapshot_id"] = snap.snapshot_id();
+          s["mid"]         = to_f(snap.mid());
+          s["spread_bps"]  = to_f(snap.spread_bps());
+          s["source"]      = snap.source();
+          s["batch_id"]    = snap.batch_id();
+          items.push_back(std::move(s));
+        }
+        out["snapshots"] = std::move(items);
+        out["count"]     = static_cast<int>(resp.snapshots_size());
+        return crow::response(200, out);
+      });
+
+  // GET /api/v1/marketdata/{asset}/effective-spread?limit=N&from=unix&to=unix
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>/effective-spread").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& req, const std::string& asset) {
+        fob::marketdata::v1::GetEffectiveSpreadRequest grpc_req;
+        grpc_req.mutable_meta()->set_source("gateway");
+        grpc_req.set_asset(asset);
+        const int limit = [&] {
+          const auto lp = req.url_params.get("limit");
+          if (!lp) return 100;
+          try { return std::stoi(lp); } catch (...) { return 100; }
+        }();
+        grpc_req.set_limit(static_cast<uint32_t>(std::min(limit, 1000)));
+        const auto parse_unix = [&](const char* name) -> int64_t {
+          const auto v = req.url_params.get(name);
+          if (!v) return 0;
+          try { return std::stoll(v); } catch (...) { return 0; }
+        };
+        if (const int64_t f = parse_unix("from"); f > 0) grpc_req.mutable_from()->set_seconds(f);
+        if (const int64_t t = parse_unix("to");   t > 0) grpc_req.mutable_to()->set_seconds(t);
+
+        grpc::ClientContext ctx;
+        ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
+        fob::marketdata::v1::GetEffectiveSpreadResponse resp;
+        const auto status = market_data_.GetEffectiveSpreadDirect(grpc_req, &resp);
+        if (!status.ok()) {
+          crow::json::wvalue err;
+          err["error"] = status.error_message();
+          return crow::response(503, err);
+        }
+
+        // Scaled floats, consistent with the snapshot/history endpoints.
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        crow::json::wvalue out;
+        out["asset"] = asset;
+        std::vector<crow::json::wvalue> items;
+        for (const auto& r : resp.records()) {
+          crow::json::wvalue rec;
+          rec["fill_id"]               = r.fill_id();
+          rec["effective_spread_bps"]  = to_f(r.effective_spread_bps());
+          rec["exec_price"]            = to_f(r.exec_price());
+          rec["mid_at_exec"]           = to_f(r.mid_at_exec());
+          rec["batch_id"]              = r.batch_id();
+          items.push_back(std::move(rec));
+        }
+        out["records"] = std::move(items);
+        out["count"]   = static_cast<int>(resp.records_size());
+        return crow::response(200, out);
+      });
 
   cex::common::log_json("INFO", "Gateway starting", {{"port", std::to_string(port)}});
   app.port(port).multithreaded().run();
