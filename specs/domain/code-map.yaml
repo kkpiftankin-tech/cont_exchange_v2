@@ -101,10 +101,12 @@ codeMap:
       - cpp/matching/src/app/matching_loop.cpp
       - cpp/matching/src/app/matching_loop.hpp
       - cpp/matching/src/domain/solver.hpp
+      - cpp/matching/src/domain/batch_result_to_fill_events.cpp
       - cpp/matching/CMakeLists.txt
     grpcPort: null
     kafkaProduces:
       - batch.outputs
+      - fills
     kafkaConsumes:
       - orders.normalized
 
