@@ -99,6 +99,18 @@ class FakeRiskStub final : public fob::risk::v1::RiskService::StubInterface {
     return post_trade_status;
   }
 
+  grpc::Status PreTradeCheckGroup(grpc::ClientContext*,
+                                  const fob::risk::v1::PreTradeCheckGroupRequest&,
+                                  fob::risk::v1::PreTradeCheckGroupResponse*) override {
+    return grpc::Status::OK;
+  }
+
+  grpc::Status PreHedgeCheck(grpc::ClientContext*,
+                             const fob::risk::v1::PreHedgeCheckRequest&,
+                             fob::risk::v1::PreHedgeCheckResponse*) override {
+    return grpc::Status::OK;
+  }
+
  private:
   grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreTradeCheckResponse>*
   AsyncCheckNewOrderRaw(grpc::ClientContext*,
@@ -133,6 +145,30 @@ class FakeRiskStub final : public fob::risk::v1::RiskService::StubInterface {
   grpc::ClientAsyncResponseReaderInterface<google::protobuf::Empty>*
   PrepareAsyncOnBatchResultRaw(grpc::ClientContext*,
                                const fob::risk::v1::PostTradeUpdateRequest&,
+                               grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreTradeCheckGroupResponse>*
+  AsyncPreTradeCheckGroupRaw(grpc::ClientContext*,
+                             const fob::risk::v1::PreTradeCheckGroupRequest&,
+                             grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreTradeCheckGroupResponse>*
+  PrepareAsyncPreTradeCheckGroupRaw(grpc::ClientContext*,
+                                    const fob::risk::v1::PreTradeCheckGroupRequest&,
+                                    grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreHedgeCheckResponse>*
+  AsyncPreHedgeCheckRaw(grpc::ClientContext*,
+                        const fob::risk::v1::PreHedgeCheckRequest&,
+                        grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreHedgeCheckResponse>*
+  PrepareAsyncPreHedgeCheckRaw(grpc::ClientContext*,
+                               const fob::risk::v1::PreHedgeCheckRequest&,
                                grpc::CompletionQueue*) override {
     return nullptr;
   }
