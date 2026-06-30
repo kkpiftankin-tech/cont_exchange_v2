@@ -46,6 +46,8 @@ AgentLogEntry MakeEntry(const std::string& session_id) {
   return e;
 }
 
+}  // namespace
+
 int main() {
   int failures = 0;
 
@@ -86,5 +88,3 @@ int main() {
   std::cerr << "routing_agent_log_writer_test: " << failures << " test(s) FAILED\n";
   return 1;
 }
-
-}  // namespace

@@ -46,6 +46,8 @@ ReplaySummary MakeSummary(const std::string& session_id) {
   return sum;
 }
 
+}  // namespace
+
 int main() {
   int failures = 0;
 
@@ -86,5 +88,3 @@ int main() {
   std::cerr << "routing_summary_store_test: " << failures << " test(s) FAILED\n";
   return 1;
 }
-
-}  // namespace

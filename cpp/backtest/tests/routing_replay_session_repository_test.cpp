@@ -76,6 +76,8 @@ ReplaySession MakeSession(const std::string& id, bool persist) {
   return s;
 }
 
+}  // namespace
+
 int main() {
   int failures = 0;
 
@@ -210,5 +212,3 @@ int main() {
   std::cerr << "routing_replay_session_repository_test: " << failures << " test(s) FAILED\n";
   return 1;
 }
-
-}  // namespace

@@ -42,6 +42,8 @@ ReplaySession MakeEphemeral(const std::string& id,
   return s;
 }
 
+}  // namespace
+
 int main() {
   int failures = 0;
 
@@ -230,5 +232,3 @@ int main() {
   std::cerr << "ephemeral_session_registry_test: " << failures << " test(s) FAILED\n";
   return 1;
 }
-
-}  // namespace
