@@ -38,6 +38,10 @@ struct FakeRepo : cex::order_flow::infra::IComboOrderRepository {
     status = d::ParentOrderStatus::kCancelled;
     active_legs.clear();
   }
+  cex::order_flow::infra::ComboReversalContext LoadInternalFilledLegs(
+      const std::string&) override {
+    return {};
+  }
 };
 
 pv1::CancelComboOrderRequest MakeReq(const std::string& combo_id) {

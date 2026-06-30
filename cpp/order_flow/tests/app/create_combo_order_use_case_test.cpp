@@ -35,6 +35,10 @@ struct FakeRepo : cex::order_flow::infra::IComboOrderRepository {
   }
   std::vector<std::string> GetActiveLegIds(const std::string&) override { return {}; }
   void CancelComboAndLegs(const std::string&) override {}
+  cex::order_flow::infra::ComboReversalContext LoadInternalFilledLegs(
+      const std::string&) override {
+    return {};
+  }
 };
 
 void SetDec(fob::common::v1::Decimal* dst, std::int64_t units, std::int32_t scale) {
