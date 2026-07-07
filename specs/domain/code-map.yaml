@@ -12,6 +12,9 @@ codeMap:
         - cpp/common/include/cex/common/uuid.hpp
         - cpp/common/include/cex/common/env.hpp
         - cpp/common/include/cex/common/log.hpp
+        # F-06 (ADR-045): shared PostgreSQL connection pool
+        - cpp/common/include/cex/common/pg_connection_pool.hpp
+        - cpp/common/tests/pg_connection_pool_test.cpp
       sources:
         - cpp/common/src/decimal.cpp
         - cpp/common/src/kafka.cpp
@@ -49,6 +52,19 @@ codeMap:
       - cpp/gateway/src/infra/order_flow_client.cpp
       - cpp/gateway/src/infra/order_flow_client.hpp
       - cpp/gateway/CMakeLists.txt
+      # F-06 positions/PnL/margin: gRPC clients + WS push + cache
+      - cpp/gateway/src/infra/ledger_client.cpp
+      - cpp/gateway/src/infra/ledger_client.hpp
+      - cpp/gateway/src/infra/risk_client.cpp
+      - cpp/gateway/src/infra/risk_client.hpp
+      - cpp/gateway/src/infra/positions_cache.cpp
+      - cpp/gateway/src/infra/positions_cache.hpp
+      - cpp/gateway/src/infra/positions_hub.cpp
+      - cpp/gateway/src/infra/positions_hub.hpp
+      - cpp/gateway/src/infra/positions_update_kafka_consumer.cpp
+      - cpp/gateway/src/infra/positions_update_kafka_consumer.hpp
+      - cpp/gateway/tests/positions_cache_test.cpp
+      - cpp/gateway/tests/positions_hub_test.cpp
     httpPort: 8080
     kafkaProduces: []
     kafkaConsumes: []
@@ -127,11 +143,24 @@ codeMap:
       - cpp/ledger/src/main.cpp
       - cpp/ledger/src/app/ledger_uc.cpp
       - cpp/ledger/src/app/ledger_uc.hpp
+      - cpp/ledger/src/app/persistence_ports.hpp
       - cpp/ledger/src/infra/kafka_consumers.cpp
+      - cpp/ledger/src/infra/postgres_repositories.cpp
+      - cpp/ledger/src/infra/postgres_repositories.hpp
+      - cpp/ledger/src/infra/positions_update_publisher.cpp
+      - cpp/ledger/src/infra/positions_update_publisher.hpp
       - cpp/ledger/src/transport/grpc_ledger_service.cpp
+      - cpp/ledger/src/transport/grpc_ledger_service.hpp
       - cpp/ledger/CMakeLists.txt
+      # F-06 positions/PnL/margin tests
+      - cpp/ledger/tests/ledger_f06_positions_test.cpp
+      - cpp/ledger/tests/ledger_f06_integration_chain_test.cpp
+      - cpp/ledger/tests/ledger_account_reserve_test.cpp
+      - cpp/ledger/tests/ledger_positions_update_test.cpp
+      - cpp/ledger/tests/ledger_reserve_leak_test.cpp
     grpcPort: 50053
-    kafkaProduces: []
+    kafkaProduces:
+      - positions.update
     kafkaConsumes:
       - batch.outputs
       - execution.reports
@@ -145,17 +174,31 @@ codeMap:
       - contracts/proto/fob/common/v1/common.proto
     features:
       - F-07
+      - F-06
     keyFiles:
       - cpp/risk/src/main.cpp
       - cpp/risk/src/app/risk_uc.cpp
       - cpp/risk/src/app/risk_uc.hpp
       - cpp/risk/src/infra/risk_alerts_publisher.cpp
       - cpp/risk/src/transport/grpc_risk_service.cpp
+      - cpp/risk/src/transport/grpc_risk_service.hpp
       - cpp/risk/CMakeLists.txt
+      # F-06 margin/RiskSnapshot: consumer + PG DAO + margin calc
+      - cpp/risk/src/domain/margin_calculator.cpp
+      - cpp/risk/src/domain/margin_calculator.hpp
+      - cpp/risk/src/infra/kafka_consumer.cpp
+      - cpp/risk/src/infra/kafka_consumer.hpp
+      - cpp/risk/src/infra/risk_snapshot_repository.cpp
+      - cpp/risk/src/infra/risk_snapshot_repository.hpp
+      - cpp/risk/src/infra/postgres/decimal_conversion.cpp
+      - cpp/risk/src/infra/postgres/decimal_conversion.hpp
+      - cpp/risk/tests/margin_calculator_test.cpp
+      - cpp/risk/tests/risk_snapshot_idempotency_test.cpp
     grpcPort: 50052
     kafkaProduces:
       - risk.alerts
-    kafkaConsumes: []
+    kafkaConsumes:
+      - batch.outputs
 
   market-data:
     codePath: cpp/market_data

@@ -109,6 +109,10 @@ if (BUILD_TESTING)
     src/infra/replay_commands_kafka_publisher.cpp
     src/infra/replay_results_hub.cpp
     src/infra/replay_results_kafka_consumer.cpp
+    # F-06: this test #includes http_gateway.cpp, which now uses the positions
+    # WS hub + TTL cache — compile their TUs so symbols resolve at link time.
+    src/infra/positions_hub.cpp
+    src/infra/positions_cache.cpp
   )
 
   target_include_directories(gateway_replay_create_payload_validation_test PRIVATE

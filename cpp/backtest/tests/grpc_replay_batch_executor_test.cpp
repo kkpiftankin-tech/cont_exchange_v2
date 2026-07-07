@@ -111,6 +111,14 @@ class FakeRiskStub final : public fob::risk::v1::RiskService::StubInterface {
     return grpc::Status::OK;
   }
 
+  // F-06: RiskService gained GetRiskSnapshot — StubInterface implementers must
+  // implement it or become abstract (fails on older gRPC codegen, e.g. 22.04).
+  grpc::Status GetRiskSnapshot(grpc::ClientContext*,
+                               const fob::risk::v1::GetRiskSnapshotRequest&,
+                               fob::risk::v1::GetRiskSnapshotResponse*) override {
+    return grpc::Status::OK;
+  }
+
  private:
   grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::PreTradeCheckResponse>*
   AsyncCheckNewOrderRaw(grpc::ClientContext*,
@@ -170,6 +178,18 @@ class FakeRiskStub final : public fob::risk::v1::RiskService::StubInterface {
   PrepareAsyncPreHedgeCheckRaw(grpc::ClientContext*,
                                const fob::risk::v1::PreHedgeCheckRequest&,
                                grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::GetRiskSnapshotResponse>*
+  AsyncGetRiskSnapshotRaw(grpc::ClientContext*,
+                          const fob::risk::v1::GetRiskSnapshotRequest&,
+                          grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+  grpc::ClientAsyncResponseReaderInterface<fob::risk::v1::GetRiskSnapshotResponse>*
+  PrepareAsyncGetRiskSnapshotRaw(grpc::ClientContext*,
+                                 const fob::risk::v1::GetRiskSnapshotRequest&,
+                                 grpc::CompletionQueue*) override {
     return nullptr;
   }
 };
