@@ -3,6 +3,7 @@
     "logo": "CONT",
     "trade": "торговля",
     "profile": "профиль",
+    "positions": "Позиции",
     "venues": "venues",
     "hedgeflows": "hedge",
     "hedgePnl": "pnl",
@@ -1119,5 +1120,68 @@
     "ok": "OK",
     "error": "Ошибка",
     "success": "Успех"
+  },
+  "positions": {
+    "title": "Позиции, PnL и маржа",
+    "subtitle": "Открытые позиции, нереализованный/реализованный PnL и состояние коллатерала. Обновляется в реальном времени.",
+    "refresh": "Обновить",
+    "updatedAt": "Обновлено",
+    "loading": "Загрузка…",
+    "loadError": "Не удалось загрузить позиции",
+    "empty": "Открытых позиций нет",
+    "all": "Все",
+    "long": "Лонг",
+    "short": "Шорт",
+    "buy": "Покупка",
+    "sell": "Продажа",
+    "col": {
+      "symbol": "Инструмент",
+      "side": "Сторона",
+      "qty": "Кол-во",
+      "avgEntry": "Ср. вход",
+      "mark": "Mark",
+      "uPnl": "uPnL",
+      "rPnl": "rPnL",
+      "status": "Статус",
+      "filled": "Исполнено",
+      "fills": "Сделки"
+    },
+    "uPnlTotal": "Нереализованный PnL",
+    "rPnlTotal": "Реализованный PnL",
+    "marginTitle": "Маржа и коллатерал",
+    "marginUnavailable": "Данные маржи временно недоступны",
+    "freeCollateral": "Свободный коллатерал",
+    "reservedCollateral": "Зарезервировано",
+    "initialMargin": "Начальная маржа",
+    "maintenanceMargin": "Поддерживающая маржа",
+    "utilization": "Свободный коллатерал",
+    "marginCall": "Margin call",
+    "marginCallBanner": "Margin call: свободного коллатерала недостаточно. Возможна принудительная ликвидация.",
+    "zoneGreen": "> 50% — безопасно",
+    "zoneYellow": "20–50% — внимание",
+    "zoneRed": "< 20% — риск",
+    "legs": "{{n}} ног",
+    "legsTitle": "Разбивка по ногам",
+    "aggregateNote": "Строка-родитель — агрегат по ногам",
+    "comboTitle": "Combo / Portfolio",
+    "bestEffortNote": "PnL и средняя цена по ноге — оценочно (по символу, best-effort). Точная атрибуция ждёт F-09.",
+    "comboStatus": {
+      "filled": "Исполнена",
+      "active": "Активна",
+      "cancelled": "Отменена",
+      "failedExternal": "Внешний сбой"
+    },
+    "fill": {
+      "time": "Время",
+      "qty": "Кол-во",
+      "price": "Цена"
+    },
+    "conn": {
+      "connecting": "Подключение…",
+      "connected": "WS подключён",
+      "reconnecting": "Переподключение…",
+      "offline": "Соединение потеряно",
+      "pollFallback": "Резервный опрос REST"
+    }
   }
 }

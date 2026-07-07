@@ -138,6 +138,28 @@ message GetRealisedPnLResponse {
   repeated RealisedPnL positions = 2;
 }
 
+// F-06: open position for a user on a single instrument.
+// Monetary values use fob.common.v1.Decimal (same style as Balance / UnrealisedPnL).
+message Position {
+  string symbol = 1;                            // e.g., "BTC/USDT"
+  string side = 2;                              // "long" | "short" | "flat"
+  fob.common.v1.Decimal quantity = 3;           // current position size (absolute)
+  fob.common.v1.Decimal avg_entry_price = 4;    // average entry price
+  fob.common.v1.Decimal mark_price = 5;         // reference/mark price for valuation
+  fob.common.v1.Decimal unrealized_pnl = 6;     // (mark_price - avg_entry_price) * signed qty
+  fob.common.v1.Decimal realized_pnl = 7;       // cumulative realised PnL for this position
+}
+
+// F-06: request open positions for a user.
+message GetPositionsRequest {
+  string user_id = 1;
+}
+
+// F-06: response with all open positions for the user.
+message GetPositionsResponse {
+  repeated Position positions = 1;
+}
+
 // Balance on an external venue (e.g., Binance, Bybit, OKX).
 message VenueBalance {
   string venue = 1;           // e.g., "binance", "bybit", "okx"
@@ -261,4 +283,7 @@ service LedgerService {
 
   // Get hedge PnL summary
   rpc GetHedgePnL(GetHedgePnLRequest) returns (GetHedgePnLResponse);
+
+  // F-06: get user's open positions (symbol, side, qty, avg entry, mark, PnL)
+  rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
 }

@@ -14,7 +14,8 @@
     "logout": "Logout",
     "about": "about",
     "login": "login",
-    "register": "register"
+    "register": "register",
+    "positions": "Positions"
   },
   "auth": {
     "signIn": "Sign in",
@@ -1119,5 +1120,68 @@
     "ok": "OK",
     "error": "Error",
     "success": "Success"
+  },
+  "positions": {
+    "title": "Positions, PnL & Margin",
+    "subtitle": "Open positions, unrealized/realized PnL and collateral state. Updates in real time.",
+    "refresh": "Refresh",
+    "updatedAt": "Updated",
+    "loading": "Loading…",
+    "loadError": "Failed to load positions",
+    "empty": "No open positions",
+    "all": "All",
+    "long": "Long",
+    "short": "Short",
+    "buy": "Buy",
+    "sell": "Sell",
+    "col": {
+      "symbol": "Instrument",
+      "side": "Side",
+      "qty": "Qty",
+      "avgEntry": "Avg entry",
+      "mark": "Mark",
+      "uPnl": "uPnL",
+      "rPnl": "rPnL",
+      "status": "Status",
+      "filled": "Filled",
+      "fills": "Fills"
+    },
+    "uPnlTotal": "Unrealized PnL",
+    "rPnlTotal": "Realized PnL",
+    "marginTitle": "Margin & Collateral",
+    "marginUnavailable": "Margin data temporarily unavailable",
+    "freeCollateral": "Free collateral",
+    "reservedCollateral": "Reserved",
+    "initialMargin": "Initial margin",
+    "maintenanceMargin": "Maintenance margin",
+    "utilization": "Free collateral",
+    "marginCall": "Margin call",
+    "marginCallBanner": "Margin call: free collateral is insufficient. Forced liquidation may occur.",
+    "zoneGreen": "> 50% — safe",
+    "zoneYellow": "20–50% — caution",
+    "zoneRed": "< 20% — risk",
+    "legs": "{{n}} legs",
+    "legsTitle": "Leg breakdown",
+    "aggregateNote": "Parent row is an aggregate of legs",
+    "comboTitle": "Combo / Portfolio",
+    "bestEffortNote": "Per-leg PnL and avg price are best-effort (by symbol). Exact attribution awaits F-09.",
+    "comboStatus": {
+      "filled": "Filled",
+      "active": "Active",
+      "cancelled": "Cancelled",
+      "failedExternal": "External failure"
+    },
+    "fill": {
+      "time": "Time",
+      "qty": "Qty",
+      "price": "Price"
+    },
+    "conn": {
+      "connecting": "Connecting…",
+      "connected": "WS connected",
+      "reconnecting": "Reconnecting…",
+      "offline": "Connection lost",
+      "pollFallback": "REST polling fallback"
+    }
   }
 }

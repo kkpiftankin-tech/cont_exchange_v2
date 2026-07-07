@@ -113,4 +113,16 @@ grpc::Status GrpcLedgerService::GetHedgePnL(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::GetPositions(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetPositionsRequest* request,
+    fob::ledger::v1::GetPositionsResponse* response) {
+  // MVP: empty mark price map → unrealized_pnl falls back to last persisted
+  // value (SEQ-LEDGER-001 stale-mark path). Production fetches mark prices from
+  // the Market Data service and passes them here.
+  std::unordered_map<std::string, cex::common::Decimal> mark_prices;
+  *response = uc_->GetPositionsView(*request, mark_prices);
+  return grpc::Status::OK;
+}
+
 }  // namespace cex::ledger::transport

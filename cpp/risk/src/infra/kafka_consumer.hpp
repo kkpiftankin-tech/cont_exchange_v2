@@ -19,6 +19,7 @@ class KafkaConsumer {
   void venue_health_loop();
   void execution_reports_loop();
   void synthetic_orders_loop();
+  void batch_outputs_loop();  // F-06 (T-F06-030): post-trade margin snapshots.
 
   std::atomic<bool> running_;
   std::string brokers_;
@@ -28,11 +29,13 @@ class KafkaConsumer {
   std::thread venue_health_t_;
   std::thread execution_reports_t_;
   std::thread synthetic_orders_t_;
+  std::thread batch_outputs_t_;
 
   cex::common::KafkaConsumer venue_liquidity_fob_consumer_;
   cex::common::KafkaConsumer venue_health_consumer_;
   cex::common::KafkaConsumer execution_reports_consumer_;
   cex::common::KafkaConsumer synthetic_orders_consumer_;
+  cex::common::KafkaConsumer batch_outputs_consumer_;
 };
 
 }  // namespace cex::risk::infra

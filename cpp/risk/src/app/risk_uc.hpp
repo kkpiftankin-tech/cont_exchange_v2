@@ -5,8 +5,10 @@
 
 #include "fob/risk/v1/risk.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/matching/v1/batch.pb.h"
 #include "fob/venue/v1/venue.pb.h"
 #include "infra/risk_alerts_publisher.hpp"
+#include "infra/risk_snapshot_repository.hpp"
 #include "cex/common/decimal.hpp"
 
 namespace cex::risk::app {
@@ -15,6 +17,12 @@ namespace cex::risk::app {
 class RiskUseCases {
 public:
   explicit RiskUseCases(infra::RiskAlertsPublisher publisher);
+
+  // F-06 (T-F06-031/032): опциональный PG-репозиторий для buildRiskSnapshot /
+  // GetRiskSnapshot. nullptr → snapshot-pipeline отключён (degraded mode).
+  void SetSnapshotRepository(infra::RiskSnapshotRepository* repo) {
+    snapshot_repo_ = repo;
+  }
 
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
@@ -32,6 +40,17 @@ public:
   SetKillSwitch(const fob::risk::v1::KillSwitchRequest &req);
 
   void OnBatchResult(const fob::risk::v1::PostTradeUpdateRequest &req);
+
+  // F-06 (T-F06-031): построить RiskSnapshot для пользователя по BatchResult
+  // (clear_prices как mark). Читает positions/accounts/risk_limits, считает
+  // margin, пишет risk_snapshots, при margin_call/liquidation публикует
+  // RiskAlert (T-F06-032). Возвращает false если запись снапшота не удалась.
+  bool buildRiskSnapshot(const std::string &user_id,
+                         const fob::matching::v1::BatchResult &batch);
+
+  // F-06 (T-F06-032): отдаёт последний risk_snapshot для entity_id.
+  fob::risk::v1::GetRiskSnapshotResponse
+  GetRiskSnapshot(const fob::risk::v1::GetRiskSnapshotRequest &req);
 
   // F-09 (T-F09-040): эмитит RiskAlert GROUPED_PRE_TRADE_REJECTED в risk.alerts
   // при отклонении группового pre-trade check (для Observability / Operator UI).
@@ -66,7 +85,13 @@ private:
   std::unordered_map<std::string, cex::common::Decimal> exposures_; // symbol->halt
   std::unordered_map<std::string, VenueHealthGateState> venue_health_gate_;
 
+  // F-06: эмитит MARGIN_CALL / LIQUIDATION RiskAlert после INSERT снапшота.
+  void PublishMarginAlert(const std::string &user_id,
+                          const std::string &batch_id,
+                          bool liquidation);
+
   infra::RiskAlertsPublisher publisher_;
+  infra::RiskSnapshotRepository *snapshot_repo_{nullptr};  // optional, not owned
 };
 
 } // namespace cex::risk::app

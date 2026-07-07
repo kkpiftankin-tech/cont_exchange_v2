@@ -203,6 +203,33 @@ message PreHedgeVenueHealth {
   double health_score = 4;    // 0..1
 }
 
+// F-06: aggregated risk/margin snapshot for an entity (user/account).
+// Monetary values use fob.common.v1.Decimal (same style as BalanceSnapshot).
+// Reuses BalanceSnapshot / PositionSnapshot to expose underlying collateral and
+// positions that the margin numbers are derived from.
+message RiskSnapshot {
+  string entity_id = 1;                              // user_id or account_id
+  fob.common.v1.Decimal free_collateral = 2;         // collateral available for new risk
+  fob.common.v1.Decimal reserved_collateral = 3;     // collateral locked by open exposure
+  fob.common.v1.Decimal initial_margin = 4;          // required initial margin
+  fob.common.v1.Decimal maintenance_margin = 5;      // required maintenance margin
+  bool margin_call = 6;                              // equity below maintenance margin
+  bool liquidation = 7;                              // liquidation triggered
+  google.protobuf.Timestamp timestamp = 8;          // snapshot time
+  repeated BalanceSnapshot balances = 10;            // underlying collateral balances
+  repeated PositionSnapshot positions = 11;          // underlying open positions
+}
+
+// F-06: request a risk snapshot for an entity.
+message GetRiskSnapshotRequest {
+  string entity_id = 1;
+}
+
+// F-06: response with the entity's risk snapshot.
+message GetRiskSnapshotResponse {
+  RiskSnapshot snapshot = 1;
+}
+
 service RiskService {
   // Pre-trade risk check (sync)
   rpc CheckNewOrder(PreTradeCheckRequest) returns (PreTradeCheckResponse);
@@ -220,4 +247,7 @@ service RiskService {
 
   // Post-trade update (sync alternative to consuming Kafka batch.outputs)
   rpc OnBatchResult(PostTradeUpdateRequest) returns (google.protobuf.Empty);
+
+  // F-06: get aggregated risk/margin snapshot for an entity (user/account)
+  rpc GetRiskSnapshot(GetRiskSnapshotRequest) returns (GetRiskSnapshotResponse);
 }

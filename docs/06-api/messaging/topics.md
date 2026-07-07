@@ -22,6 +22,7 @@ related:
 | `batch.outputs` | matching | ledger, observability, backtest (parity) | `fob.matching.v1.BatchOutputs` (wrapper of BatchResult + FillEvent\[\]) | 7 d | batch_id |
 | `fills` | matching | (analytics, planned consumers) | `fob.matching.v1.FillEvent` (F-09 extends with parentOrderId / executionGroupId / legId) | 7 d | order_id |
 | `risk.alerts` | risk | observability | `fob.risk.v1.RiskAlert` | 30 d | user_id или alert_id |
+| `positions.update` | ledger | gateway (ws-gateway) | `{ user_id, batch_id, ts }` (invalidation signal, F-06, ADR-046) | 7 d | user_id |
 
 ## Execution and grouped execution (F-09 / F-12)
 
@@ -89,6 +90,7 @@ Individual:
 - [execution-reports.md](execution-reports.md) (legacy mirror)
 - [execution-groups.md](execution-groups.md) (F-09, ADR-033)
 - [risk-alerts.md](risk-alerts.md)
+- [positions.update.md](positions.update.md) (F-06, ADR-046)
 
 Bundled (multiple related topics in one file):
 

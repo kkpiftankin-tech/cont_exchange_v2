@@ -2,7 +2,7 @@
 
 ## Status
 
-TODO / planned (в текущем `risk.proto` отсутствует)
+Implemented (контракт добавлен в `contracts/proto/fob/risk/v1/risk.proto`, F-06)
 
 ## Purpose
 
@@ -14,9 +14,9 @@ gRPC
 
 ## Service
 
-`fob.risk.v1.RiskService` (planned extension)
+`fob.risk.v1.RiskService`
 
-## Method (planned)
+## Method
 
 ```proto
 rpc GetRiskSnapshot(GetRiskSnapshotRequest) returns (GetRiskSnapshotResponse);
@@ -32,33 +32,31 @@ rpc GetRiskSnapshot(GetRiskSnapshotRequest) returns (GetRiskSnapshotResponse);
 
 ## Schema
 
-TODO. Предлагаемая форма:
+Финальный контракт (см. `contracts/proto/fob/risk/v1/risk.proto`). Monetary
+values используют `fob.common.v1.Decimal` (стиль `BalanceSnapshot`). Snapshot
+переиспользует уже существующие `BalanceSnapshot` / `PositionSnapshot`, чтобы
+показать collateral и позиции, из которых выводятся margin-числа.
 
 ```proto
-message LimitUsage {
-  string limit_name = 1;                 // "max_notional", "max_position", ...
-  fob.common.v1.Decimal current = 2;
-  fob.common.v1.Decimal limit = 3;
-  double utilization_pct = 4;
-}
-
 message RiskSnapshot {
-  fob.common.v1.Decimal initial_margin = 1;
-  fob.common.v1.Decimal maintenance_margin = 2;
-  fob.common.v1.Decimal margin_ratio = 3;
-  bool near_liquidation = 4;
-  repeated LimitUsage limits = 10;
+  string entity_id = 1;                              // user_id or account_id
+  fob.common.v1.Decimal free_collateral = 2;         // collateral available for new risk
+  fob.common.v1.Decimal reserved_collateral = 3;     // collateral locked by open exposure
+  fob.common.v1.Decimal initial_margin = 4;          // required initial margin
+  fob.common.v1.Decimal maintenance_margin = 5;      // required maintenance margin
+  bool margin_call = 6;                              // equity below maintenance margin
+  bool liquidation = 7;                              // liquidation triggered
+  google.protobuf.Timestamp timestamp = 8;          // snapshot time
+  repeated BalanceSnapshot balances = 10;            // underlying collateral balances
+  repeated PositionSnapshot positions = 11;          // underlying open positions
 }
 
 message GetRiskSnapshotRequest {
-  fob.common.v1.EventMeta meta = 1;
-  string user_id = 2;
+  string entity_id = 1;
 }
 
 message GetRiskSnapshotResponse {
-  fob.common.v1.EventMeta meta = 1;
-  RiskSnapshot snapshot = 2;
-  fob.common.v1.Error error = 3;
+  RiskSnapshot snapshot = 1;
 }
 ```
 

@@ -27,6 +27,7 @@ import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAle
 import ManualOverride from './pages/ManualOverride/ManualOverride';
 import PolicyConfig from './pages/PolicyConfig/PolicyConfig';
 import MarketDataTest from './pages/MarketDataTest/MarketDataTest';
+import Positions from './pages/Positions/Positions';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import './App.css';
 
@@ -68,6 +69,7 @@ function App() {
         <Route path="/policy-config" element={<AuthRoute><PolicyConfig /></AuthRoute>} />
         <Route path="/replay" element={<AuthRoute><BacktestReplay /></AuthRoute>} />
         <Route path="/lobfob" element={<AuthRoute><LobFobDashboard /></AuthRoute>} />
+        <Route path="/positions" element={<AuthRoute><Positions /></AuthRoute>} />
         <Route path="*" element={<AuthRoute><Main /></AuthRoute>} />
       </Routes>
     </Router>

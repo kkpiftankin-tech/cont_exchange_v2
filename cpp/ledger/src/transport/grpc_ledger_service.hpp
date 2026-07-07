@@ -52,6 +52,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                            const fob::ledger::v1::GetHedgePnLRequest* request,
                            fob::ledger::v1::GetHedgePnLResponse* response) override;
 
+  // F-06 (T-F06-021): user's open positions with mark-to-market unrealized PnL.
+  grpc::Status GetPositions(grpc::ServerContext* context,
+                            const fob::ledger::v1::GetPositionsRequest* request,
+                            fob::ledger::v1::GetPositionsResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

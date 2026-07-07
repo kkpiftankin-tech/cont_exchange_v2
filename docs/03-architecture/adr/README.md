@@ -54,5 +54,10 @@
 | ADR-039 | F-09 compensation resolution (MVP-6, operator-driven, no auto-cascade) | [accepted](ADR-039-compensation-resolution.md) |
 | ADR-040 | F-09 compensation resolution — endpoint в order_flow, matching экспонирует CompensationService gRPC (MVP-6 slice 3b) | [accepted](ADR-040-compensation-resolution-cross-service.md) |
 | ADR-041 | F-09 auto-policy compensation resolution (MVP-7, money-guardrails + circuit-breaker, default OFF) | [accepted](ADR-041-auto-policy-compensation-resolution.md) |
+| ADR-042 | Единый read-слой батчей (single-leg + combo) через ClickHouse view | [accepted](ADR-042-unified-batch-read-layer.md) |
+| ADR-043 | F-09 combo external-нога → HedgeFlow + ChildOrder (F-09↔F-12) | [accepted](ADR-043-combo-external-hedgeflow-childorder.md) |
+| ADR-044 | F-06 модель балансов ledger — единый PG-источник vs dual in-memory + PG | [proposed](ADR-044-ledger-balance-source-of-truth.md) |
+| ADR-045 | F-06 модель соединений с PostgreSQL — per-call vs in-app pool | [proposed](ADR-045-pg-connection-pooling.md) |
+| ADR-046 | F-06 топик `positions.update` для WS-push обновлений позиций | [proposed](ADR-046-positions-update-topic.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

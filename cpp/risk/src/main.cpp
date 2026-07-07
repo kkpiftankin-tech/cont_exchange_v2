@@ -15,6 +15,7 @@
 
 #include "app/risk_uc.hpp"
 #include "infra/risk_alerts_publisher.hpp"
+#include "infra/risk_snapshot_repository.hpp"
 #include "infra/kafka_consumer.hpp"
 #include "transport/grpc_risk_service.hpp"
 
@@ -31,6 +32,22 @@ int main() {
 
   // Use cases + gRPC transport wiring.
   cex::risk::app::RiskUseCases uc(std::move(pub));
+
+  // F-06 (T-F06-031/032): PostgreSQL DAO для post-trade margin snapshots.
+  // RISK_POSTGRES_DSN пуст → snapshot-pipeline отключён (degraded mode):
+  // OnBatchResult логирует diagnostics, GetRiskSnapshot отдаёт empty.
+  const std::string pg_dsn =
+      cex::common::Env::get_string("RISK_POSTGRES_DSN", "");
+  cex::risk::infra::RiskSnapshotRepository snapshot_repo(pg_dsn);
+  if (snapshot_repo.enabled()) {
+    uc.SetSnapshotRepository(&snapshot_repo);
+    cex::common::log_json("INFO", "Risk margin snapshot persistence enabled");
+  } else {
+    cex::common::log_json(
+        "WARN", "RISK_POSTGRES_DSN not set or libpqxx unavailable; "
+                "margin snapshots disabled");
+  }
+
   cex::risk::transport::GrpcRiskService svc(&uc);
 
   // Consumer — background threads для venue.health / batch.outputs / execution.reports.

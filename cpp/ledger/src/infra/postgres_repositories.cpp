@@ -1,15 +1,40 @@
 #include "infra/postgres_repositories.hpp"
 
 #include <utility>
+#include <vector>
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/log.hpp"
 
 #ifdef CEX_LEDGER_HAS_LIBPQXX
 #include <pqxx/pqxx>
+
+#include "cex/common/pg_connection_pool.hpp"
 #endif
 
 namespace cex::ledger::infra {
+
+// P2: LedgerPgPool — конкретный тип пула. Под libpqxx это полноценный
+// cex::common::PgConnectionPool; иначе пустой stub (репозитории всё равно
+// no-op без libpqxx, pool_ всегда nullptr).
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+class LedgerPgPool : public cex::common::PgConnectionPool {
+ public:
+  using cex::common::PgConnectionPool::PgConnectionPool;
+};
+
+std::shared_ptr<LedgerPgPool> MakeLedgerPgPool(const std::string& dsn,
+                                               std::size_t pool_size) {
+  if (dsn.empty()) return nullptr;
+  return std::make_shared<LedgerPgPool>(dsn, pool_size == 0 ? 1 : pool_size);
+}
+#else
+class LedgerPgPool {};
+std::shared_ptr<LedgerPgPool> MakeLedgerPgPool(const std::string& /*dsn*/,
+                                               std::size_t /*pool_size*/) {
+  return nullptr;
+}
+#endif
 
 #ifdef CEX_LEDGER_HAS_LIBPQXX
 using cex::common::Decimal;
@@ -109,19 +134,52 @@ void insert_entry(pqxx::work& tx,
       )sql",
       batch_id, order_id, user_id, currency, delta.to_string());
 }
+
+// Parse a PostgreSQL NUMERIC text value (e.g. "1234.56000") into a Decimal.
+// Keeps every fractional digit as scale (canonicalization happens in the UC,
+// not here — the read path is authoritative about whatever PG stored).
+Decimal parse_pg_numeric(const std::string& text) {
+  if (text.empty()) return Decimal::zero();
+  bool negative = false;
+  std::size_t i = 0;
+  if (text[i] == '+' || text[i] == '-') {
+    negative = (text[i] == '-');
+    ++i;
+  }
+  __int128 units = 0;
+  int32_t scale = 0;
+  bool seen_dot = false;
+  for (; i < text.size(); ++i) {
+    const char c = text[i];
+    if (c == '.') { seen_dot = true; continue; }
+    if (c < '0' || c > '9') break;  // stop at exponent / junk (NUMERIC has none)
+    units = units * 10 + (c - '0');
+    if (seen_dot) ++scale;
+  }
+  if (negative) units = -units;
+  // Clamp into int64 range, dropping least-significant digits if absurdly large.
+  while ((units > static_cast<__int128>(INT64_MAX) ||
+          units < static_cast<__int128>(INT64_MIN)) && scale > 0) {
+    units /= 10;
+    --scale;
+  }
+  return Decimal{static_cast<int64_t>(units), scale};
+}
 #endif
 
 }  // namespace
 
 // ========== PostgresPositionsRepository ==========
 
-PostgresPositionsRepository::PostgresPositionsRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {}
+PostgresPositionsRepository::PostgresPositionsRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
 
 void PostgresPositionsRepository::ApplyFill(const fob::matching::v1::FlowFill& fill) {
 #ifdef CEX_LEDGER_HAS_LIBPQXX
-  pqxx::connection c(conn_str_);
-  pqxx::work tx(c);
+  if (!pool_) return;
+  auto c = pool_->Acquire();
+  pqxx::work tx(*c);
 
   ensure_positions_table(tx);
 
@@ -144,14 +202,16 @@ void PostgresPositionsRepository::ApplyFill(const fob::matching::v1::FlowFill& f
 
 // ========== PostgresLedgerEntriesRepository ==========
 
-PostgresLedgerEntriesRepository::PostgresLedgerEntriesRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {}
+PostgresLedgerEntriesRepository::PostgresLedgerEntriesRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
 
 void PostgresLedgerEntriesRepository::CreateEntriesForFill(
     const std::string& batch_id, const fob::matching::v1::FlowFill& fill) {
 #ifdef CEX_LEDGER_HAS_LIBPQXX
-  pqxx::connection c(conn_str_);
-  pqxx::work tx(c);
+  if (!pool_) return;
+  auto c = pool_->Acquire();
+  pqxx::work tx(*c);
 
   ensure_entries_table(tx);
 
@@ -179,8 +239,9 @@ void PostgresLedgerEntriesRepository::CreateEntriesForFill(
 
 #ifdef CEX_LEDGER_HAS_LIBPQXX
 
-PostgresIdempotencyRepository::PostgresIdempotencyRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {}
+PostgresIdempotencyRepository::PostgresIdempotencyRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
 
 static void ensure_idempotency_table(pqxx::work& tx) {
   tx.exec(R"sql(
@@ -192,10 +253,11 @@ static void ensure_idempotency_table(pqxx::work& tx) {
 }
 
 bool PostgresIdempotencyRepository::IsBatchProcessed(const std::string& batch_id) {
+  if (!pool_) return false;
   try {
-    pqxx::connection c(conn_str_);
-    pqxx::work tx(c);
-    
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+
     ensure_idempotency_table(tx);
     
     auto result = tx.exec_params(
@@ -216,8 +278,9 @@ bool PostgresIdempotencyRepository::IsBatchProcessed(const std::string& batch_id
 }
 
 void PostgresIdempotencyRepository::MarkBatchProcessed(const std::string& batch_id) {
-  pqxx::connection c(conn_str_);
-  pqxx::work tx(c);
+  if (!pool_) return;
+  auto c = pool_->Acquire();
+  pqxx::work tx(*c);
   ensure_idempotency_table(tx);
   tx.exec_params(
     "INSERT INTO processed_batches (batch_id) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -229,8 +292,9 @@ void PostgresIdempotencyRepository::MarkBatchProcessed(const std::string& batch_
 #else
 
 // Заглушка для сборки без libpqxx
-PostgresIdempotencyRepository::PostgresIdempotencyRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {
+PostgresIdempotencyRepository::PostgresIdempotencyRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {
   static bool warned = false;
   if (!warned) {
     warned = true;
@@ -277,13 +341,15 @@ void ensure_hedge_ledger_table(pqxx::work& tx) {
 
 }  // namespace
 
-PostgresHedgeLedgerEntriesRepository::PostgresHedgeLedgerEntriesRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {}
+PostgresHedgeLedgerEntriesRepository::PostgresHedgeLedgerEntriesRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
 
 void PostgresHedgeLedgerEntriesRepository::CreateHedgeEntry(
     const fob::ledger::v1::HedgeExecution& hedge) {
-  pqxx::connection c(conn_str_);
-  pqxx::work tx(c);
+  if (!pool_) return;
+  auto c = pool_->Acquire();
+  pqxx::work tx(*c);
 
   ensure_hedge_ledger_table(tx);
 
@@ -319,8 +385,9 @@ void PostgresHedgeLedgerEntriesRepository::CreateHedgeEntry(
 
 #else
 
-PostgresHedgeLedgerEntriesRepository::PostgresHedgeLedgerEntriesRepository(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {
+PostgresHedgeLedgerEntriesRepository::PostgresHedgeLedgerEntriesRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {
   static bool warned = false;
   if (!warned) {
     warned = true;
@@ -341,8 +408,9 @@ void PostgresHedgeLedgerEntriesRepository::CreateHedgeEntry(
 // ============================================================================
 // F-12 / IN-009 DoD-6 (PR-F12-3c) — PostgresHedgeflowPnlSink
 // ============================================================================
-PostgresHedgeflowPnlSink::PostgresHedgeflowPnlSink(std::string conn_str)
-    : conn_str_(std::move(conn_str)) {
+PostgresHedgeflowPnlSink::PostgresHedgeflowPnlSink(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {
 #ifndef CEX_LEDGER_HAS_LIBPQXX
   static bool warned = false;
   if (!warned) {
@@ -359,10 +427,10 @@ void PostgresHedgeflowPnlSink::UpdateHedgePnlDelta(
     const std::string& pnl_delta,
     const std::string& fee_delta) {
 #ifdef CEX_LEDGER_HAS_LIBPQXX
-  if (hedge_flow_id.empty()) return;
+  if (hedge_flow_id.empty() || !pool_) return;
   try {
-    pqxx::connection c(conn_str_);
-    pqxx::work tx(c);
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
     // Accumulator UPDATE: COALESCE(..., 0) + delta. WHERE matches the row
     // written by venues' PostgresHedgeflowRepository::InsertOpen in
     // PR-F12-3a. NULLIF for empty strings to allow zero deltas.
@@ -385,6 +453,276 @@ UPDATE hedgeflows
   (void)hedge_flow_id;
   (void)pnl_delta;
   (void)fee_delta;
+#endif
+}
+
+// ============================================================================
+// F-06 (T-F06-020) — PostgresPositionRepository / PostgresAccountRepository /
+// PostgresPositionAccountTx for the F-06 `positions` / `accounts` tables.
+// ============================================================================
+
+PostgresPositionRepository::PostgresPositionRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
+
+std::vector<app::PositionRow> PostgresPositionRepository::ListByUser(
+    const std::string& user_id) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  std::vector<app::PositionRow> out;
+  if (!pool_) return out;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    auto rows = tx.exec_params(
+        R"sql(
+          SELECT symbol, side, quantity, avg_entry_price, unrealized_pnl, realized_pnl
+            FROM positions
+           WHERE user_id = $1
+        )sql",
+        user_id);
+    tx.commit();
+    for (const auto& row : rows) {
+      app::PositionRow p;
+      p.user_id = user_id;
+      p.symbol = row["symbol"].as<std::string>();
+      p.side = row["side"].as<std::string>();
+      p.quantity = parse_pg_numeric(row["quantity"].as<std::string>());
+      p.avg_entry_price = parse_pg_numeric(row["avg_entry_price"].as<std::string>());
+      p.unrealized_pnl = parse_pg_numeric(row["unrealized_pnl"].as<std::string>());
+      p.realized_pnl = parse_pg_numeric(row["realized_pnl"].as<std::string>());
+      out.push_back(std::move(p));
+    }
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresPositionRepository::ListByUser failed",
+                          {{"user_id", user_id}, {"error", e.what()}});
+  }
+  return out;
+#else
+  (void)user_id;
+  return {};
+#endif
+}
+
+PostgresAccountRepository::PostgresAccountRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
+
+std::vector<app::AccountRow> PostgresAccountRepository::ListByUser(
+    const std::string& user_id) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  std::vector<app::AccountRow> out;
+  if (!pool_) return out;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    auto rows = tx.exec_params(
+        R"sql(
+          SELECT asset, free_balance, reserved_balance
+            FROM accounts
+           WHERE user_id = $1
+        )sql",
+        user_id);
+    tx.commit();
+    for (const auto& row : rows) {
+      app::AccountRow a;
+      a.user_id = user_id;
+      a.asset = row["asset"].as<std::string>();
+      a.free_balance = parse_pg_numeric(row["free_balance"].as<std::string>());
+      a.reserved_balance = parse_pg_numeric(row["reserved_balance"].as<std::string>());
+      out.push_back(std::move(a));
+    }
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAccountRepository::ListByUser failed",
+                          {{"user_id", user_id}, {"error", e.what()}});
+  }
+  return out;
+#else
+  (void)user_id;
+  return {};
+#endif
+}
+
+// ========== PostgresAccountReserveTx (F-06 P0-A, ADR-044 mirror) ==========
+
+PostgresAccountReserveTx::PostgresAccountReserveTx(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
+
+bool PostgresAccountReserveTx::ReserveTx(const std::string& user_id,
+                                         const std::string& asset,
+                                         const cex::common::Decimal& amount,
+                                         const std::string& reservation_id) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return true;  // persistence disabled — legacy in-memory is authoritative.
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    // free -= amount, reserved += amount via plain UPDATE.
+    // NOTE (bug-fix): an `INSERT VALUES(free = -amount) ON CONFLICT DO UPDATE`
+    // does NOT work here — PostgreSQL evaluates CHECK constraints against the
+    // proposed INSERT tuple BEFORE conflict arbitration, so the negative
+    // free_balance candidate trips accounts_free_balance_nonneg before the
+    // ON CONFLICT can redirect to the UPDATE branch. Reserving from a
+    // non-existent balance is meaningless anyway, so UPDATE-only is correct:
+    // affected_rows()==0 → no such (user,asset) account → return false. The
+    // accounts_free_balance_nonneg CHECK still guards overdraft on the final
+    // (post-UPDATE) row → raises → caught below → false.
+    auto r = tx.exec_params(
+        R"sql(
+          UPDATE accounts SET
+            free_balance     = free_balance     - ($3)::numeric,
+            reserved_balance = reserved_balance + ($3)::numeric,
+            updated_at       = now()
+          WHERE user_id = $1 AND asset = $2
+        )sql",
+        user_id, asset, amount.to_string());
+    tx.commit();
+    if (r.affected_rows() == 0) {
+      cex::common::log_json("WARN", "PostgresAccountReserveTx::ReserveTx no matching account row",
+                            {{"user_id", user_id},
+                             {"asset", asset},
+                             {"reservation_id", reservation_id}});
+      return false;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAccountReserveTx::ReserveTx failed",
+                          {{"user_id", user_id},
+                           {"asset", asset},
+                           {"amount", amount.to_string()},
+                           {"reservation_id", reservation_id},
+                           {"error", e.what()}});
+    return false;
+  }
+#else
+  (void)user_id; (void)asset; (void)amount; (void)reservation_id;
+  return true;
+#endif
+}
+
+bool PostgresAccountReserveTx::ReleaseTx(const std::string& user_id,
+                                         const std::string& asset,
+                                         const cex::common::Decimal& amount,
+                                         const std::string& reservation_id) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return true;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    // reserved -= amount, free += amount. UPDATE only — releasing a reservation
+    // for a row that does not exist is a synchronisation error (no reserved to
+    // move); the missing row yields 0 affected rows (logged, returns false).
+    // accounts_reserved_balance_nonneg guards against releasing more than held.
+    auto r = tx.exec_params(
+        R"sql(
+          UPDATE accounts SET
+            reserved_balance = reserved_balance - ($3)::numeric,
+            free_balance     = free_balance     + ($3)::numeric,
+            updated_at       = now()
+          WHERE user_id = $1 AND asset = $2
+        )sql",
+        user_id, asset, amount.to_string());
+    tx.commit();
+    if (r.affected_rows() == 0) {
+      cex::common::log_json("WARN", "PostgresAccountReserveTx::ReleaseTx no matching account row",
+                            {{"user_id", user_id},
+                             {"asset", asset},
+                             {"reservation_id", reservation_id}});
+      return false;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAccountReserveTx::ReleaseTx failed",
+                          {{"user_id", user_id},
+                           {"asset", asset},
+                           {"amount", amount.to_string()},
+                           {"reservation_id", reservation_id},
+                           {"error", e.what()}});
+    return false;
+  }
+#else
+  (void)user_id; (void)asset; (void)amount; (void)reservation_id;
+  return true;
+#endif
+}
+
+PostgresPositionAccountTx::PostgresPositionAccountTx(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {}
+
+void PostgresPositionAccountTx::ApplyFillTx(
+    const app::PositionRow& position,
+    const std::vector<app::AccountRow>& account_deltas) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return;
+  // SEQ-LEDGER-002: positions Upsert + accounts UPDATE in ONE transaction.
+  auto c = pool_->Acquire();
+  pqxx::work tx(*c);
+
+  tx.exec_params(
+      R"sql(
+        INSERT INTO positions
+          (user_id, symbol, side, quantity, avg_entry_price, unrealized_pnl, realized_pnl, updated_at)
+        VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7::numeric, now())
+        ON CONFLICT (user_id, symbol) DO UPDATE SET
+          side            = excluded.side,
+          quantity        = excluded.quantity,
+          avg_entry_price = excluded.avg_entry_price,
+          unrealized_pnl  = excluded.unrealized_pnl,
+          realized_pnl    = excluded.realized_pnl,
+          updated_at      = now()
+      )sql",
+      position.user_id, position.symbol, position.side,
+      position.quantity.to_string(), position.avg_entry_price.to_string(),
+      position.unrealized_pnl.to_string(), position.realized_pnl.to_string());
+
+  for (const auto& d : account_deltas) {
+    // F-06 P0-A (T-F06-070, ADR-044): the reserve is now mirrored into this
+    // table at order placement (PostgresAccountReserveTx), so the reservation
+    // that a fill releases genuinely exists here. The masking GREATEST(0,…) is
+    // removed: deltas are applied directly so accounts_*_nonneg are once again
+    // hard de-sync indicators rather than values that silently floor to 0.
+    //
+    // UPDATE-first (not INSERT…ON CONFLICT): PostgreSQL evaluates CHECK
+    // constraints against the proposed INSERT tuple BEFORE conflict arbitration,
+    // so a negative reserved-release candidate would trip
+    // accounts_reserved_balance_nonneg before ON CONFLICT could redirect to the
+    // UPDATE branch. UPDATE evaluates the CHECK on the final (post-delta) row,
+    // which is the correct semantics. First-touch (no row yet) falls back to a
+    // plain INSERT with the deltas as initial values (fill credits are
+    // non-negative: BUY +base qty, SELL +quote notional).
+    auto r = tx.exec_params(
+        R"sql(
+          UPDATE accounts SET
+            free_balance     = free_balance     + ($3)::numeric,
+            reserved_balance = reserved_balance + ($4)::numeric,
+            updated_at       = now()
+          WHERE user_id = $1 AND asset = $2
+        )sql",
+        d.user_id, d.asset, d.free_balance.to_string(),
+        d.reserved_balance.to_string());
+    if (r.affected_rows() == 0) {
+      tx.exec_params(
+          R"sql(
+            INSERT INTO accounts (user_id, asset, free_balance, reserved_balance, updated_at)
+            VALUES ($1, $2, ($3)::numeric, ($4)::numeric, now())
+          )sql",
+          d.user_id, d.asset, d.free_balance.to_string(),
+          d.reserved_balance.to_string());
+    }
+  }
+
+  tx.commit();
+#else
+  (void)position;
+  (void)account_deltas;
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    cex::common::log_json(
+        "WARN",
+        "PostgresPositionAccountTx is disabled: build without libpqxx (CEX_LEDGER_HAS_LIBPQXX=0)");
+  }
 #endif
 }
 

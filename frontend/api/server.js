@@ -6932,6 +6932,12 @@ const server = createServer(async (req, res) => {
       return proxyMarketDataToGateway(req, res);
     }
 
+    // F-06 Positions/PnL/Margin REST → C++ gateway (alias /api/v1/positions).
+    // Reuses the generic gateway forwarder (proxyHeaders injects a dev x-user-id).
+    if (pathname === "/api/v1/positions") {
+      return proxyMarketDataToGateway(req, res);
+    }
+
     if (pathname.startsWith("/api/auth/")) {
       const handled = await handleAuth(req, res, pathname);
       if (handled !== false) return;
@@ -7146,6 +7152,11 @@ server.on("upgrade", (req, socket, head) => {
   }
   // F-05 Live Market Data WebSocket → C++ gateway /api/v1/market
   if (requestUrl.pathname === "/api/v1/market") {
+    proxyMarketDataUpgrade(req, socket, head);
+    return;
+  }
+  // F-06 Positions WebSocket push → C++ gateway /api/v1/positions/ws
+  if (requestUrl.pathname === "/api/v1/positions/ws") {
     proxyMarketDataUpgrade(req, socket, head);
     return;
   }

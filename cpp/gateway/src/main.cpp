@@ -39,11 +39,15 @@
 #include "infra/clickhouse_storage.hpp"
 #include "infra/order_flow_client.hpp"
 #include "infra/market_data_client.hpp"
+#include "infra/ledger_client.hpp"
+#include "infra/risk_client.hpp"
 #include "infra/postgres/postgres_rbac_repository.hpp"
 #include "infra/postgres/postgres_replay_session_repository.hpp"
 #include "infra/replay_commands_kafka_publisher.hpp"
 #include "infra/replay_results_hub.hpp"
 #include "infra/replay_results_kafka_consumer.hpp"
+#include "infra/positions_hub.hpp"
+#include "infra/positions_update_kafka_consumer.hpp"
 #include "transport/auth_middleware.hpp"
 #include "transport/http_gateway.hpp"
 
@@ -510,6 +514,12 @@ int main() {
   const std::string market_data_addr =
       cex::common::Env::get_string("MARKET_DATA_GRPC_ADDR", "market_data:50052");
 
+  // F-06: ledger + risk gRPC backends for positions/PnL/margin aggregation.
+  const std::string ledger_addr =
+      cex::common::Env::get_string("LEDGER_GRPC_ADDR", "ledger:50053");
+  const std::string risk_addr =
+      cex::common::Env::get_string("RISK_GRPC_ADDR", "risk:50054");
+
   const int port = cex::common::Env::get_int("GATEWAY_HTTP_PORT", 8080);
 
   const std::string pg_conn_str =
@@ -526,6 +536,8 @@ int main() {
 
   cex::gateway::infra::OrderFlowClient order_flow_client(order_flow_addr);
   cex::gateway::infra::MarketDataClient market_data_client(market_data_addr);
+  cex::gateway::infra::LedgerClient ledger_client(ledger_addr);
+  cex::gateway::infra::RiskClient risk_client(risk_addr);
   
   auto summary_repo = std::make_shared<PostgresSummaryRepo>(pg_conn_str);
   auto sessions_repo = std::make_shared<PostgresSessionsRepo>(pg_conn_str);
@@ -560,18 +572,32 @@ int main() {
   cex::gateway::infra::ReplayCommandsKafkaPublisher replay_commands(
       std::move(replay_commands_producer),
       cex::common::Env::get_string("REPLAY_COMMANDS_TOPIC", "replay.commands"));
+
+  // F-06 (T-F06-072, ADR-046): positions.update → hub → WS-push. По образцу
+  // replay.results: фоновый consumer поллит топик и публикует invalidation-
+  // сигнал в hub, WS-роут реагрегирует и пушит снимок.
+  cex::gateway::infra::PositionsHub positions_hub;
+  cex::gateway::infra::PositionsUpdateKafkaConsumer positions_update_consumer(
+      &positions_hub, brokers,
+      cex::common::Env::get_string("POSITIONS_UPDATE_TOPIC", "positions.update"));
+  positions_update_consumer.start();
+
   cex::gateway::transport::HttpGateway gw(std::move(order_flow_client),
                                           std::move(market_data_client),
+                                          std::move(ledger_client),
+                                          std::move(risk_client),
                                           summary_repo,
                                           logs_repo,
                                           sessions_repo,
                                           compare_repo,
-                                          rbac_engine, 
+                                          rbac_engine,
                                           &replay_commands,
                                           &replay_results_hub,
-                                          auth_middleware);
+                                          auth_middleware,
+                                          &positions_hub);
 
   gw.run(static_cast<uint16_t>(port));
+  positions_update_consumer.stop();
   replay_results_consumer.stop();
   return 0;
 }

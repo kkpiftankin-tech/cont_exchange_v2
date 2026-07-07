@@ -40,9 +40,14 @@ add_executable(gateway
   src/transport/auth_middleware.cpp
   src/infra/order_flow_client.cpp
   src/infra/market_data_client.cpp
+  src/infra/ledger_client.cpp
+  src/infra/risk_client.cpp
   src/infra/replay_commands_kafka_publisher.cpp
   src/infra/replay_results_hub.cpp
   src/infra/replay_results_kafka_consumer.cpp
+  src/infra/positions_hub.cpp
+  src/infra/positions_update_kafka_consumer.cpp
+  src/infra/positions_cache.cpp
 )
 
 target_include_directories(gateway PRIVATE
@@ -99,6 +104,8 @@ if (BUILD_TESTING)
     src/transport/auth_middleware.cpp
     src/infra/order_flow_client.cpp
     src/infra/market_data_client.cpp
+    src/infra/ledger_client.cpp
+    src/infra/risk_client.cpp
     src/infra/replay_commands_kafka_publisher.cpp
     src/infra/replay_results_hub.cpp
     src/infra/replay_results_kafka_consumer.cpp
@@ -132,5 +139,58 @@ if (BUILD_TESTING)
 
   add_test(NAME gateway_replay_create_payload_validation_test
     COMMAND gateway_replay_create_payload_validation_test
+  )
+
+  # F-06 (T-F06-072, ADR-046): PositionsHub fan-out + consumer parse/dedup.
+  add_executable(gateway_positions_hub_test
+    tests/positions_hub_test.cpp
+    src/infra/positions_hub.cpp
+    src/infra/positions_update_kafka_consumer.cpp
+  )
+
+  target_include_directories(gateway_positions_hub_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}
+    ${CMAKE_BINARY_DIR}/contracts/gen
+  )
+
+  target_link_libraries(gateway_positions_hub_test PRIVATE
+    cex_common
+    contracts_proto
+    ${GATEWAY_JSON_TARGET}
+  )
+
+  target_compile_options(gateway_positions_hub_test PRIVATE
+    -Wall -Wextra -Wpedantic -UNDEBUG
+  )
+
+  add_test(NAME gateway_positions_hub_test
+    COMMAND gateway_positions_hub_test
+  )
+
+  # F-06 (T-F06-071-cache, ADR-045): short-lived per-user positions TTL cache.
+  add_executable(gateway_positions_cache_test
+    tests/positions_cache_test.cpp
+    src/infra/positions_cache.cpp
+  )
+
+  target_include_directories(gateway_positions_cache_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}
+    ${CMAKE_BINARY_DIR}/contracts/gen
+  )
+
+  target_link_libraries(gateway_positions_cache_test PRIVATE
+    cex_common
+    contracts_proto
+    ${GATEWAY_JSON_TARGET}
+  )
+
+  target_compile_options(gateway_positions_cache_test PRIVATE
+    -Wall -Wextra -Wpedantic -UNDEBUG
+  )
+
+  add_test(NAME gateway_positions_cache_test
+    COMMAND gateway_positions_cache_test
   )
 endif()

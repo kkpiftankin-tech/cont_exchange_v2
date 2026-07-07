@@ -30,6 +30,11 @@ class GrpcRiskService final : public fob::risk::v1::RiskService::Service {
                              const fob::risk::v1::PostTradeUpdateRequest* request,
                              google::protobuf::Empty* response) override;
 
+  // F-06 (T-F06-032): отдаёт последний risk_snapshot для entity_id.
+  grpc::Status GetRiskSnapshot(grpc::ServerContext* context,
+                               const fob::risk::v1::GetRiskSnapshotRequest* request,
+                               fob::risk::v1::GetRiskSnapshotResponse* response) override;
+
  private:
   app::RiskUseCases* uc_;
 };

@@ -80,6 +80,16 @@ grpc::Status GrpcRiskService::OnBatchResult(
   return grpc::Status::OK;
 }
 
+/// F-06 (T-F06-032). Отдаёт gateway последний risk_snapshot пользователя.
+/// Делегирует в RiskUseCases::GetRiskSnapshot (читает risk_snapshots, latest).
+grpc::Status GrpcRiskService::GetRiskSnapshot(
+    grpc::ServerContext*,
+    const fob::risk::v1::GetRiskSnapshotRequest* request,
+    fob::risk::v1::GetRiskSnapshotResponse* response) {
+  *response = uc_->GetRiskSnapshot(*request);
+  return grpc::Status::OK;
+}
+
 // F-09 (T-F09-040). Stateless групповой check через pure-domain GroupPreTradeCheck;
 // конфиг лимитов — из env. Alert на reject — structured-лог (Kafka risk.alerts
 // через app-слой — follow-up).
