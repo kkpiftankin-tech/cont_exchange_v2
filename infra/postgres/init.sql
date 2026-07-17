@@ -635,3 +635,73 @@ CREATE INDEX IF NOT EXISTS idx_group_state_transitions_group_id
   ON group_state_transitions (group_id);
 CREATE INDEX IF NOT EXISTS idx_group_state_transitions_created_at
   ON group_state_transitions (created_at DESC);
+
+-- ===========================================================================
+-- F-05A Vectorized External Liquidity (IN-014). OLTP config + source map.
+-- Money/quantities: NUMERIC(38,18) mirrors fob.common.v1.Decimal (§9).
+-- Docs: docs/07-data/vector-flow-segments.md. Owner writer: market-data.
+-- ===========================================================================
+
+-- Упорядоченный справочник активов (ось векторов w_i).
+CREATE TABLE IF NOT EXISTS asset_basis (
+  asset_basis_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  assets          JSONB NOT NULL,          -- [{"index":0,"asset":"BTC"}, ...]
+  num_assets      INT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Векторные flow-сегменты (столбцы W); каждый внешний order level — отдельная строка.
+CREATE TABLE IF NOT EXISTS vector_flow_segments (
+  segment_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id         UUID,
+  venue_id         TEXT NOT NULL,
+  source_order_id  TEXT NOT NULL,
+  pair             TEXT NOT NULL,
+  side             TEXT NOT NULL,          -- 'bid' | 'ask'
+  asset_basis_id   UUID REFERENCES asset_basis(asset_basis_id),
+  w                JSONB NOT NULL,          -- вектор коэффициентов длины num_assets
+  p_low            NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  p_high           NUMERIC(38, 18) NOT NULL,   -- dHL
+  d_hl             NUMERIC(38, 18) NOT NULL,
+  q_rate           NUMERIC(38, 18) NOT NULL,
+  q_max            NUMERIC(38, 18) NOT NULL,
+  effective_price  NUMERIC(38, 18) NOT NULL,
+  source_timestamp TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_vector_flow_segments_batch
+  ON vector_flow_segments (batch_id);
+
+-- Метаданные одного vectorization run (для audit / replay).
+CREATE TABLE IF NOT EXISTS vectorization_runs (
+  run_id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id               UUID,
+  asset_basis_id         UUID REFERENCES asset_basis(asset_basis_id),
+  num_segments           INT NOT NULL,
+  num_assets             INT NOT NULL,
+  solver_config_version  TEXT,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Сырые внешние order levels (опц., до векторизации; provenance).
+CREATE TABLE IF NOT EXISTS venue_order_levels (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id            UUID,
+  venue_id            TEXT NOT NULL,
+  source_order_id     TEXT NOT NULL,
+  pair                TEXT NOT NULL,
+  base_asset          TEXT NOT NULL,
+  quote_asset         TEXT NOT NULL,
+  side                TEXT NOT NULL,          -- 'bid' | 'ask'
+  price               NUMERIC(38, 18) NOT NULL,
+  effective_price     NUMERIC(38, 18) NOT NULL,
+  quantity            NUMERIC(38, 18) NOT NULL,
+  remaining_quantity  NUMERIC(38, 18) NOT NULL,
+  fees_bps            NUMERIC(38, 18),
+  latency_buffer_bps  NUMERIC(38, 18),
+  slippage_buffer_bps NUMERIC(38, 18),
+  source_timestamp    TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_venue_order_levels_batch
+  ON venue_order_levels (batch_id);

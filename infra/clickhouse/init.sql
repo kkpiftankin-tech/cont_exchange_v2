@@ -409,3 +409,68 @@ SELECT
     toString(execution_scale) AS execution_scale,
     ratio_deviation_bps
 FROM combo_groups_pg;
+
+-- ===========================================================================
+-- F-05A Vectorized External Liquidity (IN-014) — OLAP diagnostics.
+-- Money/quantities: Decimal128(18) (§9); norms/diagnostics: Float64.
+-- Producer/writer: market-data (SaveVectorClearing/SaveSurplus, planned).
+-- Docs: docs/07-data/vector-clearing-results.md. Idempotent re-ingestion.
+-- ===========================================================================
+
+-- Результат vector clearing: один ExecutionGroup (vector) на строку.
+CREATE TABLE IF NOT EXISTS vector_clearing_results (
+    batch_id                 String,
+    execution_group_id       String,
+    asset_basis_json         String,     -- JSON: ordered assets
+    x_json                   String,     -- JSON: executed rates per segment
+    pi_json                  String,     -- JSON: item prices per asset
+    residual_json            String,     -- JSON: Wx per asset (Decimal as string)
+    residual_norm            Float64,    -- ||Wx|| (diagnostic)
+    solver_status            LowCardinality(String),  -- converged|degraded|failed
+    surplus_json             String,     -- JSON: [{asset, amount, allocation_policy}]
+    solver_diagnostics_json  String,     -- JSON: iterations, solveTimeMs, paramsVersion
+    leg_count                UInt16,
+    event_time_ms            Int64,
+    ingested_at              DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (execution_group_id, batch_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+
+-- Surplus / EXCHANGE_PNL события (ADR-044). Один surplus-актив на строку.
+CREATE TABLE IF NOT EXISTS surplus_events (
+    batch_id            String,
+    execution_group_id  String,
+    asset               LowCardinality(String),
+    amount              Decimal128(18),
+    allocation_policy   LowCardinality(String),  -- REJECT_IF_RESIDUAL|EXCHANGE_PNL|SURPLUS_ASSET|MM_LAST_RESORT
+    event_time_ms       Int64,
+    ingested_at         DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (execution_group_id, asset, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+
+-- История vectorized flow segments (столбцы W) для audit / replay.
+CREATE TABLE IF NOT EXISTS vector_flow_segments_history (
+    segment_id          String,
+    batch_id            String,
+    venue_id            String,
+    source_order_id     String,
+    pair                LowCardinality(String),
+    side                LowCardinality(String),  -- bid|ask
+    w_json              String,     -- JSON: вектор коэффициентов
+    p_high              Decimal128(18),
+    d_hl                Decimal128(18),
+    q_rate              Decimal128(18),
+    q_max               Decimal128(18),
+    effective_price     Decimal128(18),
+    event_time_ms       Int64,
+    ingested_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(event_time_ms)
+PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
+ORDER BY (batch_id, segment_id, event_time_ms)
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
