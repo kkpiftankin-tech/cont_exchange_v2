@@ -18,6 +18,7 @@
 | F-03 | Order Lifecycle | UC-F03-01 Amend / Cancel Order |
 | F-04 | Batch Clearing Cycle | UC-F04-01 Run Batch Clearing |
 | F-05 | Live Market Data | UC-F05-01 Stream Market Data |
+| F-05A | Vectorized External Liquidity (F-09) | UC-F05A-01 Vectorize External Order Book; UC-F05A-02 Vector Clearing; UC-F05A-03 Display Vector Liquidity; UC-F05A-04 Validate Real Order Books; UC-F05A-05 Replay Vector Clearing |
 | F-06 | Positions / PnL / Margin | UC-F06-01 Show Positions |
 | F-07 | Pre-trade Risk | UC-F07-01 Pre-trade Risk Check |
 | F-08 | Post-trade Risk / Liquidations | UC-F08-01 Liquidate Position |

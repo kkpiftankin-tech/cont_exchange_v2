@@ -28,6 +28,11 @@
 | UC-F03-01 | `…/UC-F03-01-amend-cancel-order/sequences/` | `SEQ-F03-UC-F03-01-services.md` | (none yet) |
 | UC-F04-01 | `…/UC-F04-01-run-batch-clearing/sequences/` | `SEQ-F04-UC-F04-01-services.md` | `cpp/matching/src/domain/solver_impl.cpp` (L2 sequences планируются) |
 | UC-F05-01 | `…/UC-F05-01-stream-market-data/sequences/` | `SEQ-F05-UC-F05-01-services.md` | (none yet) |
+| UC-F05A-01 | `…/UC-F05A-01-vectorize-external-orderbook/sequences/SEQ-UC-F05A-01-system.md` | `SEQ-F05A-UC-F05A-01-services.md` | (planned) |
+| UC-F05A-02 | `…/UC-F05A-02-vector-clearing/sequences/SEQ-UC-F05A-02-system.md` | `SEQ-F05A-UC-F05A-02-services.md` | (planned) |
+| UC-F05A-03 | `…/UC-F05A-03-display-vector-liquidity/sequences/SEQ-UC-F05A-03-system.md` | `SEQ-F05A-UC-F05A-03-services.md` | (planned) |
+| UC-F05A-04 | `…/UC-F05A-04-validate-real-orderbooks/sequences/SEQ-UC-F05A-04-system.md` | `SEQ-F05A-UC-F05A-04-services.md` | (planned) |
+| UC-F05A-05 | `…/UC-F05A-05-replay-vector-clearing/sequences/SEQ-UC-F05A-05-system.md` | `SEQ-F05A-UC-F05A-05-services.md` | (planned) |
 | UC-F06-01 | `…/UC-F06-01-show-positions/sequences/` | `SEQ-F06-UC-F06-01-services.md` | (none yet) |
 | UC-F07-01 | `…/UC-F07-01-pretrade-risk-check/sequences/` | `SEQ-F07-UC-F07-01-services.md` | (none yet) |
 | UC-F08-01 | `…/UC-F08-01-liquidate-position/sequences/` | `SEQ-F08-UC-F08-01-services.md` | (none yet) |
