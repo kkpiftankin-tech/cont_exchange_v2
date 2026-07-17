@@ -229,6 +229,42 @@ V(Q, P)  = Σ_i V_i(Q_i, P)
 Conceptual foundation для F-10 (MM curves через `PortfolioAgent`) и
 N-leg combo solver F-09.
 
+## Vectorized External Liquidity (F-05A, IN-014)
+
+Сущности F-05A. Полные контракты — `contracts/proto/fob/marketdata/v1/vector_liquidity.proto`;
+бизнес-правила — [business-rules.md §F-05A](business-rules.md#f-05a--vectorized-external-liquidity).
+Денежные/количественные поля — `Decimal` (§9).
+
+### ExternalOrderLevel
+
+Дискретный внешний order level venue-стакана (provenance): `venue_id`, `source_order_id`,
+`pair`, `base_asset` (X), `quote_asset` (Y), `side` (bid/ask), `price`, `effective_price`
+(`P ± fees/latency/slippage`), `quantity`, `remaining_quantity`, `fees_bps`,
+`latency_buffer_bps`, `slippage_buffer_bps`, `quality_flags[]`.
+
+### AssetBasis
+
+Упорядоченный справочник активов `A = {a_1..a_N}` — ось векторов `w_i`:
+`basis_id`, `assets[{index, asset}]`, `num_assets`.
+
+### VectorFlowSegment
+
+Один столбец матрицы `W` (вектор активов) + границы/поток: `segment_id`, `source_order_id`,
+`venue_id`, `pair`, `side`, `w[]` (длина N), `p_low`=0, `p_high`=`d_hl`, `d_hl`, `q_rate`,
+`q_max`, `remaining_quantity`. Инвариант bid/ask см. R-F05A-001; no synthetic pair book — R-F05A-002.
+
+### VectorClearingInput
+
+Вход solver: `batch_id`, `AssetBasis basis`, `VectorFlowSegment[] segments` (столбцы `W`;
+`pH`/`dHL`/`q`/`D=diag(dHL/q)` и source_map выводятся из segments).
+
+### VectorClearingResult
+
+Результат: `x[]` (executed rate/segment), `pi[]` (item prices/asset), `residual[]` (`Wx`/asset),
+`residual_norm` (‖Wx‖, diagnostic — double), `solver_status` (converged/degraded/failed),
+`surplus[{asset, amount, allocation_policy}]`, `diagnostics` (iterations/solveTimeMs).
+Связывается с F-09 `ExecutionGroup` (source-trace на venue levels). См. R-F05A-004..006.
+
 ## Source Fragments
 
 - IN-001-FR-008 — структуры данных и сервисы

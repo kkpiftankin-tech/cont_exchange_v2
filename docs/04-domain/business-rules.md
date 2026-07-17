@@ -649,8 +649,77 @@ equation `W · diag(η) · W^⊤` — согласовано с рекоменд
 | F-10 (MM Curves) | PortfolioAgent (factor `w`) | §5.2.8 |
 | F-11 (LOB → FOB) | 1D + 2D agent typology для curve calibration | §5.1, §5.2 |
 
+## F-05A — Vectorized External Liquidity
+
+Источник: IN-014. Мат.основа — [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md),
+R-CLR (ниже). Политики — [ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md) (surplus),
+[ADR-045](../03-architecture/adr/ADR-045-qp-solver-backend.md) (QP backend). Деньги — Decimal (§9).
+
+### R-F05A-001 Vector construction
+
+Каждый внешний order level пары `X/Y` с effective price `P_eff` превращается в вектор
+активов `w_i ∈ R^N`:
+
+\[
+\text{bid: } w_i = e_X - P_{eff}\, e_Y, \qquad \text{ask: } w_i = -e_X + P_{eff}\, e_Y.
+\]
+
+`P_eff = P ± fees ± latency_buffer ± slippage_buffer`. Асимметрия знаков bid/ask —
+инвариант; нарушение → ошибка векторизации.
+
+### R-F05A-002 No synthetic pair book
+
+Синтетическая книга по парам **не** строится. Каждый внешний level остаётся отдельным
+flow-сегментом и отдельным столбцом `W = [w_1 … w_I]`; `venue_id` / `source_order_id`
+сохранены (provenance / source-trace). Matching multi-asset возникает из `Wx=0`, а не
+из per-pair книг.
+
+### R-F05A-003 Flow segment & demand curve
+
+Сегмент: `(w_i, p_i^L=0, p_i^H=d_i^{HL}, q_i=min(Q_i, rateCap_i), Q_i^{max}=Q_i)`.
+Спрос — кусочно-линейная truncated-кривая:
+
+\[
+D_i(w_i^\top\pi) = q_i \cdot \mathrm{trunc}\!\left(\frac{d_i^{HL} - w_i^\top\pi}{d_i^{HL}}\right),\quad \mathrm{trunc}\in[0,1],
+\]
+
+квадратичная матрица `D = diag(d^{HL}/q)` (SPD). Согласуется с R-CLR-005 (quadratic
+closed-form) и R-CLR-001 (curve forms equivalence).
+
+### R-F05A-004 Clearing condition (asset balance)
+
+Клиринг требует баланса активов:
+
+\[
+\sum_i x_i w_i = 0 \iff Wx = 0,\qquad 0 \le x \le q.
+\]
+
+Это специализация R-CLR-003 (flow conservation `Σ Q̇_i = 0`) на multi-asset векторный
+случай. Solver: `max_x [xᵀp^H − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-045).
+
+### R-F05A-005 Residual & surplus (invariant)
+
+`r = Wx`, `residualNorm = ‖r‖`. Converged ⇔ `‖r‖ < tolerance`. При `‖r‖ > tolerance`
+остаток — денежный surplus/deficit, **никогда не скрывается** и обрабатывается по
+`surplus_policy` (ADR-044: `REJECT_IF_RESIDUAL` дефолт | `EXCHANGE_PNL` | `SURPLUS_ASSET`
+| `MM_LAST_RESORT`). **Инвариант ledger:** несбалансированный `ExecutionGroup` не
+применяется — либо `Wx≈0`, либо остаток явно на house-счёт (`Σuser + house = 0`,
+no phantom inventory, §17).
+
+### R-F05A-006 Execution mapping & traceability
+
+Для каждого `x_i > 0`: `executed_asset_vector = x_i · w_i`; исполняется исходный
+внешний order level. Каждый fill трассируется к `venue_id` / `source_order_id` /
+`segment_id` / `batch_id` / `execution_group_id`.
+
+### R-F05A-007 External atomicity
+
+Внешние ноги без native atomic support на venue **не** маркируются `strict_atomic`
+(согласуется с F-09 AC-F09-006 / ADR-031).
+
 ## Source Fragments
 
+- IN-014 §3, §13, §16 — F-05A vectorization math, w_i/W/D, Wx=0 clearing, surplus
 - IN-005 §6 «Формулы расчётов» (все 15 формул F-12)
 - IN-005 §1 (термины ExecutionIntent, HedgeFlow, ChildOrder, ExecutionReport, Urgency)
 - IN-006 § Канонические сущности и термины, Метрики качества исполнения (F-15)
