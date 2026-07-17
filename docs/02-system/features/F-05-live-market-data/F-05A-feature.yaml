@@ -72,8 +72,8 @@ kafkaTopics:
 
 grpcServices:
   exposes:
-    - fob.marketdata.v1.MarketDataService.GetVectorizedLiquidity        # TODO
-    - fob.marketdata.v1.MarketDataService.GetVectorClearingDiagnostics  # TODO
+    - fob.marketdata.v1.VectorLiquidityService.GetVectorizedLiquidity        # proto ✅, server TODO
+    - fob.marketdata.v1.VectorLiquidityService.GetVectorClearingDiagnostics  # proto ✅, server TODO
   calls:
     - MatchingInternal.solveVectorClearing  # internal
 

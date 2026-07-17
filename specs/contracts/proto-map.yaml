@@ -159,6 +159,25 @@ protoContracts:
       - GetHedgePnLRequest
       - GetHedgePnLResponse
 
+  vector_liquidity:
+    files:
+      - contracts/proto/fob/marketdata/v1/vector_liquidity.proto
+    features:
+      - F-05A
+    components:
+      - market-data
+      - matching
+      - ledger
+    entities:
+      - VectorLiquidityService
+      - ExternalOrderLevel
+      - AssetBasis
+      - VectorFlowSegment
+      - VectorClearingInput
+      - VectorClearingResult
+      - VectorizedLiquiditySnapshot
+      - SurplusEvent
+
   venue:
     files:
       - contracts/proto/fob/venue/v1/venue.proto

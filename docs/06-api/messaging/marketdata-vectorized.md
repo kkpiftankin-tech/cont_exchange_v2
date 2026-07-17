@@ -1,7 +1,8 @@
 # Topic: marketdata.vectorized
 
-> **Status:** `TODO / planned` — proposed schema sketch (F-05A, IN-014). Материализуется
-> на ingress-close (T-F05A-101/102) вместе с `contracts/proto/fob/marketdata/v1/vector_liquidity.proto`.
+> **Status:** `planned` — proto определён (`vector_liquidity.proto`, message
+> `VectorizedLiquiditySnapshot`) ✅; топик зарегистрирован в `create_topics.sh` ✅;
+> producer/consumer не поставлены (T-F05A-205/305). F-05A, IN-014.
 
 | Свойство | Значение |
 | --- | --- |
