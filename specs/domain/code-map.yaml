@@ -275,6 +275,23 @@ codeMap:
       - batch.outputs
       - execution.reports
 
+  backtest:
+    codePath: cpp/backtest
+    role: backtest-replay-engine
+    docsPath: docs/05-components/backtest
+    features:
+      - F-15
+    keyFiles:
+      - cpp/backtest/src/infra/grpc_replay_batch_executor.cpp
+      - cpp/backtest/src/infra/grpc_replay_batch_executor.hpp
+      # F-06 knock-on: RiskService gained GetRiskSnapshot → this fake-stub test
+      # had to implement it (StubInterface completeness on older gRPC codegen).
+      - cpp/backtest/tests/grpc_replay_batch_executor_test.cpp
+    grpcPort: null
+    kafkaProduces: []
+    kafkaConsumes:
+      - batch.outputs
+
   contracts-proto:
     codePath: contracts/proto
     role: protobuf-source-of-truth
