@@ -11,19 +11,18 @@
 
 ## Preconditions (docs-as-code gate)
 
-> ⚠️ **Gate NOT yet satisfied.** Этот tasks-файл — `IMPLEMENTATION_HINT` артефакт,
-> созданный на этапе регистрации IN-014 (fragment F-16). Код (`cpp/`) **нельзя**
-> начинать, пока не выполнены пункты ниже (ingress-close IN-014). Порядок: сначала
-> docs + контракты + data + ADR→accepted, потом код.
+> **Docs-gate почти снят** (ingress-close IN-014 завершён 2026-07-23). Остаётся
+> только **ADR-044/045 → accepted** (решение владельца). Код (`cpp/`) стартует после
+> принятия ADR.
 
-- [ ] `F-05A-feature.yaml` + README (addendum к F-05)
-- [ ] Use cases `UC-F05A-01..05` + L0 system sequences
-- [ ] L1 service sequences `SEQ-F05A-UC-F05A-*-services.md`
-- [ ] Contracts: `vector_liquidity.proto` + `docs/06-api/{grpc,messaging,rest}/*` + proto-map
-- [ ] Data schemas: PG (`asset_basis`, `vector_flow_segments`, `vectorization_runs`) + CH (`vector_clearing_results`, `surplus_events`, `vector_flow_segments_history`)
-- [ ] Test plan `docs/10-testing/features/F-05A-test-plan.md`
-- [ ] Acceptance criteria (feature.yaml) + business rules §F-05A
-- [ ] **ADR-044 + ADR-045 → `accepted`** (решения владельца: surplus prod-default; подтверждение OSQP)
+- [x] `F-05A-feature.yaml` + README (addendum к F-05)
+- [x] Use cases `UC-F05A-01..05` + L0 system sequences
+- [x] L1 service sequences `SEQ-F05A-UC-F05A-*-services.md`
+- [x] Contracts: `vector_liquidity.proto` (компилируется) + `docs/06-api/{grpc,messaging}/*` + proto-map
+- [x] Data schemas: PG (`asset_basis`, `vector_flow_segments`, `vectorization_runs`) + CH (`vector_clearing_results`, `surplus_events`, `vector_flow_segments_history`)
+- [x] Test plan `docs/10-testing/features/F-05A-test-plan.md`
+- [x] Acceptance criteria (feature.yaml) + business rules §F-05A (R-F05A-001..007) + FR/NFR-F05A
+- [ ] **ADR-044 + ADR-045 → `accepted`** (решения владельца: surplus prod-default; подтверждение OSQP) — **единственный оставшийся блокер**
 
 ## Architecture decisions pending (решение владельца)
 
