@@ -20,14 +20,14 @@ related: [ADR-034, ADR-035, ADR-044, ADR-005, ADR-009]
 **F-05A (IN-014) — этот спрос.** Vector clearing внешней ликвидности решает
 полноценную QP:
 
-\[
+$$
 \max_x \left[ x^\top p^H - \tfrac12 x^\top D x \right]
 \quad\text{s.t.}\quad Wx = 0,\ 0 \le x \le q,
-\]
+$$
 
-где `W ∈ R^{N×I}` (N активов, I внешних order levels), `D = diag(dHL/q)` (SPD),
-`p^H = dHL`. Это **настоящая QP** (квадратичная цель + линейное равенство `Wx=0` +
-box), в отличие от ADR-034-постановки `max α` (линейная по `α`). Обе — одна семья
+где $W \in \mathbb{R}^{N\times I}$ (N активов, I внешних order levels), $D = \operatorname{diag}(dHL/q)$ (SPD),
+$p^H = dHL$. Это **настоящая QP** (квадратичная цель + линейное равенство $Wx=0$ +
+box), в отличие от ADR-034-постановки $\max \alpha$ (линейная по $\alpha$). Обе — одна семья
 (equality + box) и обе решаются одним backend.
 
 В `cpp/matching` сейчас QP-решателя нет (только `grouped_solver_bisection` +
@@ -37,14 +37,14 @@ box), в отличие от ADR-034-постановки `max α` (линейн
 ## Решение
 
 1. **Активировать OSQP** (решение ADR-034 п.2), общий backend для двух QP-задач:
-   - F-09 combo grouped re-solve (ADR-034: `max α s.t. A_g e = b_g α, G_g e ≤ h_g`);
+   - F-09 combo grouped re-solve (ADR-034: $\max \alpha \text{ s.t. } A_g e = b_g \alpha,\ G_g e \le h_g$);
    - F-05A vector clearing (эта ADR).
    Вендоринг через **CMake FetchContent (pinned commit)** + установка в
    `docker/Dockerfile.service`. **Eigen** (уже подключён) — только сборка/масштабирование
    матриц `W`, `D`; сам QP решает OSQP.
 
 2. **Отображение F-05A-задачи в стандартную форму OSQP**
-   (`min ½ xᵀP x + qᵀx s.t. l ≤ Ax ≤ u`):
+   ($\min \tfrac12 x^\top P x + q^\top x \text{ s.t. } l \le Ax \le u$):
    ```text
    P = D                         # SPD, diag(dHL/q)
    q = -p^H                      # максимизация → минимизация -pH·x
@@ -64,13 +64,13 @@ box), в отличие от ADR-034-постановки `max α` (линейн
    **квантуется в `Decimal`** на фиксированном scale на выходе солвера, до ledger.
    `double` допустим только внутри солвера и в diagnostics (residualNorm, solveTimeMs).
 
-5. **Residual и surplus:** solver возвращает `r = Wx` и `residualNorm = ‖r‖`.
+5. **Residual и surplus:** solver возвращает $r = Wx$ и $\text{residualNorm} = \|r\|$.
    Обработка ненулевого остатка — по [ADR-044](ADR-044-surplus-exchange-pnl-policy.md)
    (`SurplusPolicy`). QP-решатель residual **не прячет** — отдаёт его наружу.
 
 6. **Numerical hardening (обязательно до money-path):** масштабирование `W`/`D` с
    учётом размерностей активов (связка с `dimensional_guard`, KI-F05A-003);
-   проверка обусловленности; поведение при `q_i → 0`, вырожденной `W`,
+   проверка обусловленности; поведение при $q_i \to 0$, вырожденной `W`,
    несовместных ограничениях (→ `degraded`/`failed`, не молчаливый мусор).
 
 7. **CI/Docker (урок F-09).** OSQP как новая зависимость добавляется **синхронно** в
@@ -84,7 +84,7 @@ box), в отличие от ADR-034-постановки `max α` (линейн
 | --- | --- | --- | --- |
 | **OSQP (выбрано)** | полноценный QP eq+box; уже выбран ADR-034; один backend на F-09+F-05A | новая зависимость + Docker/CI + numerical/replay hardening | **принято** (спрос от F-05A настал) |
 | **Ручной active-set/KKT на Eigen** | без новой либы | свой QP над деньгами — сложно, риск ошибок | отклонено (риск) |
-| **Bisection/closed-form как в F-09** | уже есть | не решает cross-asset `Wx=0` с квадратичной целью — задача F-05A другая | неприменимо |
+| **Bisection/closed-form как в F-09** | уже есть | не решает cross-asset $Wx=0$ с квадратичной целью — задача F-05A другая | неприменимо |
 | **Внешний QP-микросервис** | изоляция | сеть/latency/детерминизм/replay сложнее | отклонено (overkill для in-batch) |
 
 ## Последствия

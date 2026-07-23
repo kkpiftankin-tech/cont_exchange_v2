@@ -13,25 +13,25 @@ related: [ADR-034, ADR-035, ADR-033]
 ## Контекст
 
 F-05A (IN-014) подаёт внешнюю venue-ликвидность в matching как набор векторных
-flow-сегментов `w_i` (столбцы матрицы `W ∈ R^{N×I}`, N — активы, I — order levels) и
+flow-сегментов $w_i$ (столбцы матрицы $W \in \mathbb{R}^{N\times I}$, N — активы, I — order levels) и
 решает QP:
 
-\[
+$$
 \max_x \left[ x^\top p^H - \tfrac12 x^\top D x \right]\quad\text{s.t.}\quad Wx = 0,\ 0 \le x \le q.
-\]
+$$
 
-Условие `Wx = 0` — это **баланс активов** (никакой актив не создаётся и не
+Условие $Wx = 0$ — это **баланс активов** (никакой актив не создаётся и не
 уничтожается при клиринге). Это тот же принцип, что flow conservation в F-04
-(`Σ_i Q̇_i(Q_i, P*) = 0`, business-rules **R-CLR-003**, ADR-035).
+($\sum_i \dot{Q}_i(Q_i, P^*) = 0$, business-rules **R-CLR-003**, ADR-035).
 
 **Проблема.** На реальных стаканах идеальный треугольник (`BTC/USD ask + BTC/ETH bid +
 ETH/USD bid`) почти никогда не замыкается точно. Solver возвращает остаток
 
-\[
+$$
 r = Wx,\qquad residualNorm = \|r\|,
-\]
+$$
 
-где `r ≠ 0` по одному или нескольким активам — это **surplus/deficit** (например, +ε USD).
+где $r \neq 0$ по одному или нескольким активам — это **surplus/deficit** (например, +ε USD).
 Это денежная величина (CLAUDE.md **§9** — только `Decimal`), и она **не должна молча
 теряться**: иначе ledger применит несбалансированный `ExecutionGroup`/`FillEvent`,
 создастся **phantom inventory** и нарушится инвариант сохранения (§17).
@@ -55,7 +55,7 @@ SurplusPolicy = REJECT_IF_RESIDUAL | EXCHANGE_PNL | SURPLUS_ASSET | MM_LAST_RESO
 
 2. **`EXCHANGE_PNL`.** Остаток `r` проводится на выделенный **house-счёт**
    (`EXCHANGE_PNL` / `SURPLUS`), так что суммарно сохраняется баланс:
-   `Σ(user postings) + (house posting) = 0`. Идемпотентно по `execution_group_id`,
+   $\sum(\text{user postings}) + (\text{house posting}) = 0$. Идемпотентно по `execution_group_id`,
    с before/after snapshot и audit trail (§17). Требует появления house-счёта в ledger.
 
 3. **`SURPLUS_ASSET`.** Остаток фиксируется как отдельная surplus-позиция по активу
@@ -66,7 +66,7 @@ SurplusPolicy = REJECT_IF_RESIDUAL | EXCHANGE_PNL | SURPLUS_ASSET | MM_LAST_RESO
    лимите MM.
 
 **Инвариант (непереговорный).** Ledger **никогда** не применяет несбалансированный
-`ExecutionGroup`. Либо группа балансируется в пределах `tolerance` (`Wx ≈ 0`), либо
+`ExecutionGroup`. Либо группа балансируется в пределах `tolerance` ($Wx \approx 0$), либо
 остаток **явно** проводится на house-счёт — total conservation держится, phantom
 inventory не создаётся.
 
