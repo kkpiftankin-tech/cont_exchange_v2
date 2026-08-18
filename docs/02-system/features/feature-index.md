@@ -29,6 +29,7 @@ owner: core-team
 | [F-15](F-15-backtest-replay/) | Backtest / Replay | [UC-F15-01](../use-cases/UC-F15-01-replay-historical-batch/use-case.md) | [system](../use-cases/UC-F15-01-replay-historical-batch/sequences/SEQ-UC-F15-01-system.md) | [services](../../05-components/sequences/SEQ-F15-UC-F15-01-services.md) |
 | [F-16](F-16-operator-console/) | Operator Console & Kill-Switch | [UC-F16-01](../use-cases/UC-F16-01-trigger-kill-switch/use-case.md) | [system](../use-cases/UC-F16-01-trigger-kill-switch/sequences/SEQ-UC-F16-01-system.md) | [services](../../05-components/sequences/SEQ-F16-UC-F16-01-services.md) |
 | [F-17](F-17-monitoring-and-alerts/) | Monitoring & Alerting | [UC-F17-01](../use-cases/UC-F17-01-fire-alert/use-case.md) | [system](../use-cases/UC-F17-01-fire-alert/sequences/SEQ-UC-F17-01-system.md) | [services](../../05-components/sequences/SEQ-F17-UC-F17-01-services.md) |
+| [F-20](F-20-live-venue-simulator/) | Live Venue Simulator | [UC-F20-01](../use-cases/UC-F20-01-sim-only-execution/use-case.md) · [UC-F20-02](../use-cases/UC-F20-02-shadow-compare/use-case.md) | [system 01](../use-cases/UC-F20-01-sim-only-execution/sequences/SEQ-UC-F20-01-system.md) · [02](../use-cases/UC-F20-02-shadow-compare/sequences/SEQ-UC-F20-02-system.md) | [services 01](../../05-components/sequences/SEQ-F20-UC-F20-01-services.md) · [02](../../05-components/sequences/SEQ-F20-UC-F20-02-services.md) |
 
 ## Использование
 
