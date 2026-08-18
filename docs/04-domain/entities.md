@@ -89,7 +89,55 @@ Persistence: [`agent_logs`](../07-data/olap-schema.md#таблица-agent_logs)
 
 Persistence: [`collateral_transfers`](../07-data/oltp-schema.md#таблица-collateral_transfers).
 
+## Live Venue Simulator (F-20, IN-010)
+
+Сущности F-20. Feature — [F-20](../02-system/features/F-20-live-venue-simulator/README.md).
+Деньги/цены — `Decimal` (§9).
+
+### VenueSimulator
+
+Ядро симуляции: принимает `ChildOrderRequest`, использует **живой** `VenueSnapshot`
+(F-11), делает LEVEL_BY_LEVEL matching и применяет модели, генерирует
+`SimExecutionReport`. Параметры: `simSessionId`, `venueId`, `latencyModel`, `impactModel`,
+`feeModel`, `rejectionModel`, `staleLobThresholdMs`, `partialFillMode`.
+
+### VenueSimRouter
+
+Маршрутизатор child-ордеров между `VenueSimulator` и реальным EVC. Единственная точка
+переключения; режимы `SIM_ONLY` / `LIVE_ONLY` / `SHADOW` (dual-send). Venue Execution
+Adapter не знает о режиме.
+
+### SimSession
+
+Конфигурационная сессия (PG `sim_sessions`): `routingMode`, `scopeVenues[]`,
+`scopeInstruments[]`, конфиги моделей (JSONB), `staleLobThresholdMs`, `partialFillMode`,
+`status` (ACTIVE/PAUSED/COMPLETED/CANCELLED).
+
+### ChildOrderRequest
+
+Стандартный запрос child-ордера (F-12 → Router), режим-независимый: `childOrderId`,
+`hedgeFlowId`, `venueId`, `symbol`, `side`, `orderType`, `qty`, `price?`, `timeInForce`,
+`clientOrderId`, `simSessionId?`.
+
+### SimExecutionReport
+
+`ExecutionReport` (F-12) + sim-поля: `simMode=true`, `simSessionId`, `lobSnapshotId`,
+`lobAge`, `impactBps`, `slippageBps`, `latencySampleMs`; `rejectReason ∈
+{SIM_STALE_LOB, SIM_NO_LIQUIDITY, SIM_RANDOM_REJECT, SIM_TIMEOUT}`.
+
+### Модели: LatencyModel / ImpactModel / FeeModel / RejectionModel
+
+- **LatencyModel** — `distribution (LOGNORMAL|UNIFORM|FIXED|EMPIRICAL)`, `p50/p95/p99Ms`, `tailProbability`, `timeoutMs`.
+- **ImpactModel** — `modelType (LINEAR|SQRT|POWER_LAW|LEVEL_BY_LEVEL)`, `impactCoeff`, `powerExponent`, `depletionMode`, `depletionDecayMs`.
+- **FeeModel** — maker/taker/gas (совместим с форматом F-15).
+- **RejectionModel** — `insufficientLiquidityEnabled`, `priceConstraintEnabled`, `randomRejectionRate`, `rateLimitRejectRate`, `minLiquidityThreshold`.
+
+Persistence: PG [`sim_sessions`](../07-data/sim-sessions.md), CH
+[`sim_execution_reports`/`sim_divergence_log`](../07-data/sim-execution-reports.md).
+Базовый (наивный) симулятор уже реализован — `cpp/venues/src/app/venues_loop.cpp`.
+
 ## Source Fragments
 
+- IN-010 — F-20 Live Venue Simulator (VenueSimulator/Router/SimSession/модели)
 - IN-001-FR-008 — структуры данных и сервисы
 - IN-001-FR-007 — risk/ledger сущности

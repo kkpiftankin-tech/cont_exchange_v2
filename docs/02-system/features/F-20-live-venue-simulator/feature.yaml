@@ -1,0 +1,129 @@
+feature:
+  id: F-20
+  name: Live Venue Simulator
+  status: not-implemented
+  owner: core-team
+
+description: >
+  Гибридный режим: боевой приём живых LOB-стаканов внешних площадок через
+  F-11-инфраструктуру + симуляция исполнения child-ордеров F-12 без реального
+  выхода на рынок. VenueSimRouter перехватывает ChildOrderRequest и в режимах
+  SIM_ONLY / LIVE_ONLY / SHADOW направляет их в VenueSimulator, который на
+  актуальном VenueSnapshot применяет модели latency/impact/fee/rejection и
+  публикует синтетический SimExecutionReport (формат F-12 + simMode=true).
+
+source: IN-010 (F-20 Live Venue Simulator)
+
+relatedFeatures:
+  - F-11  # живой LOB / VenueSnapshot / venue.health
+  - F-12  # источник ChildOrderRequest / ExecutionReport формат
+  - F-15  # переиспользование форматов LatencyModel/FeeModel
+  - F-08  # sim-книга позиций (изоляция) в Ledger/Risk
+
+primaryComponents:
+  - venues            # VenueSimRouter, VenueSimulator, SimSession Manager, Divergence Service
+  - ledger            # изолированная sim-книга позиций
+  - risk              # анализ sim-исполнений
+  - observability     # Sim Monitor / Sim vs Live / LOB Quality / Impact Analysis
+
+newComponents:
+  - VenueSimRouter      # маршрутизатор SIM/LIVE/SHADOW (single switch point)
+  - VenueSimulator      # ядро симуляции: LOB-matching + impact + latency + fee + rejection
+  - SimSession-Manager  # CRUD SimSession + hot reload через sim.config
+  - Divergence-Service  # SHADOW: SIM vs LIVE delta-метрики
+
+protoContracts:
+  - contracts/proto/fob/execution/v1/execution.proto  # ExecutionReport (reuse) + sim fields (TODO extension)
+
+# ВАЖНО: базовая имитация подтверждения хеджа на внешних площадках УЖЕ реализована.
+currentImplementation:
+  - path: cpp/venues/src/app/venues_loop.cpp
+    note: >
+      Поток-2 (venues = симулятор external venue adapter): читает execution.intents и на
+      каждый ExecutionIntent сразу публикует "filled" ExecutionReport в execution.reports.
+      Это наивный MVP-симулятор (мгновенный полный fill, без живого LOB и моделей).
+      F-20 РАСШИРЯЕТ его: живой VenueSnapshot + LatencyModel/ImpactModel/FeeModel/RejectionModel
+      + SIM_ONLY/LIVE_ONLY/SHADOW + SimSession + sim-книга + divergence.
+
+codePaths:
+  - cpp/venues/src/app/venues_loop.cpp   # существующий наивный симулятор (расширяется F-20)
+
+kafkaTopics:
+  produces:
+    - execution.venue          # SimExecutionReport (simMode=true) — тот же топик, что боевой
+    - sim.execution.venue      # опциональный изолированный дубль
+    - sim.config               # SimConfigEvent (hot reload)
+    - sim.alerts               # SIM_STALE_LOB / SIM_TIMEOUT / SIM_LOB_SOURCE_DOWN
+  consumes:
+    - venue.snapshots          # живой LOB (F-11) — источник ликвидности симулятора
+    - execution.venue          # Divergence Service (LIVE+SIM пары в SHADOW)
+
+grpcServices:
+  exposes:
+    - VenueSimRouter.SimulateOrder   # in-process (Venue Execution Adapter → Router → Simulator)
+  calls:
+    - ExternalVenuesConnector.PlaceChildOrder  # LIVE/SHADOW fork
+
+restEndpoints:
+  - "POST   /sim/sessions"        # создать SimSession
+  - "GET    /sim/sessions"        # список
+  - "PATCH  /sim/sessions/{id}"   # routingMode / hot reload / pause / complete
+
+dataObjects:
+  postgres:
+    - sim_sessions
+    - sim_child_orders
+  clickhouse:
+    - sim_execution_reports
+    - sim_divergence_log
+
+useCases:
+  - UC-F20-01  # SIM_ONLY execution (happy path)
+  - UC-F20-02  # SHADOW compare (SIM vs LIVE)
+
+acceptanceCriteria:
+  - "AC-F20-01: SIM_ONLY — ни один реальный вызов EVC для child-ордеров; все ExecutionReport simMode=true"
+  - "AC-F20-02: SHADOW — каждый ChildOrderRequest порождает ровно 2 отчёта (LIVE simMode=false + SIM simMode=true)"
+  - "AC-F20-03: VenueSimulator использует актуальный VenueSnapshot; lobSnapshotId ссылается на конкретный снапшот"
+  - "AC-F20-04: lobAge > staleLobThresholdMs → REJECTED/SIM_STALE_LOB, реальных ордеров нет"
+  - "AC-F20-05: SimExecutionReport (simMode=true) не изменяет боевые позиции провайдера в Ledger (sim-книга изолирована)"
+  - "AC-F20-06: SimExecutionReport в ClickHouse ≤ 1 сек после публикации"
+  - "AC-F20-07: переключение routingMode через Admin API ≤ 500 мс"
+  - "AC-F20-08: при идентичном LOB filledQty совпадает с LEVEL_BY_LEVEL, ошибка ≤ 1%"
+  - "AC-F20-09: latency overhead F-20 (без LatencyModel sample) p95 < 50 мс"
+  - "AC-F20-10: divergence-метрики (SHADOW) пишутся в sim_divergence_log по каждому clientOrderId"
+  - "AC-F20-11: hot update параметров применяется к следующим запросам без перезапуска симулятора"
+  - "AC-F20-12: LIVE_ONLY overhead роутера ≤ 5 мс"
+
+knownIssues:
+  - id: source-labeling-f16
+    severity: minor
+    description: >
+      Исходник IN-010 помечает acceptance/sequence как «F16» (F-16 = Operator Console).
+      Нормализовано в F-20. См. Conflict Note в README и IN-010.meta.
+  - id: sim-book-ledger-isolation
+    severity: blocker
+    description: >
+      Требуется изолированная sim-книга в Ledger (simMode=true не трогает боевые позиции) — новый слой учёта.
+  - id: proto-sim-fields
+    severity: major
+    description: >
+      ExecutionReport в execution.proto нужно расширить sim-полями (simMode, simSessionId, lobSnapshotId,
+      lobAge, impactBps, slippageBps, latencySampleMs) — backward-compatible, но требует proto-изменения.
+  - id: topic-naming-mismatch
+    severity: major
+    description: >
+      Источник IN-010 использует топик `execution.venue`; в репозитории фактически
+      `execution.intents` (вход) и `execution.reports` (выход, см. venues_loop.cpp).
+      При реализации привести к существующим именам ИЛИ ввести новые с миграцией. См. CN-F20-04.
+
+migration:
+  from: naive intent→report simulator (venues_loop.cpp Поток-2)
+  to: F-20 live-LOB simulator (router + models + sessions + shadow)
+  note: базовый симулятор остаётся fallback/основой; F-20 добавляет слой моделей и маршрутизации.
+
+tests:
+  unit: []
+  integration: []
+  contract: []
+  plan: docs/10-testing/features/F-20-test-plan.md

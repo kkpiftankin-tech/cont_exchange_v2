@@ -195,6 +195,25 @@ Acceptance: F-01 ([UC-F01-01](use-cases/UC-F01-01-authenticate-user/use-case.md)
 
 Acceptance: F-01.
 
+## FR-F20. Live Venue Simulator
+
+Источник: IN-010. Feature — [F-20](features/F-20-live-venue-simulator/README.md).
+Базовая имитация подтверждения хеджа уже реализована ([venues_loop.cpp](../../cpp/venues/src/app/venues_loop.cpp), Поток-2: intent→filled report); F-20 расширяет её живым LOB + моделями + SHADOW.
+
+- **FR-F20-001.** Принимать живые `VenueSnapshot` (F-11, `venue.snapshots`) как источник ликвидности симулятора, не меняя боевой пайплайн F-11.
+- **FR-F20-002.** Реализовать `VenueSimRouter` с режимами `SIM_ONLY`, `LIVE_ONLY`, `SHADOW`.
+- **FR-F20-003.** Переключать `routingMode` без прерывания потока child-ордеров (hot reload).
+- **FR-F20-004.** `VenueSimulator` поддерживает `LatencyModel` (LOGNORMAL/UNIFORM/FIXED/EMPIRICAL), `ImpactModel` (LINEAR/SQRT/POWER_LAW/LEVEL_BY_LEVEL), `FeeModel` (maker/taker/gas), `RejectionModel`.
+- **FR-F20-005.** Генерировать `SimExecutionReport` = поля `ExecutionReport` (F-12) + sim-поля (`simMode`, `simSessionId`, `lobSnapshotId`, `lobAge`, `impactBps`, `slippageBps`, `latencySampleMs`).
+- **FR-F20-006.** Публиковать `SimExecutionReport` в `execution.reports`/`execution.venue` c `simMode=true`; опц. дубль в `sim.execution.venue` (см. CN-F20-04 о именах топиков).
+- **FR-F20-007.** Изоляция sim-позиций: `simMode=true` обновляет отдельную sim-книгу Ledger, не влияя на боевые позиции (§17).
+- **FR-F20-008.** Хранить историю `SimExecutionReport` в ClickHouse (`sim_execution_reports`).
+- **FR-F20-009.** Управление `SimSession` через Admin API (create/activate/pause/hot-reload/complete).
+- **FR-F20-010.** В SHADOW писать divergence-метрики (SIM vs LIVE) по `clientOrderId` в `sim_divergence_log`.
+- **FR-F20-011.** Stale-LOB защита: `lobAge > staleLobThresholdMs` → `SIM_STALE_LOB` (исполнение не рассчитывается), алерт в `sim.alerts`.
+
+Acceptance: F-20 ([UC-F20-01](use-cases/UC-F20-01-sim-only-execution/use-case.md), [UC-F20-02](use-cases/UC-F20-02-shadow-compare/use-case.md)); AC-F20-01..12.
+
 ## Связанные документы
 
 - Каталог фич: [features/feature-index.md](features/feature-index.md)

@@ -176,6 +176,18 @@ Decimal-арифметика для всех денежных и количес�
 
 Изменения `risk_limits`, `solver_config`, `fee_model` применяются без рестарта сервисов; история изменений — для audit.
 
+## NFR-F20. Live Venue Simulator
+
+Источник: IN-010. Feature — [F-20](features/F-20-live-venue-simulator/README.md).
+
+- **NFR-F20-001. Latency overhead.** VenueSimulator overhead (без LatencyModel sample): `p95 < 50 мс` (AC-F20-09); LIVE_ONLY overhead роутера ≤ 5 мс.
+- **NFR-F20-002. Точность.** LOB-matching: ошибка `filledQty` ≤ 1% при идентичном LOB; цена ≤ 0.5 bps (LEVEL_BY_LEVEL).
+- **NFR-F20-003. Throughput.** ≥ 500 симулируемых child-ордеров/сек суммарно.
+- **NFR-F20-004. Свежесть LOB.** `p95 lag < 100 мс` от публикации в `venue.snapshots` до кэша; stale-LOB обнаружение ≤ 200 мс.
+- **NFR-F20-005. Retention.** `sim_execution_reports` ≥ 90 дней; `sim_divergence_log` — для калибровки.
+- **NFR-F20-006. Admin API / переключение.** Admin API `p95 < 200 мс`; SIM→LIVE переключение ≤ 500 мс; hot reload без перезапуска.
+- **NFR-F20-007. Изоляция и аудит.** sim-книга полностью изолирована от боевых позиций; каждый sim-отчёт трассируем к `lobSnapshotId`/`simSessionId`; операторские действия — авторизованы и audit-logged.
+
 ## Связанные документы
 
 - FR: [functional-requirements.md](functional-requirements.md)
