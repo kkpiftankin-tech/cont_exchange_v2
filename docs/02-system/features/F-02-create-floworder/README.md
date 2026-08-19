@@ -22,8 +22,18 @@ Client → HTTP gateway (POST /v1/flow-orders)
 
 ## Связанные фичи
 
-- F-04 (Batch Clearing) — consumer `orders.normalized`
+- F-04 (Batch Clearing) — consumer `orders.normalized`; источник `FillEvent`/`batch.outputs`
 - F-07 (Pre-trade Risk) — синхронный гейт перед резервом
+- F-12 (Execution Hedge) — Exchange-provider хеджирует полученные `FillEvent` на внешних venues
+
+## v2 (IN-004): роль Exchange-provider
+
+Обновление v2 добавляет **Exchange-provider** как отдельную роль/провайдера
+(`providerType=provider`): он создаёт заявки через тот же API, а после матчинга **читает
+`FillEvent`** (`batch.outputs`, F-04) и инициирует хедж позиции через Venue Execution
+Adapter (F-12). Новое требование — **F2-17** ([functional-requirements §FR-ORDERS](../../functional-requirements.md)).
+Цепочка: F-02 (создать) → F-04 (fills) → Exchange-provider → F-12 (хедж). Изменения
+аддитивны к v1 (реестр правок — в [IN-004.meta](../../../../incoming-docs/IN-004.meta.md)).
 
 ## Acceptance / Issues
 
