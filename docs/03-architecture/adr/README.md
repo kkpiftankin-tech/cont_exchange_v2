@@ -60,6 +60,6 @@
 | ADR-045 | F-06 модель соединений с PostgreSQL — per-call vs in-app pool | [proposed](ADR-045-pg-connection-pooling.md) |
 | ADR-046 | F-06 топик `positions.update` для WS-push обновлений позиций | [proposed](ADR-046-positions-update-topic.md) |
 | ADR-047 | F-05A Surplus / EXCHANGE_PNL policy для vectorized external clearing | [proposed](ADR-047-surplus-exchange-pnl-policy.md) |
-| ADR-048 | F-05A QP solver backend (OSQP) для vector clearing `Wx=0` | [proposed](ADR-048-qp-solver-backend.md) |
+| ADR-048 | F-05A QP solver backend (OSQP) для vector clearing `Wx=0` | [accepted](ADR-048-qp-solver-backend.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

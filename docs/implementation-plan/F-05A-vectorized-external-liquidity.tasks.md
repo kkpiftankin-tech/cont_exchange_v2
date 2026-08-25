@@ -6,14 +6,14 @@
 - Base feature: [F-05 Live Market Data](../02-system/features/F-05-live-market-data/) (primary owner)
 - Consumer feature: [F-09 Batch/Combo Orders](../02-system/features/F-09-batch-combo-orders/) (`multileg_vector_solver`)
 - Reused infra: [F-11 External Venues](../02-system/features/F-11-external-venues-lob-to-fob/) (venue normalization `venue.liquidity.fob`), [F-15 Backtest/Replay](../02-system/features/F-15-backtest-replay/)
-- ADRs (blockers, `proposed`): [ADR-047 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md), [ADR-048 QP solver backend (OSQP)](../03-architecture/adr/ADR-048-qp-solver-backend.md); extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
+- ADRs: [ADR-048 QP solver backend (OSQP)](../03-architecture/adr/ADR-048-qp-solver-backend.md) — **accepted 2026-08-25** (QP-путь разблокирован); [ADR-047 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — **`proposed`, остаётся блокером money-path/surplus**; extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
 - Math foundation: IN-012 continuous-order market (clearing as Lagrange multiplier), business-rules **R-CLR-003** (flow conservation)
 
 ## Preconditions (docs-as-code gate)
 
-> **Docs-gate почти снят** (ingress-close IN-014 завершён 2026-07-23). Остаётся
-> только **ADR-047/045 → accepted** (решение владельца). Код (`cpp/`) стартует после
-> принятия ADR.
+> **Docs-gate почти снят** (ingress-close IN-014 завершён 2026-07-23). **ADR-048 (OSQP)
+> принят 2026-08-25** — QP-путь (Phase 3) разблокирован. Остаётся **ADR-047 (surplus) →
+> accepted** (решение владельца) как блокер money-path/surplus-задач (Phase с ledger-проводками).
 
 - [x] `F-05A-feature.yaml` + README (addendum к F-05)
 - [x] Use cases `UC-F05A-01..05` + L0 system sequences
@@ -22,7 +22,8 @@
 - [x] Data schemas: PG (`asset_basis`, `vector_flow_segments`, `vectorization_runs`) + CH (`vector_clearing_results`, `surplus_events`, `vector_flow_segments_history`)
 - [x] Test plan `docs/10-testing/features/F-05A-test-plan.md`
 - [x] Acceptance criteria (feature.yaml) + business rules §F-05A (R-F05A-001..007) + FR/NFR-F05A
-- [ ] **ADR-047 + ADR-048 → `accepted`** (решения владельца: surplus prod-default; подтверждение OSQP) — **единственный оставшийся блокер**
+- [x] **ADR-048 → `accepted`** (2026-08-25, подтверждение OSQP) — QP-путь разблокирован
+- [ ] **ADR-047 → `accepted`** (решение владельца: surplus prod-default) — **оставшийся блокер money-path/surplus**
 
 ## Architecture decisions pending (решение владельца)
 
@@ -53,8 +54,10 @@
 #### T-F05A-003. FR/NFR + domain entities + business rules
 - FR-F05A-001..011 → `functional-requirements.md`; NFR-F05A-001..005 → `non-functional-requirements.md`; entities (ExternalOrderLevel/AssetBasis/VectorFlowSegment/VectorClearingInput/Result) → `docs/04-domain/entities.md`; math (bid/ask w_i, D_i, Wx=0) → `business-rules.md §F-05A`. Owner: trading-domain-specialist.
 
-#### T-F05A-004. ADR → accepted
-- Довести [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md), [ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) до `accepted` после решений D3/D4. Owner: solution-architect + владелец.
+#### T-F05A-004. ADR → accepted (частично)
+
+- [x] [ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) (QP/OSQP, D3) → `accepted` **2026-08-25**.
+- [ ] [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) (surplus prod-default, D4) → `accepted` — ожидает решения владельца. Owner: solution-architect + владелец.
 
 #### T-F05A-005. Test plan + coverage row
 - `docs/10-testing/features/F-05A-test-plan.md` (incl. real-orderbook fixtures policy) + строка F-05A в `docs/traceability/coverage-matrix.md`. Owner: test-architect.
@@ -207,4 +210,4 @@ AC: AC-F05A-011.
 
 Feature `implemented` только при выполнении всех DoD-групп из IN-014 §10
 (Documentation / Contract / Data / Backend / UI / Testing / Observability) +
-ADR-047/045 `accepted` + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.
+ADR-048 `accepted` (✅ 2026-08-25) + ADR-047 `accepted` (ожидается) + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.

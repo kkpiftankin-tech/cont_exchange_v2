@@ -1,14 +1,17 @@
 ---
 id: ADR-048
 title: QP solver backend (OSQP) для vector clearing F-05A — активация и расширение ADR-034
-status: proposed
+status: accepted
 date: 2026-07-07
+accepted: 2026-08-25
 level: sea
 feature: F-05A
 related: [ADR-034, ADR-035, ADR-047, ADR-005, ADR-009]
 ---
 
 # ADR-048 — QP solver backend (OSQP) для F-05A vector clearing
+
+> **Принято 2026-08-25** (решение владельца): OSQP-backend с детерминированным replay-режимом и `Decimal`-квантованием на границе солвера (§9) утверждён. Разблокирует критический путь QP-реализации F-05A (Phase 3) и общий QP-backend для F-09 combo. Обработка ненулевого остатка (`residual → surplus`) остаётся за **[ADR-047](ADR-047-surplus-exchange-pnl-policy.md)** (`proposed`): money-path/surplus-задачи F-05A не разблокированы до его принятия.
 
 ## Контекст
 
