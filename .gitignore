@@ -20,3 +20,6 @@ __pycache__/
 *.pyc
 *.pyo
 
+
+# generated frontend production build output (do not track)
+frontend/web/build/
