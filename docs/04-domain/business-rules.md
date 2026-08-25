@@ -652,8 +652,8 @@ equation `W · diag(η) · W^⊤` — согласовано с рекоменд
 ## F-05A — Vectorized External Liquidity
 
 Источник: IN-014. Мат.основа — [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md),
-R-CLR (ниже). Политики — [ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md) (surplus),
-[ADR-045](../03-architecture/adr/ADR-045-qp-solver-backend.md) (QP backend). Деньги — Decimal (§9).
+R-CLR (ниже). Политики — [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) (surplus),
+[ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) (QP backend). Деньги — Decimal (§9).
 
 ### R-F05A-001 Vector construction
 
@@ -695,13 +695,13 @@ closed-form) и R-CLR-001 (curve forms equivalence).
 \]
 
 Это специализация R-CLR-003 (flow conservation `Σ Q̇_i = 0`) на multi-asset векторный
-случай. Solver: `max_x [xᵀp^H − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-045).
+случай. Solver: `max_x [xᵀp^H − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-048).
 
 ### R-F05A-005 Residual & surplus (invariant)
 
 `r = Wx`, `residualNorm = ‖r‖`. Converged ⇔ `‖r‖ < tolerance`. При `‖r‖ > tolerance`
 остаток — денежный surplus/deficit, **никогда не скрывается** и обрабатывается по
-`surplus_policy` (ADR-044: `REJECT_IF_RESIDUAL` дефолт | `EXCHANGE_PNL` | `SURPLUS_ASSET`
+`surplus_policy` (ADR-047: `REJECT_IF_RESIDUAL` дефолт | `EXCHANGE_PNL` | `SURPLUS_ASSET`
 | `MM_LAST_RESORT`). **Инвариант ledger:** несбалансированный `ExecutionGroup` не
 применяется — либо `Wx≈0`, либо остаток явно на house-счёт (`Σuser + house = 0`,
 no phantom inventory, §17).

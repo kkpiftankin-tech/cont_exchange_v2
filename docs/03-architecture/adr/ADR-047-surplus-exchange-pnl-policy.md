@@ -1,5 +1,5 @@
 ---
-id: ADR-044
+id: ADR-047
 title: Surplus / EXCHANGE_PNL policy для vector clearing (F-05A)
 status: proposed
 date: 2026-07-07
@@ -8,7 +8,7 @@ feature: F-05A
 related: [ADR-034, ADR-035, ADR-033]
 ---
 
-# ADR-044 — Surplus / EXCHANGE_PNL policy для vectorized external clearing
+# ADR-047 — Surplus / EXCHANGE_PNL policy для vectorized external clearing
 
 ## Контекст
 
@@ -112,7 +112,7 @@ inventory не создаётся.
 - Feature: **F-05A** (IN-014). Закрывает GAP-F05A-001 / KI-F05A-001; поддерживает
   AC-F05A-005, AC-F05A-007.
 - Related: [ADR-034](ADR-034-grouped-constraint-solver.md) (QP solver — отдельный
-  ADR-045 backend), [ADR-035](ADR-035-fob-solver-mathematical-foundation.md) (flow
+  ADR-048 backend), [ADR-035](ADR-035-fob-solver-mathematical-foundation.md) (flow
   conservation / clearing math), [ADR-033](ADR-033-execution-groups-topic.md)
   (`ExecutionGroup`).
 - Domain: business-rules **R-CLR-003** (flow conservation), CLAUDE.md **§9** (Decimal),

@@ -11,8 +11,8 @@ related:
   - docs/05-components/sequences/SEQ-F05A-UC-F05A-01-services.md
   - docs/05-components/sequences/SEQ-F05A-UC-F05A-02-services.md
   - docs/07-data/vector-clearing-results.md
-  - docs/03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md
-  - docs/03-architecture/adr/ADR-045-qp-solver-backend.md
+  - docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
+  - docs/03-architecture/adr/ADR-048-qp-solver-backend.md
   - docs/10-testing/features/F-15-test-plan.md
 ---
 

@@ -9,7 +9,7 @@ related:
   - docs/07-data/vector-flow-segments.md
   - docs/07-data/olap-schema.md
   - docs/02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md
-  - docs/03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md
+  - docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
 ---
 
 # ClickHouse Tables: F-05A vector clearing (OLAP)
@@ -43,7 +43,7 @@ TTL 365 дней; PARTITION по дню; ORDER BY `(execution_group_id, batch_id
 
 ### `surplus_events`
 
-Surplus / EXCHANGE_PNL события ([ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md)).
+Surplus / EXCHANGE_PNL события ([ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md)).
 Один surplus-актив на строку. `MergeTree`.
 
 | Column | Type | Notes |
@@ -66,5 +66,5 @@ Surplus / EXCHANGE_PNL события ([ADR-044](../03-architecture/adr/ADR-044-
 - Feature: [F-05A](../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
 - Use cases: [UC-F05A-02 Vector Clearing](../02-system/use-cases/UC-F05A-02-vector-clearing/use-case.md), [UC-F05A-03 Display](../02-system/use-cases/UC-F05A-03-display-vector-liquidity/use-case.md), [UC-F05A-05 Replay](../02-system/use-cases/UC-F05A-05-replay-vector-clearing/use-case.md)
 - Sequences: [SEQ-F05A-UC-F05A-02-services](../05-components/sequences/SEQ-F05A-UC-F05A-02-services.md), [SEQ-F05A-UC-F05A-05-services](../05-components/sequences/SEQ-F05A-UC-F05A-05-services.md)
-- ADR: [ADR-044 surplus policy](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md)
+- ADR: [ADR-047 surplus policy](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md)
 - OLTP counterpart: [vector-flow-segments.md](vector-flow-segments.md)

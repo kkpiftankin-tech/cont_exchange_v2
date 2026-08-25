@@ -27,8 +27,8 @@ Matching Backend (`multileg_vector_solver`)
 ## Preconditions
 
 - `VectorClearingInput` (W, pH, D, q, source_map) собран (UC-F05A-01).
-- QP solver backend доступен ([ADR-045](../../../03-architecture/adr/ADR-045-qp-solver-backend.md), OSQP).
-- `surplus_policy` сконфигурирована ([ADR-044](../../../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md); MVP `REJECT_IF_RESIDUAL`).
+- QP solver backend доступен ([ADR-048](../../../03-architecture/adr/ADR-048-qp-solver-backend.md), OSQP).
+- `surplus_policy` сконфигурирована ([ADR-047](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md); MVP `REJECT_IF_RESIDUAL`).
 
 ## Trigger
 
@@ -50,7 +50,7 @@ Batch-цикл matching получает `VectorClearingInput` из `marketdata.
 
 ## Alternative Flows
 
-### A1. Surplus / ненулевой residual ([ADR-044](../../../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md))
+### A1. Surplus / ненулевой residual ([ADR-047](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md))
 
 1. `residualNorm > tolerance` → применяется `surplus_policy`.
 2. `REJECT_IF_RESIDUAL` (MVP): группа `degraded` / не исполняется как полностью клиринговая.
@@ -86,5 +86,5 @@ Batch-цикл matching получает `VectorClearingInput` из `marketdata.
 
 ## Related ADR
 
-- [ADR-045 QP solver backend (OSQP)](../../../03-architecture/adr/ADR-045-qp-solver-backend.md)
-- [ADR-044 surplus / EXCHANGE_PNL policy](../../../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md)
+- [ADR-048 QP solver backend (OSQP)](../../../03-architecture/adr/ADR-048-qp-solver-backend.md)
+- [ADR-047 surplus / EXCHANGE_PNL policy](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md)

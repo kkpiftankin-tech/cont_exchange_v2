@@ -185,7 +185,7 @@ Decimal-арифметика для всех денежных и количес�
 Для одного и того же входа (`external_order_levels`, `asset_basis`, fees/buffers,
 `solver_config`, `batch_id`) solver возвращает идентичные `x`, `π`, `residual`,
 `ExecutionGroup` (бит-в-бит). QP в детерминированном режиме (fixed `max_iter`, no
-adaptive-rho — ADR-045). Обязательно для F-15 replay (AC-F05A-011).
+adaptive-rho — ADR-048). Обязательно для F-15 replay (AC-F05A-011).
 
 ### NFR-F05A-002. Latency
 

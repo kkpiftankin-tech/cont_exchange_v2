@@ -80,15 +80,15 @@ side/price). Matching multi-asset ликвидности (напр. цикл `BT
 
 ## Архитектурные решения (ADR)
 
-- [ADR-044](../../../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md) — surplus / EXCHANGE_PNL policy (`proposed`, blocker).
-- [ADR-045](../../../03-architecture/adr/ADR-045-qp-solver-backend.md) — QP solver backend OSQP (`proposed`, blocker; активирует [ADR-034](../../../03-architecture/adr/ADR-034-grouped-constraint-solver.md)).
+- [ADR-047](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — surplus / EXCHANGE_PNL policy (`proposed`, blocker).
+- [ADR-048](../../../03-architecture/adr/ADR-048-qp-solver-backend.md) — QP solver backend OSQP (`proposed`, blocker; активирует [ADR-034](../../../03-architecture/adr/ADR-034-grouped-constraint-solver.md)).
 
 ## Known Gaps
 
 | ID | Severity | Description |
 | --- | --- | --- |
-| GAP-F05A-001 | blocker | ADR-044 surplus policy — proposed (решение владельца). |
-| GAP-F05A-002 | blocker | ADR-045 QP backend — proposed; QP-решателя в matching пока нет. |
+| GAP-F05A-001 | blocker | ADR-047 surplus policy — proposed (решение владельца). |
+| GAP-F05A-002 | blocker | ADR-048 QP backend — proposed; QP-решателя в matching пока нет. |
 | GAP-F05A-003 | major | Dimensional units validation (KI-F05A-003). |
 | GAP-F05A-004 | major | Stale external levels policy (KI-F05A-004). |
 | GAP-F05A-005 | major | Vector/grouped replay в backtest (совм. с AC-F09-010, CN-IN014-05). |

@@ -55,7 +55,7 @@ sequenceDiagram
         K-->>L: ExecutionGroup / FillEvent
         L->>L: balanced apply (Wx~0, no phantom inventory)
     else surplus (residual > tolerance)
-        MB->>MB: apply surplus_policy (ADR-044)
+        MB->>MB: apply surplus_policy (ADR-047)
         MB->>CH: surplus_events
         MB->>K: SurplusEvent / degraded status
         K-->>R: risk.alerts (surplus above threshold)
@@ -78,7 +78,7 @@ sequenceDiagram
 
 ## Related ADR
 
-- [ADR-045 QP solver backend](../../03-architecture/adr/ADR-045-qp-solver-backend.md), [ADR-044 surplus policy](../../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md)
+- [ADR-048 QP solver backend](../../03-architecture/adr/ADR-048-qp-solver-backend.md), [ADR-047 surplus policy](../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md)
 
 ## Contract binding
 
