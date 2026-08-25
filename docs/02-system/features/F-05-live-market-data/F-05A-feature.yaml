@@ -131,7 +131,7 @@ acceptanceCriteria:
   - id: AC-F05A-004
     text: "Solver проверяет Wx и записывает residual/residualNorm."
   - id: AC-F05A-005
-    text: "Surplus явно показывается и не скрывается (ADR-044)."
+    text: "Surplus явно показывается и не скрывается (ADR-047)."
   - id: AC-F05A-006
     text: "Используются реальные captured exchange order book fixtures минимум из двух venues; CI offline."
   - id: AC-F05A-007
@@ -154,22 +154,22 @@ acceptanceCriteria:
     text: "Definition of Done выполнен полностью."
 
 architectureDecisions:
-  - id: ADR-044
+  - id: ADR-047
     title: Surplus / EXCHANGE_PNL policy
     status: proposed
-    file: docs/03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md
-  - id: ADR-045
+    file: docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
+  - id: ADR-048
     title: QP solver backend (OSQP) — активирует/расширяет ADR-034
     status: proposed
-    file: docs/03-architecture/adr/ADR-045-qp-solver-backend.md
+    file: docs/03-architecture/adr/ADR-048-qp-solver-backend.md
 
 knownIssues:
   - id: surplus-policy-open
     severity: blocker
-    description: "ADR-044 surplus/EXCHANGE_PNL policy — proposed, нужно решение владельца (prod-default)."
+    description: "ADR-047 surplus/EXCHANGE_PNL policy — proposed, нужно решение владельца (prod-default)."
   - id: qp-solver-backend
     severity: blocker
-    description: "ADR-045 QP backend (OSQP) — proposed; QP-решателя в matching пока нет (только bisection)."
+    description: "ADR-048 QP backend (OSQP) — proposed; QP-решателя в matching пока нет (только bisection)."
   - id: unit-dimensional-validation
     severity: major
     description: "KI-F05A-003 — строгая валидация размерностей активов/цен/rate/batch (dimensional_guard)."

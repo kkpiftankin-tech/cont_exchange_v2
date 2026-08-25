@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## Related ADR
 
-- [ADR-045 QP solver backend (determinism)](../../03-architecture/adr/ADR-045-qp-solver-backend.md)
+- [ADR-048 QP solver backend (determinism)](../../03-architecture/adr/ADR-048-qp-solver-backend.md)
 
 ## Contract binding
 

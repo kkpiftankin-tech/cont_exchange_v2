@@ -215,11 +215,11 @@ Acceptance: F-01.
 - **FR-F05A-004.** Построить `w_i`: bid `w=e_X−P_eff·e_Y`, ask `w=−e_X+P_eff·e_Y` (R-F05A-001).
 - **FR-F05A-005.** Построить flow-сегмент `(w_i, p^L=0, p^H=dHL, q=min(Q,rateCap), Q^max=Q)`.
 - **FR-F05A-006.** Собрать solver input: `W`, `pH`, `dHL`, `q`, `D=diag(dHL/q)`, `source_map` (no synthetic pair book, R-F05A-002).
-- **FR-F05A-007.** Решить QP: `max_x [xᵀpH − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-045).
+- **FR-F05A-007.** Решить QP: `max_x [xᵀpH − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-048).
 - **FR-F05A-008.** Проверить residual `r=Wx`, требовать `‖r‖ < tolerance` либо явный surplus.
 - **FR-F05A-009.** Сформировать исполнения: `executed_asset_vector = x_i·w_i`; source-trace сохранён.
 - **FR-F05A-010.** Представить результат как F-09 `ExecutionGroup` (`execution.mode = multileg_vector_solver`, ссылки на vectorized source levels).
-- **FR-F05A-011.** Публиковать `batch.outputs` / `fills` / `execution.groups` / `marketdata.snapshots`; surplus по `surplus_policy` (ADR-044).
+- **FR-F05A-011.** Публиковать `batch.outputs` / `fills` / `execution.groups` / `marketdata.snapshots`; surplus по `surplus_policy` (ADR-047).
 
 Acceptance: F-05A (AC-F05A-001..015).
 

@@ -1,14 +1,14 @@
 ---
-id: ADR-045
+id: ADR-048
 title: QP solver backend (OSQP) для vector clearing F-05A — активация и расширение ADR-034
 status: proposed
 date: 2026-07-07
 level: sea
 feature: F-05A
-related: [ADR-034, ADR-035, ADR-044, ADR-005, ADR-009]
+related: [ADR-034, ADR-035, ADR-047, ADR-005, ADR-009]
 ---
 
-# ADR-045 — QP solver backend (OSQP) для F-05A vector clearing
+# ADR-048 — QP solver backend (OSQP) для F-05A vector clearing
 
 ## Контекст
 
@@ -65,7 +65,7 @@ box), в отличие от ADR-034-постановки $\max \alpha$ (лин�
    `double` допустим только внутри солвера и в diagnostics (residualNorm, solveTimeMs).
 
 5. **Residual и surplus:** solver возвращает $r = Wx$ и $\text{residualNorm} = \|r\|$.
-   Обработка ненулевого остатка — по [ADR-044](ADR-044-surplus-exchange-pnl-policy.md)
+   Обработка ненулевого остатка — по [ADR-047](ADR-047-surplus-exchange-pnl-policy.md)
    (`SurplusPolicy`). QP-решатель residual **не прячет** — отдаёт его наружу.
 
 6. **Numerical hardening (обязательно до money-path):** масштабирование `W`/`D` с
@@ -94,7 +94,7 @@ box), в отличие от ADR-034-постановки $\max \alpha$ (лин�
 - ➕ Зависимость OSQP во всех образах; numerical + replay-детерминизм harness;
   `IVectorClearingSolver` + DI-привязка; квантование double→Decimal на выходе.
 - ⚠️ Money-path включается только после numerical hardening (п.6) и тестов
-  детерминизма/idempotency; до этого — `REJECT_IF_RESIDUAL` (ADR-044 дефолт).
+  детерминизма/idempotency; до этого — `REJECT_IF_RESIDUAL` (ADR-047 дефолт).
 - Контракты downstream (`ExecutionGroup`, ledger, risk) не меняются — solver
   заполняет существующие поля.
 
@@ -102,7 +102,7 @@ box), в отличие от ADR-034-постановки $\max \alpha$ (лин�
 
 Высокая. QP инкапсулирован за `IVectorClearingSolver`/`IGroupedSolver`; добавление —
 аддитивно, fallback (gate/reject) доступен. OSQP можно снять без изменения контрактов.
-Дефолт surplus `REJECT_IF_RESIDUAL` (ADR-044) означает, что до включения money-path
+Дефолт surplus `REJECT_IF_RESIDUAL` (ADR-047) означает, что до включения money-path
 изменения money-модели нет.
 
 ## Трассировка
@@ -111,7 +111,7 @@ box), в отличие от ADR-034-постановки $\max \alpha$ (лин�
   AC-F05A-004, AC-F05A-005, AC-F05A-011.
 - Расширяет/активирует: [ADR-034](ADR-034-grouped-constraint-solver.md) (QP deferred → now).
 - Related: [ADR-035](ADR-035-fob-solver-mathematical-foundation.md) (clearing math),
-  [ADR-044](ADR-044-surplus-exchange-pnl-policy.md) (residual → surplus),
+  [ADR-047](ADR-047-surplus-exchange-pnl-policy.md) (residual → surplus),
   [ADR-005](ADR-005-fixed-point-decimal-money.md) (Decimal boundary),
   ADR-009 (replay isolation/determinism).
 - Code (при реализации): `cpp/matching/src/domain/vector_qp_solver.{hpp,cpp}`,

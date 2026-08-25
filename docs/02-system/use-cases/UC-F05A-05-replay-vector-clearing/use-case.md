@@ -26,7 +26,7 @@ Backtest / Replay Service (`backtest`)
 ## Preconditions
 
 - Captured external order book snapshots / `VectorClearingInput` доступны в replay-корпусе.
-- Solver в детерминированном режиме ([ADR-045](../../../03-architecture/adr/ADR-045-qp-solver-backend.md): fixed max_iter, no adaptive-rho).
+- Solver в детерминированном режиме ([ADR-048](../../../03-architecture/adr/ADR-048-qp-solver-backend.md): fixed max_iter, no adaptive-rho).
 - ⚠️ Требует grouped/vector пути в `cpp/backtest` (тот же незакрытый разрыв AC-F09-010, CN-IN014-05).
 
 ## Trigger
@@ -45,7 +45,7 @@ Backtest / Replay Service (`backtest`)
 
 ### A1. Недетерминизм обнаружен
 
-1. `(W,x,residual)` расходится с оригиналом → replay помечает non-deterministic, эмитится diagnostic (сигнал о нарушении ADR-045 solver-настроек).
+1. `(W,x,residual)` расходится с оригиналом → replay помечает non-deterministic, эмитится diagnostic (сигнал о нарушении ADR-048 solver-настроек).
 
 ## Postconditions
 
@@ -70,4 +70,4 @@ Backtest / Replay Service (`backtest`)
 
 ## Related ADR
 
-- [ADR-045 QP solver backend (determinism)](../../../03-architecture/adr/ADR-045-qp-solver-backend.md)
+- [ADR-048 QP solver backend (determinism)](../../../03-architecture/adr/ADR-048-qp-solver-backend.md)

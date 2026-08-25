@@ -6,13 +6,13 @@
 - Base feature: [F-05 Live Market Data](../02-system/features/F-05-live-market-data/) (primary owner)
 - Consumer feature: [F-09 Batch/Combo Orders](../02-system/features/F-09-batch-combo-orders/) (`multileg_vector_solver`)
 - Reused infra: [F-11 External Venues](../02-system/features/F-11-external-venues-lob-to-fob/) (venue normalization `venue.liquidity.fob`), [F-15 Backtest/Replay](../02-system/features/F-15-backtest-replay/)
-- ADRs (blockers, `proposed`): [ADR-044 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md), [ADR-045 QP solver backend (OSQP)](../03-architecture/adr/ADR-045-qp-solver-backend.md); extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
+- ADRs (blockers, `proposed`): [ADR-047 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md), [ADR-048 QP solver backend (OSQP)](../03-architecture/adr/ADR-048-qp-solver-backend.md); extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
 - Math foundation: IN-012 continuous-order market (clearing as Lagrange multiplier), business-rules **R-CLR-003** (flow conservation)
 
 ## Preconditions (docs-as-code gate)
 
 > **Docs-gate почти снят** (ingress-close IN-014 завершён 2026-07-23). Остаётся
-> только **ADR-044/045 → accepted** (решение владельца). Код (`cpp/`) стартует после
+> только **ADR-047/045 → accepted** (решение владельца). Код (`cpp/`) стартует после
 > принятия ADR.
 
 - [x] `F-05A-feature.yaml` + README (addendum к F-05)
@@ -22,7 +22,7 @@
 - [x] Data schemas: PG (`asset_basis`, `vector_flow_segments`, `vectorization_runs`) + CH (`vector_clearing_results`, `surplus_events`, `vector_flow_segments_history`)
 - [x] Test plan `docs/10-testing/features/F-05A-test-plan.md`
 - [x] Acceptance criteria (feature.yaml) + business rules §F-05A (R-F05A-001..007) + FR/NFR-F05A
-- [ ] **ADR-044 + ADR-045 → `accepted`** (решения владельца: surplus prod-default; подтверждение OSQP) — **единственный оставшийся блокер**
+- [ ] **ADR-047 + ADR-048 → `accepted`** (решения владельца: surplus prod-default; подтверждение OSQP) — **единственный оставшийся блокер**
 
 ## Architecture decisions pending (решение владельца)
 
@@ -30,8 +30,8 @@
 | --- | --- | --- |
 | D1 | Placement: addendum к F-05 vs F-09 vs отдельная фича | CN-IN014-01 (рекоменд. F-05) |
 | D2 | Вход векторизации: `marketdata.raw` vs F-11 `venue.liquidity.fob` | CN-IN014-03 (рекоменд. F-11) |
-| D3 | QP backend | [ADR-045](../03-architecture/adr/ADR-045-qp-solver-backend.md) (OSQP) |
-| D4 | Surplus prod-default | [ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md) (MVP `REJECT_IF_RESIDUAL`) |
+| D3 | QP backend | [ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) (OSQP) |
+| D4 | Surplus prod-default | [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) (MVP `REJECT_IF_RESIDUAL`) |
 | D5 | Объём UI в первой итерации | CN-IN014-04 (MVP: W/x/Wx/source-trace) |
 
 ## Critical path
@@ -54,7 +54,7 @@
 - FR-F05A-001..011 → `functional-requirements.md`; NFR-F05A-001..005 → `non-functional-requirements.md`; entities (ExternalOrderLevel/AssetBasis/VectorFlowSegment/VectorClearingInput/Result) → `docs/04-domain/entities.md`; math (bid/ask w_i, D_i, Wx=0) → `business-rules.md §F-05A`. Owner: trading-domain-specialist.
 
 #### T-F05A-004. ADR → accepted
-- Довести [ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md), [ADR-045](../03-architecture/adr/ADR-045-qp-solver-backend.md) до `accepted` после решений D3/D4. Owner: solution-architect + владелец.
+- Довести [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md), [ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) до `accepted` после решений D3/D4. Owner: solution-architect + владелец.
 
 #### T-F05A-005. Test plan + coverage row
 - `docs/10-testing/features/F-05A-test-plan.md` (incl. real-orderbook fixtures policy) + строка F-05A в `docs/traceability/coverage-matrix.md`. Owner: test-architect.
@@ -117,10 +117,10 @@ AC: AC-F05A-012.
 
 ---
 
-### Phase 3 — QP solver (matching) — **критический путь** ([ADR-045](../03-architecture/adr/ADR-045-qp-solver-backend.md))
+### Phase 3 — QP solver (matching) — **критический путь** ([ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md))
 
 #### T-F05A-301. Подключить OSQP
-- FetchContent (pinned) в matching CMake + `docker/Dockerfile.service` **И** `.github/workflows/cpp-build.yml` синхронно (урок F-09 `libabsl`/protoc). Зависимости: T-F05A-004 (ADR-045 accepted).
+- FetchContent (pinned) в matching CMake + `docker/Dockerfile.service` **И** `.github/workflows/cpp-build.yml` синхронно (урок F-09 `libabsl`/protoc). Зависимости: T-F05A-004 (ADR-048 accepted).
 
 #### T-F05A-302. `vector_qp_solver`
 AC: AC-F05A-004, AC-F05A-005. (U-F05A-005/006/007/008)
@@ -130,7 +130,7 @@ AC: AC-F05A-004, AC-F05A-005. (U-F05A-005/006/007/008)
 AC: AC-F05A-004.
 - `r=Wx`, `residualNorm`, solver_status (converged/degraded/failed), solveTimeMs, iterations.
 
-#### T-F05A-304. Surplus policy ([ADR-044](../03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md))
+#### T-F05A-304. Surplus policy ([ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md))
 AC: AC-F05A-005, AC-F05A-007. (U-F05A-009)
 - `cpp/matching/src/domain/surplus_policy.hpp` (`REJECT_IF_RESIDUAL` default). Эмит `SurplusEvent`.
 
@@ -198,7 +198,7 @@ AC: AC-F05A-011.
 | --- | --- | --- | --- |
 | Корректность/детерминизм QP (OSQP) | high | fixed OSQP params; replay-тест как гейт | T-F05A-302/504 |
 | Размерности единиц (KI-F05A-003) | high | `dimensional_guard` + unit-тесты | T-F05A-204/502 |
-| Деньги/surplus (§9/§17) | high | ADR-044 + идемпотентный ledger; double-apply тесты | T-F05A-304/401 |
+| Деньги/surplus (§9/§17) | high | ADR-047 + идемпотентный ledger; double-apply тесты | T-F05A-304/401 |
 | Staleness внешних levels (KI-F05A-004) | major | freshness score + snapshot ts + latency buffer | T-F05A-205 |
 | CI-инфра (новый OSQP dep) | major | Dockerfile.service + cpp-build.yml синхронно | T-F05A-301 |
 | Combo/vector replay в backtest | major | закрыть вместе с AC-F09-010 | T-F05A-701 |
@@ -207,4 +207,4 @@ AC: AC-F05A-011.
 
 Feature `implemented` только при выполнении всех DoD-групп из IN-014 §10
 (Documentation / Contract / Data / Backend / UI / Testing / Observability) +
-ADR-044/045 `accepted` + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.
+ADR-047/045 `accepted` + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.
