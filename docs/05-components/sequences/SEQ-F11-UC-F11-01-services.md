@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F11-UC-F11-01-services
+level: sea
+---
+-->
+
 # SEQ-F11-UC-F11-01-services. External Market Data: service view
 
 ## Type

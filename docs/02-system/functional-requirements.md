@@ -145,7 +145,7 @@ Acceptance: F-14 ([UC-F14-01](use-cases/UC-F14-01-deposit-funds/use-case.md)).
 
 При достижении внутреннего inventory threshold система формирует `ExecutionIntent` (venue, symbol, side, qty, urgency).
 
-Acceptance: F-12 ([UC-F12-01](use-cases/UC-F12-01-execute-hedge/use-case.md)).
+Acceptance: F-12 ([UC-F12-01](use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)).
 
 ### FR-HEDGE-002. Размещение и учёт
 
@@ -194,6 +194,25 @@ Acceptance: F-01 ([UC-F01-01](use-cases/UC-F01-01-authenticate-user/use-case.md)
 Поддерживаемые роли: `demo`, `client`, `provider`, `operator`, `admin`. Operator может повышать роли при подтверждении KYC.
 
 Acceptance: F-01.
+
+## FR-F05A. Vectorized External Liquidity (F-09 clearing)
+
+Источник: IN-014. Feature — [F-05A](features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md).
+Правила — [business-rules.md §F-05A](../04-domain/business-rules.md#f-05a--vectorized-external-liquidity).
+
+- **FR-F05A-001.** Получать внешние order levels (CEX/DEX/AMM): `venue_id`, `source_order_id`, `pair`, `side`, `price`, `quantity`, `remaining_quantity`, `timestamp`, fees/buffers.
+- **FR-F05A-002.** Нормализовать level: проверить pair, определить base/quote, вычислить `P_eff = P ± fees ± latency_buffer ± slippage_buffer`, привести qty к base units, отбросить `qty ≤ 0`.
+- **FR-F05A-003.** Построить упорядоченный `AssetBasis` для всех активов из внешних levels и активных F-04/F-09 заявок.
+- **FR-F05A-004.** Построить `w_i`: bid `w=e_X−P_eff·e_Y`, ask `w=−e_X+P_eff·e_Y` (R-F05A-001).
+- **FR-F05A-005.** Построить flow-сегмент `(w_i, p^L=0, p^H=dHL, q=min(Q,rateCap), Q^max=Q)`.
+- **FR-F05A-006.** Собрать solver input: `W`, `pH`, `dHL`, `q`, `D=diag(dHL/q)`, `source_map` (no synthetic pair book, R-F05A-002).
+- **FR-F05A-007.** Решить QP: `max_x [xᵀpH − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-045).
+- **FR-F05A-008.** Проверить residual `r=Wx`, требовать `‖r‖ < tolerance` либо явный surplus.
+- **FR-F05A-009.** Сформировать исполнения: `executed_asset_vector = x_i·w_i`; source-trace сохранён.
+- **FR-F05A-010.** Представить результат как F-09 `ExecutionGroup` (`execution.mode = multileg_vector_solver`, ссылки на vectorized source levels).
+- **FR-F05A-011.** Публиковать `batch.outputs` / `fills` / `execution.groups` / `marketdata.snapshots`; surplus по `surplus_policy` (ADR-044).
+
+Acceptance: F-05A (AC-F05A-001..015).
 
 ## Связанные документы
 

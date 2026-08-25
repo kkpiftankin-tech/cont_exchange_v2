@@ -1,0 +1,204 @@
+featureId: F-12
+
+useCases:
+  - id: UC-F12-01-auto-hedge-after-batch
+    role: primary
+    path: docs/02-system/use-cases/UC-F12-01-auto-hedge-after-batch/
+  - id: UC-F12-02-manual-operator-hedge
+    role: alternative-operator
+    path: docs/02-system/use-cases/UC-F12-02-manual-operator-hedge/
+  - id: UC-F12-03-partial-fill-retry
+    role: alternative-flow
+    path: docs/02-system/use-cases/UC-F12-03-partial-fill-retry/
+  - id: UC-F12-04-rejection-fallback
+    role: alternative-flow
+    path: docs/02-system/use-cases/UC-F12-04-rejection-fallback/
+  - id: UC-F12-05-timeout-underfilled-reconciliation
+    role: error-flow
+    path: docs/02-system/use-cases/UC-F12-05-timeout-underfilled-reconciliation/
+
+components:
+  - id: venue-execution-adapter
+    role: primary
+    codePath: cpp/venues
+    status: partial  # hosted внутри cpp/venues; нет отдельного сервиса
+  - id: execution-planning
+    role: primary-orchestrator
+    codePath: cpp/matching/src/app  # IExecutionPlanningUseCases stub
+    status: not-implemented
+  - id: matching-fob-core
+    role: intent-emitter
+    codePath: cpp/matching
+    status: partial  # HedgeTriggerPolicy, ExecutionIntentBuilder, HedgeExecutionIntentsPublisher есть
+  - id: risk-manager
+    role: pre-hedge-gate
+    codePath: cpp/risk
+    status: not-implemented  # PreHedgeCheck RPC отсутствует
+  - id: external-venues
+    role: connector
+    codePath: cpp/venues/src/infra
+    status: partial  # CexWsRest, DexAmmRpc, VenueSim adapters существуют
+  - id: ledger
+    role: hedge-pnl-consumer
+    codePath: cpp/ledger
+    status: partial  # ApplyExecutionReport только логирует
+  - id: observability-reporting
+    role: telemetry-consumer
+    codePath: cpp/observability
+    status: planned
+  - id: market-data
+    role: reference-mid-and-venue-health-relay
+    codePath: cpp/market_data
+    status: partial
+
+protoContracts:
+  - file: contracts/proto/fob/execution/v1/execution.proto
+    role: ExecutionIntent-ExecutionReport-source-of-truth
+  - file: contracts/proto/fob/hedge/v1/hedge.proto
+    role: HedgeFlow-ChildOrder-source-of-truth
+  - file: contracts/proto/fob/risk/v1/risk.proto
+    role: PreHedgeCheck-RPC-extension-planned
+  - file: contracts/proto/fob/ledger/v1/ledger.proto
+    role: ApplyExecutionReport-RPC
+  - file: contracts/proto/fob/venue/v1/venue.proto
+    role: VenueSnapshot-SideLiquidityCurve-from-F-11
+  - file: contracts/openapi/fob/hedge/v1/api/hedge.yaml
+    role: REST-API-HedgeFlow-Monitor
+
+kafkaTopics:
+  - name: execution.intents
+    direction: in/out
+    producers:
+      - matching       # auto-hedge after batch
+      - execution-planning  # retry
+      - gateway        # manual override (планируется)
+    consumer: execution-planning  # routing decision; затем -> venue-execution-adapter
+    partitionKey: hedge_flow_id
+    status: created  # в infra/kafka/create_topics.sh
+  - name: execution.venue
+    direction: out
+    producer: venue-execution-adapter
+    consumers:
+      - ledger
+      - risk-manager
+      - clickhouse
+      - observability-reporting
+      - backtest-replay
+    partitionKey: hedge_flow_id
+    status: created  # в infra/kafka/create_topics.sh; legacy execution.reports также существует (Conflict Note)
+  - name: venue.liquidity.fob
+    direction: in
+    producer: external-venues  # F-11
+    consumer: execution-planning  # routing plan input
+    status: created  # F-11
+  - name: venue.health
+    direction: in
+    producer: external-venues  # F-11
+    consumer: execution-planning  # exclude unhealthy venues
+    status: created  # F-11
+  - name: risk.alerts
+    direction: out
+    producer: risk-manager
+    consumers:
+      - observability-reporting
+      - operator-ui
+    status: existing  # F-04, F-07, F-08
+
+grpcServices:
+  - service: fob.risk.v1.RiskService
+    method: PreHedgeCheck
+    role: F12-8-pre-hedge-gate
+    status: planned  # RPC не определён
+  - service: fob.ledger.v1.LedgerService
+    method: ApplyExecutionReport
+    role: alternative-to-kafka-execution.venue
+    status: partial  # метод есть, расчёт HedgePnL не реализован
+
+storage:
+  postgresql:
+    - name: hedgeflows
+      role: hedge-session-state
+      schemaSource: docs/07-data/hedgeflows.md
+      ddlStatus: spec-only  # не в infra/postgres/init.sql
+    - name: child_orders
+      role: per-venue-child-orders
+      schemaSource: docs/07-data/child-orders.md
+      ddlStatus: spec-only
+  clickhouse:
+    - name: execution_reports
+      role: execution-history-analytics
+      schemaSource: docs/07-data/execution-reports.md
+      ddlStatus: spec-only
+
+tests:
+  unit:
+    expected:
+      - U1-happy-path
+      - U2-partial-retry
+      - U3-overfill-guard
+      - U4-rejection-fallback
+      - U5-timeout-underfilled
+      - U6-urgency-order-type
+      - U7-reconciliation
+      - U8-client-order-id-idempotency
+      - U9-multi-venue-split
+      - U10-pre-hedge-risk-rejection
+    actual:
+      - cpp/matching/tests/app/hedge_trigger_policy_test.cpp
+      - cpp/matching/tests/app/execution_intent_builder_test.cpp
+      - cpp/matching/tests/app/external_venue_filter_test.cpp
+      - cpp/matching/tests/app/position_snapshot_calculator_test.cpp
+      - cpp/venues/tests/execute_on_venue_test.cpp
+      - cpp/venues/tests/execution_report_producer_test.cpp
+      - cpp/venues/tests/venue_sim_adapter_test.cpp
+      - cpp/venues/tests/simulated_venue_adapter_test.cpp
+      - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+      - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+  integration:
+    expected:
+      - IT-1-full-cycle
+      - IT-2-partial-retry
+      - IT-3-rejection-fallback
+      - IT-4-timeout-underfilled
+      - IT-5-sla-latency
+      - IT-6-load-throughput
+      - IT-7-backtest-parity
+    actual:
+      - cpp/venues/tests/backtest_parity_check_test.cpp
+      - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
+
+sequenceDiagrams:
+  system:
+    - docs/02-system/use-cases/UC-F12-01-auto-hedge-after-batch/sequences/SEQ-UC-F12-01-system.md
+    - docs/02-system/use-cases/UC-F12-02-manual-operator-hedge/sequences/SEQ-UC-F12-02-system.md
+    - docs/02-system/use-cases/UC-F12-03-partial-fill-retry/sequences/SEQ-UC-F12-03-system.md
+    - docs/02-system/use-cases/UC-F12-04-rejection-fallback/sequences/SEQ-UC-F12-04-system.md
+    - docs/02-system/use-cases/UC-F12-05-timeout-underfilled-reconciliation/sequences/SEQ-UC-F12-05-system.md
+  service:
+    - docs/05-components/sequences/SEQ-F12-01-auto-hedge-services.md
+    - docs/05-components/sequences/SEQ-F12-02-rejection-fallback-services.md
+    - docs/05-components/sequences/SEQ-F12-03-error-scenarios-services.md
+
+dependentFeatures:
+  - id: F-04
+    role: emits-clearing-price-as-referenceMid
+    note: BatchResult clearing price используется как referenceMid в ExecutionIntent
+  - id: F-11
+    role: provides-venue-liquidity-and-health
+    note: Execution Planning подписывается на venue.liquidity.fob и venue.health
+  - id: F-06
+    role: consumes-execution.venue-for-position-update
+    note: F-06 (Positions/PnL/Margin) обновляет позиции из ExecutionReport
+  - id: F-07
+    role: provides-PreHedgeCheck-extension
+    note: F-07 (Pre-trade Risk) расширяется методом PreHedgeCheck для F-12-8
+  - id: F-08
+    role: post-trade-exposure-monitoring
+  - id: F-15
+    role: backtest-counterpart
+    note: F-15 (Backtest/Replay) использует VenueSim для parity-проверки
+
+incomingDocSources:
+  - id: IN-005
+    file: incoming-docs/2026-05-20-F-12-execution-hedge-v1.md
+    fragmentMap: incoming-docs/IN-005.fragment-map.md

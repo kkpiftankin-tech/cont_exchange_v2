@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F07-UC-F07-01-services
+level: sea
+---
+-->
+
 # SEQ-F07-UC-F07-01-services. Pre-trade Risk: service view
 
 ## Type

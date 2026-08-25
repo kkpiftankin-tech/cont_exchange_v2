@@ -1,6 +1,47 @@
+// ============================================================================
+// matching_loop.cpp — orchestration ядро F-04: запускает batch cycle и
+// поддерживает Kafka consumer для входящих заявок / venue.liquidity / venue.health.
+//
+// Назначение и физический смысл:
+//   MatchingLoop — главный класс matching-сервиса. Управляет:
+//     * двумя background threads: consume_orders_loop (Kafka consumer) и
+//       batch_timer_loop (periodic ticker, по умолчанию 5 сек);
+//     * глобальным state: active_ (in-memory FlowOrder map), order_index_
+//       (UI-friendly snapshot для /orders/<id> endpoint), planner_inputs_cache_
+//       (external venue liquidity + health);
+//     * вызывает RunBatchUseCase → solver → publish → ledger;
+//     * F-12: hedge trigger evaluation + multi-venue routing (DoD-2 PR-F12-15) +
+//       execution intent publication.
+//
+// Архитектура thread'ов:
+//   * consume_orders_loop: poll Kafka 500ms, маршрутизирует topic → handler.
+//     Topics: "orders.normalized", "venue.liquidity.fob", "venue.health".
+//   * batch_timer_loop: sleep(batch_interval_ms_) → run_one_batch().
+//     Interval может hot-reload'иться через solver_config_repo_.
+//
+// Источник flow_orders:
+//   * Если flow_order_repository_ задан (MATCHING_POSTGRES_DSN) → PG (canonical).
+//   * Иначе → in-memory active_ (Kafka-fed legacy path).
+//
+// Ключевые исторические фиксы:
+//   * PR-F02-003: order_index_ status sync с расширением switch на все
+//     7 FlowOrderStatus значений + guard на filled_qty >= total_qty.
+//   * PR-F02-006: order_updates pre-pass читает batch.order_updates() ДО
+//     refresh active_orders — иначе race теряет terminal updates.
+//   * PR-F12-5: HedgeTriggerConfig / HedgeExecutionIntentConfig из env.
+//   * PR-F12-15 (F-12 DoD-2): multi-venue routing — split target_qty
+//     proportionally to L(v) между allowed_venues.
+//
+// CRITICAL: ВСЁ что mutate state требует locking. order_index_mutex_ — для
+// order_index_; planner_inputs_cache_mutex_ — для planner_inputs_cache_.
+// active_ — НЕ под mutex'ом (single-thread access из batch loop + consumer
+// гарантирует исключаемость через design).
+// ============================================================================
+
 #include "app/matching_loop.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -10,6 +51,10 @@
 #include <utility>
 #include <vector>
 
+#include "fob/execution/v1/execution.pb.h"
+
+#include "app/execution_planner.hpp"
+#include "app/combo_external_routing.hpp"
 #include "app/hedge_execution_intents_publisher.hpp"
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"
@@ -24,6 +69,8 @@ namespace cex::matching::app {
 
 namespace {
 
+/// Преобразование vector<FlowOrder> → map<order_id, FlowOrder> для быстрого
+/// lookup'а. Reserve для O(1) bucket allocation.
 std::unordered_map<std::string, domain::FlowOrder> MapRepoOrders(
     const std::vector<domain::FlowOrder>& repo_orders) {
   std::unordered_map<std::string, domain::FlowOrder> result;
@@ -34,6 +81,9 @@ std::unordered_map<std::string, domain::FlowOrder> MapRepoOrders(
   return result;
 }
 
+/// Snapshot map → vector — для передачи в solver / market_data_client.
+/// Copy-by-value (FlowOrder copyable) — изменения в snapshot'е не влияют
+/// на исходную map.
 std::vector<domain::FlowOrder> SnapshotActiveOrders(
     const std::unordered_map<std::string, domain::FlowOrder>& active_orders) {
   std::vector<domain::FlowOrder> snapshot;
@@ -45,11 +95,15 @@ std::vector<domain::FlowOrder> SnapshotActiveOrders(
   return snapshot;
 }
 
+/// Normalized price limits для planner-forecast. nullopt = side disabled.
 struct NormalizedOrderPriceLimits {
   std::optional<double> buy_limit_price;
   std::optional<double> sell_limit_price;
 };
 
+/// Извлекает [normalized_low, normalized_high] с учётом legacy signed-by-side
+/// convention (PR-F02-005): для SELL заявок p_low/p_high stored as negated,
+/// здесь возвращаем business-facing positive values.
 NormalizedOrderPriceLimits NormalizeOrderPriceLimits(
     const domain::FlowOrder& order) {
   const double raw_low = static_cast<double>(order.p_low);
@@ -81,6 +135,153 @@ NormalizedOrderPriceLimits NormalizeOrderPriceLimits(
   }
 
   return limits;
+}
+
+// F-12 / PR-F12-5: parse a numeric string like "0.05" or "50000" into a
+// fixed-point Decimal{units, scale}. Empty / unparseable / non-finite input
+// returns zero (which the policy treats as "threshold disabled").
+//
+/// Дубликат ParseDecimalString из cpp/risk/src/app/risk_uc.cpp — намеренно
+/// не вынесен в common чтобы избежать cross-service refactor на PR-F12-5.
+/// При будущем cleanup'е стоит вынести в cex::common.
+cex::common::Decimal ParseDecimalString(const std::string& raw) {
+  if (raw.empty()) return cex::common::Decimal::zero();
+  std::string s = raw;
+  bool negative = false;
+  if (s[0] == '-') {
+    negative = true;
+    s.erase(0, 1);
+  } else if (s[0] == '+') {
+    s.erase(0, 1);
+  }
+  if (s.empty()) return cex::common::Decimal::zero();
+
+  const auto dot = s.find('.');
+  std::string int_part;
+  std::string frac_part;
+  if (dot == std::string::npos) {
+    int_part = s;
+  } else {
+    int_part = s.substr(0, dot);
+    frac_part = s.substr(dot + 1);
+  }
+  // strip trailing zeros from fractional part to keep scale minimal
+  while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
+  if (int_part.empty()) int_part = "0";
+
+  const std::string combined = int_part + frac_part;
+  try {
+    int64_t units = std::stoll(combined);
+    if (negative) units = -units;
+    return cex::common::Decimal{units, static_cast<int32_t>(frac_part.size())};
+  } catch (...) {
+    return cex::common::Decimal::zero();
+  }
+}
+
+// F-12 / PR-F12-5: convert "BTC/USDT" → "BTC_USDT" for env-var suffix.
+//
+/// Env vars не могут содержать '/' или '-'. Конвертируем для построения
+/// per-symbol env var names типа HEDGE_TRIGGER_QTY_BTC_USDT.
+std::string SymbolToEnvSuffix(const std::string& symbol) {
+  std::string out = symbol;
+  for (auto& c : out) {
+    if (c == '/' || c == '-') c = '_';
+  }
+  return out;
+}
+
+// F-12 / PR-F12-5: load HedgeTriggerConfig from env. Defaults are zero, which
+// disables the trigger entirely (matches pre-PR behaviour). Active deployments
+// set HEDGE_TRIGGER_QTY_DEFAULT / HEDGE_TRIGGER_NOTIONAL_DEFAULT, or per-symbol
+// HEDGE_TRIGGER_QTY_BTC_USDT etc., and list active symbols in HEDGE_TRIGGER_SYMBOLS.
+//
+/// Per-symbol thresholds OVERRIDE default. Если HEDGE_TRIGGER_SYMBOLS пуст —
+/// per_symbol_thresholds пустой, и применяется только default (если он > 0).
+HedgeTriggerConfig LoadHedgeTriggerConfig() {
+  HedgeTriggerConfig config;
+  config.default_thresholds.threshold_qty = ParseDecimalString(
+      cex::common::Env::get_string("HEDGE_TRIGGER_QTY_DEFAULT", "0"));
+  config.default_thresholds.threshold_notional = ParseDecimalString(
+      cex::common::Env::get_string("HEDGE_TRIGGER_NOTIONAL_DEFAULT", "0"));
+
+  const auto symbols_csv =
+      cex::common::Env::get_string("HEDGE_TRIGGER_SYMBOLS", "");
+  if (symbols_csv.empty()) return config;
+
+  size_t start = 0;
+  while (start <= symbols_csv.size()) {
+    auto end = symbols_csv.find(',', start);
+    if (end == std::string::npos) end = symbols_csv.size();
+    std::string symbol = symbols_csv.substr(start, end - start);
+    // trim whitespace
+    while (!symbol.empty() && std::isspace(static_cast<unsigned char>(symbol.front()))) symbol.erase(symbol.begin());
+    while (!symbol.empty() && std::isspace(static_cast<unsigned char>(symbol.back()))) symbol.pop_back();
+    if (!symbol.empty()) {
+      const auto suffix = SymbolToEnvSuffix(symbol);
+      HedgeTriggerThreshold threshold;
+      threshold.threshold_qty = ParseDecimalString(
+          cex::common::Env::get_string("HEDGE_TRIGGER_QTY_" + suffix, "0"));
+      threshold.threshold_notional = ParseDecimalString(
+          cex::common::Env::get_string("HEDGE_TRIGGER_NOTIONAL_" + suffix, "0"));
+      config.per_symbol_thresholds.emplace(symbol, threshold);
+    }
+    start = end + 1;
+  }
+  return config;
+}
+
+// F-12 / PR-F12-5: parse comma-separated string into a vector, trimming
+// surrounding whitespace per item and skipping empties.
+std::vector<std::string> ParseCsvList(const std::string& raw) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (start <= raw.size()) {
+    auto end = raw.find(',', start);
+    if (end == std::string::npos) end = raw.size();
+    std::string item = raw.substr(start, end - start);
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+    if (!item.empty()) out.push_back(std::move(item));
+    start = end + 1;
+  }
+  return out;
+}
+
+fob::execution::v1::ExecutionUrgency ParseUrgency(const std::string& raw) {
+  if (raw == "LOW") return fob::execution::v1::URGENCY_LOW;
+  if (raw == "HIGH") return fob::execution::v1::URGENCY_HIGH;
+  return fob::execution::v1::URGENCY_MEDIUM;
+}
+
+fob::execution::v1::ExecutionStrategy ParseStrategy(const std::string& raw) {
+  if (raw == "LIMIT") return fob::execution::v1::EXEC_STRATEGY_LIMIT;
+  if (raw == "TWAP") return fob::execution::v1::EXEC_STRATEGY_TWAP;
+  if (raw == "POST_ONLY") return fob::execution::v1::EXEC_STRATEGY_POST_ONLY;
+  return fob::execution::v1::EXEC_STRATEGY_MARKET;
+}
+
+fob::common::v1::TimeInForce ParseTif(const std::string& raw) {
+  if (raw == "GTC") return fob::common::v1::TIF_GTC;
+  if (raw == "FOK") return fob::common::v1::TIF_FOK;
+  return fob::common::v1::TIF_IOC;
+}
+
+// F-12 / PR-F12-5: load HedgeExecutionIntentConfig from env.
+HedgeExecutionIntentConfig LoadHedgeExecutionIntentConfig() {
+  HedgeExecutionIntentConfig config;
+  config.urgency = ParseUrgency(
+      cex::common::Env::get_string("HEDGE_INTENT_URGENCY", "MEDIUM"));
+  config.strategy = ParseStrategy(
+      cex::common::Env::get_string("HEDGE_INTENT_STRATEGY", "MARKET"));
+  config.tif = ParseTif(cex::common::Env::get_string("HEDGE_INTENT_TIF", "IOC"));
+  config.timeout_ms = static_cast<int64_t>(
+      cex::common::Env::get_int("HEDGE_INTENT_TIMEOUT_MS", 30000));
+  config.max_slippage_bps = static_cast<int32_t>(
+      cex::common::Env::get_int("HEDGE_INTENT_MAX_SLIPPAGE_BPS", 50));
+  config.allowed_venues = ParseCsvList(
+      cex::common::Env::get_string("HEDGE_INTENT_ALLOWED_VENUES", ""));
+  return config;
 }
 
 VenueThresholds LoadVenueHealthThresholds() {
@@ -125,13 +326,28 @@ std::string CurveIdForLog(const fob::venue::v1::VenueLiquidityCurve& curve) {
 }
 }  // namespace
 
+// ============================================================================
+// MatchingLoop конструктор.
+//
+// Принимает зависимости через DI:
+//   brokers              — Kafka broker list "host1:9092,host2:9092".
+//   batch_interval_ms    — interval между batch tick'ами (5000 default).
+//   flow_order_repository — nullable, для PG-режима чтения flow_orders.
+//   solver_config_repo   — для hot-reload solver config из PG (nullable).
+//   market_data_client   — для reference prices fetch (nullable).
+//   metrics              — Prometheus metrics обёртка.
+//
+// run_batch_uc_ инициализируется с lambda как publish_batch callback —
+// она и пишет в Kafka, и записывает metrics.
+// ============================================================================
 MatchingLoop::MatchingLoop(
     const std::string& brokers,
     int batch_interval_ms,
     std::shared_ptr<domain::IFlowOrderRepository> flow_order_repository,
     std::unique_ptr<domain::SolverConfigRepositoryPort> solver_config_repo,
     std::shared_ptr<infra::MarketDataClient> market_data_client,
-    SolverMetrics& metrics)
+    SolverMetrics& metrics,
+    const std::string& postgres_dsn)
     : brokers_(brokers),
       batch_interval_ms_(batch_interval_ms),
       producer_({.brokers = brokers, .client_id = "matching"}),
@@ -144,20 +360,85 @@ MatchingLoop::MatchingLoop(
                     [this](const fob::matching::v1::BatchResult& batch) {
                       metrics_.ObserveBatch(batch);
                       return publish_batch(batch);
-                    }),
+                    },
+                    LoadHedgeTriggerConfig(),
+                    LoadHedgeExecutionIntentConfig()),
       solver_config_repo_(std::move(solver_config_repo)),
       market_data_client_(std::move(market_data_client)),
       flow_order_repository_(std::move(flow_order_repository)),
-      planner_inputs_cache_(LoadVenueHealthThresholds()) {}
+      planner_inputs_cache_(LoadVenueHealthThresholds()) {
+  // F-09 (T-F09-048): включаем grouped combo-цикл при заданном PG DSN.
+  // Любая ошибка инициализации → grouped выключен, single-leg F-04 не затронут.
+  if (!postgres_dsn.empty()) {
+    try {
+      active_groups_loader_ =
+          std::make_unique<infra::PostgresActiveGroupsLoader>(postgres_dsn);
+      eg_repo_ = std::make_unique<infra::PostgresExecutionGroupsRepository>(postgres_dsn);
+      child_graph_repo_ = std::make_unique<infra::PostgresChildGraphRepository>(postgres_dsn);
+      compensation_repo_ = std::make_unique<infra::PostgresComboCompensationRepository>(postgres_dsn);
+      eg_producer_.emplace(producer_);
+      solve_grouped_uc_.emplace(grouped_solver_);
+      grouped_enabled_ = true;
+      cex::common::log_json("INFO", "Matching F-09 grouped execution enabled", {});
+    } catch (const std::exception& ex) {
+      grouped_enabled_ = false;
+      cex::common::log_json("ERROR",
+                            "Failed to enable F-09 grouped execution; staying single-leg only",
+                            {{"error", ex.what()}});
+    }
+  }
+}
 
+// ============================================================================
+// start — запуск consumer + batch loop threads.
+//
+// Шаги:
+//   1. Log effective F-12 config (для operator confirmation).
+//   2. running_ → true.
+//   3. consumer_.subscribe три topic.
+//   4. Spawn 2 threads: consume_orders_loop, batch_timer_loop.
+//
+// CRITICAL: вызывать только один раз. Повторный start без stop() leak'нет threads.
+// ============================================================================
 void MatchingLoop::start() {
+  // F-12 / PR-F12-5: log effective hedge trigger config + intent config so
+  // operators can confirm thresholds without restarting the service.
+  const auto trigger_cfg = LoadHedgeTriggerConfig();
+  const auto intent_cfg = LoadHedgeExecutionIntentConfig();
+  std::string venues_csv;
+  for (size_t i = 0; i < intent_cfg.allowed_venues.size(); ++i) {
+    if (i > 0) venues_csv += ",";
+    venues_csv += intent_cfg.allowed_venues[i];
+  }
+  std::map<std::string, std::string> log_fields = {
+      {"default_threshold_qty",
+       trigger_cfg.default_thresholds.threshold_qty.to_string()},
+      {"default_threshold_notional",
+       trigger_cfg.default_thresholds.threshold_notional.to_string()},
+      {"intent_urgency", std::to_string(static_cast<int>(intent_cfg.urgency))},
+      {"intent_strategy", std::to_string(static_cast<int>(intent_cfg.strategy))},
+      {"intent_tif", std::to_string(static_cast<int>(intent_cfg.tif))},
+      {"intent_timeout_ms", std::to_string(intent_cfg.timeout_ms)},
+      {"intent_max_slippage_bps", std::to_string(intent_cfg.max_slippage_bps)},
+      {"intent_allowed_venues", venues_csv},
+      {"per_symbol_overrides_count",
+       std::to_string(trigger_cfg.per_symbol_thresholds.size())}};
+  for (const auto& [sym, th] : trigger_cfg.per_symbol_thresholds) {
+    log_fields["sym:" + sym + ":qty"] = th.threshold_qty.to_string();
+    log_fields["sym:" + sym + ":notional"] = th.threshold_notional.to_string();
+  }
+  cex::common::log_json("INFO", "F-12 hedge config loaded", log_fields);
+
   running_.store(true);
   consumer_.subscribe(
-      {"orders.normalized", "venue.liquidity.fob", "venue.health"});
+      {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue"});
   t_consume_ = std::thread([this] { consume_orders_loop(); });
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
 
+/// Graceful shutdown: clear running_ flag, ждём threads.
+/// join() — блокирующий, но threads должны завершиться в течение 500ms
+/// (один Kafka poll cycle) или batch_interval_ms_ (sleep period).
 void MatchingLoop::stop() {
   running_.store(false);
   if (t_consume_.joinable()) {
@@ -168,6 +449,16 @@ void MatchingLoop::stop() {
   }
 }
 
+// ============================================================================
+// consume_orders_loop — Kafka consumer thread.
+//
+// Polls 500ms за раз. Маршрутизирует payload в handler по topic:
+//   "orders.normalized" → on_order_event (create/cancel/amend).
+//   "venue.liquidity.fob" → on_liquidity_curve (F-11 LOB→FOB curves).
+//   "venue.health" → on_venue_health (F-11 venue circuit-breaker state).
+//
+// poll_once возвращает false при transport-level fail → break.
+// ============================================================================
 void MatchingLoop::consume_orders_loop() {
   while (running_.load()) {
     bool ok = consumer_.poll_once(
@@ -208,6 +499,17 @@ void MatchingLoop::consume_orders_loop() {
             on_venue_health(*health);
             return;
           }
+
+          // MVP-5 (ADR-037): провал внешней combo-ноги → требование компенсации.
+          if (topic == "execution.venue") {
+            fob::execution::v1::ExecutionReport report;
+            if (!cex::common::from_bytes(payload, report)) {
+              cex::common::log_json("ERROR", "Failed to parse ExecutionReport (execution.venue)");
+              return;
+            }
+            on_external_execution_report(report);
+            return;
+          }
         });
     if (!ok) {
       break;
@@ -215,6 +517,103 @@ void MatchingLoop::consume_orders_loop() {
   }
 }
 
+// on_external_execution_report — MVP-5 (ADR-037). Провал внешней combo-ноги
+// (rejected/cancelled/expired) фиксируется как combo_compensations(pending).
+// Успех/partial игнорируются (ledger постит). Не-combo internal_order_id (hedge)
+// отсеиваются по FindComboLegParent. Идемпотентно по report_id.
+void MatchingLoop::on_external_execution_report(
+    const fob::execution::v1::ExecutionReport& report) {
+  if (!compensation_repo_) {
+    return;
+  }
+  // report не несёт internal_order_id; линковка через client_order_id.
+  // ADR-043: client_order_id структурный "{leg_id}#{chunk}" — берём leg_id до '#'
+  // (combo external дробится на chunk'и, у каждого свой client_order_id/ChildOrder).
+  const std::string& cid = report.client_order_id();
+  if (cid.empty()) {
+    return;
+  }
+  const auto hash_pos = cid.find('#');
+  const std::string leg_id = (hash_pos == std::string::npos) ? cid : cid.substr(0, hash_pos);
+
+  const auto st = report.status();
+  const bool is_fill = st == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED;
+  const char* reason = nullptr;
+  switch (st) {
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED: reason = "rejected"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED: reason = "cancelled"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED: reason = "expired"; break;
+    case fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED: break;  // терминальный успех
+    default: return;  // NEW / PARTIALLY_FILLED → не терминально
+  }
+  try {
+    const auto parent = compensation_repo_->FindComboLegParent(leg_id);
+    if (!parent.has_value()) {
+      return;  // не combo-нога (hedge / прочий internal_order_id)
+    }
+    // Терминальный отчёт по chunk'у → снимаем in-flight, чтобы следующий батч мог
+    // дослать остаток (rate-throttle внешней ноги).
+    {
+      std::lock_guard<std::mutex> lk(external_inflight_mu_);
+      external_in_flight_.erase(leg_id);
+    }
+
+    if (is_fill) {
+      // Внешняя нога дробится по qRate: каждый chunk-отчёт аккумулирует filled_cum
+      // (clamp до q_max); статус 'filled' только при достижении q_max, иначе
+      // 'partially_filled' (matching дошлёт остаток следующим батчем).
+      if (compensation_repo_->MarkExternalLegFilled(
+              leg_id, cex::common::Decimal::from_proto(report.filled_qty()))) {
+        cex::common::log_json("INFO", "Combo external leg chunk filled",
+                              {{"parent_order_id", *parent}, {"leg_id", leg_id},
+                               {"chunk_qty", cex::common::Decimal::from_proto(report.filled_qty()).to_string()}});
+      }
+      return;
+    }
+
+    // reject/cancel/expire: компенсацию пишем ТОЛЬКО на первый терминальный переход
+    // ноги (active→failed_external) → ровно ОДНА компенсация на ногу, без роста от
+    // повторного routing'а (MVP-5 fix). Loader исключает failed_external.
+    if (compensation_repo_->MarkExternalLegFailed(leg_id)) {
+      // Реальная внутренняя экспозиция combo (Σ filled_cum внутренних ног, кроме
+      // упавшей) — её и нужно откатить. НЕ report.filled_qty(): у reject'а он 0,
+      // из-за чего раньше компенсации писались с qty=0 и ничего не откатывали.
+      const cex::common::Decimal internal_filled =
+          compensation_repo_->SumInternalFilledQty(*parent, leg_id);
+      if (cex::common::Decimal::cmp(internal_filled, cex::common::Decimal::zero()) <= 0) {
+        // Откатывать нечего → компенсация не нужна (нога просто failed_external).
+        cex::common::log_json("INFO", "Combo external leg failed — no internal fill, no compensation",
+                              {{"parent_order_id", *parent}, {"leg_id", leg_id}, {"reason", reason}});
+      } else {
+        infra::ComboCompensation c;
+        c.parent_order_id = *parent;
+        c.leg_id = leg_id;
+        c.report_id = report.report_id();
+        c.reason = reason;
+        c.internal_filled_qty = internal_filled;
+        compensation_repo_->RecordPending(c);
+        cex::common::log_json("WARN", "Combo external leg failed — compensation pending",
+                              {{"parent_order_id", *parent},
+                               {"leg_id", leg_id},
+                               {"reason", reason},
+                               {"report_id", c.report_id},
+                               {"internal_filled_qty", internal_filled.to_string()}});
+      }
+    }
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Compensation check failed",
+                          {{"leg_id", leg_id}, {"error", ex.what()}});
+  }
+}
+
+// ============================================================================
+// batch_timer_loop — periodic batch ticker thread.
+//
+// sleep(batch_interval_ms_) → run_one_batch() → repeat.
+// batch_interval_ms_ может hot-reload'иться внутри refresh_batch_interval_ms()
+// из solver_config_repo_ — это позволяет operator изменять interval без
+// рестарта сервиса.
+// ============================================================================
 void MatchingLoop::batch_timer_loop() {
   using namespace std::chrono;
   while (running_.load()) {
@@ -226,6 +625,9 @@ void MatchingLoop::batch_timer_loop() {
   }
 }
 
+/// Hot-reload solver config + batch_interval из PG.
+/// Если solver_config_repo_ не задан — fallback на батч-interval из конструктора.
+/// При ошибке — log + сохраняем текущее значение (не паника, не падаем).
 int MatchingLoop::refresh_batch_interval_ms() {
   if (!solver_config_repo_) {
     return batch_interval_ms_;
@@ -257,6 +659,19 @@ int MatchingLoop::refresh_batch_interval_ms() {
   return batch_interval_ms_;
 }
 
+// ============================================================================
+// on_order_event — handler для orders.normalized Kafka.
+//
+// Три типа event'ов:
+//   create  → FlowOrder.from_proto + index_order + active_[id] = order.
+//   cancel  → erase из active_ + index_terminal(filled_qty, "cancelled").
+//   amend   → in-place update полей q_max / p_low / p_high / q_rate.
+//
+// Запись в active_ без mutex'а — single-thread access из consumer thread.
+// batch_timer_loop читает active_ для snapshot — потенциальный race,
+// но FlowOrder copy безопасен (это просто struct), worst case: solver
+// видит stale view одной заявки.
+// ============================================================================
 void MatchingLoop::on_order_event(
     const fob::orders::v1::OrdersNormalized& evt) {
   if (evt.has_create()) {
@@ -314,6 +729,13 @@ void MatchingLoop::on_order_event(
   }
 }
 
+// ============================================================================
+// on_liquidity_curve — handler для venue.liquidity.fob Kafka (F-11).
+//
+// Обновляет planner_inputs_cache_ (under mutex) — это shared state между
+// run_one_batch() и этим handler'ом.
+// usable=false означает venue health или confidence слишком низкие.
+// ============================================================================
 void MatchingLoop::on_liquidity_curve(
     const fob::venue::v1::VenueLiquidityCurve& curve) {
   PlannerVenueInput input;
@@ -376,6 +798,13 @@ void MatchingLoop::on_liquidity_curve(
   });
 }
 
+// ============================================================================
+// on_venue_health — handler для venue.health Kafka (F-11).
+//
+// Обновляет venue health state в cache. Может deactivate venue для последующих
+// batches. affected_inputs — list curves, чья usability изменилась из-за
+// этого health update.
+// ============================================================================
 void MatchingLoop::on_venue_health(const fob::venue::v1::VenueHealth& health) {
   HealthUpsertResult update;
   std::size_t cached_curves = 0;
@@ -445,12 +874,19 @@ void MatchingLoop::on_venue_health(const fob::venue::v1::VenueHealth& health) {
   }
 }
 
+/// Filter cached venue curves через венозные health gates.
+/// Public wrapper с lock. Используется в legacy paths / tests.
 domain::ExternalLiquidityBySymbol MatchingLoop::filtered_external_liquidity()
     const {
   std::lock_guard<std::mutex> lock(planner_inputs_cache_mutex_);
   return filtered_external_liquidity_unlocked();
 }
 
+/// Internal version — caller обязан удерживать planner_inputs_cache_mutex_.
+/// Также проверяет env override MATCHING_DISABLE_EXTERNAL_VENUES (kill-switch
+/// для external routing на случай incident'а).
+/// static const local — Meyers singleton pattern, инициализируется один раз
+/// при первом вызове (thread-safe в C++11+).
 domain::ExternalLiquidityBySymbol
 MatchingLoop::filtered_external_liquidity_unlocked() const {
   static const bool external_disabled = []() {
@@ -468,12 +904,197 @@ MatchingLoop::filtered_external_liquidity_unlocked() const {
   return planner_inputs_cache_.LegacyBestProjection();
 }
 
+// ============================================================================
+// run_one_batch — главный batch cycle. Вызывается batch_timer_loop'ом.
+//
+// Шаги:
+//   1. Generate batch_id (UUID v4) + текущее время.
+//   2. Source flow orders: PG (если flow_order_repository_) ИЛИ in-memory active_.
+//   3. Fetch reference prices через MarketData (для solver Init initial π).
+//   4. Per-order planner forecast (F-11 venue comparisons).
+//   5. Filter usable external liquidity по health gates.
+//   6. RunBatchUseCase.Execute → BatchResult (solver + cap + publish).
+//   7. PR-F02-006 pre-pass: apply batch.order_updates() к order_index_.
+//   8. order_index_ sync с active_orders (для UI snapshot).
+//   9. Persist fill_deltas в PG через UpdateFilledVolumes (если репо есть).
+//  10. Log position snapshots (F-06).
+//  11. F-12 multi-venue routing fan-out (PR-F12-15 / DoD-2).
+//  12. Publish hedge_execution_intents.
+//  13. Build + publish execution intents для external fills.
+//  14. Summary log.
+//
+// Heavy method ~600+ строк — кандидат на decomposition в future refactor.
+// ============================================================================
+// ============================================================================
+// run_grouped_batch — F-09 (T-F09-048). Аддитивный grouped combo-цикл.
+//
+// Полностью независим от single-leg F-04: gated (grouped_enabled_), вся работа
+// в try/catch, при пустом наборе групп — мгновенный выход без накладных.
+//   load active groups (PG) → reference prices символов групп (market_data) →
+//   SolveGroupedBatch → per группа: build ExecutionGroup → publish (Kafka) →
+//   persist (PG, идемпотентно). ADR-033: publish раньше/вместе с persist.
+// ============================================================================
+void MatchingLoop::run_grouped_batch(const std::string& batch_id) {
+  if (!grouped_enabled_ || !active_groups_loader_ || !solve_grouped_uc_ ||
+      !eg_producer_.has_value() || !eg_repo_) {
+    return;
+  }
+  try {
+    const auto groups = active_groups_loader_->LoadActiveGroups();
+    if (groups.empty()) {
+      return;  // нет grouped-combo — выходим без накладных (типовой случай)
+    }
+
+    // Reference prices для символов групп (синтетические FlowOrder-пробы).
+    domain::ReferencePrices reference_prices;
+    if (market_data_client_) {
+      std::vector<domain::FlowOrder> probes;
+      probes.reserve(groups.size());
+      for (const auto& g : groups) {
+        domain::FlowOrder fo;
+        fo.order_id = g.parent_order_id;
+        for (const auto& leg : g.legs) {
+          domain::FlowOrderLeg fl;
+          fl.instrument_symbol = leg.instrument_symbol;
+          fl.weight = cex::common::Decimal{1, 0};
+          fo.legs.push_back(std::move(fl));
+        }
+        probes.push_back(std::move(fo));
+      }
+      try {
+        for (const auto& [sym, dec] : market_data_client_->GetReferencePrices(probes)) {
+          reference_prices[sym] = cex::common::Decimal::from_proto(dec);
+        }
+      } catch (const std::exception& ex) {
+        cex::common::log_json("WARN", "Grouped batch: reference prices unavailable",
+                              {{"batch_id", batch_id}, {"error", ex.what()}});
+      }
+    }
+
+    // MVP-5 (ADR-037): external-ноги combo исполняются на venue через
+    // ExecutionIntent, а не внутренним solver'ом. Split аддитивен — для combo без
+    // external-ног (venue_preferences пусто) internal_groups == groups, поведение
+    // не меняется.
+    std::vector<domain::MultiLegVectorOrder> internal_groups;
+    internal_groups.reserve(groups.size());
+    std::size_t external_intents = 0;
+    {
+      infra::ExecutionIntentsProducer ext_producer(producer_);
+      for (const auto& g : groups) {
+        auto split = SplitInternalExternal(g);
+        for (const auto& ext_leg : split.external) {
+          // Guard: не шлём новый chunk, пока предыдущий по этой ноге не исполнен
+          // (отчёт venue снимет флаг). Защита от over-fill при лаге venue.
+          {
+            std::lock_guard<std::mutex> lk(external_inflight_mu_);
+            if (!external_in_flight_.insert(ext_leg.leg_id).second) continue;
+          }
+          const auto intent =
+              BuildExternalIntent(g.parent_order_id, batch_id, cex::common::uuid_v4(), ext_leg);
+          if (ext_producer.produce(intent)) {
+            ++external_intents;
+          } else {
+            std::lock_guard<std::mutex> lk(external_inflight_mu_);
+            external_in_flight_.erase(ext_leg.leg_id);  // produce упал → освобождаем
+          }
+        }
+        if (!split.internal.empty()) {
+          domain::MultiLegVectorOrder ig = g;
+          ig.legs = std::move(split.internal);
+          internal_groups.push_back(std::move(ig));
+        }
+      }
+    }
+    if (external_intents > 0) {
+      cex::common::log_json("INFO", "Combo external legs routed to venues",
+                            {{"batch_id", batch_id}, {"intents", std::to_string(external_intents)}});
+    }
+
+    const auto results = solve_grouped_uc_->Execute(internal_groups, reference_prices);
+
+    std::size_t produced = 0;
+    for (const auto& r : results) {
+      const domain::MultiLegVectorOrder* order = nullptr;
+      for (const auto& g : internal_groups) {
+        if (g.parent_order_id == r.parent_order_id) order = &g;
+      }
+      if (order == nullptr) continue;
+      // Ничего не исполнено в этом batch (blocked / G=0) → не плодим пустые
+      // ExecutionGroup. Группа остаётся активной и попробует на след. цикле.
+      if (r.solve.leg_execs.empty()) continue;
+
+      infra::ExecutionGroupRecord rec;
+      rec.execution_group_id = cex::common::uuid_v4();
+      rec.batch_id = batch_id;
+      rec.order = *order;
+      rec.result = r.solve;
+      rec.reference_prices = reference_prices;
+
+      // Один proto и в Kafka, и в PG (ADR-033: publish перед persist).
+      const auto eg = infra::BuildExecutionGroup(rec);
+      eg_producer_->ProduceBuilt(eg);
+      try {
+        eg_repo_->PersistExecutionGroup(eg);
+      } catch (const std::exception& ex) {
+        cex::common::log_json("ERROR", "Grouped batch: persist failed",
+                              {{"batch_id", batch_id},
+                               {"parent_order_id", r.parent_order_id},
+                               {"error", ex.what()}});
+      }
+
+      // MVP-4 (ADR-038): OCO/bracket leg-переходы после исполнения (filled_cum
+      // обновлён PersistExecutionGroup). Аддитивно; группы без графа → no-op.
+      if (child_graph_repo_) {
+        try {
+          auto state = child_graph_repo_->LoadComboGroupState(r.parent_order_id);
+          if (!state.edges.empty()) {
+            auto transitions = domain::ApplyOCOTransitions(state);
+            auto bracket = domain::ResizeBracketExits(state);
+            transitions.insert(transitions.end(), bracket.begin(), bracket.end());
+            // MVP-4.1: conditional-активация по триггеру (рыночные цены batch).
+            auto conditional = domain::ApplyConditionalActivations(state, reference_prices);
+            transitions.insert(transitions.end(), conditional.begin(), conditional.end());
+            if (!transitions.empty()) {
+              child_graph_repo_->PersistChildGraphTransitions(rec.execution_group_id, batch_id,
+                                                              state, transitions);
+              cex::common::log_json("INFO", "Child-graph transitions applied",
+                                    {{"batch_id", batch_id},
+                                     {"parent_order_id", r.parent_order_id},
+                                     {"transitions", std::to_string(transitions.size())}});
+            }
+          }
+        } catch (const std::exception& ex) {
+          cex::common::log_json("ERROR", "Child-graph step failed",
+                                {{"batch_id", batch_id},
+                                 {"parent_order_id", r.parent_order_id},
+                                 {"error", ex.what()}});
+        }
+      }
+
+      ++produced;
+    }
+
+    cex::common::log_json("INFO", "Grouped batch executed",
+                          {{"batch_id", batch_id},
+                           {"groups", std::to_string(groups.size())},
+                           {"execution_groups", std::to_string(produced)}});
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Grouped batch failed (single-leg unaffected)",
+                          {{"batch_id", batch_id}, {"error", ex.what()}});
+  }
+}
+
 void MatchingLoop::run_one_batch() {
   using namespace std::chrono;
 
   const auto cycle_started_at = steady_clock::now();
   const auto batch_time = std::chrono::system_clock::now();
   const auto batch_id = cex::common::uuid_v4();
+
+  // F-09 (T-F09-048): grouped combo-цикл — аддитивный шаг до single-leg F-04.
+  // Независим, gated и в try/catch внутри; на single-leg не влияет.
+  run_grouped_batch(batch_id);
+
   infra::ExecutionIntentsProducer execution_intents_producer(producer_);
   std::vector<fob::execution::v1::ExecutionIntent> pending_execution_intents;
 
@@ -706,20 +1327,105 @@ void MatchingLoop::run_one_batch() {
 
   {
     std::lock_guard<std::mutex> lock(order_index_mutex_);
+    // PR-F02-006: apply terminal OrderUpdates from THIS batch's solver
+    // output BEFORE the active_orders refresh below. The previous
+    // PR-F02-003 loop reads `snap.filled_qty` / `snap.status` from
+    // `active_orders`, but run_batch_uc.cpp:357-371 erases entries that
+    // hit a terminal state (FILLED/CANCELLED/EXPIRED) DURING this batch.
+    // By the time we get here, the entry that just became "filled" is
+    // gone from active_orders, so the existing in_active branch can't
+    // pick it up and the else-if guard (snap.filled_qty >= total_qty)
+    // sees the value from one batch ago and refuses to promote. Reading
+    // the proto OrderUpdates directly captures the just-set
+    // filled_qty_total and status, so /orders/<id> reports filled with
+    // the correct full quantity instead of stuck at "partial 0.004/0.005"
+    // as seen on the front-end ("Частично" badge on a fully-filled BUY).
+    for (const auto& update : batch_result.batch.order_updates()) {
+      auto it = order_index_.find(update.order_id());
+      if (it == order_index_.end()) continue;
+      auto& snap = it->second;
+      if (update.has_filled_qty_total()) {
+        snap.filled_qty = static_cast<double>(
+            cex::common::Decimal::from_proto(update.filled_qty_total()));
+      }
+      switch (update.status()) {
+        case fob::common::v1::ORDER_STATUS_FILLED:
+          snap.status = "filled";
+          // Defensive: if the proto carried no filled_qty_total field
+          // for some reason but reported FILLED, mirror total_qty so the
+          // UI doesn't show "filled 0/qty".
+          if (snap.total_qty > 0.0 && snap.filled_qty < snap.total_qty) {
+            snap.filled_qty = snap.total_qty;
+          }
+          break;
+        case fob::common::v1::ORDER_STATUS_PARTIALLY_FILLED:
+          snap.status = "partial";
+          break;
+        case fob::common::v1::ORDER_STATUS_CANCELED:
+          snap.status = "cancelled";
+          break;
+        case fob::common::v1::ORDER_STATUS_EXPIRED:
+          snap.status = "expired";
+          break;
+        case fob::common::v1::ORDER_STATUS_REJECTED:
+          snap.status = "rejected";
+          break;
+        default:
+          break;
+      }
+    }
+
     for (auto& [oid, snap] : order_index_) {
       auto it = active_orders->find(oid);
       if (it != active_orders->end()) {
+        // Order is present in this batch's active set — sync snap with
+        // authoritative domain status from PG/in-memory active_orders.
+        // PR-F02-003: must cover ALL incoming statuses (was kPartiallyFilled
+        // / kCancelled / kExpired only) so a stale snap.status="filled"
+        // from a prior racy batch — when the order momentarily fell out of
+        // active_orders during a PG load transition — resets back to the
+        // correct value when the order reappears. Without the kActive/kNew
+        // and kFilled branches the snapshot stays "filled, filled_qty=0"
+        // forever and the user-facing trade list shows "Завершено / 0/qty".
         snap.filled_qty = static_cast<double>(it->second.filled_cum);
-        if (it->second.status == domain::FlowOrderStatus::kPartiallyFilled) {
-          snap.status = "partial";
-        } else if (it->second.status == domain::FlowOrderStatus::kCancelled) {
-          snap.status = "cancelled";
-        } else if (it->second.status == domain::FlowOrderStatus::kExpired) {
-          snap.status = "expired";
+        switch (it->second.status) {
+          case domain::FlowOrderStatus::kPartiallyFilled:
+            snap.status = "partial";
+            break;
+          case domain::FlowOrderStatus::kCancelled:
+            snap.status = "cancelled";
+            break;
+          case domain::FlowOrderStatus::kExpired:
+            snap.status = "expired";
+            break;
+          case domain::FlowOrderStatus::kFilled:
+            snap.status = "filled";
+            break;
+          case domain::FlowOrderStatus::kActive:
+          case domain::FlowOrderStatus::kNew:
+            snap.status = "pending";
+            break;
+          case domain::FlowOrderStatus::kLiquidated:
+          default:
+            // leave snap.status untouched for statuses we don't have
+            // explicit UI mapping for (caller will treat unknown as terminal).
+            break;
         }
       } else if (snap.status == "pending" || snap.status == "partial") {
-        snap.filled_qty = snap.total_qty;
-        snap.status = "filled";
+        // PR-F02-003: previously this branch auto-promoted any tracked
+        // order missing from active_orders to status="filled",
+        // filled_qty=total_qty. That's wrong: an order can drop out of
+        // active_orders for many non-fill reasons (window expired, IOC
+        // excluded by query, transient PG load failure, order_index_
+        // populated from Kafka before PG row caught up). Only promote to
+        // "filled" when the snap's accumulated filled_qty actually reached
+        // total_qty; otherwise leave the prior state for the next batch
+        // to confirm (the order is likely to come back when active_orders
+        // refreshes).
+        if (snap.total_qty > 0.0 && snap.filled_qty >= snap.total_qty) {
+          snap.filled_qty = snap.total_qty;
+          snap.status = "filled";
+        }
       }
     }
   }
@@ -805,9 +1511,91 @@ void MatchingLoop::run_one_batch() {
            std::to_string(batch_result.hedge_execution_intents.size())}
   });
 
+  // F-12 DoD-2 (PR-F12-15): multi-venue routing fan-out.
+  // For each pre-fan-out intent, ask BuildMultiVenuePlan to split
+  // target_qty across allowed venues proportionally to L(v). If the
+  // plan yields >=2 allocations we replace the single intent with N
+  // child clones (each gets its own hedge_flow_id, venue, qty share).
+  // No-op fallback: when only 1 venue passes filtering or planner
+  // returns infeasible, we keep the original intent unchanged.
+  std::vector<fob::execution::v1::ExecutionIntent> fanned_out;
+  fanned_out.reserve(batch_result.hedge_execution_intents.size());
+  std::size_t fanout_expansions = 0;
+  for (const auto& intent : batch_result.hedge_execution_intents) {
+    PlanRequest plan_req;
+    plan_req.symbol = intent.instrument().symbol();
+    plan_req.side = intent.side();
+    plan_req.target_qty = cex::common::Decimal::from_proto(intent.target_qty());
+    for (const auto& v : intent.allowed_venues()) plan_req.allowed_venues.push_back(v);
+    {
+      std::lock_guard<std::mutex> lock(planner_inputs_cache_mutex_);
+      plan_req.planner_inputs =
+          planner_inputs_cache_.GetPlannerInputsSnapshotForSymbol(
+              intent.instrument().symbol());
+    }
+    const auto plan = BuildMultiVenuePlan(plan_req);
+
+    // F-12 DoD-2 diagnostic: always log the plan outcome so operators
+    // can see why a fan-out did or didn't happen (candidate count is
+    // the usual surprise — health/liquidity filters narrow venues).
+    {
+      std::string venue_list;
+      for (const auto& a : plan.allocations) {
+        if (!venue_list.empty()) venue_list += ",";
+        venue_list += a.venue_id + ":" + a.qty.to_string();
+      }
+      cex::common::log_json(
+          "INFO", "Multi-venue routing plan computed",
+          {{"batch_id", batch_id},
+           {"hedge_flow_id", intent.hedge_flow_id()},
+           {"symbol", intent.instrument().symbol()},
+           {"planner_inputs", std::to_string(plan_req.planner_inputs.size())},
+           {"allowed_venues_count", std::to_string(plan_req.allowed_venues.size())},
+           {"allocations", std::to_string(plan.allocations.size())},
+           {"feasible", plan.feasible ? "true" : "false"},
+           {"reject_reason", plan.reject_reason},
+           {"venue_split", venue_list}});
+    }
+
+    if (plan.feasible && plan.allocations.size() >= 2) {
+      auto children = FanOutIntentByPlan(intent, plan);
+      ++fanout_expansions;
+      cex::common::log_json(
+          "INFO",
+          "Multi-venue routing plan expanded hedge intent",
+          {{"batch_id", batch_id},
+           {"hedge_flow_id", intent.hedge_flow_id()},
+           {"symbol", intent.instrument().symbol()},
+           {"allocations", std::to_string(plan.allocations.size())},
+           {"target_qty", plan_req.target_qty.to_string()}});
+      for (auto& child : children) fanned_out.push_back(std::move(child));
+    } else {
+      // 0 or 1 allocation — keep original.
+      fanned_out.push_back(intent);
+      if (!plan.feasible) {
+        cex::common::log_json(
+            "WARN",
+            "Multi-venue routing plan not feasible; emitting original intent",
+            {{"batch_id", batch_id},
+             {"hedge_flow_id", intent.hedge_flow_id()},
+             {"reject_reason", plan.reject_reason}});
+      }
+    }
+  }
+  if (fanout_expansions > 0) {
+    cex::common::log_json(
+        "INFO",
+        "Multi-venue routing summary",
+        {{"batch_id", batch_id},
+         {"input_intents",
+          std::to_string(batch_result.hedge_execution_intents.size())},
+         {"expanded_intents", std::to_string(fanout_expansions)},
+         {"output_intents", std::to_string(fanned_out.size())}});
+  }
+
   const auto hedge_publish_result = PublishAutoHedgeExecutionIntents(
       batch_id,
-      batch_result.hedge_execution_intents,
+      fanned_out,
       execution_intents_producer);
   hedge_execution_intents_attempted = hedge_publish_result.attempted;
   hedge_execution_intents_published = hedge_publish_result.published;
@@ -931,12 +1719,26 @@ void MatchingLoop::run_one_batch() {
   });
 }
 
+/// Тонкая обёртка для Kafka publish — делегирует BatchOutputsProducer.
+/// Закомментированный код выше — legacy direct-call вариант.
 bool MatchingLoop::publish_batch(const fob::matching::v1::BatchResult& batch) {
   return infra::BatchOutputsProducer(producer_).produce(batch);
   // return producer_.produce("batch.outputs", batch.batch_id(),
   // cex::common::to_bytes(batch));
 }
 
+// ============================================================================
+// index_order / index_terminal / snapshot_order — UI-friendly snapshot
+// поддержка для /orders/<id> endpoint.
+//
+// order_index_ — отдельная map от active_, оптимизированная для read API
+// (включает terminal заявки которые уже не в active_). Обновляется
+// inline в нескольких местах: on_order_event (create/cancel), run_one_batch
+// (после batch_result через PR-F02-006 pre-pass), и через index_terminal.
+// ============================================================================
+
+/// Add/update OrderSnapshot для заявки. Status — UI-facing string
+/// ("pending"/"partial"/"filled"/"cancelled"/...).
 void MatchingLoop::index_order(const domain::FlowOrder& order,
                                const std::string& status) {
   std::lock_guard<std::mutex> lock(order_index_mutex_);
@@ -947,6 +1749,9 @@ void MatchingLoop::index_order(const domain::FlowOrder& order,
   snap.filled_qty = static_cast<double>(order.filled_cum);
 }
 
+/// Mark заявку как terminal (cancelled/expired/...) с финальным filled_qty.
+/// No-op если заявка не была в index_ (мы не отслеживаем заявки которые
+/// никогда не приходили через on_order_event).
 void MatchingLoop::index_terminal(const std::string& order_id,
                                   const std::string& status,
                                   double filled_qty) {
@@ -959,6 +1764,8 @@ void MatchingLoop::index_terminal(const std::string& order_id,
   it->second.filled_qty = filled_qty;
 }
 
+/// Lookup snapshot заявки по order_id. std::nullopt если не найдена.
+/// Используется HTTP /orders/<id> endpoint для отдачи UI-friendly data.
 std::optional<MatchingLoop::OrderSnapshot> MatchingLoop::snapshot_order(
     const std::string& order_id) const {
   std::lock_guard<std::mutex> lock(order_index_mutex_);

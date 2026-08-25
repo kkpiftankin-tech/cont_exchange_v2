@@ -1,8 +1,16 @@
-# ADR-0002 — Proto-контракты как source of truth
+---
+id: ADR-002
+status: accepted
+date: 2026-05-13
+owners:
+  - core-team
+related:
+  - contracts/proto/
+  - specs/contracts/proto-map.yaml
+  - docs/06-api/messaging/topics.md
+---
 
-- **Status:** Accepted
-- **Date:** 2026-05-13
-- **Deciders:** core-team
+# ADR-002: Protobuf / gRPC / Kafka payload contracts as source of truth
 
 ## Контекст
 

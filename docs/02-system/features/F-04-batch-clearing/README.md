@@ -1,6 +1,82 @@
 # F-04 — Batch Clearing Cycle
 
-> **Статус:** in-progress, MVP-симулятор. Реальный солвер D(p)=0 не реализован.
+> **Статус:** in-progress. Solver, метрики, Market Data integration, отдельный
+> `fills` топик, PostgreSQL источник, multi-leg legs в схеме — все есть. Pending
+> зоны выделены ниже отдельно.
+
+## 🧭 Navigation Map (IN-013 drill-down)
+
+Эта секция — **карта документации сверху вниз**. Каждый уровень имеет
+свой ответ на «что/как», и каждая ссылка ведёт на следующий уровень
+детализации.
+
+```text
+   ┌─ Уровень ──────────────┬─ Артефакт ─────────────────────────────────┐
+☁️ L0 │ Что система делает    │ Эта страница (overview + L0 sequence ниже) │
+   │ для внешнего мира?     │                                            │
+🌊 L1 │ Какие функции у фичи?  │ Use Cases (таблица ниже)                   │
+   │ Какие сервисы участвуют?│ L1 service sequence (ниже)                 │
+🐟 L2 │ Из каких классов       │ Component overview + L2 sequences          │
+   │ состоит сервис?        │ → matching-fob-core/overview.md            │
+   │ Как функция исполняется │ Per-UC L2 sequences (в use-case.md)        │
+   │ через классы?          │                                            │
+💻 src │ Код                    │ cpp/matching/src/...                       │
+   └────────────────────────┴────────────────────────────────────────────┘
+```
+
+**Быстрый старт по drill-down:**
+
+1. **L0 ☁️** Прочитайте описание ниже + откройте
+   [L0 system sequence](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md)
+   — система как чёрный ящик, видны только внешние эффекты.
+2. **L1 🌊** Перейдите к Use Cases (таблица ниже) → каждый UC раскрывает
+   одну функцию фичи. Для UC-F04-01 откройте
+   [L1 service sequence](../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md)
+   — видны сервисы matching/risk/ledger/market_data и контракты между ними.
+3. **L2 🐟** Откройте
+   [matching-fob-core component overview](../../../05-components/matching-fob-core/overview.md)
+   — увидите классы внутри сервиса. Затем
+   [L2 solver-cycle sequence](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md)
+   — как один цикл клиринга проходит через классы.
+4. **💻 Код** — [cpp/matching/](../../../../cpp/matching/) (ссылки на конкретные файлы внизу).
+
+## 📋 Use Cases (L1 🌊)
+
+| UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 | Status |
+| --- | --- | --- | --- | --- |
+| [UC-F04-01](../../use-cases/UC-F04-01-run-batch-clearing/use-case.md) | Run Batch Clearing Cycle | [SEQ-UC-F04-01-system](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md) | [SEQ-F04-UC-F04-01-services](../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md) | in-progress |
+
+## 🏗 Components Involved
+
+| Component | Role | Drill-down → L2 🐟 |
+| --- | --- | --- |
+| [matching-fob-core](../../../05-components/matching-fob-core/overview.md) | Solver + batch loop (owner of F-04) | [SEQ-MATCHING-001-solver-cycle](../../../05-components/matching-fob-core/sequences/SEQ-MATCHING-001-solver-cycle.md) |
+| [market-data](../../../05-components/market-data/) | Reference prices (gRPC) | (L2 TBD) |
+| [ledger](../../../05-components/ledger/) | Apply fills → balances | (L2 TBD) |
+| [risk](../../../05-components/risk-manager/) | Post-trade alerts (consumer of `batch.outputs`) | (L2 TBD) |
+| [observability](../../../05-components/observability-reporting/) | Metrics + alerts | (L2 TBD) |
+
+## ☁️ L0 — System view (preview)
+
+Полная диаграмма с описанием шагов — в
+[SEQ-UC-F04-01-system.md](../../use-cases/UC-F04-01-run-batch-clearing/sequences/SEQ-UC-F04-01-system.md).
+
+```mermaid
+sequenceDiagram
+    actor Scheduler as Internal Timer
+    actor Trader
+    participant System as Continuous Exchange System
+
+    Scheduler->>System: Tick (every batch_interval_ms)
+    Note over System: step-1: Load active FlowOrders
+    Note over System: step-2: Fetch reference prices
+    Note over System: step-3: Solve batch (clearing)
+    Note over System: step-4: Publish results
+    System-->>Trader: Order status update (filled / partially filled)
+```
+
+> ⚠️ Эта диаграмма — preview уровня L0. Согласно IN-013 §3 (sequence rules),
+> на L0 запрещено упоминать внутренние сервисы. Их видно на L1 — см. ниже.
 
 ## Описание
 
@@ -18,8 +94,12 @@
 
 ## Реализация
 
-- [cpp/matching/src/app/matching_loop.cpp](../../../../cpp/matching/src/app/matching_loop.cpp)
-- [cpp/matching/src/domain/solver.hpp](../../../../cpp/matching/src/domain/solver.hpp) — placeholder интерфейс для будущего LP/QP
+- [cpp/matching/src/app/matching_loop.cpp](../../../../cpp/matching/src/app/matching_loop.cpp) — batch loop, fallback PG vs in-memory.
+- [cpp/matching/src/app/run_batch_uc.cpp](../../../../cpp/matching/src/app/run_batch_uc.cpp) — один прогон, `steady_clock` измерение `solve_time_ms`.
+- [cpp/matching/src/domain/solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp) — `ContinuousClearingSolver` на Eigen с расчётом `residual_norm` через дисбаланс по символам.
+- [cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp](../../../../cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp) — `LoadActiveFlowOrders()` фильтрует `status IN ('active','partially_filled')`, `filled_cum < q_max`, `time_in_force <> 'IOC'` и LEFT JOIN'ит `flow_order_legs`.
+- [cpp/matching/src/infra/kafka/batch_outputs_producer.cpp](../../../../cpp/matching/src/infra/kafka/batch_outputs_producer.cpp) — публикует `batch.outputs` и (отдельно по каждому fill) `fills`.
+- [cpp/matching/src/infra/market_data/market_data_client.cpp](../../../../cpp/matching/src/infra/market_data/market_data_client.cpp) — gRPC `MarketDataService.GetLastTicker` для reference price (`last` или mid(bid,ask)).
 
 ## Acceptance criteria
 
@@ -27,27 +107,30 @@
 
 ## Известные несоответствия спецификации
 
-См. [feature.yaml](feature.yaml) → `knownIssues`. Кратко:
+См. [feature.yaml](feature.yaml) → `knownIssues`.
 
-### Критические
+### Критические (denежные, не закрыты)
 
-1. **Утечка резерва при BUY** — после полного fill в reserved висит разница `(price_high - midpoint) * qty`.
-2. **Двойной учёт при cancel после partial fill** — ledger снимает оригинальную сумму резерва, а не остаток.
+1. **Утечка резерва при BUY** — после полного fill в reserved висит разница `(price_high - midpoint) * qty`. См. F-02 `buy-reserve-leak`.
+2. **Двойной учёт при cancel после partial fill** — ledger снимает оригинальную сумму резерва, а не остаток. См. F-02 `cancel-double-count`.
 
-### Архитектурные gap'ы
+### Открытые архитектурные gap'ы
 
-3. **Нет настоящего солвера** — каждый ордер обрабатывается независимо.
-4. **Цена fill — per-order midpoint**, а не единая клиринговая на инструмент.
-5. **`residualNorm = 0.0` захардкожен.**
-6. **`solveTimeMs = 1` захардкожен.**
-7. **`executed_rates` показывает `max_speed`**, а не фактическую скорость.
-8. **Источник данных — Kafka**, а не PostgreSQL `floworders`.
-9. **Нет интеграции с Market Data** за reference prices.
-10. **Один Kafka топик `batch.outputs` вместо двух (нет `fills`).**
-11. **Отсутствуют поля `liquidity_source`, `fees`, `fill_id`** в Fill.
-12. **Нет fallback** при non-convergence.
-13. **Нет SLA-метрик и алертов.**
-14. **Нет multi-leg / portfolio orders.**
+3. **ClickHouse ingestion для `batch.outputs`/`fills` ещё не подключён** — таблицы есть, но Kafka→CH консьюмер только в follow-up PR (см. `feature.yaml` → `clickhouse-ingestion-pending`). До этого `batchresults`/`fills` в CH пустые; UI «Батчи / Профиль» при отсутствии BATCHES_SIMULATE=1 покажет только статичный seed.
+4. **Solver fallback при non-convergence** — есть `degraded`-флаг в diagnostics, но reflex-стратегии (epsilon-MM / halt) ещё нет (TODO в `run_batch_uc.cpp`).
+5. **Multi-leg / portfolio orders** — domain (`FlowOrderLeg`, `weight`) и PG-схема (`flow_order_legs`) готовы; пользовательский ввод (F-02 single-leg) и solver для портфельных весов — следующий шаг (F-09).
+6. **SLA-метрики/алерты для p50/p95 solver'а** — `solve_time_ms` пишется в `BatchResult.diagnostics`, но prometheus-histogram и алерт-thresholds — TODO (см. NFR-EXEC-002).
+
+### Закрытые ранее заявленные gap'ы
+
+- ~~«Нет настоящего солвера»~~ — `ContinuousClearingSolver` (Eigen-based) активен ([solver_impl.cpp](../../../../cpp/matching/src/domain/solver_impl.cpp)).
+- ~~«residualNorm = 0.0 захардкожен»~~ — считается как max дисбаланса по символам.
+- ~~«solveTimeMs = 1 захардкожен»~~ — измеряется через `steady_clock` в `run_batch_uc.cpp`.
+- ~~«executed_rates показывает max_speed»~~ — `executed_rate = executed_qty * 1000 / batch_interval_ms`.
+- ~~«Источник — Kafka вместо PostgreSQL»~~ — при `MATCHING_POSTGRES_DSN` MatchingLoop использует `PostgresFlowOrderRepository`; PR-F02-001 добавил недостающий writer в `order_flow`, замкнув цикл.
+- ~~«Нет интеграции с Market Data»~~ — `MarketDataClient.GetLastTicker` подключён.
+- ~~«Один топик `batch.outputs` вместо двух (нет `fills`)»~~ — `fills` создаётся в `infra/kafka/create_topics.sh` и пишется в `BatchOutputsProducer`.
+- ~~«Нет `liquidity_source`/`fees`/`fill_id`»~~ — поля присутствуют в proto `FillEvent` и заполняются.
 
 ## Связанные фичи
 

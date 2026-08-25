@@ -1,0 +1,264 @@
+syntax = "proto3";
+
+package fob.ledger.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/matching/v1/batch.proto";
+import "fob/execution/v1/execution.proto";
+
+message Balance {
+  string currency = 1;
+  fob.common.v1.Decimal available = 2;
+  fob.common.v1.Decimal reserved = 3;
+  fob.common.v1.Decimal total = 4;
+}
+
+message GetBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+}
+
+message GetBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated Balance balances = 2;
+}
+
+enum ReserveReason {
+  RESERVE_REASON_UNSPECIFIED = 0;
+  RESERVE_REASON_NEW_ORDER = 1;
+  RESERVE_REASON_AMEND_ORDER = 2;
+  RESERVE_REASON_HEDGE = 3;
+}
+
+message ReserveFundsRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string reservation_id = 2; // idempotency key; can be client_order_id
+  string user_id = 3;
+
+  // Link to internal order
+  string order_id = 4;
+
+  string currency = 10;
+  fob.common.v1.Decimal amount = 11;
+
+  ReserveReason reason = 12;
+}
+
+message ReserveFundsResponse {
+  fob.common.v1.EventMeta meta = 1;
+
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+
+  // Echo actual reserved amount (can differ if partial reserve supported)
+  fob.common.v1.Decimal reserved_amount = 10;
+}
+
+message ReleaseFundsRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string reservation_id = 2;
+  string user_id = 3;
+  string order_id = 4;
+
+  string currency = 10;
+  fob.common.v1.Decimal amount = 11;
+
+  string reason = 12;
+}
+
+message ApplyBatchResultRequest {
+  // Usually Ledger consumes Kafka batch.outputs.
+  // This RPC is useful for tests, replays, or if you want sync integration.
+  fob.common.v1.EventMeta meta = 1;
+  fob.matching.v1.BatchResult batch = 2;
+}
+
+message ApplyBatchResultResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+}
+
+message ApplyExecutionReportRequest {
+  // Ledger consumes execution.reports from external venues and updates the exchange's own hedge positions.
+  fob.common.v1.EventMeta meta = 1;
+  fob.execution.v1.ExecutionReport report = 2;
+}
+
+// Request for unrealised PnL calculation for a user's open positions.
+message GetUnrealisedPnLRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  
+  // Optional: if empty, returns all positions for the user
+  string instrument_symbol = 3;
+}
+
+// Unrealised PnL for a single instrument.
+message UnrealisedPnL {
+  string instrument_symbol = 1;
+  fob.common.v1.Decimal position_amount = 2;    // current position size (positive = long)
+  fob.common.v1.Decimal avg_entry_price = 3;    // average entry price for the position
+  fob.common.v1.Decimal current_price = 4;      // reference price used for calculation
+  fob.common.v1.Decimal unrealised_pnl = 5;     // (current_price - avg_entry_price) * position_amount
+  string price_source = 6;                      // e.g., "marketdata", "last_trade", "mid", "fallback_to_avg"
+}
+
+// Response containing unrealised PnL for all requested instruments.
+message GetUnrealisedPnLResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated UnrealisedPnL positions = 2;
+}
+
+// Request for realised PnL history.
+message GetRealisedPnLRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string user_id = 2;
+  
+  // Optional filters
+  string instrument_symbol = 3;                 // if empty, returns all instruments
+  google.protobuf.Timestamp from_time = 4;      // optional: start of time range
+  google.protobuf.Timestamp to_time = 5;        // optional: end of time range
+}
+
+// Realised PnL summary for a single instrument.
+message RealisedPnL {
+  string instrument_symbol = 1;
+  fob.common.v1.Decimal total_realised_pnl = 2; // cumulative realised PnL
+  int32 trade_count = 3;                        // number of trades that contributed to this PnL
+}
+
+// Response containing realised PnL summary.
+message GetRealisedPnLResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated RealisedPnL positions = 2;
+}
+
+// Balance on an external venue (e.g., Binance, Bybit, OKX).
+message VenueBalance {
+  string venue = 1;           // e.g., "binance", "bybit", "okx"
+  string currency = 2;        // e.g., "USDT", "BTC"
+  fob.common.v1.Decimal total = 3;      // total balance on the venue
+  fob.common.v1.Decimal reserved = 4;   // reserved for open orders on the venue
+  fob.common.v1.Decimal available = 5;  // free balance (total - reserved)
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// Request to get venue balances.
+message GetVenueBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;           // optional: if empty, returns all venues
+  string currency = 3;        // optional: if empty, returns all currencies
+}
+
+// Response with venue balances.
+message GetVenueBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated VenueBalance balances = 2;
+}
+
+// Request to update venue balance (typically called by venue adapter).
+message UpdateVenueBalanceRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;
+  string currency = 3;
+  fob.common.v1.Decimal total = 4;      // new total balance
+  fob.common.v1.Decimal reserved = 5;   // new reserved amount
+}
+
+// Response for venue balance update.
+message UpdateVenueBalanceResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+}
+
+// Hedge execution record for PnL calculation.
+message HedgeExecution {
+  string hedge_id = 1;
+  string venue = 2;
+  string instrument_symbol = 3;
+  fob.common.v1.Side side = 4;
+  fob.common.v1.Decimal executed_qty = 5;
+  fob.common.v1.Decimal executed_price = 6;
+  fob.common.v1.Decimal executed_notional = 7;
+  fob.common.v1.Decimal internal_price = 8;    // price on internal exchange at that time
+  fob.common.v1.Decimal hedge_pnl = 9;          // (executed_price - internal_price) * qty (adjusted for side)
+  google.protobuf.Timestamp timestamp = 10;
+}
+
+// Request to record hedge execution for PnL calculation.
+message RecordHedgeExecutionRequest {
+  fob.common.v1.EventMeta meta = 1;
+  HedgeExecution hedge = 2;
+}
+
+// Response for hedge execution record.
+message RecordHedgeExecutionResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool success = 2;
+  fob.common.v1.Error error = 3;
+}
+
+// Request to get hedge PnL summary.
+message GetHedgePnLRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;           // optional: filter by venue
+  string instrument_symbol = 3; // optional: filter by instrument
+  google.protobuf.Timestamp from_time = 4;
+  google.protobuf.Timestamp to_time = 5;
+}
+
+// Hedge PnL summary.
+message HedgePnL {
+  string venue = 1;
+  string instrument_symbol = 2;
+  fob.common.v1.Decimal total_hedge_pnl = 3;
+  int32 hedge_count = 4;
+  fob.common.v1.Decimal total_hedge_volume = 5;  // total notional value hedged
+}
+
+// Response for hedge PnL query.
+message GetHedgePnLResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated HedgePnL results = 2;
+}
+
+service LedgerService {
+  // Query current balances (sync)
+  rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
+
+  // Reserve funds for a new/updated order (sync)
+  rpc ReserveFunds(ReserveFundsRequest) returns (ReserveFundsResponse);
+
+  // Release funds on cancel/reject (sync)
+  rpc ReleaseFunds(ReleaseFundsRequest) returns (google.protobuf.Empty);
+
+  // Apply internal matching results (sync alternative)
+  rpc ApplyBatchResult(ApplyBatchResultRequest) returns (ApplyBatchResultResponse);
+
+  // Apply external hedge report (sync alternative)
+  rpc ApplyExecutionReport(ApplyExecutionReportRequest) returns (google.protobuf.Empty);
+
+  // Get unrealised PnL for user's open positions
+  rpc GetUnrealisedPnL(GetUnrealisedPnLRequest) returns (GetUnrealisedPnLResponse);
+
+  // Get realised PnL summary for user
+  rpc GetRealisedPnL(GetRealisedPnLRequest) returns (GetRealisedPnLResponse);
+
+  // Get balances on external venues (exchange's own funds)
+  rpc GetVenueBalances(GetVenueBalancesRequest) returns (GetVenueBalancesResponse);
+
+  // Update balance for an external venue (called by venue adapter or admin)
+  rpc UpdateVenueBalance(UpdateVenueBalanceRequest) returns (UpdateVenueBalanceResponse);
+
+  // Record a hedge execution for PnL tracking
+  rpc RecordHedgeExecution(RecordHedgeExecutionRequest) returns (RecordHedgeExecutionResponse);
+
+  // Get hedge PnL summary
+  rpc GetHedgePnL(GetHedgePnLRequest) returns (GetHedgePnLResponse);
+}

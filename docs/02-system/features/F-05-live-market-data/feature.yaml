@@ -3,10 +3,15 @@ feature:
   name: Live Market Data
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
-  Сервис market_data принимает поток marketdata.raw из Kafka, кэширует
-  последний тикер по парам (venue, symbol) и отдаёт его по gRPC GetLastTicker.
+  Market Data Service вычисляет и публикует рыночные данные в реальном времени.
+  Принимает BatchResult из Kafka batch.outputs и FillEvent из fills,
+  вычисляет mid-price, spread, effectiveSpread, bidDepth/askDepth, volume24h,
+  публикует MarketDataSnapshot через Kafka marketdata.snapshots и WebSocket.
+  При отсутствии внутренних данных — fallback на CEX/DEX из marketdata.raw.
+  Предоставляет GetReferencePrices для Matching Backend (F-04).
 
 primaryComponents:
   - market-data
@@ -15,45 +20,121 @@ primaryComponents:
 
 protoContracts:
   - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
-  - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+  - contracts/proto/fob/marketdata/v1/marketdata_service.proto
 
 codePaths:
   - cpp/market_data/src/app/market_data_uc.cpp
+  - cpp/market_data/src/app/market_data_uc.hpp
+  - cpp/market_data/src/app/compute_market_data.cpp
+  - cpp/market_data/src/app/compute_market_data.hpp
   - cpp/market_data/src/infra/kafka_consumer.cpp
+  - cpp/market_data/src/infra/kafka_fills_consumer.cpp
+  - cpp/market_data/src/infra/kafka_snapshots_producer.cpp
+  - cpp/market_data/src/infra/clickhouse_marketdata_storage.cpp
   - cpp/market_data/src/transport/grpc_market_data_service.cpp
   - cpp/venues/src/app/venues_loop.cpp
 
 kafkaTopics:
   produces:
-    - marketdata.raw  # из venues
+    - marketdata.snapshots   # MarketDataSnapshot после каждого пересчёта
+    - risk.alerts            # при аномальном спреде
   consumes:
-    - marketdata.raw  # в market_data
+    - marketdata.raw         # VenueSnapshot от External Venues Connector
+    - batch.outputs          # BatchResult от Matching Backend
+    - fills                  # FillEvent для effective spread
 
 grpcServices:
   exposes:
     - fob.marketdata.v1.MarketDataService.GetLastTicker
+    - fob.marketdata.v1.MarketDataService.GetMarketDataSnapshot
+    - fob.marketdata.v1.MarketDataService.GetMarketDataHistory
+    - fob.marketdata.v1.MarketDataService.GetEffectiveSpread
+    - fob.marketdata.v1.MarketDataService.GetReferencePrices
+    - fob.marketdata.v1.MarketDataService.SubscribeMarketData
   calls: []
 
-acceptanceCriteria:
-  - "GetLastTicker возвращает последний Ticker по (venue, symbol)."
-  - "При отсутствии данных: found=false, error.code=NOT_FOUND."
-  - "Кэш потокобезопасен (защищён мьютексом)."
+dataStores:
+  clickhouse:
+    - marketdata_snapshots   # TTL 90 дней, ORDER BY (asset, timestamp)
+    - effective_spreads      # TTL 365 дней
+  postgresql:
+    - marketdata_config      # конфигурация инструментов
 
+restEndpoints:
+  - GET /api/v1/marketdata/{asset}                     # текущий snapshot, p95 < 50ms
+  - GET /api/v1/marketdata/{asset}/history             # исторические снимки из ClickHouse
+  - GET /api/v1/marketdata/{asset}/effective-spread    # история effective spread
+
+webSocket:
+  - ws://api/market   # subscribe/unsubscribe, MarketDataSnapshot + delta updates
+
+acceptanceCriteria:
+  - id: F5-CS1
+    description: "Mid-price, spread, volume и depth обновляются в UI в течение 200 ms после BatchResult."
+  - id: F5-CS2
+    description: "WebSocket стабильно поддерживает до 5000 одновременных подписчиков на инструмент."
+  - id: F5-CS3
+    description: "Effective spread рассчитывается для каждого FillEvent и доступен в аналитике."
+  - id: F5-CS4
+    description: "При отсутствии внутренних данных fallback на внешние источники работает прозрачно (source=cex/dex)."
+  - id: F5-CS5
+    description: "REST API возвращает текущий snapshot за p95 < 50 ms."
+
+nonFunctional:
+  latency:
+    ws_publish_after_batch_p95_ms: 200
+    rest_get_snapshot_p95_ms: 50
+  throughput:
+    ws_concurrent_subscribers_per_instrument: 5000
+    fills_per_sec: 10000
+  availability: "99.9%"
+  storage:
+    marketdata_snapshots_retention_days: 90
+    effective_spreads_retention_days: 365
+
+# Базовая вертикаль F-05 реализована: WS ws://api/market + REST /api/v1/marketdata/*,
+# ComputeMarketData (mid/spread/depth/volume), ComputeEffectiveSpread, fills consumer,
+# публикация marketdata.snapshots, GetReferencePrices (батч-RPC, используется matching),
+# глубина рынка (FlowOrder-агрегация + venue-стакан), kill-switch, risk.alerts.
 knownIssues:
-  - id: ticker-only
-    severity: feature-gap
-    description: Trade и OrderBookL2Update игнорируются
-  - id: no-history-ohlcv
-    severity: feature-gap
-    description: Нет OHLCV свечей и истории
-  - id: no-stream-api
-    severity: feature-gap
-    description: Нет gRPC streaming / WebSocket для UI
-  - id: simulator-only-source
-    severity: feature-gap
-    description: venues только симулирует BTC/USDT, нет реальных площадок
+  - id: ws-full-snapshot-not-delta
+    severity: minor
+    description: "WS-канал шлёт полный MarketDataSnapshot на каждый батч, а не {type:update} дельту. UX-эффект тот же (live <200ms), но трафик выше."
+  - id: bbo-depth-need-active-orders
+    severity: minor
+    description: "Внутренние bestBid/bestAsk и depth заполняются только при активных FlowOrder (orders.normalized). Без них snapshot падает на venue-fallback (source=cex/dex) с глубиной из venue-стакана."
+  - id: ref-prices-no-stale-switch
+    severity: minor
+    description: "GetReferencePrices отдаёт закэшированный snapshot без in-call проверки возраста; устаревание обрабатывается StaleSweeper и venue-fallback асинхронно."
+  - id: test-fidelity
+    severity: minor
+    description: "Часть unit/integration тестов покрывает поведение частично (kill-switch, risk-alert emission, stale→cex); SLA-латентность только через k6 (Testing/f05_load_test.js), не в CI."
+
+relatedFeatures:
+  - F-04   # поставщик BatchResult и FillEvent
+  - F-06   # использует mid-price для mark-to-market
+  - F-07   # Risk Manager использует reference prices
+  - F-13   # post-trade аналитика на основе effective spread
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    - U1: "bestBid=67000, bestAsk=67020 → mid=67010, spread=20, spreadBps=2.99"
+    - U2: "bestBid=bestAsk=100 → spread=0, spreadBps=0"
+    - U3: "нет FlowOrder → fallback на external, source=cex"
+    - U4: "execPrice=67015, mid=67010 → effectiveSpread=10, bps=1.49"
+    - U5: "execPrice=mid → effectiveSpread=0"
+    - U6: "aggregate demand суммируется корректно по ценовым уровням"
+    - U7: "пустой список FlowOrder → bidDepth=[], askDepth=[]"
+    - U8: "volume24h = sum(fills) за 24h"
+    - U9: "spread > threshold → risk.alerts event генерируется"
+    - U10: "internalSnapshot age > staleThreshold → GetReferencePrices возвращает source=cex"
+  integration:
+    - I1: "BatchResult в batch.outputs → MarketDataSnapshot в ClickHouse + WS push < 200ms"
+    - I2: "FillEvent в fills → запись в effective_spreads"
+    - I3: "VenueSnapshot → MarketDataUpdate через WS с source != internal"
+    - I4: "GET /api/v1/marketdata/BTCUSDT → JSON snapshot, p95 < 50ms"
+    - I5: "GET /api/v1/marketdata/BTCUSDT/history → массив снимков из ClickHouse"
+    - I6: "getReferencePrices([BTCUSDT], ts) → корректный ReferencePrice"
+    - I7: "WS reconnect → полный snapshot при переподключении, затем delta"
+    - I8: "marketdata_config.isActive=false → публикация прекращается"
   contract: []

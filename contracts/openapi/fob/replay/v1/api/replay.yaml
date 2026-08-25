@@ -1,0 +1,332 @@
+openapi: 3.0.3
+info:
+  title: F-15 Backtest Replay API
+  version: 1.0.0
+  description: >
+    API для управления и просмотра результатов обратного тестирования (backtest/replay)
+    в рамках фичи F-15.
+servers:
+  - url: /api/v1
+paths:
+  /replay/sessions:
+    post:
+      summary: Создать новую сессию реплея
+      operationId: createReplaySession
+      tags: [Replay]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: 'schemas/replay-dtos.json#/definitions/CreateReplayRequest'
+      responses:
+        '201':
+          description: Сессия создана и поставлена в очередь
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/ReplaySessionCreated'
+        '400':
+          description: Ошибка валидации параметров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      summary: Получить список сессий с фильтрацией
+      operationId: listReplaySessions
+      tags: [Replay]
+      parameters:
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: 'schemas/replay-dtos.json#/definitions/ReplayStatus' }
+        - name: date_from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: date_to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Список сессий
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: 'schemas/replay-dtos.json#/definitions/ReplaySession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /replay/sessions/{sessionId}:
+    get:
+      summary: Получить полную информацию о сессии
+      operationId: getReplaySession
+      tags: [Replay]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Информация о сессии
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/ReplaySession'
+        '404':
+          description: Сессия не найдена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Отменить выполняющуюся сессию
+      operationId: cancelReplaySession
+      tags: [Replay]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Сессия отменена
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/ReplaySession'
+        '404':
+          description: Сессия не найдена
+        '409':
+          description: Сессия уже завершена и не может быть отменена
+  /replay/sessions/{sessionId}/summary:
+    get:
+      summary: Получить агрегированные метрики сессии
+      operationId: getReplaySummary
+      tags: [Replay]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Сводные метрики
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/ReplaySummary'
+        '404':
+          description: Сессия или summary не найдены
+  /replay/sessions/{sessionId}/agentlogs:
+    get:
+      summary: Получить пошаговые логи (AgentLog) сессии
+      operationId: getAgentLogs
+      tags: [Replay]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: batch_seq_from
+          in: query
+          schema: { type: integer }
+        - name: batch_seq_to
+          in: query
+          schema: { type: integer }
+        - name: pnl_min
+          in: query
+          schema: { type: number }
+        - name: pnl_max
+          in: query
+          schema: { type: number }
+        - name: fillrate_min
+          in: query
+          schema: { type: number }
+        - name: fillrate_max
+          in: query
+          schema: { type: number }
+        - name: solver_error
+          in: query
+          schema: { type: boolean }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        '200':
+          description: Список логов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: 'schemas/replay-dtos.json#/definitions/AgentLog'
+        '404':
+          description: Сессия не найдена
+  /replay/sessions/{sessionId}/retry:
+    post:
+      summary: Повторно запустить сессию после сбоя/отмены
+      operationId: retryReplaySession
+      tags: [Replay]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: ID оригинальной сессии
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: 'schemas/replay-dtos.json#/definitions/RetryRequest'
+      responses:
+        '201':
+          description: Создана новая сессия-ретрай
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/ReplaySessionCreated'
+        '400':
+          description: Ошибка валидации
+        '404':
+          description: Оригинальная сессия не найдена
+  /replay/compare:
+    get:
+      summary: Сравнить две сессии
+      operationId: compareReplaySessions
+      tags: [Replay]
+      parameters:
+        - name: sessionA
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: sessionB
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Результат сравнения
+          content:
+            application/json:
+              schema:
+                $ref: 'schemas/replay-dtos.json#/definitions/CompareResponse'
+        '400':
+          description: Сессии несовместимы или не найдены
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code: { type: string }
+        message: { type: string }
+        details: { type: object }
+
+    # Вспомогательные схемы, которые не вошли в основной файл DTO
+    CreateReplayRequest:
+      type: object
+      required:
+        - name
+        - date_range_from
+        - date_range_to
+        - strategy
+        - solver_config_id
+        - risk_limits_id
+        - fee_model
+      properties:
+        name: { type: string }
+        date_range_from: { type: string, format: date-time }
+        date_range_to: { type: string, format: date-time }
+        strategy:
+          type: array
+          items: { $ref: 'schemas/replay-dtos.json#/definitions/FlowOrder' }
+        solver_config_id: { type: string, format: uuid }
+        risk_limits_id: { type: string, format: uuid }
+        fee_model: { $ref: 'schemas/replay-dtos.json#/definitions/FeeModel' }
+        session_config_snapshot_json: { type: object }
+        persist:
+          type: boolean
+          default: true
+          description: >
+            F15-PERSIST — если false, сессия ephemeral: живёт только в памяти
+            процесса и Kafka-потоке replay.results. Ничего не записывается в
+            PostgreSQL или ClickHouse. Отсутствие поля эквивалентно true
+            (backward-compat). Frontend по умолчанию отправляет false.
+
+    ReplaySessionCreated:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        status: { const: "pending" }
+        total_batches: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    RetryRequest:
+      type: object
+      required: [new_session_id, user_id]
+      properties:
+        new_session_id: { type: string, format: uuid, description: "ID новой сессии" }
+        user_id: { type: string, format: uuid }
+        use_same_config: { type: boolean, default: true }
+        override_config:
+          type: object
+          properties:
+            solver_config_id: { type: string, format: uuid }
+            risk_limits_id: { type: string, format: uuid }
+            fee_model: { $ref: 'schemas/replay-dtos.json#/definitions/FeeModel' }
+
+    CompareResponse:
+      type: object
+      properties:
+        sessionA: { type: string, format: uuid }
+        sessionB: { type: string, format: uuid }
+        diff:
+          type: object
+          properties:
+            avg_is: { $ref: '#/components/schemas/MetricDelta' }
+            total_pnl: { $ref: '#/components/schemas/MetricDelta' }
+            sharpe: { $ref: '#/components/schemas/MetricDelta' }
+            fill_rate: { $ref: '#/components/schemas/MetricDelta' }
+            max_drawdown: { $ref: '#/components/schemas/MetricDelta' }
+            avg_solve_time_ms: { $ref: '#/components/schemas/MetricDelta' }
+
+    MetricDelta:
+      type: object
+      properties:
+        A: { type: number }
+        B: { type: number }
+        delta: { type: number }
+        better: { type: string, description: "'A' | 'B' | 'equal'" }
+
+  responses:
+    Unauthorized:
+      description: Неавторизованный доступ
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Доступ запрещён
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

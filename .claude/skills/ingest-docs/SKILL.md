@@ -24,6 +24,27 @@ For each incoming document, execute:
 8. Validate coverage
 9. Generate implementation tasks
 
+## Agent Integration (per-level sandwich)
+
+This skill is the **project ingress** layer — it owns *cross-level connectivity
+and contradiction-exclusion* (placement, traceability, links, Conflict Notes/ADR,
+coverage), **not** the deep content of every artifact. Deep content per level is
+authored by the owning specialist agent.
+
+Канонический процесс — **сэндвич на каждом уровне**:
+`ingress(open) → agent(refine) → ingress(close)` (см.
+[docs/00-methodology/ingest-and-agents-integration.md](../../../docs/00-methodology/ingest-and-agents-integration.md)).
+
+- `ingress(open)`: шаги 1–4 (Register/Segment/Classify/Map) + входная связность.
+- `agent(refine)`: профильный специалист по матрице владения (§5 интеграции)
+  авторствует содержание уровня, читая `incoming-docs/<source>`.
+- `ingress(close)`: шаги 5–9 (Normalize/Insert/Link/Validate/Tasks) + повторная
+  проверка связности и исключение противоречий.
+
+В `fragment-map` добавляй колонку **Owner Agent** (classification → специалист).
+Лёгкий режим (без специалиста) допустим только для простых фрагментов без
+формул/контрактов/инвариантов/перф-порогов.
+
 ## Source Archive Rule
 
 All incoming documents must first be preserved under:

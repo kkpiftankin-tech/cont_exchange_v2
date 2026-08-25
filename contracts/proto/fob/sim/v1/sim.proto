@@ -1,0 +1,240 @@
+syntax = "proto3";
+
+// F-20 Live Venue Simulator — control-plane + observability contracts.
+//
+// SCOPE NOTE (ADR-015): this file does NOT define how the simulator
+// interacts with venues. Order placement and execution reporting reuse
+// the existing exchange-facing contracts AS-IS:
+//   - fob.connector.v1.PlaceChildOrderRequest  (order placement)
+//   - fob.execution.v1.ExecutionReport          (execution result)
+// The simulator emits the same ExecutionReport a real venue would, just
+// to the isolated `sim.execution.venue` topic. The sim/live discriminator
+// is the TOPIC, not a field.
+//
+// This file holds only what has NO real-exchange analog:
+//   - SimSession / SimConfigEvent : operator control-plane (which venues
+//     and instruments run in sim mode, with which behaviour models).
+//   - LatencyModel / ImpactModel / FeeModel / RejectionModel : the
+//     simulator's behaviour knobs.
+//   - SimAlert : simulator operational alerts.
+//   - SimExecutionAnnotation : sim provenance/telemetry sidecar,
+//     correlated to an ExecutionReport by report_id (ADR-015).
+
+package fob.sim.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "fob/common/v1/common.proto";
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum RoutingMode {
+  ROUTING_MODE_UNSPECIFIED = 0;
+  ROUTING_MODE_SIM_ONLY = 1;    // child orders -> VenueSimulator only
+  ROUTING_MODE_LIVE_ONLY = 2;   // transparent proxy to real EVC
+  ROUTING_MODE_SHADOW = 3;      // dual-send: LIVE + SIM in parallel
+}
+
+enum SimSessionStatus {
+  SIM_SESSION_STATUS_UNSPECIFIED = 0;
+  SIM_SESSION_STATUS_ACTIVE = 1;
+  SIM_SESSION_STATUS_PAUSED = 2;
+  SIM_SESSION_STATUS_COMPLETED = 3;
+  SIM_SESSION_STATUS_CANCELLED = 4;
+}
+
+enum LatencyDistribution {
+  LATENCY_DISTRIBUTION_UNSPECIFIED = 0;
+  LATENCY_DISTRIBUTION_LOGNORMAL = 1;
+  LATENCY_DISTRIBUTION_UNIFORM = 2;
+  LATENCY_DISTRIBUTION_FIXED = 3;
+  LATENCY_DISTRIBUTION_EMPIRICAL = 4;
+}
+
+enum ImpactModelType {
+  IMPACT_MODEL_TYPE_UNSPECIFIED = 0;
+  IMPACT_MODEL_TYPE_LINEAR = 1;
+  IMPACT_MODEL_TYPE_SQRT = 2;
+  IMPACT_MODEL_TYPE_POWER_LAW = 3;
+  IMPACT_MODEL_TYPE_LEVEL_BY_LEVEL = 4;
+}
+
+enum PartialFillMode {
+  PARTIAL_FILL_MODE_UNSPECIFIED = 0;
+  PARTIAL_FILL_MODE_PROPORTIONAL = 1;
+  PARTIAL_FILL_MODE_LEVEL_BY_LEVEL = 2;
+  PARTIAL_FILL_MODE_NONE = 3;
+}
+
+enum SimAlertType {
+  SIM_ALERT_TYPE_UNSPECIFIED = 0;
+  SIM_ALERT_TYPE_STALE_LOB = 1;
+  SIM_ALERT_TYPE_SIM_TIMEOUT = 2;
+  SIM_ALERT_TYPE_LOB_SOURCE_DOWN = 3;
+  SIM_ALERT_TYPE_RANDOM_REJECT_SPIKE = 4;
+}
+
+enum SimConfigEventType {
+  SIM_CONFIG_EVENT_TYPE_UNSPECIFIED = 0;
+  SIM_CONFIG_EVENT_TYPE_UPSERT = 1;   // session created or updated (incl. hot reload)
+  SIM_CONFIG_EVENT_TYPE_DELETE = 2;   // session completed/cancelled -> stop routing
+}
+
+// ============================================================================
+// Behaviour models (simulator knobs — no real-exchange analog)
+// ============================================================================
+
+// How long the simulated venue "takes to respond". Sampled per child order.
+message LatencyModel {
+  LatencyDistribution distribution = 1;
+  uint32 p50_ms = 2;
+  uint32 p95_ms = 3;
+  uint32 p99_ms = 4;
+  double tail_probability = 5;   // probability of a long-tail sample
+  uint32 timeout_ms = 6;         // sample > timeout -> SIM_TIMEOUT reject
+}
+
+// How order volume moves the execution price (market impact).
+message ImpactModel {
+  ImpactModelType model_type = 1;
+  double impact_coeff = 2;       // alpha in delta_p = alpha * f(qty)
+  double power_exponent = 3;     // for POWER_LAW
+  bool depletion_mode = 4;       // consume LOB levels across serial orders
+  uint32 depletion_decay_ms = 5; // how fast depleted liquidity "recovers"
+}
+
+// Fees applied to the simulated fill. Compatible with F-15 FeeModel shape.
+message FeeModel {
+  int32 maker_bps = 1;
+  int32 taker_bps = 2;
+  fob.common.v1.Decimal min_fee = 3;
+  fob.common.v1.Decimal gas_flat = 4;   // DEX/AMM flat gas component
+}
+
+// When the simulator should reject instead of fill (mimics real rejects).
+message RejectionModel {
+  bool insufficient_liquidity_enabled = 1;
+  bool price_constraint_enabled = 2;
+  double random_rejection_rate = 3;     // [0,1] "dark" venue errors
+  double rate_limit_reject_rate = 4;    // [0,1] rate-limit rejects
+  fob.common.v1.Decimal min_liquidity_threshold = 5;  // below -> auto reject
+}
+
+// ============================================================================
+// SimSession — one active simulation configuration period
+// ============================================================================
+
+message SimSession {
+  fob.common.v1.EventMeta meta = 1;
+
+  string sim_session_id = 2;       // UUID (PG sim_sessions PK)
+  string name = 3;                 // human label, e.g. "BTC_SIM_2026Q2"
+  RoutingMode routing_mode = 4;
+
+  repeated string scope_venues = 5;       // venues in sim mode
+  repeated string scope_instruments = 6;  // instruments in sim mode
+
+  LatencyModel latency_model = 10;
+  ImpactModel impact_model = 11;
+  FeeModel fee_model = 12;
+  RejectionModel rejection_model = 13;
+
+  uint32 stale_lob_threshold_ms = 20;     // lobAge over this -> SIM_STALE_LOB
+  PartialFillMode partial_fill_mode = 21;
+
+  SimSessionStatus status = 30;
+  google.protobuf.Timestamp created_at = 40;
+  google.protobuf.Timestamp activated_at = 41;
+  google.protobuf.Timestamp completed_at = 42;
+  string created_by = 43;
+}
+
+// Kafka `sim.config` envelope — propagates SimSession changes to
+// VenueSimRouter for hot reload (no restart).
+message SimConfigEvent {
+  fob.common.v1.EventMeta meta = 1;
+  SimConfigEventType event_type = 2;
+  SimSession session = 3;
+}
+
+// Kafka `sim.alerts` — simulator operational alerts.
+message SimAlert {
+  fob.common.v1.EventMeta meta = 1;
+  string alert_id = 2;
+  SimAlertType type = 3;
+  string sim_session_id = 4;
+  string venue_id = 5;
+  string symbol = 6;
+  string message = 7;
+  google.protobuf.Timestamp ts = 8;
+}
+
+// ============================================================================
+// SimExecutionAnnotation — sim telemetry sidecar (ADR-015)
+// ============================================================================
+//
+// Correlated to a fob.execution.v1.ExecutionReport by report_id. Published
+// to `sim.execution.annotations` and landed as extra columns on the CH
+// `sim_execution_reports` table. The live execution path never produces or
+// consumes this — it is pure simulation provenance, NOT execution data, so
+// it stays out of the shared ExecutionReport contract.
+message SimExecutionAnnotation {
+  fob.common.v1.EventMeta meta = 1;
+
+  string report_id = 2;        // -> ExecutionReport.report_id
+  string sim_session_id = 3;
+  string lob_snapshot_id = 4;  // which VenueSnapshot fed the simulation
+  uint32 lob_age_ms = 5;       // snapshot age at simulation time
+  double impact_bps = 6;       // ImpactModel-computed market impact
+  uint32 latency_sample_ms = 7; // LatencyModel-sampled delay applied
+}
+
+// ============================================================================
+// SimSession Manager — operator control-plane (REST + gRPC duals)
+// ============================================================================
+
+message CreateSimSessionRequest {
+  // Caller supplies everything except server-assigned id/timestamps.
+  SimSession session = 1;
+}
+
+message GetSimSessionRequest {
+  string sim_session_id = 1;
+}
+
+message ListSimSessionsRequest {
+  // Optional filter; empty = all.
+  SimSessionStatus status = 1;
+  uint32 limit = 2;
+}
+
+message ListSimSessionsResponse {
+  repeated SimSession sessions = 1;
+}
+
+message UpdateSimSessionRequest {
+  string sim_session_id = 1;
+  // Mutable fields. routing_mode switch + model hot-reload go here.
+  RoutingMode routing_mode = 2;
+  LatencyModel latency_model = 10;
+  ImpactModel impact_model = 11;
+  FeeModel fee_model = 12;
+  RejectionModel rejection_model = 13;
+  uint32 stale_lob_threshold_ms = 20;
+  PartialFillMode partial_fill_mode = 21;
+  SimSessionStatus status = 30;   // e.g. ACTIVE<->PAUSED
+}
+
+message CompleteSimSessionRequest {
+  string sim_session_id = 1;
+}
+
+service SimSessionManager {
+  rpc CreateSession(CreateSimSessionRequest) returns (SimSession);
+  rpc GetSession(GetSimSessionRequest) returns (SimSession);
+  rpc ListSessions(ListSimSessionsRequest) returns (ListSimSessionsResponse);
+  rpc UpdateSession(UpdateSimSessionRequest) returns (SimSession);
+  rpc CompleteSession(CompleteSimSessionRequest) returns (google.protobuf.Empty);
+}

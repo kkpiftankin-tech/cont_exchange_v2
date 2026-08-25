@@ -176,6 +176,39 @@ Decimal-арифметика для всех денежных и количес�
 
 Изменения `risk_limits`, `solver_config`, `fee_model` применяются без рестарта сервисов; история изменений — для audit.
 
+## NFR-F05A. Vectorized External Liquidity
+
+Источник: IN-014. Feature — [F-05A](features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md).
+
+### NFR-F05A-001. Детерминизм
+
+Для одного и того же входа (`external_order_levels`, `asset_basis`, fees/buffers,
+`solver_config`, `batch_id`) solver возвращает идентичные `x`, `π`, `residual`,
+`ExecutionGroup` (бит-в-бит). QP в детерминированном режиме (fixed `max_iter`, no
+adaptive-rho — ADR-045). Обязательно для F-15 replay (AC-F05A-011).
+
+### NFR-F05A-002. Latency
+
+`p95` vectorization < 100 ms; `p95` solver < batch SLA; `p95` snapshot после batch
+< 200 ms (в пределах бюджета F-05).
+
+### NFR-F05A-003. Traceability
+
+Каждый `x_i` связан с `source_order_id` / `venue_id` / `pair` / `side` / `w_i` /
+`batch_id` / `execution_group_id` / `fill_id`.
+
+### NFR-F05A-004. Auditability
+
+`W`, `pH`, `dHL`, `q`, `D`, `x`, `π`, `residual`, source mapping, solver diagnostics,
+surplus allocation сохраняются в ClickHouse (`vector_clearing_results`, `surplus_events`,
+`vector_flow_segments_history`) при audit/replay режиме.
+
+### NFR-F05A-005. Replay compatibility
+
+F-15 воспроизводит `external_order_levels → vectorization → W → QP → ExecutionGroup →
+FillEvent → MarketDataSnapshot` детерминированно (зависит от grouped/vector пути в
+`backtest`, CN-IN014-05).
+
 ## Связанные документы
 
 - FR: [functional-requirements.md](functional-requirements.md)

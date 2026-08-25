@@ -5,6 +5,7 @@ package fob.matching.v1;
 import "fob/common/v1/common.proto";
 import "fob/orders/v1/orders.proto";
 import "fob/matching/v1/batch.proto";
+import "fob/venue/v1/venue.proto";
 
 // Solver gRPC contract for one batch-clearing step.
 //
@@ -30,6 +31,10 @@ message BatchRequest {
   // services that support per-call overrides can apply it; older services may
   // ignore it while preserving request reproducibility in logs/traces.
   string solver_config_snapshot_json = 5;
+
+  // Historical external venue liquidity used by replay/audit calls. Live
+  // matching still sources this from its in-memory venue cache.
+  repeated fob.venue.v1.VenueLiquidityCurve external_liquidity = 6;
 }
 
 service Solver {

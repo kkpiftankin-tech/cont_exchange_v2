@@ -1,8 +1,112 @@
-# Компонент: matching
+# Компонент: matching (matching-fob-core)
 
 Сервис непрерывного клиринга. Читает `orders.normalized` из Kafka, поддерживает реестр активных ордеров, периодически запускает solver и публикует `BatchResult` в `batch.outputs`.
 
-## Код
+## 🧭 Navigation (IN-013)
+
+| ⬆️ Куда / зачем | Ссылка |
+| --- | --- |
+| Какие features используют этот компонент? | F-04 (Batch Clearing), F-09 (Combo Orders, grouped solver), F-12 (Hedge Triggers, planner) |
+| L0 system-boundary view | [F-04 README → L0](../../02-system/features/F-04-batch-clearing/) |
+| L1 service-level view | [SEQ-F04-UC-F04-01-services](../sequences/SEQ-F04-UC-F04-01-services.md) |
+| L2 component-internal view | секция «L2 sequences (Fish 🐟)» ниже |
+
+## 🏗 Class structure (внутреннее устройство, L2 🐟)
+
+Высокоуровневая структура сервиса (соответствует слоям из CLAUDE.md §10):
+
+```mermaid
+classDiagram
+    class main_cpp {
+        +entrypoint
+    }
+    class MatchingLoop {
+        +start()
+        +stop()
+        -consume_orders_normalized()
+        -batch_timer_tick()
+    }
+    class RunBatchUseCase {
+        +execute(batch_id)
+        +solve_time_ms
+    }
+    class ContinuousClearingSolver {
+        +solve(orders, ref_prices) BatchResult
+        -interior_point_loop()
+        -compute_residual_norm()
+    }
+    class BatchResultToFillEvents {
+        +convert(BatchResult) FillEvent[]
+    }
+    class PostgresFlowOrderRepository {
+        +load_active_orders() FlowOrder[]
+    }
+    class PostgresSolverConfigRepository {
+        +load_active_config() SolverConfig
+    }
+    class MarketDataClient {
+        +get_last_ticker(symbol) ReferencePrice
+    }
+    class BatchOutputsProducer {
+        +publish(BatchResult)
+        +publish_fills(FillEvent[])
+    }
+    class SolverMetrics {
+        +record_solve_time(ms)
+        +record_residual_norm(d)
+    }
+    class GrpcIsolationMatchingService {
+        +Solve(BatchRequest) BatchResponse
+    }
+
+    main_cpp --> MatchingLoop : owns
+    MatchingLoop --> RunBatchUseCase : per tick
+    RunBatchUseCase --> PostgresFlowOrderRepository : load
+    RunBatchUseCase --> PostgresSolverConfigRepository : load
+    RunBatchUseCase --> MarketDataClient : ref prices
+    RunBatchUseCase --> ContinuousClearingSolver : solve
+    RunBatchUseCase --> BatchResultToFillEvents : convert
+    RunBatchUseCase --> BatchOutputsProducer : publish
+    RunBatchUseCase --> SolverMetrics : observe
+    GrpcIsolationMatchingService --> ContinuousClearingSolver : standalone solve (replay)
+```
+
+Полное соответствие классов → cpp/-файлов — в секции «💻 Код» ниже.
+
+## 🐟 L2 sequences (component-internal)
+
+Эти sequences показывают, как UC F-04 / F-09 / F-12 реализуются через
+внутренние классы `matching`.
+
+| L2 sequence | Запускается из | Использует классы |
+| --- | --- | --- |
+| [SEQ-MATCHING-001-solver-cycle](sequences/SEQ-MATCHING-001-solver-cycle.md) | [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md) step 1–4 | MatchingLoop, RunBatchUseCase, ContinuousClearingSolver, BatchResultToFillEvents, BatchOutputsProducer, SolverMetrics, PostgresFlowOrderRepository, MarketDataClient |
+| (TBD) SEQ-MATCHING-002-grouped-solve | [UC-F09-02](../../02-system/use-cases/UC-F09-02-grouped-matching/use-case.md) | GroupedSolverBisection, MultilegFeasibleCaps, ConstraintEvaluator |
+| (TBD) SEQ-MATCHING-003-hedge-trigger | [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md) | HedgeTriggerPolicy, ExecutionPlanner, ExecutionIntentBuilder |
+
+## 💻 Код (соответствие класс ↔ файл)
+
+| Класс / модуль | Файл |
+| --- | --- |
+| entry point | [src/main.cpp](../../../cpp/matching/src/main.cpp) |
+| MatchingLoop (consumer + batch timer) | [src/app/matching_loop.cpp](../../../cpp/matching/src/app/matching_loop.cpp) |
+| RunBatchUseCase | [src/app/run_batch_uc.cpp](../../../cpp/matching/src/app/run_batch_uc.cpp) |
+| ContinuousClearingSolver | [src/domain/solver_impl.cpp](../../../cpp/matching/src/domain/solver_impl.cpp) (math foundation — [IN-012 / ADR-035](../../09-implementation/solver-foundation.md)) |
+| BatchResultToFillEvents | [src/domain/batch_result_to_fill_events.cpp](../../../cpp/matching/src/domain/batch_result_to_fill_events.cpp) |
+| GroupedSolverBisection (F-09) | [src/domain/grouped_solver_bisection.cpp](../../../cpp/matching/src/domain/grouped_solver_bisection.cpp) |
+| MultilegFeasibleCaps (F-09) | [src/domain/multileg_feasible_caps.cpp](../../../cpp/matching/src/domain/multileg_feasible_caps.cpp) |
+| ConstraintEvaluator (F-09) | [src/domain/constraint_evaluator.cpp](../../../cpp/matching/src/domain/constraint_evaluator.cpp) |
+| HedgeTriggerPolicy (F-12) | [src/app/hedge_trigger_policy.cpp](../../../cpp/matching/src/app/hedge_trigger_policy.cpp) |
+| ExecutionPlanner (F-12) | [src/app/execution_planner.cpp](../../../cpp/matching/src/app/execution_planner.cpp) |
+| ExecutionIntentBuilder (F-12) | [src/app/execution_intent_builder.cpp](../../../cpp/matching/src/app/execution_intent_builder.cpp) |
+| PostgresFlowOrderRepository | [src/infra/postgres/postgres_flow_order_repository.cpp](../../../cpp/matching/src/infra/postgres/postgres_flow_order_repository.cpp) |
+| PostgresSolverConfigRepository | [src/infra/postgres/postgres_solver_config_repository.cpp](../../../cpp/matching/src/infra/postgres/postgres_solver_config_repository.cpp) |
+| MarketDataClient (gRPC) | [src/infra/market_data/market_data_client.cpp](../../../cpp/matching/src/infra/market_data/market_data_client.cpp) |
+| BatchOutputsProducer (Kafka) | [src/infra/kafka/batch_outputs_producer.cpp](../../../cpp/matching/src/infra/kafka/batch_outputs_producer.cpp) |
+| GrpcIsolationMatchingService | [src/transport/grpc_isolation_matching_service.cpp](../../../cpp/matching/src/transport/grpc_isolation_matching_service.cpp) |
+| SolverMetrics | [src/app/solver_metrics.cpp](../../../cpp/matching/src/app/solver_metrics.cpp) |
+
+## Старая «Код» (legacy секция)
 
 - [cpp/matching/](../../../cpp/matching/) — каталог
 - [src/main.cpp](../../../cpp/matching/src/main.cpp) — entrypoint
@@ -54,11 +158,11 @@
 
 ## Participates In Use Cases
 
-- [UC-F02-01](../../02-system/use-cases/UC-F02-01-create-flow-order/use-case.md), [UC-F03-01](../../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md), [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F09-01](../../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md), [UC-F10-01](../../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md), [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md)
+- [UC-F02-01](../../02-system/use-cases/UC-F02-01-create-flow-order/use-case.md), [UC-F03-01](../../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md), [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F09-01](../../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md), [UC-F10-01](../../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md)
 
 ## Participates In Sequence Diagrams
 
-- [SEQ-F03-UC-F03-01-services](../sequences/SEQ-F03-UC-F03-01-services.md), [SEQ-F04-UC-F04-01-services](../sequences/SEQ-F04-UC-F04-01-services.md), [SEQ-F08-UC-F08-01-services](../sequences/SEQ-F08-UC-F08-01-services.md), [SEQ-F09-UC-F09-01-services](../sequences/SEQ-F09-UC-F09-01-services.md), [SEQ-F10-UC-F10-01-services](../sequences/SEQ-F10-UC-F10-01-services.md), [SEQ-F11-UC-F11-01-services](../sequences/SEQ-F11-UC-F11-01-services.md), [SEQ-F12-UC-F12-01-services](../sequences/SEQ-F12-UC-F12-01-services.md), [SEQ-F15-UC-F15-01-services](../sequences/SEQ-F15-UC-F15-01-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md)
+- [SEQ-F03-UC-F03-01-services](../sequences/SEQ-F03-UC-F03-01-services.md), [SEQ-F04-UC-F04-01-services](../sequences/SEQ-F04-UC-F04-01-services.md), [SEQ-F08-UC-F08-01-services](../sequences/SEQ-F08-UC-F08-01-services.md), [SEQ-F09-UC-F09-01-services](../sequences/SEQ-F09-UC-F09-01-services.md), [SEQ-F10-UC-F10-01-services](../sequences/SEQ-F10-UC-F10-01-services.md), [SEQ-F11-UC-F11-01-services](../sequences/SEQ-F11-UC-F11-01-services.md), [SEQ-F12-01-auto-hedge-services](../sequences/SEQ-F12-01-auto-hedge-services.md), [SEQ-F15-UC-F15-01-services](../sequences/SEQ-F15-UC-F15-01-services.md), [SEQ-F16-UC-F16-01-services](../sequences/SEQ-F16-UC-F16-01-services.md)
 
 ## Owned Contracts
 

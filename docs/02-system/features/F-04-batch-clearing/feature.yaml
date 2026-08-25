@@ -3,6 +3,18 @@ feature:
   name: Batch Clearing Cycle
   status: in-progress-mvp
   owner: core-team
+  level: kite
+
+# Theoretical foundation (IN-012, 2026-04-15) — Hamiltonian-based QP
+# formulation. Closed-form test vectors §4.5/§6.1.3; agent typology §5.1.
+# См. ADR-035 + docs/09-implementation/solver-foundation.md.
+theoreticalFoundation:
+  source: IN-012
+  ref: incoming-docs/2026-04-15-continuous-order-market-academic-v1.md
+  sections: ["§4", "§5.1", "§6.1"]
+  adr: ADR-035
+  implementationDoc: docs/09-implementation/solver-foundation.md
+  primitives: [StandardAgent, LinearFeeAgent, MarketAggregation, ClearingPrice]
 
 description: >
   Периодический батч-клиринг FlowOrder. ContinuousClearingSolver (Eigen3
@@ -91,13 +103,15 @@ acceptanceCriteria:
 
 knownIssues:
   - id: order-flow-postgres-write-pending
-    severity: feature-gap
+    severity: resolved
     description: >
       Postgres схема для flow_orders/solver_config готова (init.sql),
-      matching читает её на старте. Однако order_flow сервис ещё не
-      пишет принимаемые FlowOrder в эту таблицу — записи появятся
-      только когда подключится postgres-writer в order_flow (отдельная
-      задача T-F04-002).
+      matching читает её на старте. Writer в order_flow подключён в
+      PR-F02-001 (cpp/order_flow/src/infra/postgres/
+      postgres_flow_order_repository.cpp). После успешного reserve
+      пишется flow_orders (status='active') + flow_order_legs
+      (single-leg weight=±1 по side). Без ORDER_FLOW_POSTGRES_DSN сервис
+      по-прежнему работает в режиме in-memory + Kafka-only.
   - id: clickhouse-ingestion-pending
     severity: feature-gap
     description: >
@@ -116,6 +130,44 @@ knownIssues:
     severity: critical
     description: ReleaseFunds при cancel после partial fill снимает оригинальную сумму
     location: cpp/order_flow/src/app/order_flow_uc.cpp#L172-L186
+  - id: order-flow-not-subscribed-to-batch-outputs
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      Service order_flow не подписан на Kafka топик `batch.outputs` и не
+      получает уведомлений о fills. В результате `flow_orders.filled_cum`,
+      `flow_orders.remaining_qty` и `flow_orders.status` НИКОГДА не
+      обновляются после изначального INSERT. Gateway/UI бесконечно видят
+      исполненную заявку как `status: "new"`, progress 0%.
+
+      Воспроизведено: order 89b0a0aa-... (1 BTC) → ClickHouse `fills`
+      содержит 70 записей с SUM(executed_qty)=2.000002 → gateway
+      возвращает `remaining_qty: 1, status: "new"`.
+
+      Решение: подписать order_flow на batch.outputs и обновлять
+      flow_orders idempotently (recommended), либо ledger должен делать
+      обратный gRPC call в order_flow после успешного ApplyBatchResult.
+    location: cpp/order_flow/src/main.cpp (no Kafka consumer for batch.outputs)
+    target_pr: PR-A (см. IN-007.meta.md)
+  - id: matching-overfill-no-hard-cap
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      Solver продолжает генерировать fills после того, как
+      SUM(executed_qty per order) превысила `total_qty`. Воспроизведено:
+      order 1 BTC → SUM(executed_qty в ClickHouse) = 2.000002 BTC.
+      В проде это эквивалент short-sale без обеспечения.
+
+      Возможные источники: (1) RunBatchUseCase::Execute не проверяет
+      hard cap по remaining_qty перед publish_batch, (2) observability
+      consumer пишет дубликаты в `fills`. Соотношение 70 fills /
+      ~34 batch ticks (171 сек / 5 сек) намекает на оба компонента.
+
+      Нарушает Ledger invariant из CLAUDE.md §17 "не применять fill
+      дважды" и неявный domain invariant
+      `SUM(fills[order_id]) <= flow_orders.total_qty`.
+    location: cpp/matching/src/app/run_batch_uc.cpp, cpp/observability/
+    target_pr: PR-B (см. IN-007.meta.md)
 
 tests:
   unit:

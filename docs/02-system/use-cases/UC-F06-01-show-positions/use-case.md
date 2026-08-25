@@ -1,4 +1,21 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: use-case
+level: sea
+---
+-->
+
 # UC-F06-01. Показать позиции / PnL / маржу
+
+## 🧭 Navigation (IN-013)
+
+| Уровень | Где |
+| --- | --- |
+| ⬆️ Parent feature L0 ☁️ | [F-06-positions-pnl-margin](../../features/F-06-positions-pnl-margin/) |
+| ☁️ L0 system sequence | [SEQ-UC-F06-01-system](sequences/SEQ-UC-F06-01-system.md) — system как чёрный ящик |
+| 🌊 L1 service sequence | [SEQ-F06-UC-F06-01-services](../../../05-components/sequences/SEQ-F06-UC-F06-01-services.md) — взаимодействие сервисов |
+| 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
+| 💻 Source code | [`cpp/`](../../../../cpp/) |
 
 ## Feature
 

@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package fob.marketdata.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// F-05A (IN-014): Vectorized external order book liquidity for F-09
+// multileg_vector_solver. Каждый внешний order level превращается в вектор
+// активов w_i (столбец матрицы W); клиринг возникает из условия баланса
+// активов Wx=0. Денежные/количественные величины — fob.common.v1.Decimal (§9).
+// ADR-044 (surplus), ADR-045 (QP backend). status: planned.
+
+// Сторона внешнего уровня стакана.
+enum VectorLevelSide {
+  VECTOR_LEVEL_SIDE_UNSPECIFIED = 0;
+  VECTOR_LEVEL_SIDE_BID = 1;  // внешний покупает base, продаёт quote
+  VECTOR_LEVEL_SIDE_ASK = 2;  // внешний продаёт base, покупает quote
+}
+
+// Статус vector clearing solve.
+enum VectorSolverStatus {
+  VECTOR_SOLVER_STATUS_UNSPECIFIED = 0;
+  VECTOR_SOLVER_STATUS_CONVERGED = 1;
+  VECTOR_SOLVER_STATUS_DEGRADED = 2;
+  VECTOR_SOLVER_STATUS_FAILED = 3;
+}
+
+// Политика распределения surplus (остатка Wx != 0). См. ADR-044.
+enum SurplusAllocationPolicy {
+  SURPLUS_ALLOCATION_POLICY_UNSPECIFIED = 0;
+  SURPLUS_ALLOCATION_POLICY_REJECT_IF_RESIDUAL = 1;  // MVP default
+  SURPLUS_ALLOCATION_POLICY_EXCHANGE_PNL = 2;
+  SURPLUS_ALLOCATION_POLICY_SURPLUS_ASSET = 3;
+  SURPLUS_ALLOCATION_POLICY_MM_LAST_RESORT = 4;
+}
+
+// Дискретный внешний order level из venue-стакана (provenance сохранён).
+message ExternalOrderLevel {
+  string venue_id = 1;
+  string source_order_id = 2;
+  string pair = 3;                             // "BTC/USDT"
+  string base_asset = 4;                       // X
+  string quote_asset = 5;                      // Y
+  VectorLevelSide side = 6;
+  fob.common.v1.Decimal price = 7;
+  fob.common.v1.Decimal effective_price = 8;   // P ± fees/latency/slippage
+  fob.common.v1.Decimal quantity = 9;
+  fob.common.v1.Decimal remaining_quantity = 10;
+  google.protobuf.Timestamp ts_event = 11;
+  fob.common.v1.Decimal fees_bps = 12;
+  fob.common.v1.Decimal latency_buffer_bps = 13;
+  fob.common.v1.Decimal slippage_buffer_bps = 14;
+  repeated string quality_flags = 15;
+}
+
+// Упорядоченный справочник активов (ось векторов w_i).
+message AssetBasis {
+  message Entry {
+    int32 index = 1;
+    string asset = 2;   // "BTC", "ETH", "USDT"
+  }
+  string basis_id = 1;
+  repeated Entry assets = 2;
+  int32 num_assets = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// Flow-сегмент: один столбец W (вектор активов) + границы/поток.
+message VectorFlowSegment {
+  string segment_id = 1;
+  string source_order_id = 2;
+  string venue_id = 3;
+  string pair = 4;
+  VectorLevelSide side = 5;
+  repeated fob.common.v1.Decimal w = 6;        // длина = num_assets
+  fob.common.v1.Decimal p_low = 7;             // обычно 0
+  fob.common.v1.Decimal p_high = 8;            // dHL
+  fob.common.v1.Decimal d_hl = 9;
+  fob.common.v1.Decimal q_rate = 10;
+  fob.common.v1.Decimal q_max = 11;
+  fob.common.v1.Decimal remaining_quantity = 12;
+  google.protobuf.Timestamp source_timestamp = 13;
+}
+
+// Вход vector clearing: W/pH/dHL/q/D и source_map выводятся из segments.
+message VectorClearingInput {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;
+  AssetBasis basis = 3;
+  repeated VectorFlowSegment segments = 4;     // столбцы W
+}
+
+// Информация о surplus/остатке по одному активу.
+message SurplusInfo {
+  string asset = 1;
+  fob.common.v1.Decimal amount = 2;
+  SurplusAllocationPolicy allocation_policy = 3;
+}
+
+// Диагностика solve (double допустим только здесь — §9).
+message VectorSolverDiagnostics {
+  double residual_norm = 1;      // ||Wx|| (диагностика)
+  uint32 iterations = 2;
+  uint32 solve_time_ms = 3;
+  string solver_params_version = 4;
+}
+
+// Результат vector clearing.
+message VectorClearingResult {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;
+  string execution_group_id = 3;
+  repeated fob.common.v1.Decimal x = 4;        // executed rate per segment
+  repeated fob.common.v1.Decimal pi = 5;       // item prices per asset
+  repeated fob.common.v1.Decimal residual = 6; // Wx per asset
+  VectorSolverStatus solver_status = 7;
+  repeated SurplusInfo surplus = 8;
+  VectorSolverDiagnostics diagnostics = 9;
+}
+
+// Kafka-конверт marketdata.vectorized (topic doc: marketdata-vectorized.md).
+message VectorizedLiquiditySnapshot {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;
+  VectorClearingInput input = 3;
+}
+
+// Событие surplus для observability (CH surplus_events).
+message SurplusEvent {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;
+  string execution_group_id = 3;
+  SurplusInfo surplus = 4;
+}
+
+message GetVectorizedLiquidityRequest {
+  repeated string symbols = 1;
+  string fixture_id = 2;         // опц.: read из captured fixture
+}
+
+message GetVectorizedLiquidityResponse {
+  VectorClearingInput input = 1;
+  fob.common.v1.Error error = 2;
+}
+
+message GetVectorClearingDiagnosticsRequest {
+  string execution_group_id = 1;
+  string batch_id = 2;
+}
+
+message GetVectorClearingDiagnosticsResponse {
+  VectorClearingResult result = 1;
+  fob.common.v1.Error error = 2;
+}
+
+// Read-side диагностика vector clearing (F-05A). Отдельный сервис —
+// не расширяет MarketDataService (меньше blast-radius).
+service VectorLiquidityService {
+  rpc GetVectorizedLiquidity(GetVectorizedLiquidityRequest)
+      returns (GetVectorizedLiquidityResponse);
+  rpc GetVectorClearingDiagnostics(GetVectorClearingDiagnosticsRequest)
+      returns (GetVectorClearingDiagnosticsResponse);
+}

@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package fob.marketdata.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "fob/common/v1/common.proto";
+import "fob/venue/v1/venue.proto";
+import "fob/marketdata/v1/bbo.proto";
+
+message PriceLevel {
+  fob.common.v1.Decimal price = 1;
+  fob.common.v1.Decimal amount = 2;
+}
+
+message OrderBookSnapshot {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  uint64 nonce = 4;
+  repeated PriceLevel bids = 5;
+  repeated PriceLevel asks = 6;
+}
+
+message Ticker {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  fob.common.v1.Decimal bid = 10;
+  fob.common.v1.Decimal ask = 11;
+  fob.common.v1.Decimal last = 12;
+  fob.common.v1.Decimal high = 13;
+  fob.common.v1.Decimal low = 14;
+  fob.common.v1.Decimal open = 15;
+  fob.common.v1.Decimal close = 16;
+  fob.common.v1.Decimal base_volume = 20;
+  fob.common.v1.Decimal quote_volume = 21;
+  fob.common.v1.Decimal vwap = 30;
+  fob.common.v1.Decimal spread = 31;
+}
+
+message Trade {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  string trade_id = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  fob.common.v1.Side side = 5;
+  fob.common.v1.Decimal price = 6;
+  fob.common.v1.Decimal amount = 7;
+  fob.common.v1.Decimal cost = 8;
+  fob.common.v1.Fee fee = 9;
+  bool maker = 10;
+  string order_id = 11;
+}
+
+message VenueSymbolMeta {
+  string venue = 1;
+  fob.common.v1.Instrument instrument = 2;
+  fob.common.v1.Decimal maker_fee_rate = 10;
+  fob.common.v1.Decimal taker_fee_rate = 11;
+  fob.common.v1.Decimal tick_size = 20;
+  fob.common.v1.Decimal lot_size = 21;
+  fob.common.v1.Decimal min_notional = 22;
+  fob.common.v1.Decimal min_qty = 23;
+  fob.common.v1.Decimal max_qty = 24;
+  string venue_symbol = 30;
+}
+
+message MarketDataRaw {
+  fob.common.v1.EventMeta meta = 1;
+  oneof payload {
+    OrderBookSnapshot orderbook = 10;
+    Ticker ticker = 11;
+    Trade trade = 12;
+    VenueSymbolMeta symbol_meta = 13;
+  }
+}
+
+message GetLastTickerRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;
+  string symbol = 3;
+}
+
+message GetLastTickerResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool found = 2;
+  Ticker ticker = 3;
+  fob.common.v1.Error error = 4;
+}
+
+message GetLiquidityCurveRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string venue = 2;
+  string symbol = 3;
+  fob.venue.v1.ExecutionSide side = 4;
+}
+
+message GetLiquidityCurveResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool found = 2;
+  fob.venue.v1.SideLiquidityCurve curve = 3;
+  fob.common.v1.Error error = 4;
+}
+
+service MarketDataService {
+  rpc GetLastTicker(GetLastTickerRequest) returns (GetLastTickerResponse);
+  rpc GetLiveMarketSnapshots(google.protobuf.Empty) returns (stream OrderBookSnapshot);
+  rpc GetLiquidityCurve(GetLiquidityCurveRequest) returns (GetLiquidityCurveResponse);
+  rpc SubscribeBBO(google.protobuf.Empty) returns (stream BBOUpdate);
+}

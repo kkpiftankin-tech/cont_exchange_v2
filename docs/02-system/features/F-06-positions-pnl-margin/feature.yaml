@@ -3,6 +3,7 @@ feature:
   name: Positions / PnL / Margin
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Учёт балансов (available/reserved), позиций и PnL пользователей.
@@ -38,11 +39,36 @@ grpcServices:
     - fob.ledger.v1.LedgerService.ApplyBatchResult
   calls: []
 
+# T-F06-010 / T-F06-011: OLTP tables in infra/postgres/init.sql.
+# accounts/positions — ledger writes; risk_limits/risk_snapshots — risk writes.
+postgresTables:
+  writes:
+    - accounts          # ledger: SettleFill / ApplyBatchResult
+    - positions         # ledger: apply fill / reduce / flip
+    - risk_limits       # risk: operator limits + margin rates
+    - risk_snapshots    # risk: buildRiskSnapshot (append-only)
+  reads:
+    - accounts          # risk (margin), gateway (balances)
+    - positions         # risk (margin/liquidation), gateway (display)
+    - risk_limits       # risk (margin calc), matching (kill_switch)
+
 acceptanceCriteria:
   - "GetBalances возвращает available/reserved/total для всех валют пользователя."
   - "ReserveFunds идемпотентен по reservation_id."
   - "ApplyBatchResult корректно списывает reserved и начисляет available по каждому fill."
   - "ReleaseFunds возвращает amount=0 если резерва не существует (WARN log)."
+  # --- F6-1..F6-10 (IN-001 §6, FR-LEDGER-001/002) ---
+  - "F6-1: positions и accounts обновляются при каждом FillEvent (apply BatchResult); apply идемпотентен по (batch_id, order_id, fill_id)."
+  - "F6-2: после каждого батча Risk строит RiskSnapshot (initial/maintenance margin, free/reserved collateral, leverage, risk_flags) и пишет строку в risk_snapshots."
+  - "F6-3: gRPC LedgerService.GetPositions возвращает позиции с unrealized PnL (mark-to-market по текущей mark price); при stale mark — флаг mark_stale и last persisted PnL."
+  - "F6-4: gateway GET /v1/positions (alias /api/v1/positions) агрегирует ledger (позиции+балансы) и risk (маржу) в единый ответ."
+  - "F6-5: WebSocket push: при новом RiskSnapshot или обновлении позиций клиент получает апдейт без перезапроса."
+  - "F6-6: UI показывает таблицу позиций (symbol, side, qty, avg_entry, mark, uPnL, rPnL)."
+  - "F6-7: UI показывает блок маржи (free/used collateral, initial/maintenance margin, leverage) и подсвечивает состояние margin call / liquidation по risk_flags."
+  - "F6-8: multi-leg / портфельные позиции отображаются корректно (агрегация по legs, раскрытие per-leg)."
+  - "F6-9: polling fallback — при недоступном WebSocket UI переключается на периодический GET /v1/positions без потери данных."
+  - "F6-10: все денежные величины — Decimal (fixed-point); realized/unrealized PnL и avg_entry_price детерминированы и покрыты unit-тестами (U1-U10)."
+  - "Position flip через ноль: realized_pnl фиксируется только на закрытом объёме, новая нога открывается по fill_price (avg_entry_price = fill_price)."
 
 knownIssues:
   - id: no-persistence
@@ -62,9 +88,72 @@ knownIssues:
     description: Realised/Unrealised PnL не вычисляется
   - id: no-margin-calculation
     severity: feature-gap
-    description: Margin requirements не рассчитываются (есть placeholder в risk)
+    description: >
+      Margin requirements не рассчитываются. Текущий risk_uc.cpp использует
+      placeholder margin = qty * reference_price * 0.1, не учитывает позиции,
+      max_leverage из risk_limits, free/maintenance collateral. План замены —
+      buildRiskSnapshot (SEQ-RISK-001), задача T-F06-031.
+  - id: no-risk-snapshot
+    severity: feature-gap
+    description: >
+      RiskSnapshot после батча не строится (F6-2): risk не консьюмит
+      batch.outputs и не пишет risk_snapshots. Нет margin call detection.
+      План — T-F06-030..032.
+  - id: no-get-positions-rpc
+    severity: feature-gap
+    description: >
+      gRPC LedgerService.GetPositions не реализован (F6-3); contract-doc в
+      статусе planned. unrealized PnL по mark price не вычисляется. План —
+      T-F06-001, T-F06-021 (SEQ-LEDGER-001).
+  - id: no-positions-api-ui
+    severity: feature-gap
+    description: >
+      gateway GET /v1/positions, WS push и UI (таблица позиций + блок маржи,
+      подсветка margin call, multi-leg, polling fallback) отсутствуют
+      (F6-4..F6-9). План — волны 4-5 (T-F06-040..052).
+  - id: reserve-not-mirrored-to-accounts
+    severity: critical
+    adr: ADR-044
+    description: >
+      Резерв при размещении ордера живёт только в legacy in-memory
+      (balances_/reservations_) и НЕ зеркалится в PG-таблицу accounts; accounts
+      узнаёт о средствах только на филле. ApplyFillTx списывает несуществующий
+      reserved_balance → уход в минус → нарушение CHECK
+      accounts_reserved_balance_nonneg; временно замаскировано GREATEST(0,...).
+      План — переходный mirror (Reserve/Release → атомарные PG-проводки),
+      целевое состояние accounts = единственный источник истины.
+      См. ADR-044, follow-up-тикет T-F06-070.
+  - id: pg-per-call-connection
+    severity: bug
+    adr: ADR-045
+    description: >
+      ledger и risk открывают новый pqxx::connection на каждый gRPC-вызов;
+      при нагрузке упор в max_connections=100 (~50% ошибок при 500 conc).
+      План — in-app cex::common::PgConnectionPool (размер через env),
+      pgbouncer как будущая опция. См. ADR-045, follow-up-тикет T-F06-071.
+  - id: no-positions-update-push-signal
+    severity: feature-gap
+    adr: ADR-046
+    description: >
+      FillEvent НЕ содержит user_id, gateway не может консьюмить batch.outputs
+      и маршрутизировать WS-push по пользователю (F6-5). План — новый
+      Kafka-топик positions.update (key=user_id, лёгкий invalidation-сигнал
+      {user_id, batch_id, ts}), ledger публикует после ApplyBatchResult,
+      gateway реагрегирует снимок через positions_handler. См. ADR-046,
+      follow-up-тикеты T-F06-072 (WS-push) и T-F06-073 (идемпотентность снапшотов).
+
+relatedFeatures:
+  - F-01   # зависимость: positions/accounts ссылаются на users (FK user_id) — нужен реестр пользователей F-01
+  - F-09   # зависимость: per-leg атрибуция позиций/PnL для combo/портфельных заявок (multi-leg, F6-8)
+
+relatedAdrs:
+  - ADR-026   # ledger accounting & PnL source of truth (baseline)
+  - ADR-044   # модель балансов: единый PG-источник vs dual in-memory+PG
+  - ADR-045   # модель соединений с PostgreSQL: in-app connection pool
+  - ADR-046   # топик positions.update для WS-push обновлений позиций
 
 tests:
-  unit: []
-  integration: []
-  contract: []
+  unit: []          # план: U1-U10 (T-F06-060)
+  integration: []   # план: I1-I6 (T-F06-061)
+  contract: []      # план: ledger-get-positions, risk-get-risk-snapshot
+  plan: docs/implementation-plan/F-06-positions-pnl-margin.tasks.md

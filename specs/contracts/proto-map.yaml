@@ -45,6 +45,37 @@ protoContracts:
       - CancelFlowOrderRequest
       - GetFlowOrderRequest
 
+  combo:
+    files:
+      - contracts/proto/fob/orders/v1/combo.proto
+    features:
+      - F-09
+    components:
+      - order-flow
+      - gateway
+      - matching
+      - risk
+      - ledger
+    entities:
+      - Leg
+      - ComboOrder
+      - BatchOrder
+      - MultiLegConstraint
+      - ConditionalLink
+      - ChildRef
+      - ExecutionMode
+      - AtomicityPolicy
+      - AtomicityScope
+      - ComboType
+      - RatioBasis
+      - LegStatus
+      - ParentOrderStatus
+      - CreateBatchOrderRequest
+      - CreateComboOrderRequest
+      - PreviewComboOrderRequest
+      - CancelComboOrderRequest
+      - GetComboOrderRequest
+
   matching:
     files:
       - contracts/proto/fob/matching/v1/batch.proto
@@ -70,9 +101,40 @@ protoContracts:
       - BatchRequest
       - Solver
 
+  execution_groups:
+    files:
+      - contracts/proto/fob/matching/v1/execution_group.proto
+    features:
+      - F-09
+      - F-15
+    components:
+      - matching
+      - ledger
+      - risk
+      - order-flow
+      - observability
+    entities:
+      - ExecutionGroup
+      - LegResult
+      - GroupSolverDiagnostics
+      - GroupStatus
+
+  compensation:
+    files:
+      - contracts/proto/fob/matching/v1/compensation.proto
+    features:
+      - F-09
+    components:
+      - matching
+      - order-flow
+    entities:
+      - CompensationService
+      - PendingCompensation
+
   marketdata:
     files:
       - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
+      - contracts/proto/fob/marketdata/v1/marketdata_service.proto
       - contracts/proto/fob/marketdata/v1/bbo.proto
     features:
       - F-04
@@ -97,6 +159,25 @@ protoContracts:
       - GetLiquidityCurveResponse
       - GetHedgePnLRequest
       - GetHedgePnLResponse
+
+  vector_liquidity:
+    files:
+      - contracts/proto/fob/marketdata/v1/vector_liquidity.proto
+    features:
+      - F-05A
+    components:
+      - market-data
+      - matching
+      - ledger
+    entities:
+      - VectorLiquidityService
+      - ExternalOrderLevel
+      - AssetBasis
+      - VectorFlowSegment
+      - VectorClearingInput
+      - VectorClearingResult
+      - VectorizedLiquiditySnapshot
+      - SurplusEvent
 
   venue:
     files:
@@ -172,9 +253,51 @@ protoContracts:
       - ExecutionIntent
       - ExecutionReport
 
+  connector:
+    files:
+      - contracts/proto/fob/connector/v1/connector.proto
+    features:
+      - F-11
+      - F-12
+    components:
+      - venues
+      - external-venues-connector
+      - venue-execution-adapter
+    entities:
+      - VenueOrderType
+      - VenueErrorCode
+      - RawExecutionStatus
+      - CexOrderParams
+      - DexOrderParams
+      - PlaceChildOrderRequest
+      - PlaceChildOrderResponse
+      - CexFillDetails
+      - DexFillDetails
+      - RawExecutionEvent
+      - CancelChildOrderRequest
+      - CancelChildOrderResponse
+      - CancelAllChildOrdersRequest
+      - CancelAllChildOrdersResponse
+      - SubscribeExecutionEventsRequest
+
+  hedge:
+    files:
+      - contracts/proto/fob/hedge/v1/hedge.proto
+    features:
+      - F-12
+    components:
+      - venues
+      - venue-execution-adapter
+    entities:
+      - HedgeFlowStatus
+      - ChildOrderStatus
+      - HedgeFlow
+      - ChildOrder
+
   observability:
     files:
       - contracts/proto/fob/observability/v1/observability.proto
+      - contracts/proto/fob/observability/v1/quality.proto
     features:
       - F-04
       - F-05
@@ -184,10 +307,18 @@ protoContracts:
       - F-15
     components:
       - observability
+      - venue-liquidity-curve-builder
     entities:
       - MetricPoint
       - Alert
       - HealthStatus
+      - LobFobQualityService
+      - GetQualityMetricsRequest
+      - GetQualityMetricsResponse
+      - TimeSeriesPoint
+      - LevelState
+      - CurveSnapshot
+      - DirectVsSyntheticComparison
 
   agent:
     files:
@@ -200,3 +331,53 @@ protoContracts:
       - ReplaySession
       - AgentLog
       - ReplaySummary
+
+  replay:
+    files:
+      - contracts/proto/fob/replay/v1/replay.proto
+    features:
+      - F-15
+    components:
+      - backtest
+      - backtest-service
+    entities:
+      - ReplayStatus
+      - FeeModel
+      - ReplaySessionConfig
+      - ReplaySummary
+      - ReplaySession
+      - CreateReplayCommand
+      - CancelReplayCommand
+      - RetryReplayCommand
+      - PauseReplayCommand
+      - ReplayProgressEvent
+      - ReplayCompletedEvent
+      - ReplayFailedEvent
+      - ReplayCancelledEvent
+
+  # AUDIT-001 follow-up (2026-06-08): sim.proto was unmapped despite being
+  # used by F-20 venues simulator. Surfaced by proto-contract-auditor.
+  sim:
+    files:
+      - contracts/proto/fob/sim/v1/sim.proto
+    features:
+      - F-20
+    components:
+      - venues
+      - observability
+    entities:
+      - RoutingMode
+      - SimSessionStatus
+      - LatencyDistribution
+      - ImpactModelType
+      - PartialFillMode
+      - SimAlertType
+      - SimConfigEventType
+      - LatencyModel
+      - ImpactModel
+      - FeeModel
+      - RejectionModel
+      - SimSession
+      - SimConfigEvent
+      - SimAlert
+      - SimExecutionAnnotation

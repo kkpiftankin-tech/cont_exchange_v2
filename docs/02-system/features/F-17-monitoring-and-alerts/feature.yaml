@@ -3,6 +3,7 @@ feature:
   name: Monitoring & Alerting (Observability)
   status: partially-implemented-mvp
   owner: core-team
+  level: kite
 
 description: >
   Непрерывный сбор метрик производительности (solve time, fill rate, IS,
@@ -19,7 +20,7 @@ protoContracts:
   - contracts/proto/fob/risk/v1/risk.proto
 
 codePaths:
-  - cpp/observability/src/app/obs_loop.cpp
+  - cpp/observability/src/app/service.cpp
 
 kafkaTopics:
   produces: []
@@ -38,7 +39,7 @@ knownIssues:
   - id: stdout-only
     severity: feature-gap
     description: Сейчас observability только пишет JSON в stdout
-    location: cpp/observability/src/app/obs_loop.cpp
+    location: cpp/observability/src/app/service.cpp
   - id: no-prometheus
     severity: feature-gap
     description: Нет экспорта метрик в Prometheus или OpenTelemetry

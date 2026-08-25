@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F03-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F03-01-system. Amend/Cancel FlowOrder: system view
 
 ## Type

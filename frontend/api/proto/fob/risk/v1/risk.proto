@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package fob.risk.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/orders/v1/orders.proto";
+import "fob/matching/v1/batch.proto";
+
+enum RiskDecision {
+  RISK_DECISION_UNSPECIFIED = 0;
+  RISK_DECISION_ACCEPT = 1;
+  RISK_DECISION_REJECT = 2;
+  RISK_DECISION_RESIZE = 3;     // accept but with smaller qty/speed
+  RISK_DECISION_HALT = 4;       // trading halted (instrument/global)
+}
+
+message BalanceSnapshot {
+  string currency = 1;
+  fob.common.v1.Decimal available = 2;
+  fob.common.v1.Decimal reserved = 3;
+  fob.common.v1.Decimal total = 4;
+}
+
+message PositionSnapshot {
+  string symbol = 1;  // "BTC"
+  fob.common.v1.Decimal qty = 2;
+  fob.common.v1.Decimal avg_entry_price = 3;
+}
+
+message PreTradeCheckRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  string user_id = 2;
+  fob.orders.v1.FlowOrder order = 3;
+
+  // Optional snapshots to make Risk stateless (OrderFlow can fetch from Ledger).
+  repeated BalanceSnapshot balances = 10;
+  repeated PositionSnapshot positions = 11;
+
+  // Optional reference price (mid) for notional/margin calculations
+  fob.common.v1.Decimal reference_price = 20;
+}
+
+message PreTradeCheckResponse {
+  fob.common.v1.EventMeta meta = 1;
+
+  RiskDecision decision = 2;
+
+  // Human readable + stable code
+  fob.common.v1.Error error = 3;
+
+  // If RESIZE: recommended accepted order params
+  fob.orders.v1.FlowOrder resized_order = 10;
+
+  // Risk metrics (optional for MVP)
+  fob.common.v1.Decimal required_initial_margin = 20;
+  fob.common.v1.Decimal max_loss_estimate = 21;
+}
+
+message KillSwitchRequest {
+  fob.common.v1.EventMeta meta = 1;
+
+  // Empty => global halt, else instrument-specific
+  string instrument_symbol = 2; // "BTC/USDT" or empty for global
+
+  bool halt = 3;
+  string reason = 4;
+}
+
+message KillSwitchResponse {
+  fob.common.v1.EventMeta meta = 1;
+  bool effective_halt = 2;
+}
+
+message PostTradeUpdateRequest {
+  // Risk consumes batch.outputs (or via RPC) to update exposures, run liquidations, etc.
+  fob.common.v1.EventMeta meta = 1;
+  fob.matching.v1.BatchResult batch = 2;
+}
+
+enum RiskSeverity {
+  RISK_SEVERITY_UNSPECIFIED = 0;
+  RISK_SEVERITY_INFO = 1;
+  RISK_SEVERITY_WARN = 2;
+  RISK_SEVERITY_CRITICAL = 3;
+}
+
+message RiskAlert {
+  // Kafka topic: risk.alerts
+  fob.common.v1.EventMeta meta = 1;
+
+  string alert_id = 2;
+  RiskSeverity severity = 3;
+
+  string user_id = 4;
+  string instrument_symbol = 5; // empty if global
+  string alert_type = 6;        // "KILL_SWITCH", "MARGIN_CALL", "LIMIT_BREACH", ...
+
+  fob.common.v1.Error error = 7;
+
+  // Free-form payload for analytics / operator UI
+  map<string, string> details = 8;
+
+  google.protobuf.Timestamp timestamp = 9;
+}
+
+service RiskService {
+  // Pre-trade risk check (sync)
+  rpc CheckNewOrder(PreTradeCheckRequest) returns (PreTradeCheckResponse);
+
+  // Operator action: halt/resume trading (sync)
+  rpc SetKillSwitch(KillSwitchRequest) returns (KillSwitchResponse);
+
+  // Post-trade update (sync alternative to consuming Kafka batch.outputs)
+  rpc OnBatchResult(PostTradeUpdateRequest) returns (google.protobuf.Empty);
+}

@@ -1,0 +1,61 @@
+services:
+  frontend-api:
+    restart: unless-stopped
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: cex-frontend-api
+    environment:
+      PORT: 8090
+      BATCHES_SIMULATE: ${BATCHES_SIMULATE:-0}
+      BATCHES_SIM_WINDOW_MS: ${BATCHES_SIM_WINDOW_MS:-60000}
+      BATCHES_SIM_STEP_MS: ${BATCHES_SIM_STEP_MS:-5000}
+      MATCHING_VIEW_CACHE_TTL_MS: ${MATCHING_VIEW_CACHE_TTL_MS:-5000}
+      LEDGER_GRPC_ADDR: ${LEDGER_GRPC_ADDR:-ledger:50053}
+      VENUES_HTTP_ADDR: ${VENUES_HTTP_ADDR:-http://venues:8087}
+      # F-09 MVP-6 slice 4: combo compensation console (matching list + order_flow resolve).
+      MATCHING_GRPC_ADDR: ${MATCHING_GRPC_ADDR:-matching:50053}
+      ORDER_FLOW_GRPC_ADDR: ${ORDER_FLOW_GRPC_ADDR:-order_flow:50051}
+      # F-12 DoD-14: HedgeFlow Monitor reads PG hedgeflows directly.
+      FRONTEND_POSTGRES_DSN: ${FRONTEND_POSTGRES_DSN:-postgresql://cex:cex@postgres:5432/cex}
+      # F-12 DoD-15 (PR-F12-9d): Policy Config page mirrors matching-service env.
+      HEDGE_TRIGGER_QTY_DEFAULT: ${HEDGE_TRIGGER_QTY_DEFAULT:-0}
+      HEDGE_TRIGGER_NOTIONAL_DEFAULT: ${HEDGE_TRIGGER_NOTIONAL_DEFAULT:-0}
+      HEDGE_TRIGGER_SYMBOLS: ${HEDGE_TRIGGER_SYMBOLS:-BTC/USDT,ETH/USDT}
+      HEDGE_TRIGGER_QTY_BTC_USDT: ${HEDGE_TRIGGER_QTY_BTC_USDT:-0.001}
+      HEDGE_TRIGGER_NOTIONAL_BTC_USDT: ${HEDGE_TRIGGER_NOTIONAL_BTC_USDT:-10}
+      HEDGE_TRIGGER_QTY_ETH_USDT: ${HEDGE_TRIGGER_QTY_ETH_USDT:-0.01}
+      HEDGE_TRIGGER_NOTIONAL_ETH_USDT: ${HEDGE_TRIGGER_NOTIONAL_ETH_USDT:-10}
+      HEDGE_INTENT_URGENCY: ${HEDGE_INTENT_URGENCY:-MEDIUM}
+      HEDGE_INTENT_STRATEGY: ${HEDGE_INTENT_STRATEGY:-MARKET}
+      HEDGE_INTENT_TIF: ${HEDGE_INTENT_TIF:-IOC}
+      HEDGE_INTENT_TIMEOUT_MS: ${HEDGE_INTENT_TIMEOUT_MS:-30000}
+      HEDGE_INTENT_MAX_SLIPPAGE_BPS: ${HEDGE_INTENT_MAX_SLIPPAGE_BPS:-50}
+      HEDGE_INTENT_ALLOWED_VENUES: ${HEDGE_INTENT_ALLOWED_VENUES:-binance,okx}
+    ports:
+      - "8090:8090"
+    networks: [default, cex_net]
+
+  frontend-web:
+    restart: unless-stopped
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      network: host
+    container_name: cex-frontend-web
+    environment:
+      REACT_APP_API_BASE_URL: /api
+      REACT_APP_MARKET_API_BASE_URL: /api
+      REACT_APP_MATCHING_ENGINE_API_BASE_URL: /api
+      REACT_APP_API_TIMEOUT: 10000
+    depends_on:
+      frontend-api:
+        condition: service_started
+    ports:
+      - "8091:3000"
+    networks: [default]
+
+networks:
+  cex_net:
+    external: true
+    name: cex_net

@@ -107,7 +107,7 @@ Risk Manager / Matching Backend
           → ClickHouse: execution_reports (W via Kafka engine)
 ```
 
-Подробности: [SEQ-F12-UC-F12-01-services](../05-components/sequences/SEQ-F12-UC-F12-01-services.md).
+Подробности: [SEQ-F12-01-auto-hedge-services](../05-components/sequences/SEQ-F12-01-auto-hedge-services.md).
 
 ## Поток 5: deposit / withdraw
 

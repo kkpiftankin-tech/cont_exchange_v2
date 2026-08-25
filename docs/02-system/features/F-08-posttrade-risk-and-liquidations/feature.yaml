@@ -3,6 +3,7 @@ feature:
   name: Post-trade Risk Monitoring & Liquidations
   status: not-implemented
   owner: core-team
+  level: kite
 
 description: >
   После каждого batch пересчитывает margin/VaR/exposure по пользователям.

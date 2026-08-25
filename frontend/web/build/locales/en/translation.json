@@ -1,0 +1,1187 @@
+{
+  "navbar": {
+    "logo": "CONT",
+    "trade": "trade",
+    "profile": "profile",
+    "venues": "venues",
+    "hedgeflows": "hedge",
+    "hedgePnl": "pnl",
+    "executionLive": "live",
+    "reconciliationAlerts": "alerts",
+    "manualOverride": "override",
+    "policyConfig": "policy",
+    "replay": "replay",
+    "logout": "Logout",
+    "about": "about",
+    "login": "login",
+    "register": "register",
+    "positions": "Positions"
+  },
+  "auth": {
+    "signIn": "Sign in",
+    "signUp": "Sign up",
+    "email": "email",
+    "password": "password",
+    "loading": "Loading...",
+    "signInBtn": "Sign in!",
+    "signUpBtn": "Sign up!",
+    "errors": {
+      "emailRequired": "Email is required",
+      "invalidEmail": "Invalid email format",
+      "passwordRequired": "Password is required",
+      "minPassword": "Min 8 characters required",
+      "incorrectCredentials": "Incorrect email or password",
+      "serverUnavailable": "Server is unavailable, please try later",
+      "networkError": "Network error, please try later",
+      "emailRegistered": "This email is already registered"
+    }
+  },
+  "about": {
+    "title": "CONT - first continuous order trading platform",
+    "description": "Experience seamless, high-speed trading with our continuous order book. Deep liquidity, ultra-low latency, and advanced security—everything you need to trade smarter. Join now and stay ahead in the crypto market.",
+    "register": "register",
+    "signIn": "sign in"
+  },
+  "main": {
+    "type_buy": "buy",
+    "type_sell": "sell",
+    "priceUndefined": "undefined",
+    "tradingPair": "USDT/BTC",
+    "high": "high this day:",
+    "change": "this day",
+    "buy": "buy",
+    "sell": "sell",
+    "minPrice": "min price",
+    "maxPrice": "max price",
+    "amount": "amount BTC to {{action}}",
+    "speed": "max execution speed (BTC/sec)",
+    "proceed": "proceed",
+    "withdraw": "withdraw",
+    "deposit": "deposit",
+    "withdrawModal": {
+      "title": "Withdraw {{currency}}",
+      "amount": "Amount ({{currency}})",
+      "wallet": "Your wallet address",
+      "confirm": "Confirm Withdraw",
+      "errors": {
+        "amountRequired": "Amount is required",
+        "mustBeNumber": "Must be a number",
+        "mustBePositive": "Must be positive",
+        "insufficientBalance": "Insufficient balance",
+        "walletRequired": "Wallet is required"
+      }
+    },
+    "depositModal": {
+      "title": "Deposit",
+      "instructions": "Send funds to the following address:",
+      "note": "Please make sure you're sending the correct currency to this address. The deposit will be credited after 3 network confirmations.",
+      "copy": "Copy",
+      "copied": "Copied!"
+    },
+    "chart": {
+      "volume_hour": "volume per hour",
+      "volume": "Volume",
+      "clearing": "Clearing",
+      "price": "Price",
+      "supply": "Supply",
+      "demand": "Demand"
+    },
+    "success": "Order created successfully!",
+    "error": "Failed to create order",
+    "invalidData": "Invalid data",
+    "insufficientBalance": "Insufficient balance"
+  },
+  "profile": {
+    "tabs": {
+      "trades": "Trades",
+      "transactions": "Transactions"
+    },
+    "withdraw": "withdraw",
+    "deposit": "deposit",
+    "filters": {
+      "time": "Time:",
+      "allTime": "All time",
+      "lastHour": "Last hour",
+      "lastDay": "Last 24 hours",
+      "lastWeek": "Last week",
+      "lastMonth": "Last month",
+      "lastYear": "Last year",
+      "type": "Type:",
+      "allTypes": "All types",
+      "deposits": "Deposits",
+      "withdrawals": "Withdrawals",
+      "status": "Status:",
+      "allStatuses": "All statuses",
+      "statuses": {
+        "completed": "Completed",
+        "pending": "Pending",
+        "partial": "Partial",
+        "cancelled": "Cancelled"
+      },
+      "clear": "Clear filters"
+    },
+    "table": {
+      "minPrice": "Min Price",
+      "maxPrice": "Max Price",
+      "buySpeed": "Execution Speed (BTC/sec)",
+      "spentAmount": "Full Cost",
+      "date": "Date",
+      "type": "Type",
+      "currency": "Currency",
+      "amount": "Amount",
+      "fee": "Fee",
+      "status": "Status",
+      "actions": "Actions",
+      "pair": "Pair",
+      "completed": "Completed",
+      "details": "Details",
+      "hide": "Hide",
+      "cancel": "Cancel",
+      "wallet": "Wallet:",
+      "sell": "Sell:",
+      "buy": "Buy:",
+      "progress": "Progress:",
+      "completedDate": "Completed Date:",
+      "noData": "No records found",
+      "loading": "Loading..."
+    },
+    "batches": {
+      "title": "Batches",
+      "id": "Batch ID",
+      "time": "Time",
+      "status": "Status",
+      "solveTimeMs": "Solve Time, ms",
+      "residualNorm": "Residual Norm",
+      "sla": "SLA",
+      "diagnosticsTitle": "Diagnostics",
+      "slaStates": {
+        "ok": "OK",
+        "at-risk": "At risk",
+        "breached": "Breached"
+      },
+      "diagnostics": {
+        "ok": "No issues detected",
+        "solverFailed": "Solver failed",
+        "solveTimeRisk": "Solve time above {{threshold}} ms",
+        "solveTimeBreached": "Solve-time SLA breached (>{{threshold}} ms)",
+        "residualRisk": "Residual norm above {{threshold}}",
+        "residualBreached": "Residual-norm SLA breached (>{{threshold}})"
+      },
+      "loading": "Loading batches...",
+      "noData": "No batches found",
+      "error": "Failed to load batches list."
+    },
+    "modals": {
+      "cancelTitle": "Confirm cancellation",
+      "cancelMessage": "Are you sure you want to cancel this {{type}}?",
+      "cancelConfirm": "Yes, cancel",
+      "cancelKeep": "No, keep it",
+      "errorTitle": "Error",
+      "errorLoading": "Failed to load history. Please try again later.",
+      "errorCancel": "Failed to cancel trade. Please try again."
+    }
+  },
+  "venues": {
+    "kicker": "Provider Exchange",
+    "title": "External Venues",
+    "subtitle": "Operator view for external CEX/DEX/AMM venues with market snapshots, health-score and routing readiness.",
+    "live": "Live updates every 4s",
+    "lastUpdated": "Last updated: {{time}}",
+    "searchLabel": "Search",
+    "searchPlaceholder": "venue id, display name, symbol",
+    "filters": {
+      "all": "All",
+      "connected": "Connected",
+      "stale": "Stale",
+      "empty": "Empty",
+      "disconnected": "Disconnected"
+    },
+    "summary": {
+      "total": "Total venues",
+      "healthy": "Healthy",
+      "stale": "Stale now",
+      "disabled": "Disable recommended"
+    },
+    "states": {
+      "loading": "Loading venues...",
+      "error": "Failed to load external venues.",
+      "empty": "No venues match the current filters.",
+      "select": "Select a venue to inspect its details.",
+      "notFound": "Venue not found or temporarily unavailable."
+    },
+    "table": {
+      "venue": "Venue",
+      "market": "Market",
+      "status": "Status",
+      "health": "Health",
+      "executionQuality": "Execution quality",
+      "latency": "Latency",
+      "spread": "Execution spread",
+      "volume": "24h Volume",
+      "action": "Routing",
+      "controls": "Controls",
+      "details": "Details"
+    },
+    "actions": {
+      "openDetails": "Open",
+      "backToList": "Back to list"
+    },
+    "curves": {
+      "title": "Liquidity curves",
+      "subtitle": "Current FOB-aligned preview for venue liquidity by side.",
+      "confidence": "Confidence",
+      "empty": "No curves available for this venue.",
+      "side": {
+        "buy": "Buy curve",
+        "sell": "Sell curve"
+      }
+    },
+    "snapshots": {
+      "title": "Venue snapshots",
+      "subtitle": "Normalized VenueSnapshot history with top-of-book depth and freshness.",
+      "empty": "No VenueSnapshot data available for this venue.",
+      "latestStatus": "Latest status",
+      "freshness": "Freshness",
+      "depth": "Bid / ask depth",
+      "volume24hBase": "24h base volume",
+      "bidDepth": "Bid depth",
+      "askDepth": "Ask depth",
+      "table": {
+        "time": "Time",
+        "status": "Status",
+        "bidAsk": "Bid / ask",
+        "mid": "Mid",
+        "volume": "24h volume"
+      }
+    },
+    "synthetics": {
+      "title": "Synthetic flow orders",
+      "subtitle": "Compatibility-mode SyntheticFlowOrder rows derived from FOB curves.",
+      "empty": "SyntheticFlowOrder rows are not being produced for this venue.",
+      "total": "Total rows",
+      "active": "Active",
+      "latestRate": "Latest q_rate",
+      "latestMaxQty": "Latest q_max",
+      "table": {
+        "time": "Created / TTL",
+        "side": "Side",
+        "band": "Price band",
+        "speed": "q_rate / q_max",
+        "status": "Status",
+        "links": "Curve / snapshot"
+      }
+    },
+    "status": {
+      "connected": "Connected",
+      "stale": "Stale",
+      "empty": "Empty",
+      "disconnected": "Disconnected"
+    },
+    "recommendation": {
+      "route": "Route",
+      "watch": "Watch",
+      "deprioritize": "Deprioritize",
+      "disable": "Disable"
+    },
+    "recommendationText": {
+      "route": "This venue looks ready for routing: fresh data, healthy latency, and strong overall quality.",
+      "watch": "The venue is still available, but latency or stale-rate already makes routing riskier.",
+      "deprioritize": "Liquidity or visible depth is weaker right now, so this venue should stay a fallback path.",
+      "disable": "This venue is not suitable for routing right now because connectivity is unstable or unavailable."
+    },
+    "detail": {
+      "midPrice": "Mid price",
+      "bookBidAsk": "Book bid / ask",
+      "executionBidAsk": "Execution bid / ask",
+      "fillRate": "Fill rate",
+      "errorRate": "Error rate",
+      "volume24h": "24h volume",
+      "latency": "Latency",
+      "executionQuality": "Execution quality",
+      "routingTitle": "Routing insight",
+      "lastUpdate": "Last venue update",
+      "fees": "Fees",
+      "bookSpread": "Book spread",
+      "executionSpread": "Execution spread",
+      "staleRate": "Stale rate",
+      "freshness": "Freshness",
+      "tickLot": "Tick / lot size",
+      "circuitBreaker": "Circuit breaker",
+      "region": "Region",
+      "healthScore": "Health score",
+      "snapshotDepth": "Snapshot depth",
+      "curveConfidence": "Curve confidence",
+      "curveLevel": "Curve level",
+      "curveLatency": "Curve build latency",
+      "curveAction": "Curve action",
+      "hedgePnl": "Hedge PnL",
+      "hedgeCount": "Hedge count"
+    },
+    "detailPage": {
+      "title": "Venue details",
+      "subtitle": "Detailed card for venue {{venueId}} on {{symbol}}.",
+      "fallbackSubtitle": "Detailed view for the selected external venue."
+    },
+    "operator": {
+      "title": "Operator actions",
+      "subtitle": "Manual controls for reconnect, disable/enable, and routing mode overrides.",
+      "createTitle": "Create venue",
+      "adminState": "Admin state",
+      "routingMode": "Routing mode",
+      "reconnectCount": "Reconnect count",
+      "lastAction": "Last action",
+      "error": "Operator action failed. Please try again.",
+      "createRequired": "Venue id is required.",
+      "successReconnect": "Reconnect command sent.",
+      "successDisable": "Venue disabled for routing.",
+      "successEnable": "Venue enabled again.",
+      "successRouting": "Routing mode updated.",
+      "successConfig": "Venue config updated.",
+      "successDeleteConfig": "Venue config deleted.",
+      "state": {
+        "active": "Active",
+        "disabled": "Disabled"
+      },
+      "mode": {
+        "auto": "Auto",
+        "watch": "Watch"
+      },
+      "configTitle": "Update venue config",
+      "configSubtitle": "These settings now apply per venue. Adapter mode is informational and fixed by the running venues service.",
+      "fields": {
+        "venueId": "Venue id",
+        "adapterMode": "Adapter mode",
+        "wsUrl": "WS URL",
+        "restBaseUrl": "REST base URL",
+        "rpcUrl": "RPC URL",
+        "chainId": "Chain id",
+        "poolAddress": "Pool address",
+        "venueSymbol": "Venue symbol",
+        "curveLevel": "Curve level",
+        "routingMode": "Routing mode",
+        "depthLevels": "Depth levels",
+        "staleThresholdMs": "Stale threshold (ms)",
+        "circuitBreakerErrors": "CB errors",
+        "circuitBreakerWindowMs": "CB window (ms)",
+        "circuitBreakerCooldownMs": "CB cooldown (ms)",
+        "syntheticEnabled": "Synthetic enabled",
+        "circuitBreakerEnabled": "CB enabled",
+        "isActive": "Active in routing"
+      },
+      "help": {
+        "venueId": "Stable venue identifier used by the admin API and routing metadata.",
+        "adapterMode": "Shows which adapter family serves this venue. It is selected by service startup mode and is not editable here.",
+        "wsUrl": "WebSocket endpoint for live venue market data. Saving reconnects the adapter to the new stream.",
+        "restBaseUrl": "HTTP base URL for CEX snapshot, ticker and order endpoints used by this venue.",
+        "rpcUrl": "RPC endpoint for DEX or AMM snapshots and order execution on this venue.",
+        "chainId": "Blockchain or network identifier sent to the DEX adapter for RPC calls and subscription headers.",
+        "poolAddress": "AMM pool address used to fetch liquidity state and build venue snapshots.",
+        "venueSymbol": "Venue-native market symbol used for subscriptions, snapshots and child orders for this venue.",
+        "curveLevel": "Requested FOB curve model for this venue: L1 is simplest, L3 uses impact calibration, OFF stops curve publishing.",
+        "routingMode": "Auto lets matching route to this venue. Watch keeps it visible but excludes it from execution routing.",
+        "depthLevels": "Requested order-book depth per side for this venue. Values above 20 now pass through without backend truncation.",
+        "staleThresholdMs": "How old this venue snapshot may become before status and curve degradation switch it to stale.",
+        "circuitBreakerErrors": "How many external-call failures are allowed inside the breaker window before the venue is opened.",
+        "circuitBreakerWindowMs": "Rolling time window used to count external-call failures for the circuit breaker.",
+        "circuitBreakerCooldownMs": "Cooldown after the breaker opens before the adapter may retry the venue again.",
+        "syntheticEnabled": "Publish SyntheticFlowOrder compatibility rows from this venue's FOB curve only for this venue.",
+        "circuitBreakerEnabled": "Turns the external-call circuit breaker on or off for this venue adapter.",
+        "isActive": "If disabled, the venue is excluded from routing and shown as operator-disabled."
+      },
+      "actions": {
+        "reconnect": "Force reconnect",
+        "disable": "Disable venue",
+        "enable": "Enable venue",
+        "routeNormally": "Route normally",
+        "watchMode": "Watch mode",
+        "saveConfig": "Save config",
+        "deleteConfig": "Delete config",
+        "createVenue": "Create venue"
+      }
+    }
+  },
+  "replay": {
+    "kicker": "Replay console",
+    "title": "Backtest / Replay",
+    "form": {
+      "name": "Session name",
+      "nameError": "Session name is required.",
+      "instrument": "Instrument",
+      "dateFrom": "Date from",
+      "dateTo": "Date to",
+      "dateError": "Date is required.",
+      "dateRangeError": "Date to must be after date from.",
+      "strategy": "Strategy JSON",
+      "strategyError": "Strategy must be valid JSON.",
+      "instrumentError": "Select at least one instrument.",
+      "priceRangeError": "pL must be less than or equal to pH.",
+      "qrateError": "qrate must be greater than zero.",
+      "qmaxError": "qmax must be greater than zero.",
+      "executionWindowError": "executionwindow must be greater than zero.",
+      "jsonObjectError": "Override must be a JSON object.",
+      "jsonError": "JSON is invalid.",
+      "requiredFieldError": "Required override fields are missing.",
+      "solver": "Solver config",
+      "productionConfig": "Use production config",
+      "overrideConfig": "Use inline override",
+      "risk": "Risk limits",
+      "productionRisk": "Use production risk limits",
+      "overrideRisk": "Use inline risk limits",
+      "fee": "Fee model",
+      "productionFee": "Use production fee model",
+      "overrideFee": "Use inline fee model",
+      "feeError": "Fee model must include makerfeerate and takerfeerate.",
+      "reward": "Reward",
+      "randomSeed": "Random seed",
+      "tolerance": "Tolerance",
+      "numberError": "Use a numeric value.",
+      "run": "Run replay",
+      "creating": "Creating...",
+      "refresh": "Refresh",
+      "persist": "Save results to DB",
+      "persistHelperEphemeral": "Ephemeral mode: results are visible only via the live stream. The session will not appear in the list and summary / agent logs are unavailable via REST.",
+      "persistHelperSaved": "Persisted mode: the session is saved to the DB, appears in the list, and summary / agent logs are accessible via REST after completion."
+    },
+    "sessions": {
+      "caption": "Live queue",
+      "title": "Replay sessions",
+      "status": "Status",
+      "search": "Search",
+      "sessionid": "Session",
+      "progress": "Progress",
+      "created": "Created",
+      "liveConnected": "live: {{transport}}",
+      "liveDisconnected": "live: reconnecting",
+      "liveUpdated": "Last event: {{time}}",
+      "liveWaiting": "Waiting for live events",
+      "prev": "Prev",
+      "next": "Next",
+      "range": "Range"
+    },
+    "status": {
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "statusFilter": {
+      "all": "All",
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "summary": {
+      "avgIs": "avgIS",
+      "totalPnl": "Total PnL",
+      "sharpe": "Sharpe",
+      "fillRate": "Fill rate",
+      "avgVwap": "Avg VWAP",
+      "maxDrawdown": "Max drawdown",
+      "avgSolveTime": "Avg solve time",
+      "totalBatches": "Total batches",
+      "totalFillEvents": "Total fill events",
+      "processedBatches": "Processed batches",
+      "failedBatches": "Failed batches",
+      "partial": "Partial"
+    },
+    "tabs": {
+      "summary": "Summary",
+      "equity": "Equity curve",
+      "batches": "By batches",
+      "compare": "A/B compare",
+      "audit": "Audit mode",
+      "playback": "Playback"
+    },
+    "equity": {
+      "title": "Equity curve",
+      "copy": "PnL grows batch by batch while the shadow ledger keeps balances and positions isolated from production."
+    },
+    "batches": {
+      "title": "By batches",
+      "subtitle": "AgentLog rows with per-batch PnL, IS, fill rate, solve time, and risk status.",
+      "batch": "Batch",
+      "pnl": "PnL",
+      "is": "IS",
+      "fillRate": "Fill rate",
+      "solve": "Solve time",
+      "residual": "Residual norm",
+      "risk": "Risk",
+      "solverError": "solver_error",
+      "filterBatch": "batchseq",
+      "filterPnl": "pnl",
+      "filterIs": "isvalue",
+      "filterFillRate": "fillrate",
+      "filterSolverAll": "solver_error: all",
+      "filterSolverError": "solver_error: true",
+      "filterSolverOk": "solver_error: false",
+      "details": "AgentLog details",
+      "closeDetails": "Close details",
+      "prev": "Prev",
+      "next": "Next"
+    },
+    "compare": {
+      "title": "A/B compare",
+      "subtitle": "Compare two replay sessions on key quality metrics.",
+      "sessionA": "Session A",
+      "sessionB": "Session B",
+      "run": "Run compare",
+      "running": "Comparing...",
+      "loaded": "Compare loaded.",
+      "table": {
+        "metric": "Metric",
+        "delta": "Delta (B - A)",
+        "verdict": "Better"
+      },
+      "verdict": {
+        "aBetter": "A",
+        "bBetter": "B",
+        "equal": "Equal"
+      },
+      "metrics": {
+        "avgis": "avgIS",
+        "totalpnl": "Total PnL",
+        "avgpnl": "Avg PnL",
+        "stdpnl": "Std PnL",
+        "sharpe": "Sharpe",
+        "fillrate": "Fill rate",
+        "maxdrawdown": "Max drawdown",
+        "avgvwap": "Avg VWAP",
+        "avgsolvetime": "Avg solve time"
+      },
+      "errors": {
+        "selectSessions": "Select both sessions first.",
+        "sameSession": "Session A and Session B must be different.",
+        "incompatible": "Sessions are not comparable.",
+        "loadFailed": "Failed to load compare."
+      }
+    },
+    "audit": {
+      "title": "Audit mode",
+      "subtitle": "Replay a single batch and inspect diff against production.",
+      "batchId": "Batch ID",
+      "batchIdPlaceholder": "batch-2026-04-05-1203",
+      "run": "Run audit",
+      "running": "Running...",
+      "loaded": "Loaded {{count}} batch diff(s).",
+      "equivalent": "Equivalent",
+      "different": "Different",
+      "table": {
+        "batch": "Batch",
+        "equivalent": "Equivalent",
+        "residualDelta": "Residual delta"
+      },
+      "detail": {
+        "residual": "Residual norm",
+        "riskStatus": "Risk status",
+        "equivalent": "Result",
+        "batch": "Batch",
+        "production": "Production",
+        "clearPrices": "Clear prices",
+        "fills": "Fills",
+        "symbol": "Symbol",
+        "fill": "Fill",
+        "replay": "Replay",
+        "delta": "Delta",
+        "openProduction": "Open production record"
+      },
+      "errors": {
+        "selectSession": "Select a replay session first.",
+        "batchIdRequired": "Batch ID is required.",
+        "notFound": "No audit diff found for this batch.",
+        "loadFailed": "Failed to load audit diff."
+      }
+    },
+    "results": {
+      "emptyTitle": "Replay results",
+      "refresh": "Refresh",
+      "cancel": "Cancel session",
+      "cancelling": "Cancelling...",
+      "retry": "Retry",
+      "retrying": "Retrying...",
+      "tabs": "Replay result tabs",
+      "snapshotUsed": "Config snapshot used"
+    },
+    "states": {
+      "loading": "Loading sessions...",
+      "sessionsError": "Failed to load replay sessions.",
+      "resultsLoading": "Loading results...",
+      "resultsError": "Failed to load replay results.",
+      "created": "Replay session created.",
+      "createError": "Failed to create replay session.",
+      "cancelled": "Session cancelled.",
+      "cancelError": "Failed to cancel replay session.",
+      "retryStarted": "Retry started.",
+      "retryError": "Failed to start retry.",
+      "permissionDenied": "You do not have permission for this replay action.",
+      "solverError": "Replay stopped because of a solver error.",
+      "validationError": "Replay parameters failed validation.",
+      "noData": "No replayable data is available for the selected range.",
+      "partialSummary": "Partial replay results are available.",
+      "cancelledPartial": "Session was cancelled and partial results were preserved.",
+      "pending": "Session is queued and waiting to start.",
+      "liveRunning": "Replay is running and metrics are updating live.",
+      "waitingForLogs": "Replay has started. AgentLog rows will appear after the first batches.",
+      "noAgentLogs": "No AgentLog rows yet.",
+      "ephemeralStarted": "Ephemeral replay started. Results are available only via the live stream.",
+      "ephemeralCompleted": "Ephemeral replay completed. Results were not saved to the DB.",
+      "ephemeralStreamLost": "Live stream was interrupted before completion. Partial results are unavailable.",
+      "ephemeralNoAgentLogs": "Agent logs are not saved — enable \"Save results to DB\" to access logs.",
+      "ephemeralNoEquity": "Equity curve is not available in ephemeral mode.",
+      "ephemeralNoCompare": "Comparison is unavailable — the session was not saved.",
+      "ephemeralNoAudit": "Audit mode is unavailable — the session was not saved.",
+      "noSessions": "No sessions found."
+    },
+    "ephemeral": {
+      "panelTitle": "Current run",
+      "dismiss": "Dismiss",
+      "retryHint": "Run the replay again.",
+      "badge": "Ephemeral"
+    },
+    "playback": {
+      "play": "Play",
+      "resume": "Resume",
+      "replay": "Replay",
+      "pause": "Pause",
+      "stop": "Stop",
+      "speed": "Speed",
+      "seek": "Seek to batch",
+      "batchOf": "Batch {{current}} / {{total}}",
+      "buffering": "Loading batches {{loaded}} / {{total}}…",
+      "noData": "This session has no saved batch data. Playback is only available for completed sessions with saved AgentLog rows.",
+      "loadError": "Failed to load batch data for playback.",
+      "retry": "Retry load",
+      "ended": "Playback finished.",
+      "cappedNotice": "Too many batches — loaded the first {{cap}} of {{total}}. Playback covers only the beginning of the session.",
+      "clearPrices": "Clearing prices",
+      "runningPnl": "Running PnL",
+      "fillRate": "Fill rate",
+      "residualNorm": "Residual norm",
+      "solveTime": "Solve time",
+      "riskStatus": "Risk status",
+      "equityTitle": "Equity (up to current batch)",
+      "sessionWindow": "Session window"
+    }
+  },
+  "hedgeFlow": {
+    "kicker": "F-12 Execution Hedge",
+    "title": "HedgeFlow Monitor",
+    "subtitle": "F-12 operator screen for HedgeFlow status, reconciliation, hedge PnL, slippage, and full drilldown into child orders and ExecutionReports.",
+    "live": "Live updates every {{seconds}}s",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh"
+    },
+    "summary": {
+      "open": "Open",
+      "openMeta": "Active HedgeFlows in execution",
+      "completion": "Completion",
+      "completionMeta": "filledQty / targetQty for the filter",
+      "pnl": "Hedge PnL",
+      "pnlMeta": "Total PnL across selected flows",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Mean drift from referenceMid",
+      "alerts": "Alerts",
+      "alertsMeta": "UNDERFILLED and rejected flows"
+    },
+    "filters": {
+      "status": "Status",
+      "all": "All",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "search": "Search",
+      "searchPlaceholder": "hedgeFlowId, batchId, provider, symbol"
+    },
+    "status": {
+      "OPEN": "OPEN",
+      "COMPLETED": "COMPLETED",
+      "UNDERFILLED": "UNDERFILLED",
+      "RISK_REJECTED": "RISK_REJECTED",
+      "REJECTED": "REJECTED"
+    },
+    "orderStatus": {
+      "FILLED": "FILLED",
+      "PARTIALLY_FILLED": "PARTIAL",
+      "CANCELLED": "CANCELLED",
+      "REJECTED": "REJECTED",
+      "PENDING": "PENDING"
+    },
+    "states": {
+      "loading": "Loading HedgeFlows...",
+      "error": "Failed to load HedgeFlow list.",
+      "empty": "No HedgeFlows match the current filters.",
+      "select": "Select a HedgeFlow to inspect child orders and execution reports.",
+      "detailLoading": "Loading drilldown...",
+      "detailError": "Failed to load HedgeFlow drilldown."
+    },
+    "list": {
+      "title": "HedgeFlow list",
+      "subtitle": "Matched flows: {{count}}"
+    },
+    "table": {
+      "aria": "HedgeFlow list",
+      "flow": "Flow",
+      "context": "Context",
+      "execution": "Execution",
+      "progress": "Target / Filled",
+      "quality": "Quality",
+      "pnl": "PnL",
+      "status": "Status",
+      "intent": "Intent",
+      "childOrders": "Child orders: {{count}}",
+      "gap": "Gap",
+      "reference": "Ref",
+      "fees": "Fees"
+    },
+    "detail": {
+      "kicker": "Drilldown",
+      "filled": "Filled",
+      "reconciliationGap": "Reconciliation gap",
+      "nextAction": "Next",
+      "pnl": "Hedge PnL",
+      "fees": "Fees",
+      "slippage": "Slippage",
+      "reference": "ReferenceMid",
+      "intentTitle": "ExecutionIntent",
+      "batch": "Batch",
+      "provider": "Provider",
+      "mode": "Mode",
+      "timeout": "Timeout",
+      "allowedVenues": "Allowed venues",
+      "risk": "Risk",
+      "limitUsage": "limit"
+    },
+    "childOrders": {
+      "title": "Child orders",
+      "count": "{{count}} orders",
+      "empty": "No child orders were created.",
+      "venue": "Venue",
+      "type": "Type",
+      "qty": "Qty",
+      "price": "Price",
+      "latency": "Latency",
+      "status": "Status",
+      "of": "of"
+    },
+    "reports": {
+      "title": "ExecutionReport feed",
+      "count": "{{count}} reports",
+      "empty": "No ExecutionReports yet.",
+      "fee": "Fee"
+    },
+    "timeline": {
+      "title": "Audit trail",
+      "auditTrail": "PostgreSQL / ClickHouse trail"
+    }
+  },
+  "hedgePnl": {
+    "kicker": "F-12 Analytics",
+    "title": "Hedge PnL Dashboard",
+    "subtitle": "Hedge PnL analytics across time, symbol, and venue with `referenceMid` versus `avgFillPrice` control.",
+    "live": "Live updates every {{seconds}}s",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh"
+    },
+    "filters": {
+      "all": "All",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider"
+    },
+    "analytics": {
+      "notional": "Notional",
+      "filledQty": "Filled qty",
+      "flows": "Flows / reports",
+      "spread": "Avg price spread"
+    },
+    "summary": {
+      "netPnl": "Net PnL",
+      "netPnlMeta": "Final hedge PnL after fees",
+      "grossPnl": "Gross PnL",
+      "grossPnlMeta": "PnL before venue fees",
+      "fees": "Fees",
+      "feesMeta": "Total venue fees",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Mean drift from referenceMid",
+      "winRate": "Win rate",
+      "winRateMeta": "Positive execution rows out of {{count}}"
+    },
+    "charts": {
+      "pnlTitle": "PnL over time",
+      "pnlSubtitle": "Execution-level PnL and cumulative result for the selected slice.",
+      "cumulativePnl": "Cumulative PnL",
+      "executionPnl": "Execution PnL",
+      "priceTitle": "Clearing vs hedge price",
+      "priceSubtitle": "`referenceMid / clearingPrice` against actual `avgFillPrice`.",
+      "clearingPrice": "Clearing/reference",
+      "avgFillPrice": "Avg fill"
+    },
+    "breakdown": {
+      "symbolTitle": "PnL by symbol",
+      "venueTitle": "PnL by venue"
+    },
+    "table": {
+      "title": "Latest execution rows",
+      "subtitle": "Latest ExecutionReport rows backing the dashboard.",
+      "time": "Time",
+      "context": "Context",
+      "prices": "Clearing / fill",
+      "pnl": "PnL",
+      "slippage": "Slippage",
+      "fee": "Fee",
+      "clearingVsFill": "referenceMid vs avgFillPrice"
+    },
+    "states": {
+      "loading": "Loading Hedge PnL...",
+      "error": "Failed to load Hedge PnL Dashboard.",
+      "empty": "No execution rows match the current filters."
+    }
+  },
+  "executionLive": {
+    "kicker": "F-12 WebSocket",
+    "title": "Execution Live Feed",
+    "subtitle": "Real-time `execution.venue` ExecutionReport stream with venue, side, filledQty, avgPrice, slippage, fee, status, and HedgeFlow linkage.",
+    "lastEvent": "Last event: {{time}}",
+    "actions": {
+      "refresh": "Refresh snapshot",
+      "pause": "Pause",
+      "resume": "Resume"
+    },
+    "connection": {
+      "idle": "idle",
+      "connecting": "connecting",
+      "connected": "WebSocket connected",
+      "reconnecting": "reconnecting",
+      "paused": "paused",
+      "error": "connection error"
+    },
+    "filters": {
+      "all": "All",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "status": "Status",
+      "side": "Side",
+      "search": "Search",
+      "searchPlaceholder": "executionId, hedgeFlowId, childOrderId"
+    },
+    "summary": {
+      "reports": "Reports",
+      "reportsMeta": "ExecutionReports matching the current filters",
+      "notional": "Notional",
+      "notionalMeta": "Total venue notional",
+      "slippage": "Avg slippage",
+      "slippageMeta": "Mean drift from referenceMid",
+      "latency": "p95 latency",
+      "latencyMeta": "Venue adapter report latency",
+      "alerts": "Alerts",
+      "alertsMeta": "Rejected or slippage > 15 bps"
+    },
+    "feed": {
+      "title": "Live execution tape",
+      "subtitle": "Events in tape: {{count}}",
+      "topic": "Kafka execution.venue",
+      "live": "live"
+    },
+    "table": {
+      "time": "Time",
+      "execution": "Execution",
+      "route": "Route",
+      "fill": "Fill",
+      "quality": "Quality",
+      "status": "Status"
+    },
+    "inspector": {
+      "kicker": "ExecutionReport",
+      "notional": "Notional",
+      "pnl": "Hedge PnL",
+      "reference": "ReferenceMid",
+      "received": "Received",
+      "batch": "Batch",
+      "provider": "Provider",
+      "childOrder": "Child order",
+      "clientOrder": "Client order",
+      "routeType": "Route type",
+      "urgency": "Urgency"
+    },
+    "states": {
+      "loading": "Loading Execution Live Feed...",
+      "error": "Failed to load Execution Live Feed.",
+      "badMessage": "Received malformed WebSocket message.",
+      "streamError": "Execution Live Feed WebSocket disconnected. Reconnecting...",
+      "empty": "No ExecutionReports match the current filters.",
+      "select": "Select a feed event to inspect details."
+    }
+  },
+  "reconciliationAlerts": {
+    "kicker": "F-12 Alerts",
+    "title": "Reconciliation Alerts",
+    "subtitle": "Operator view of `risk.alerts` for UNDERFILLED and rejected HedgeFlows with gap, timestamp, venue route, and next action.",
+    "live": "Polling every {{seconds}}s",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh alerts",
+      "openHedgeflows": "Open HedgeFlow Monitor",
+      "openManualOverride": "Launch manual override"
+    },
+    "filters": {
+      "all": "All",
+      "severity": "Severity",
+      "status": "Status",
+      "type": "Type",
+      "symbol": "Symbol",
+      "venue": "Venue",
+      "provider": "Provider",
+      "search": "Search",
+      "searchPlaceholder": "hedgeFlowId, batchId, provider, reason"
+    },
+    "severity": {
+      "critical": "critical",
+      "warning": "warning",
+      "info": "info"
+    },
+    "summary": {
+      "total": "Alerts",
+      "totalMeta": "Active reconciliation alerts",
+      "critical": "Critical",
+      "criticalMeta": "Risk rejects or severe gaps",
+      "underfilled": "Underfilled",
+      "underfilledMeta": "HEDGE_UNDERFILL events",
+      "rejected": "Rejected",
+      "rejectedMeta": "HEDGE_RISK_REJECT events",
+      "gap": "Total gap",
+      "gapMeta": "Residual quantity across alerts",
+      "avgGap": "Avg gap",
+      "avgGapMeta": "Mean gap percentage"
+    },
+    "list": {
+      "title": "Alert queue",
+      "subtitle": "Matched alerts: {{count}}",
+      "topic": "Kafka risk.alerts"
+    },
+    "table": {
+      "time": "Time",
+      "alert": "Alert",
+      "flow": "Flow",
+      "gap": "Gap",
+      "route": "Route",
+      "status": "Status"
+    },
+    "inspector": {
+      "kicker": "Reconciliation",
+      "gap": "Gap qty",
+      "gapPct": "Gap %",
+      "target": "Target",
+      "filled": "Filled",
+      "slippage": "Slippage",
+      "pnl": "Hedge PnL",
+      "nextAction": "Next action",
+      "batch": "Batch",
+      "provider": "Provider",
+      "venues": "Venues",
+      "timeout": "Timeout",
+      "risk": "Risk",
+      "mode": "Mode"
+    },
+    "states": {
+      "loading": "Loading reconciliation alerts...",
+      "error": "Failed to load Reconciliation Alerts.",
+      "empty": "No reconciliation alerts match the current filters.",
+      "select": "Select an alert to inspect reconciliation details."
+    }
+  },
+  "manualOverride": {
+    "kicker": "F-12 Operator UI",
+    "title": "Manual Override",
+    "subtitle": "Create a manual ExecutionIntent for operator-driven hedge execution with venue routing, urgency, qty, and audit reason.",
+    "lastUpdated": "Last updated: {{time}}",
+    "actions": {
+      "refresh": "Refresh context"
+    },
+    "summary": {
+      "alerts": "Source alerts",
+      "alertsMeta": "Open reconciliation alerts",
+      "recent": "Recent",
+      "recentMeta": "Manual intents in this session",
+      "accepted": "Accepted",
+      "acceptedMeta": "Mock risk allowed",
+      "rejected": "Rejected",
+      "rejectedMeta": "Mock risk rejected"
+    },
+    "form": {
+      "title": "ExecutionIntent",
+      "subtitle": "Manual operator hedge request.",
+      "sourceAlert": "Source alert",
+      "noSourceAlert": "No source alert",
+      "symbol": "Symbol",
+      "side": "Side",
+      "targetQty": "Target qty",
+      "provider": "Provider",
+      "priceConstraint": "Price constraint",
+      "timeoutMs": "Timeout ms",
+      "urgency": "Urgency",
+      "venues": "Venues",
+      "reason": "Operator reason",
+      "submit": "Create ExecutionIntent",
+      "submitting": "Creating..."
+    },
+    "preview": {
+      "notional": "Target notional",
+      "riskLimit": "Current mock hedge policy",
+      "maxSlippage": "Max slippage",
+      "urgency": "{{urgency}} urgency policy",
+      "route": "Route",
+      "routeMeta": "Selected venue split"
+    },
+    "side": {
+      "title": "Override trail",
+      "subtitle": "Source alert, created intent, and recent operator actions.",
+      "source": "Source alert",
+      "gap": "Gap",
+      "gapPct": "Gap %",
+      "created": "Created intent",
+      "recent": "Recent intents"
+    },
+    "states": {
+      "loading": "Loading manual override context...",
+      "error": "Failed to load Manual Override context.",
+      "submitError": "Failed to create manual ExecutionIntent.",
+      "created": "Created {{intentId}}.",
+      "noRecent": "No manual override intents yet."
+    }
+  },
+  "policyConfig": {
+    "kicker": "F-12 Admin UI",
+    "title": "Policy Config",
+    "subtitle": "Edit solverconfig hedge thresholds, urgency routing policy, slippage caps, and risk limits with an audit reason.",
+    "lastUpdated": "Generated: {{time}}",
+    "actions": {
+      "refresh": "Refresh config",
+      "reset": "Reset draft",
+      "save": "Save policy",
+      "saving": "Saving..."
+    },
+    "summary": {
+      "revision": "Revision",
+      "revisionMeta": "Current solverconfig version",
+      "eligible": "Eligible flows",
+      "eligibleMeta": "Would trigger auto hedge",
+      "slippage": "Avg slippage cap",
+      "slippageMeta": "Across urgency tiers",
+      "exposure": "Exposure limit",
+      "exposureMeta": "Mock risk budget"
+    },
+    "form": {
+      "title": "solverconfig",
+      "subtitle": "Runtime policy values used by hedge execution.",
+      "general": "General limits",
+      "generalMeta": "Shared risk envelope for auto and manual hedges.",
+      "solverConfigId": "Solver config id",
+      "hedgeExposureLimit": "Hedge exposure limit",
+      "maxNotionalPerHedge": "Max notional per hedge",
+      "thresholds": "Trigger thresholds",
+      "thresholdsMeta": "Net residual qty needed before auto hedge is eligible.",
+      "urgency": "Urgency policy",
+      "urgencyMeta": "Gap percent, order type, timeout, and slippage caps by tier.",
+      "reason": "Audit reason"
+    },
+    "table": {
+      "urgency": "Urgency",
+      "minGap": "Min gap %",
+      "maxSlippage": "Max slippage bps",
+      "timeout": "Timeout ms",
+      "orderType": "Order type"
+    },
+    "side": {
+      "title": "Impact preview",
+      "subtitle": "Current hedge flows evaluated against this policy.",
+      "impact": "Flow eligibility",
+      "threshold": "threshold {{value}}",
+      "skip": "SKIP",
+      "audit": "Audit trail",
+      "revision": "rev {{revision}}",
+      "risk": "Risk view",
+      "maxThreshold": "Max threshold qty",
+      "avgSlippage": "Avg slippage cap",
+      "coverage": "Eligible coverage"
+    },
+    "states": {
+      "loading": "Loading Policy Config...",
+      "error": "Failed to load Policy Config.",
+      "saveError": "Failed to save Policy Config.",
+      "saved": "Saved revision {{revision}}."
+    }
+  },
+  "common": {
+    "ok": "OK",
+    "error": "Error",
+    "success": "Success"
+  },
+  "positions": {
+    "title": "Positions, PnL & Margin",
+    "subtitle": "Open positions, unrealized/realized PnL and collateral state. Updates in real time.",
+    "refresh": "Refresh",
+    "updatedAt": "Updated",
+    "loading": "Loading…",
+    "loadError": "Failed to load positions",
+    "empty": "No open positions",
+    "all": "All",
+    "long": "Long",
+    "short": "Short",
+    "buy": "Buy",
+    "sell": "Sell",
+    "col": {
+      "symbol": "Instrument",
+      "side": "Side",
+      "qty": "Qty",
+      "avgEntry": "Avg entry",
+      "mark": "Mark",
+      "uPnl": "uPnL",
+      "rPnl": "rPnL",
+      "status": "Status",
+      "filled": "Filled",
+      "fills": "Fills"
+    },
+    "uPnlTotal": "Unrealized PnL",
+    "rPnlTotal": "Realized PnL",
+    "marginTitle": "Margin & Collateral",
+    "marginUnavailable": "Margin data temporarily unavailable",
+    "freeCollateral": "Free collateral",
+    "reservedCollateral": "Reserved",
+    "initialMargin": "Initial margin",
+    "maintenanceMargin": "Maintenance margin",
+    "utilization": "Free collateral",
+    "marginCall": "Margin call",
+    "marginCallBanner": "Margin call: free collateral is insufficient. Forced liquidation may occur.",
+    "zoneGreen": "> 50% — safe",
+    "zoneYellow": "20–50% — caution",
+    "zoneRed": "< 20% — risk",
+    "legs": "{{n}} legs",
+    "legsTitle": "Leg breakdown",
+    "aggregateNote": "Parent row is an aggregate of legs",
+    "comboTitle": "Combo / Portfolio",
+    "bestEffortNote": "Per-leg PnL and avg price are best-effort (by symbol). Exact attribution awaits F-09.",
+    "comboStatus": {
+      "filled": "Filled",
+      "active": "Active",
+      "cancelled": "Cancelled",
+      "failedExternal": "External failure"
+    },
+    "fill": {
+      "time": "Time",
+      "qty": "Qty",
+      "price": "Price"
+    },
+    "conn": {
+      "connecting": "Connecting…",
+      "connected": "WS connected",
+      "reconnecting": "Reconnecting…",
+      "offline": "Connection lost",
+      "pollFallback": "REST polling fallback"
+    }
+  }
+}

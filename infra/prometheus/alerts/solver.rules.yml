@@ -1,0 +1,47 @@
+groups:
+  - name: matching-solver
+    rules:
+      - alert: MatchingSolverP95SolveTimeTooHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(matching_solver_solve_time_ms_bucket[5m]))) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: matching solver p95 solve time is above SLA
+          description: p95 of matching solver solve time has been above 1000ms for 10 minutes.
+
+      - alert: MatchingSolverP99SolveTimeTooHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(matching_solver_solve_time_ms_bucket[5m]))) > 1500
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: matching solver p99 solve time is above hard limit
+          description: p99 of matching solver solve time has been above 1500ms for 10 minutes.
+
+      - alert: MatchingSolverResidualNormTooHigh
+        expr: max_over_time(matching_solver_residual_norm[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: matching solver residual norm is elevated
+          description: residual norm stayed above 0.01 for at least 5 minutes.
+
+      - alert: MatchingSolverResidualNormCritical
+        expr: max_over_time(matching_solver_residual_norm[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: matching solver residual norm is critically high
+          description: residual norm stayed above 0.1 for at least 2 minutes.
+
+      - alert: MatchingSolverErrorsDetected
+        expr: increase(matching_solver_errors_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: matching solver errors were detected
+          description: matching reported solver or batch pipeline errors during the last 5 minutes.

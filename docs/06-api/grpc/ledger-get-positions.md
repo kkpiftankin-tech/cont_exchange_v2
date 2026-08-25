@@ -2,7 +2,7 @@
 
 ## Status
 
-TODO / planned (в текущем `ledger.proto` отсутствует)
+Implemented (контракт добавлен в `contracts/proto/fob/ledger/v1/ledger.proto`, F-06)
 
 ## Purpose
 
@@ -16,9 +16,9 @@ gRPC
 
 ## Service
 
-`fob.ledger.v1.LedgerService` (planned extension)
+`fob.ledger.v1.LedgerService`
 
-## Method (planned)
+## Method
 
 ```proto
 rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
@@ -35,26 +35,26 @@ rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
 
 ## Schema
 
-TODO. Предлагаемая форма:
+Финальный контракт (см. `contracts/proto/fob/ledger/v1/ledger.proto`):
 
 ```proto
+// Monetary values use fob.common.v1.Decimal (same style as Balance / UnrealisedPnL).
 message Position {
-  string symbol = 1;
-  fob.common.v1.Decimal qty = 2;
-  fob.common.v1.Decimal avg_entry_price = 3;
-  fob.common.v1.Decimal unrealized_pnl = 4;
-  fob.common.v1.Decimal realized_pnl = 5;
+  string symbol = 1;                            // e.g., "BTC/USDT"
+  string side = 2;                              // "long" | "short" | "flat"
+  fob.common.v1.Decimal quantity = 3;           // current position size (absolute)
+  fob.common.v1.Decimal avg_entry_price = 4;    // average entry price
+  fob.common.v1.Decimal mark_price = 5;         // reference/mark price for valuation
+  fob.common.v1.Decimal unrealized_pnl = 6;     // (mark_price - avg_entry_price) * signed qty
+  fob.common.v1.Decimal realized_pnl = 7;       // cumulative realised PnL for this position
 }
 
 message GetPositionsRequest {
-  fob.common.v1.EventMeta meta = 1;
-  string user_id = 2;
-  repeated string symbols = 3;          // optional filter
+  string user_id = 1;
 }
 
 message GetPositionsResponse {
-  fob.common.v1.EventMeta meta = 1;
-  repeated Position positions = 2;
+  repeated Position positions = 1;
 }
 ```
 

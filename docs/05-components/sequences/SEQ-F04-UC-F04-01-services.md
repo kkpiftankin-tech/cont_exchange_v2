@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F04-UC-F04-01-services
+level: sea
+---
+-->
+
 # SEQ-F04-UC-F04-01-services. Batch Clearing: service view
 
 ## Type

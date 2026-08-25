@@ -1,0 +1,193 @@
+syntax = "proto3";
+
+package fob.replay.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+import "fob/orders/v1/orders.proto";
+
+enum ReplayStatus {
+  REPLAY_STATUS_UNSPECIFIED = 0;
+  REPLAY_STATUS_PENDING = 1;
+  REPLAY_STATUS_RUNNING = 2;
+  REPLAY_STATUS_COMPLETED = 3;
+  REPLAY_STATUS_FAILED = 4;
+  REPLAY_STATUS_CANCELLED = 5;
+}
+
+message FeeModel {
+  // Maker fee rate (e.g., 0.0002 for 0.02%)
+  double maker_fee_rate = 1;
+  // Taker fee rate (e.g., 0.0005 for 0.05%)
+  double taker_fee_rate = 2;
+  // Extended: per-instrument rates, discounts by volume, etc.
+  map<string, double> instrument_rates = 3;
+}
+
+message ReplaySessionConfig {
+  // Reference to solver configuration snapshot
+  string solverconfig_id = 1;
+  // Reference to risk limits configuration snapshot
+  string risklimits_id = 2;
+  // Fee model for this replay session
+  FeeModel fee_model = 3;
+}
+
+message ReplaySummary {
+  string summary_id = 1;
+
+  string session_id = 2;
+
+  // Quality metrics
+  fob.common.v1.Decimal avg_is = 3;        // Average Implementation Shortfall
+  fob.common.v1.Decimal total_pnl = 4;     // Total PnL across all batches
+  fob.common.v1.Decimal avg_pnl = 5;       // Average PnL per batch
+  fob.common.v1.Decimal std_pnl = 6;       // Standard deviation of PnL
+  fob.common.v1.Decimal sharpe = 7;        // Sharpe ratio
+  double fill_rate = 8;                     // Overall fill rate (%)
+  fob.common.v1.Decimal avg_vwap = 9;      // Volume-weighted average price
+  fob.common.v1.Decimal avg_solve_time_ms = 10; // Average solver time per batch
+
+  // Risk metrics
+  fob.common.v1.Decimal max_drawdown = 11; // Maximum drawdown from peak
+
+  // Counters
+  int32 total_batches = 12;
+  int32 total_fill_events = 13;
+
+  // Creation timestamp
+  google.protobuf.Timestamp created_at = 14;
+
+  int32 processed_batches = 15;
+  int32 failed_batches = 16;
+  bool partial = 17;
+}
+
+
+message ReplaySession {
+  string session_id = 1;                       // UUID
+  string user_id = 2;                          // владелец
+  string name = 3;                             // человекочитаемое имя
+  string strategy_json = 4;                    // JSON-массив FlowOrder
+  google.protobuf.Timestamp date_range_from = 5;
+  google.protobuf.Timestamp date_range_to = 6;
+  string solver_config_id = 7;                 // ссылка на конфиг солвера
+  string risk_limits_id = 8;                   // ссылка на риск-лимиты
+  string fee_model_json = 9;                   // JSON с maker/taker ставками
+  optional string session_config_snapshot_json = 10; // замороженный снимок конфигурации
+  ReplayStatus status = 11;                    // текущий статус (enum)
+  optional int32 total_batches = 12;           // общее число батчей (заполняется при старте)
+  int32 progress_batches = 13;                 // обработано батчей
+  google.protobuf.Timestamp created_at = 14;
+  optional google.protobuf.Timestamp started_at = 15;
+  optional google.protobuf.Timestamp completed_at = 16;
+  optional string error_details = 17;          // причина ошибки при status=failed
+  // NOTE F15-PERSIST: field 18 is reserved for a future `bool persist` flag.
+  // Currently the flag lives only in the REST/Kafka JSON payload and the C++
+  // ReplaySession struct — no proto wire change needed yet.
+  // reserved 18;
+}
+
+
+// Command to create and start a new replay session
+message CreateReplayCommand {
+  // Event metadata for tracing
+  fob.common.v1.EventMeta meta = 1;
+
+  // Session parameters
+  string session_id = 2;        // UUID, pre-assigned
+  string user_id = 3;
+  string name = 4;
+  string strategy = 5;  // Strategy: json
+  google.protobuf.Timestamp date_range_from = 6;
+  google.protobuf.Timestamp date_range_to = 7;
+  ReplaySessionConfig config = 8;
+}
+
+// Command to cancel a running or pending replay session
+message CancelReplayCommand {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  string user_id = 3;
+  string reason = 4; // Optional: user-provided reason
+}
+
+// Command to retry a failed or cancelled replay session
+message RetryReplayCommand {
+  fob.common.v1.EventMeta meta = 1;
+
+  string original_session_id = 2; // The failed/cancelled session
+  string new_session_id = 3;      // New session (even for strict retry)
+  string user_id = 4;
+  bool use_same_config = 5;       // true = strict retry with original config
+  ReplaySessionConfig override_config = 6; // Used only if use_same_config=false
+}
+
+// Optional: Command to pause a running replay session
+message PauseReplayCommand {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  string user_id = 3;
+  string reason = 4;
+}
+
+// Event: Replay session progress update
+message ReplayProgressEvent {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  ReplayStatus status = 3;
+  int32 batch_seq = 4;      // Currently processing batch
+  int32 total_batches = 5;
+
+  // Optional: partial summary up to current batch
+  ReplaySummary partial_summary = 6;
+
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+// Event: Replay session completed successfully
+message ReplayCompletedEvent {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  ReplayStatus status = 3; // Always COMPLETED
+  int32 total_batches = 4;
+
+  // Final aggregated metrics
+  ReplaySummary final_summary = 5;
+
+  google.protobuf.Timestamp completed_at = 6;
+}
+
+// Event: Replay session failed
+message ReplayFailedEvent {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  ReplayStatus status = 3; // Always FAILED
+  string error_details = 4;
+  int32 failed_at_batch_seq = 5; // Which batch triggered failure (0 if pre-batch error)
+
+  // Partial summary up to failure point
+  ReplaySummary partial_summary = 6;
+
+  google.protobuf.Timestamp failed_at = 7;
+}
+
+// Event: Replay session cancelled by user
+message ReplayCancelledEvent {
+  fob.common.v1.EventMeta meta = 1;
+
+  string session_id = 2;
+  ReplayStatus status = 3; // Always CANCELLED
+  string reason = 4;       // User-provided or system reason
+  int32 cancelled_at_batch_seq = 5;
+
+  // Partial summary up to cancellation point
+  ReplaySummary partial_summary = 6;
+
+  google.protobuf.Timestamp cancelled_at = 7;
+}

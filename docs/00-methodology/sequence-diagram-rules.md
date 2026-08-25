@@ -4,12 +4,19 @@
 
 Sequence diagrams describe behavior over time.
 
-The project uses two mandatory types of sequence diagrams:
+The project uses **three mandatory types** of sequence diagrams,
+соответствующих **уровням декомпозиции Cockburn** (IN-013):
 
-1. System-level sequence diagrams.
-2. Service-level sequence diagrams.
+| Уровень | Cockburn | Type | Location |
+| --- | --- | --- | --- |
+| **L0 ☁️** | Kite | System-level (boundary view) | `docs/02-system/use-cases/{UC-ID}/sequences/SEQ-{UC-ID}-system.md` |
+| **L1 🌊** | Sea | Service-level (cross-component) | `docs/05-components/sequences/SEQ-{F-ID}-{UC-ID}-services.md` |
+| **L2 🐟** | Fish | Component-internal | `docs/05-components/{component-name}/sequences/SEQ-{COMPONENT}-NNN-{topic}.md` |
 
-These rules are also expressed in `CLAUDE.md` §26a; this file is the canonical, version-controlled prose reference.
+Полная двухосевая модель и mapping IN-013 ↔ paths —
+[`functional-hierarchy-and-decomposition.md`](functional-hierarchy-and-decomposition.md).
+Эти правила также присутствуют в `CLAUDE.md` §26a; этот файл — canonical
+version-controlled prose reference.
 
 ## Type A: System-level Sequence Diagram
 

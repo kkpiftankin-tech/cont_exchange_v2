@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F07-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F07-01-system. Pre-trade Risk: system view
 
 ## Type

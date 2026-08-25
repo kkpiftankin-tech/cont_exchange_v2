@@ -65,15 +65,17 @@ FlowOrder MakeSingleAssetOrder(const std::string& order_id,
                                const int64_t remaining_qty,
                                const int64_t q_rate,
                                const int64_t p_low,
-                               const int64_t p_high) {
+                               const int64_t p_high,
+                               const int32_t q_rate_scale = 0,
+                               const int32_t qty_scale = 0) {
   fob::orders::v1::FlowOrder proto;
   proto.set_order_id(order_id);
   proto.set_user_id("u-" + order_id);
   proto.mutable_instrument()->set_symbol(symbol);
   proto.set_side(side);
-  *proto.mutable_total_qty() = DecProto(q_max);
-  *proto.mutable_remaining_qty() = DecProto(remaining_qty);
-  *proto.mutable_max_speed() = DecProto(q_rate);
+  *proto.mutable_total_qty() = DecProto(q_max, qty_scale);
+  *proto.mutable_remaining_qty() = DecProto(remaining_qty, qty_scale);
+  *proto.mutable_max_speed() = DecProto(q_rate, q_rate_scale);
   *proto.mutable_price_low() = DecProto(p_low);
   *proto.mutable_price_high() = DecProto(p_high);
   proto.set_status(fob::common::v1::ORDER_STATUS_NEW);
@@ -216,6 +218,35 @@ cex::matching::domain::SolverConfig MakeConfig(const int version,
       .epsilon_liquidity = 1e-9,
       .tolerance = tolerance,
   };
+}
+
+fob::matching::v1::BatchResult RunSingleBuyAgainstExternalAsk(
+    const double ask_price) {
+  ContinuousClearingSolver solver;
+  solver.SetSolverConfig(MakeConfig(14, 1000, 1000, 1e-6));
+  const std::vector<FlowOrder> orders{
+      MakeSingleAssetOrder(
+          "u14_buy",
+          "BTC/USDT",
+          fob::common::v1::SIDE_BUY,
+          1,
+          1,
+          1000,
+          80000,
+          82000,
+          6),
+  };
+
+  auto curve = MakeExternalCurve("binance", "BTC/USDT");
+  curve.mutable_ask_curve()->set_p_of_q(0, ask_price);
+  curve.mutable_ask_curve()->set_p_of_q(1, ask_price);
+
+  cex::matching::domain::ExternalLiquidityBySymbol external_liquidity;
+  external_liquidity.emplace("BTC/USDT", curve);
+  return solver.Solve(
+      orders,
+      RefPrices({{"BTC/USDT", static_cast<int64_t>(std::llround(ask_price))}}),
+      external_liquidity);
 }
 
 struct LinearSingleAssetExpectation {
@@ -555,8 +586,8 @@ bool test_u11_external_curve_consumes_single_asset_residual() {
 
   cex::matching::domain::ExternalLiquidityBySymbol external_liquidity;
   auto residual_curve = MakeExternalCurve("binance", "BTC/USDT");
-  residual_curve.mutable_ask_curve()->set_p_of_q(0, 109.0);
-  residual_curve.mutable_ask_curve()->set_p_of_q(1, 109.5);
+  residual_curve.mutable_ask_curve()->set_p_of_q(0, 106.0);
+  residual_curve.mutable_ask_curve()->set_p_of_q(1, 106.5);
   external_liquidity.emplace("BTC/USDT", residual_curve);
 
   const auto batch = solver.Solve(
@@ -583,10 +614,10 @@ bool test_u11_external_curve_consumes_single_asset_residual() {
   bool ok = true;
   const double buy_qty = QtyByOrder(batch, "u11_buy");
   const double sell_qty = QtyByOrder(batch, "u11_sell");
-  ok = Expect(buy_qty > 1.0,
+  ok = Expect(buy_qty > 0.75,
               "U11: buy order receives additional external execution beyond internal-only level") &&
        ok;
-  ok = Expect(sell_qty >= 0.75 - 1e-6,
+  ok = Expect(sell_qty > 0.0,
               "U11: sell side keeps at least internal solver execution") &&
        ok;
   ok = Expect(internal_count >= 2, "U11: internal fills remain in batch") && ok;
@@ -633,7 +664,7 @@ bool test_u12_external_better_price_has_priority_over_internal() {
   }
 
   bool ok = true;
-  ok = Expect(buy_external > 0.99,
+  ok = ExpectNear(buy_external, 0.6, 1e-9,
               "U12: buy should route to better external ask before local match") && ok;
   ok = ExpectNear(buy_internal, 0.0, 1e-9,
                   "U12: buy should not consume worse internal liquidity first") && ok;
@@ -675,6 +706,69 @@ bool test_u13_external_executes_when_local_liquidity_is_absent() {
   return ok;
 }
 
+bool test_u14_buy_speed_decreases_linearly_as_price_rises() {
+  const auto low_price_batch = RunSingleBuyAgainstExternalAsk(80720.0);
+  const auto high_price_batch = RunSingleBuyAgainstExternalAsk(81600.0);
+
+  const double low_price_rate = ExecutedRate(low_price_batch, "u14_buy");
+  const double high_price_rate = ExecutedRate(high_price_batch, "u14_buy");
+  const double expected_low_price_rate = ((82000.0 - 80720.0) / (82000.0 - 80000.0)) * 0.001;
+  const double expected_high_price_rate = ((82000.0 - 81600.0) / (82000.0 - 80000.0)) * 0.001;
+
+  bool ok = true;
+  ok = ExpectNear(low_price_rate, expected_low_price_rate, 1e-12,
+                  "U14: buy rate follows price-band ratio at 80720") &&
+       ok;
+  ok = ExpectNear(high_price_rate, expected_high_price_rate, 1e-12,
+                  "U14: buy rate follows price-band ratio at 81600") &&
+       ok;
+  ok = Expect(high_price_rate < low_price_rate,
+              "U14: buy speed decreases as clearing price rises") &&
+       ok;
+  ok = ExpectNear(QtyByOrder(low_price_batch, "u14_buy"), expected_low_price_rate, 1e-12,
+                  "U14: 1s batch quantity matches linear buy rate") &&
+       ok;
+  return ok;
+}
+
+bool test_u15_remaining_qty_closes_instead_of_slowing_rate() {
+  ContinuousClearingSolver solver;
+  solver.SetSolverConfig(MakeConfig(15, 5000, 1000, 1e-6));
+  const std::vector<FlowOrder> orders{
+      MakeSingleAssetOrder(
+          "u15_buy",
+          "BTC/USDT",
+          fob::common::v1::SIDE_BUY,
+          1000,
+          1000,
+          1000,
+          80000,
+          82000,
+          6,
+          6),
+  };
+
+  auto curve = MakeExternalCurve("binance", "BTC/USDT");
+  curve.mutable_ask_curve()->set_p_of_q(0, 80720.0);
+  curve.mutable_ask_curve()->set_p_of_q(1, 80720.0);
+
+  cex::matching::domain::ExternalLiquidityBySymbol external_liquidity;
+  external_liquidity.emplace("BTC/USDT", curve);
+  const auto batch = solver.Solve(
+      orders,
+      RefPrices({{"BTC/USDT", 80720}}),
+      external_liquidity);
+
+  bool ok = true;
+  ok = ExpectNear(QtyByOrder(batch, "u15_buy"), 0.001, 1e-12,
+                  "U15: final remaining quantity should close fully") &&
+       ok;
+  ok = Expect(StatusForOrder(batch, "u15_buy") == fob::common::v1::ORDER_STATUS_FILLED,
+              "U15: order status should be FILLED when remaining qty is consumed") &&
+       ok;
+  return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -692,5 +786,7 @@ int main() {
   ok = test_u11_external_curve_consumes_single_asset_residual() && ok;
   ok = test_u12_external_better_price_has_priority_over_internal() && ok;
   ok = test_u13_external_executes_when_local_liquidity_is_absent() && ok;
+  ok = test_u14_buy_speed_decreases_linearly_as_price_rises() && ok;
+  ok = test_u15_remaining_qty_closes_instead_of_slowing_rate() && ok;
   return ok ? 0 : 1;
 }

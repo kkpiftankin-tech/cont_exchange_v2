@@ -1,8 +1,15 @@
-# ADR-0004 — Policy для docs-code drift
+---
+id: ADR-008
+status: accepted
+date: 2026-05-13
+owners:
+  - core-team
+related:
+  - tools/docs-code-drift/check.py
+  - docs/03-architecture/adr/ADR-029-llm-assisted-development-governance.md
+---
 
-- **Status:** Accepted
-- **Date:** 2026-05-13
-- **Deciders:** core-team
+# ADR-008: Code/Doc drift policy
 
 ## Контекст
 

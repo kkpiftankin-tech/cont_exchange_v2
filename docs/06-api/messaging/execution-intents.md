@@ -2,38 +2,107 @@
 
 ## Purpose
 
-Намерения внешнего хеджирования (child orders) — что нужно исполнить на внешней площадке.
+Намерения хеджирования. После batch clearing (F-04) или ручного запуска оператором формируется `ExecutionIntent`, описывающий цель: какой объём, в каком направлении, с какой urgency и в каких venues исполнить. Топик является входом для Execution Planning.
 
 ## Producer
 
-- [risk-manager](../../05-components/risk-manager/overview.md) (planned)
-- [matching-fob-core](../../05-components/matching-fob-core/overview.md) (planned execution policy)
+- [matching-fob-core](../../05-components/matching-fob-core/overview.md) — auto-hedge after batch (через `HedgeExecutionIntentsPublisher`).
+- [gateway](../../05-components/gateway/overview.md) — manual operator override (POST `/api/v1/hedge/intents/manual`, planned).
+- [execution-planning](../../05-components/execution-planning/overview.md) — retry intents (urgency upgrade при reconciliation gap; planned).
 
 ## Consumers
 
-- [external-venues](../../05-components/external-venues/overview.md)
+- [execution-planning](../../05-components/execution-planning/overview.md) — primary consumer, формирует routing plan.
+- [observability-reporting](../../05-components/observability-reporting/overview.md) — audit + metrics.
 
 ## Settings
 
 | Параметр | Значение |
 | --- | --- |
-| Retention | 1 день |
-| Partition key | `intent_id` |
-| Delivery | at-least-once, idempotent consumer |
+| Retention | 7 дней (604_800_000 ms) — `infra/kafka/create_topics.sh:59` |
+| Partition key | `hedge_flow_id` (ensures ordered processing per hedge session) |
+| Delivery | at-least-once, idempotent consumer (key=hedge_flow_id + client_order_id) |
 | Schema | `fob.execution.v1.ExecutionIntent` (Protobuf) |
+| Partitions | 3 (dev), увеличить в prod |
 
-## Message schema
+## Message Schema
 
-См. [contracts/proto/fob/execution/v1/execution.proto](../../../contracts/proto/fob/execution/v1/execution.proto).
+См. [`contracts/proto/fob/execution/v1/execution.proto`](../../../contracts/proto/fob/execution/v1/execution.proto), сообщение `ExecutionIntent`.
+
+Ключевые поля:
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `meta` | `fob.common.v1.EventMeta` | event_id, event_time, source, correlation_id |
+| `intent_id` | `string` (UUID) | идемпотентный ID intent'а |
+| `hedge_flow_id` | `string` (UUID) | сессия хеджа (1:1 с HedgeFlow в PostgreSQL) |
+| `batch_id` | `string` | связь с BatchResult (F-04) |
+| `provider_id` | `string` | провайдер, для которого хеджируется |
+| `source` | `HedgeSource` enum | AUTO_BATCH / MANUAL_OVERRIDE / BACKTEST |
+| `instrument` | `fob.common.v1.Instrument` | symbol, base, quote |
+| `venue_symbol` | `string` | venue-specific символ (опционально; вычисляется planning'ом) |
+| `allowed_venues` | `repeated string` | white-list venue IDs |
+| `side` | `fob.common.v1.Side` | BUY / SELL |
+| `target_qty` | `fob.common.v1.Decimal` | целевой объём |
+| `target_notional` | `fob.common.v1.Decimal` | targetQty × referenceMid |
+| `reference_mid` | `fob.common.v1.Decimal` | clearing-price из F-04 |
+| `limit_price` | `fob.common.v1.Decimal` | необяз.: верхняя/нижняя граница |
+| `max_slippage_bps` | `int32` | макс. допустимый slippage |
+| `urgency` | `ExecutionUrgency` enum | LOW / MEDIUM / HIGH |
+| `strategy` | `ExecutionStrategy` enum | MARKET / LIMIT / TWAP / POST_ONLY |
+| `tif` | `fob.common.v1.TimeInForce` | GTC / IOC / FOK / GTD |
+| `timeout_ms` | `int64` | hedgeTimeoutMs |
+| `client_order_id` | `string` | для idempotency на venue side |
+| `reason` | `string` | человекочитаемая причина (для manual override / retry) |
+
+## Idempotency
+
+- Producer не должен публиковать дубликаты по `intent_id` (одной hedge_flow_id может соответствовать несколько intent'ов в случае retry).
+- Consumer (`execution-planning`) должен дедуплицировать по `intent_id` (in-memory кэш + persistence в state store).
 
 ## Used In Features
 
-- [F-12. Execution Hedge](../../02-system/features/F-12-execution-hedge/)
+- [F-12. Execution Hedge](../../02-system/features/F-12-execution-hedge/) — primary.
 
 ## Used In Use Cases
 
-- [UC-F12-01](../../02-system/use-cases/UC-F12-01-execute-hedge/use-case.md)
+- [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)
+- [UC-F12-02](../../02-system/use-cases/UC-F12-02-manual-operator-hedge/use-case.md)
+- [UC-F12-03](../../02-system/use-cases/UC-F12-03-partial-fill-retry/use-case.md) (retry intent)
+- [UC-F12-04](../../02-system/use-cases/UC-F12-04-rejection-fallback/use-case.md) (fallback retry)
+- [UC-F12-05](../../02-system/use-cases/UC-F12-05-timeout-underfilled-reconciliation/use-case.md) (auto-retry on underfill)
 
 ## Used In Sequence Diagrams
 
-- [SEQ-F12-UC-F12-01-services](../../05-components/sequences/SEQ-F12-UC-F12-01-services.md)
+- [SEQ-F12-01-auto-hedge-services](../../05-components/sequences/SEQ-F12-01-auto-hedge-services.md)
+- [SEQ-F12-02-rejection-fallback-services](../../05-components/sequences/SEQ-F12-02-rejection-fallback-services.md)
+- [SEQ-F12-03-error-scenarios-services](../../05-components/sequences/SEQ-F12-03-error-scenarios-services.md)
+
+## Source Fragments
+
+- IN-005 §1 «ExecutionIntent (Kafka execution.intents)»
+- IN-005 §9 «Kafka topics»
+
+## Implementation notes (DoD-18 sync, 2026-05-27)
+
+- **`hedge_flow_id` is TEXT (composite), not UUID**. matching's F-04
+  external_fill path uses `<batch_id>|<order_id>|<symbol>|<venue_id>|external_fill_N`;
+  the real F-12 auto-hedge path (PR-F12-5,
+  `cpp/matching/src/app/execution_intent_builder.cpp`)
+  uses `<batch_id>|hedge|<provider_id>|<symbol>`. Both shapes are
+  carried in this Kafka field as `string` (proto type) and persisted
+  to PG `hedgeflows.hedge_flow_id` as `TEXT`.
+- **`source` enum**: F-12 auto-hedge intents set
+  `source = HEDGE_SOURCE_AUTO_BATCH` (enum value 1, see
+  `contracts/proto/fob/execution/v1/execution.proto`). F-04
+  external_fill intents currently do **not** set this field (default
+  unset). The `manual` origin (operator-created intent) is reserved
+  for a future PR (`POST /api/v1/hedge/manual-overrides`).
+- **Per-symbol thresholds gate emission**: matching only publishes a
+  real F-12 intent when `HEDGE_TRIGGER_QTY_<SYM>` or
+  `HEDGE_TRIGGER_NOTIONAL_<SYM>` is non-zero and the per-batch net
+  exposure exceeds it. Defaults are 0 — feature is disabled out of
+  the box. Configure via `infra/env/.env-example`.
+- **`allowed_venues` is CSV-parsed from `HEDGE_INTENT_ALLOWED_VENUES`**
+  env (PR-F12-5). Today there is no per-symbol allow-list; venues
+  selection happens uniformly across all F-12 intents.

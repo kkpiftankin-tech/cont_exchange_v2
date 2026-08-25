@@ -34,14 +34,20 @@ jobs:
             cmake \
             pkg-config \
             git \
+            ca-certificates \
             libgrpc++-dev \
             protobuf-compiler-grpc \
             libprotobuf-dev \
+            libabsl-dev \
             librdkafka-dev \
             libboost-all-dev \
             libeigen3-dev \
             libpqxx-dev \
-            libpq-dev
+            libpq-dev \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libasio-dev \
+            nlohmann-json3-dev
 
       - name: Show toolchain versions
         run: |

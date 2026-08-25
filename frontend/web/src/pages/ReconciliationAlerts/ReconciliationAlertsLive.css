@@ -1,0 +1,150 @@
+.rec-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0a0a1a 0%, #14132a 60%, #1a1a35 100%);
+  color: #fff;
+}
+
+.rec-shell {
+  padding: 32px 40px 80px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.rec-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.rec-hero h1 { margin: 6px 0 8px; font-size: 26px; font-weight: 600; }
+.rec-hero p { margin: 0; color: rgba(255, 255, 255, 0.6); font-size: 13px; }
+.rec-hero code {
+  background: rgba(180, 140, 255, 0.12);
+  padding: 1px 6px; border-radius: 4px;
+  font-family: 'Roboto Mono', monospace; font-size: 12px;
+}
+.rec-kicker {
+  display: inline-block; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  color: rgba(180, 160, 255, 0.85);
+  background: rgba(180, 140, 255, 0.1);
+  padding: 3px 8px; border-radius: 6px;
+}
+.rec-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.rec-refresh {
+  background: rgba(180, 140, 255, 0.18); color: #fff;
+  border: 1px solid rgba(180, 140, 255, 0.3);
+  padding: 7px 14px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.rec-refresh:hover { background: rgba(180, 140, 255, 0.28); }
+.rec-live-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(76, 175, 80, 0.15); color: #6fdc6f;
+  font-size: 12px; padding: 3px 10px; border-radius: 14px;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+.rec-live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #6fdc6f; animation: rec-pulse 1.5s ease-in-out infinite;
+}
+@keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.rec-refresh-label { font-size: 11px; color: rgba(255, 255, 255, 0.5); }
+
+.rec-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.rec-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.rec-card.crit { border-color: rgba(244, 67, 54, 0.35); background: rgba(244, 67, 54, 0.08); }
+.rec-card.warn { border-color: rgba(255, 180, 0, 0.35); background: rgba(255, 180, 0, 0.06); }
+.rec-card span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(255, 255, 255, 0.55); }
+.rec-card strong { font-size: 22px; font-family: 'Roboto Mono', monospace; color: #fff; }
+.rec-card small { font-size: 11px; color: rgba(255, 255, 255, 0.45); }
+
+.rec-toolbar { display: flex; gap: 20px; align-items: flex-end; margin-bottom: 20px; }
+.rec-field { display: flex; flex-direction: column; gap: 4px; }
+.rec-field label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(255, 255, 255, 0.55); }
+.rec-field select {
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff; padding: 7px 10px; border-radius: 7px; font-size: 13px; min-width: 160px;
+}
+.rec-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: rgba(255, 255, 255, 0.85); }
+
+.rec-state {
+  text-align: center; padding: 60px 20px;
+  color: rgba(255, 255, 255, 0.7); font-size: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+.rec-state.error { color: #f44336; }
+.rec-state h3 { margin: 0 0 8px; color: #fff; font-size: 16px; }
+.rec-state p { margin: 4px 0; }
+.rec-state .rec-note { color: rgba(255, 255, 255, 0.45); font-size: 12px; margin-top: 12px; }
+.rec-state code {
+  background: rgba(180, 140, 255, 0.1); padding: 1px 5px; border-radius: 3px;
+  font-family: 'Roboto Mono', monospace; font-size: 12px;
+}
+
+.rec-table-wrap { overflow-x: auto; background: rgba(255, 255, 255, 0.02); border-radius: 10px; padding: 4px; }
+.rec-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Roboto Mono', monospace; }
+.rec-table thead th {
+  text-align: left; padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+.rec-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: #fff; white-space: nowrap;
+}
+.rec-table tbody tr.acked { opacity: 0.5; }
+.rec-table tbody tr.sev-critical { background: rgba(244, 67, 54, 0.04); }
+.rec-table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+.rec-table .rec-id { color: rgba(180, 160, 255, 0.9); cursor: help; }
+.rec-table .side-buy { color: #4caf50; font-weight: 600; }
+.rec-table .side-sell { color: #f44336; font-weight: 600; }
+.rec-table .rec-error { color: #ffb400; font-size: 11px; }
+
+.rec-sev-badge {
+  display: inline-block; padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.rec-sev-badge.critical { background: rgba(244, 67, 54, 0.18); color: #f44336; }
+.rec-sev-badge.warning { background: rgba(255, 180, 0, 0.18); color: #ffb400; }
+
+.rec-ack-btn {
+  background: rgba(180, 140, 255, 0.18); color: #fff;
+  border: 1px solid rgba(180, 140, 255, 0.3);
+  padding: 4px 10px; border-radius: 5px; cursor: pointer;
+  font-size: 11px; font-family: inherit;
+}
+.rec-ack-btn:hover { background: rgba(180, 140, 255, 0.3); }
+.rec-ack-btn:disabled { opacity: 0.4; cursor: wait; }
+.rec-acked-label {
+  display: inline-block; padding: 4px 10px; border-radius: 5px;
+  font-size: 11px; color: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.hedge-status-badge {
+  display: inline-block; padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.hedge-status-badge.status-UNDERFILLED { background: rgba(255, 180, 0, 0.18); color: #ffb400; }
+.hedge-status-badge.status-REJECTED,
+.hedge-status-badge.status-RISK_REJECTED { background: rgba(244, 67, 54, 0.18); color: #f44336; }

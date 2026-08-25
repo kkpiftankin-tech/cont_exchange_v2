@@ -1,7 +1,43 @@
 services:
+  clickhouse:
+    restart: unless-stopped
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/001_cex_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    restart: unless-stopped
+    image: postgres:16-alpine
+    # ADR-045: per-service connection pools (ledger/risk) + headroom for
+    # other services. Raise max_connections above stock 100 accordingly.
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=256MB"]
+    environment:
+      POSTGRES_DB: cex
+      POSTGRES_USER: cex
+      POSTGRES_PASSWORD: cex
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001_cex_init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cex -d cex >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   redpanda:
+    restart: unless-stopped
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
-    container_name: redpanda
     command:
       - redpanda
       - start
@@ -48,49 +84,9 @@ services:
       BROKER: redpanda:9092
       P: 3
 
-  # F-04 OLAP: stores batchresults, fills. Schema lives in
-  # infra/clickhouse/init.sql; clickhouse-server runs all *.sql files
-  # from /docker-entrypoint-initdb.d/ on first start of an empty volume.
-  # Ingestion (Kafka batch.outputs / fills -> these tables) will be added
-  # in a follow-up cpp/market_data update.
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    environment:
-      CLICKHOUSE_SKIP_USER_SETUP: "1"
-    volumes:
-      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/001_f04_init.sql:ro
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  # F-04 OLTP: stores flow_orders, flow_order_legs, solver_config.
-  # Schema lives in infra/postgres/init.sql; the alpine image runs all
-  # *.sql in /docker-entrypoint-initdb.d/ on first start of an empty
-  # volume.
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: cex
-      POSTGRES_USER: cex
-      POSTGRES_PASSWORD: cex
-    volumes:
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001_cex_init.sql:ro
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cex -d cex >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   redpanda-console:
+    restart: unless-stopped
     image: docker.redpanda.com/redpandadata/console:v2.7.2
-    container_name: redpanda-console
     depends_on:
       redpanda:
         condition: service_healthy
@@ -109,92 +105,225 @@ services:
 
   # --- Core services ---
   risk:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: risk }
+      args:
+        TARGET: risk
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
     depends_on:
       topics-init:
         condition: service_completed_successfully
+      # F-06 (T-F06-031): risk reads positions/accounts/risk_limits and writes
+      # risk_snapshots — needs postgres up before margin snapshots can persist.
+      postgres:
+        condition: service_healthy
+
+  # При старте ledger'а сбрасываем активные ордера чтобы резервы не накапливались между сессиями
+  ledger-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: cex
+    command: >
+      psql -h postgres -U cex -d cex -c
+      "UPDATE flow_orders SET status='canceled' WHERE status NOT IN ('filled','canceled');"
+    restart: "no"
 
   ledger:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: ledger }
+      args:
+        TARGET: ledger
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
     depends_on:
+      postgres:
+        condition: service_healthy
+      ledger-init:
+        condition: service_completed_successfully
       topics-init:
         condition: service_completed_successfully
 
   order_flow:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: order_flow }
+      args:
+        TARGET: order_flow
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
+    environment:
+      # F-09 MVP-5/6: разрешить external_compensating combo (внешние ноги +
+      # compensation resolution). По умолчанию выключено (honest gate, T-F09-002).
+      F09_EXTERNAL_COMPENSATING_ENABLED: "true"
+      # F-09 MVP-7 (ADR-041): auto-policy resolution (default OFF; dev — ON с лимитами).
+      F09_AUTO_RESOLVE_ENABLED: "true"
+      F09_AUTO_MAX_NOTIONAL: "1000000"
+      F09_AUTO_WINDOW_NOTIONAL: "10000000"
+      F09_AUTO_MAX_PER_WINDOW: "100"
+      F09_AUTO_MIN_AGE_MS: "3000"
+      F09_AUTO_RESOLVE_INTERVAL_MS: "5000"
+      F09_AUTO_WINDOW_MS: "3600000"
     depends_on:
       risk:
         condition: service_started
       ledger:
         condition: service_started
-
-  matching:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.service
-      args: { TARGET: matching }
-    env_file: [ ./env/.env-example ]
-    environment:
-      # Enables PostgresFlowOrderRepository and PostgresSolverConfigRepository.
-      # Without this, matching falls back to in-memory active orders (env
-      # batch interval) — useful for tests, not for the F-04 end-to-end path.
-      MATCHING_POSTGRES_DSN: "host=postgres port=5432 dbname=cex user=cex password=cex"
-    depends_on:
-      topics-init:
-        condition: service_completed_successfully
+      # PR-F02-001: PG writer needs postgres up for flow_orders inserts.
       postgres:
         condition: service_healthy
 
-  venues:
+  matching:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: venues }
+      args:
+        TARGET: matching
+        BUILD_JOBS: ${BUILD_JOBS:-1}
+    env_file: [ ./env/.env-example ]
+    environment:
+      MATCHING_DISABLE_EXTERNAL_VENUES: "0"
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  venues:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args:
+        TARGET: venues
+        BUILD_JOBS: ${BUILD_JOBS:-1}
+    env_file: [ ./env/.env-example ]
+    environment:
+      # multi_real: Binance geo-blocked → упадёт через circuit breaker
+      # Coinbase доступен → будет основным источником реальных данных
+      VENUES_ADAPTER_MODE: "multi_real"
+      CURVE_LEVEL: "L3"
+      BINANCE_VENUE_ID: "binance"
+      BINANCE_VENUE_SYMBOL: "BTCUSDT"
+      # F-09 T-F09-068: симуляция reject дискретного hedge-ордера (для демо
+      # MVP-5 external-leg failure → compensation). Пусто = hedge внешних ног
+      # исполняется нормально. Чтобы снова демонстрировать компенсации —
+      # вернуть сюда символ, напр. "ETH/USDT", и пересоздать venues.
+      BINANCE_SIMULATE_REJECT_SYMBOLS: ""
+      # F-09 UX: доп. символы для тикер-фида (live-котировки в combo-форме). Пары,
+      # которые binance реально торгует (USDT/USDC/EUR/BTC-quote для major-баз).
+      VENUES_FEED_SYMBOLS: "ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOGE/USDT,AVAX/USDT,LINK/USDT,LTC/USDT,DOT/USDT,MATIC/USDT,TRX/USDT,ATOM/USDT,UNI/USDT,BCH/USDT,NEAR/USDT,APT/USDT,ARB/USDT,OP/USDT,FIL/USDT,ETC/USDT,XLM/USDT,ALGO/USDT,INJ/USDT,SUI/USDT,SEI/USDT,BTC/USDC,ETH/USDC,SOL/USDC,XRP/USDC,BTC/EUR,ETH/EUR,SOL/EUR,ETH/BTC,SOL/BTC,BNB/BTC,XRP/BTC"
+      COINBASE_VENUE_ID: "coinbase"
+      COINBASE_VENUE_SYMBOL: "BTC-USD"
+      UNISWAP_VENUE_ID: "uniswap_v3"
+      UNISWAP_VENUE_SYMBOL: "WBTCUSDC"
+      # Ускоряем срабатывание circuit breaker для Binance чтобы быстрее переключиться на Coinbase
+      CIRCUIT_BREAKER_ERRORS: "3"
+      CIRCUIT_BREAKER_WINDOW_S: "10"
+      CIRCUIT_BREAKER_COOLDOWN_S: "60"
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+
+  venue_health:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args: { TARGET: venue_health }
     env_file: [ ./env/.env-example ]
     depends_on:
       topics-init:
         condition: service_completed_successfully
 
   market_data:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: market_data }
+      args:
+        TARGET: market_data
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
+    environment:
+      MARKET_DATA_TRACE_EACH_MESSAGE: "1"
+      POSTGRES_CONN: "host=postgres port=5432 dbname=cex user=cex password=cex"
     depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
       topics-init:
         condition: service_completed_successfully
 
-  observability:
+  backtest:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: observability }
+      args:
+        TARGET: backtest
+        BUILD_JOBS: ${BUILD_JOBS:-1}
+    env_file: [ ./env/.env-example ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    ports:
+      - "8087:8087"
+
+  observability:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.service
+      args:
+        TARGET: observability
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
     depends_on:
       topics-init:
         condition: service_completed_successfully
 
   gateway:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile.service
-      args: { TARGET: gateway }
+      args:
+        TARGET: gateway
+        BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
     depends_on:
+      postgres:
+        condition: service_healthy
       order_flow:
         condition: service_started
     ports:
       - "8088:8080"
+
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus:v2.54.1
+    depends_on:
+      matching:
+        condition: service_started
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
+    ports:
+      - "9090:9090"
+
+networks:
+  default:
+    name: cex_net

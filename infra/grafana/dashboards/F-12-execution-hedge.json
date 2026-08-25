@@ -1,0 +1,179 @@
+{
+  "title": "F-12 Execution Hedge",
+  "uid": "f12-execution-hedge",
+  "tags": ["f12", "hedge", "execution"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "symbol",
+        "type": "query",
+        "query": "label_values(f12_hedgeflows_total, symbol)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "selected": false, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "venue",
+        "type": "query",
+        "query": "label_values(f12_hedge_reports_total, venue_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "selected": false, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total HedgeFlows (24h)",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        { "expr": "sum(f12_hedgeflows_total{symbol=~\"$symbol\"})", "legendFormat": "total" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "OPEN now",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] } } },
+      "targets": [
+        { "expr": "sum(f12_hedge_open_total{symbol=~\"$symbol\"})", "legendFormat": "open" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "UNDERFILLED (24h)",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 }] } } },
+      "targets": [
+        { "expr": "sum(f12_hedge_underfill_total{symbol=~\"$symbol\"})", "legendFormat": "underfilled" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "REJECTED (24h)",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "targets": [
+        { "expr": "sum(f12_hedge_reject_total{symbol=~\"$symbol\"})", "legendFormat": "rejected" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Hedge PnL Σ (24h, USDT)",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] }, "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum(f12_hedge_pnl_sum{symbol=~\"$symbol\"})", "legendFormat": "pnl" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Fees Σ (24h)",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum(f12_hedge_fee_sum{symbol=~\"$symbol\"})", "legendFormat": "fees" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "HedgeFlows by status (gauge)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "custom": { "stacking": { "mode": "normal" } } } },
+      "targets": [
+        { "expr": "sum by (status) (f12_hedgeflows_total{symbol=~\"$symbol\"})", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Oldest OPEN age (sec)",
+      "description": "Per-symbol max age of OPEN hedgeflows. Should normally be < 30 (matches HEDGE_INTENT_TIMEOUT_MS). > 300s indicates stuck flow.",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 300 }] } } },
+      "targets": [
+        { "expr": "f12_hedge_open_age_seconds_max{symbol=~\"$symbol\"}", "legendFormat": "{{symbol}}" }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Reports rate (5min) — filled / rejected by venue",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (venue_id) (f12_hedge_reports_filled_total{venue_id=~\"$venue\",symbol=~\"$symbol\"})", "legendFormat": "{{venue_id}} filled" },
+        { "expr": "sum by (venue_id) (f12_hedge_reports_rejected_total{venue_id=~\"$venue\",symbol=~\"$symbol\"})", "legendFormat": "{{venue_id}} rejected" }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Slippage p95 by (venue, symbol)",
+      "description": "p95 slippage_bps over the last 5 minutes. Policy max: HEDGE_INTENT_MAX_SLIPPAGE_BPS (default 50). In dev with sim adapter this stays at 0.",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }] } } },
+      "targets": [
+        { "expr": "f12_hedge_slippage_bps_p95{venue_id=~\"$venue\",symbol=~\"$symbol\"}", "legendFormat": "{{venue_id}} / {{symbol}}" }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Cumulative Filled vs Target qty (24h)",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (symbol) (f12_hedgeflow_filled_qty_total{symbol=~\"$symbol\"})", "legendFormat": "{{symbol}} filled" },
+        { "expr": "sum by (symbol) (f12_hedgeflow_target_qty_total{symbol=~\"$symbol\"})", "legendFormat": "{{symbol}} target" }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Hedge PnL by symbol (24h, USDT)",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        { "expr": "sum by (symbol) (f12_hedge_pnl_sum{symbol=~\"$symbol\"})", "legendFormat": "{{symbol}} pnl" },
+        { "expr": "-sum by (symbol) (f12_hedge_fee_sum{symbol=~\"$symbol\"})", "legendFormat": "{{symbol}} -fees" }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "table",
+      "title": "Per-symbol breakdown (current)",
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
+      "targets": [
+        { "expr": "f12_hedge_open_total{symbol=~\"$symbol\"}", "instant": true, "format": "table", "legendFormat": "open" },
+        { "expr": "f12_hedge_underfill_total{symbol=~\"$symbol\"}", "instant": true, "format": "table", "legendFormat": "underfilled" },
+        { "expr": "f12_hedge_reject_total{symbol=~\"$symbol\"}", "instant": true, "format": "table", "legendFormat": "rejected" },
+        { "expr": "f12_hedge_pnl_sum{symbol=~\"$symbol\"}", "instant": true, "format": "table", "legendFormat": "pnl" }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "name": "deploys",
+        "enable": true,
+        "datasource": "Prometheus",
+        "expr": "changes(frontend_api_generated_at_seconds[1m]) > 0",
+        "iconColor": "blue",
+        "tagKeys": "feature"
+      }
+    ]
+  }
+}

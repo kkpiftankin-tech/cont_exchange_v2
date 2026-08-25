@@ -1,0 +1,192 @@
+component:
+  id: backtest-service
+  name: Backtest / Replay Service
+  layer: app
+  status: implemented-mvp
+  codePath: cpp/backtest
+  owner: core-team
+
+responsibility:
+  summary: >
+    Оркестратор replay-сессий. Загружает историю (ClickHouse), фиксирует
+    snapshot конфигов (PostgreSQL), per-batch вызывает Matching Backend в
+    isolation mode, Risk Manager (post-trade) и Shadow Collateral Ledger,
+    записывает AgentLog в ClickHouse, агрегирует ReplaySummary в PostgreSQL.
+    Поддерживает audit-mode (single batch + diff), A/B compare, retry с
+    цепочкой retry_parent_id, cancel с partial save и RBAC.
+
+sourceTreeEvidence:
+  entry:
+    - cpp/backtest/src/main.cpp
+  app:
+    - cpp/backtest/src/app/create_replay_session_uc.cpp
+    - cpp/backtest/src/app/run_replay_session_uc.cpp
+    - cpp/backtest/src/app/cancel_replay_session_uc.cpp
+    - cpp/backtest/src/app/retry_replay_session_uc.cpp
+    - cpp/backtest/src/app/read_replay_sessions_uc.cpp
+    - cpp/backtest/src/app/compare_replay_sessions_uc.cpp
+    - cpp/backtest/src/app/check_replay_determinism_uc.cpp
+    - cpp/backtest/src/app/run_replay_audit_batch_uc.cpp
+    - cpp/backtest/src/app/historical_batch_loader_uc.cpp
+    - cpp/backtest/src/app/shadow_namespace_uc.cpp
+    - cpp/backtest/src/app/restore_state_uc.cpp
+    - cpp/backtest/src/app/backtest_uc.cpp
+    - cpp/backtest/src/app/lob_fob_replay_uc.cpp
+    - cpp/backtest/src/app/venue_replay_uc.cpp
+    - cpp/backtest/src/app/quality_metrics_uc.cpp
+    - cpp/backtest/src/app/replay_config_snapshot.cpp
+    - cpp/backtest/src/app/replay_step_journal.cpp
+    - cpp/backtest/src/app/replay_batch_input.cpp
+    - cpp/backtest/src/app/replay_runtime_metrics.cpp
+    - cpp/backtest/src/app/metrics.cpp
+    - cpp/backtest/src/app/quality_metrics.cpp
+    - cpp/backtest/src/app/replay_metrics.cpp
+  infra:
+    - cpp/backtest/src/infra/clickhouse_storage.cpp
+    - cpp/backtest/src/infra/clickhouse_historical_queries.cpp
+    - cpp/backtest/src/infra/grpc_replay_batch_executor.cpp
+    - cpp/backtest/src/infra/in_memory_shadow_ledger.cpp
+    - cpp/backtest/src/infra/kafka_consumer.cpp
+    - cpp/backtest/src/infra/kafka_replay_event_publisher.cpp
+    - cpp/backtest/src/infra/replay_commands_kafka_consumer.cpp
+    - cpp/backtest/src/infra/venue_kafka_consumer.cpp
+    - cpp/backtest/src/infra/http/retry_session_handler.cpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_session_repository.cpp
+    - cpp/backtest/src/infra/postgres/postgres_replay_config_repository.cpp
+    - cpp/backtest/src/infra/postgres/postgres_rbac_repository.cpp
+  migrations:
+    - cpp/backtest/migrations/postgres/001_f15_replay_schema.sql
+    - cpp/backtest/migrations/postgres/002_f15_rbac_schema.sql
+    - cpp/backtest/migrations/postgres/003_f15_retry_parent_id.sql
+  build:
+    - cpp/backtest/CMakeLists.txt
+
+features:
+  - F-15
+  # F-11 (parity replay via lob_fob_replay_uc) и F-12 (venue parity) опираются
+  # на backtest-service для backtest-сценариев.
+
+protoContracts:
+  - contracts/proto/fob/replay/v1/replay.proto
+  - contracts/proto/fob/matching/v1/solver.proto
+  - contracts/proto/fob/matching/v1/batch.proto
+  - contracts/proto/fob/matching/v1/fill_event.proto
+  - contracts/proto/fob/risk/v1/risk.proto
+  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/orders/v1/orders.proto
+
+openapiContracts:
+  - contracts/openapi/fob/replay/v1/api/replay.yaml
+  - contracts/openapi/fob/replay/v1/schemas/replay.json
+
+entities:
+  - ReplaySession
+  - ReplaySummary
+  - AgentLog
+  - ConfigSnapshot
+  - ShadowPositions
+  - AuditRun
+
+dependencies:
+  upstream:
+    - gateway          # REST edge для /api/v1/replay/*
+  downstream:
+    - matching-fob-core   # gRPC Solver/Solve isolation
+    - risk-manager        # gRPC CheckPostTrade
+    - settlement-ledger   # in-process reuse через cpp/ledger/src/app/ledger_uc.cpp
+    - postgres            # replay_sessions, summaries, RBAC tables
+    - clickhouse          # batchresults/fills/marketdata (read) + replay_agentlogs (write)
+    - kafka               # replay.commands (consume), replay.results (produce)
+
+kafkaConsumes:
+  - topic: replay.commands
+    messageType: fob.replay.v1.CreateReplayCommand / CancelReplayCommand / RetryReplayCommand
+    consumerGroup: backtest
+    status: optional-alternative-to-rest
+  - topic: batch.outputs
+    messageType: fob.matching.v1.BatchResult
+    consumerGroup: backtest-parity
+    status: parity-checks-only
+  - topic: venue.snapshots
+    messageType: fob.venues.v1.VenueSnapshot
+    consumerGroup: backtest-venue-replay
+    status: F-11-parity
+
+kafkaProduces:
+  - topic: replay.results
+    messageType: fob.replay.v1.ReplayProgressEvent / Completed / Failed / Cancelled
+    partitionKey: session_id
+
+grpcCalls:
+  - target: fob.matching.v1.Solver/Solve
+    description: isolation-mode solver вызов (тот же код, что и production scheduler)
+  - target: fob.risk.v1.RiskService/CheckPostTrade
+    description: shadow post-trade проверки
+  - target: fob.ledger.v1.LedgerService/ApplyFills
+    description: реально вызывается inline через ledger_uc.cpp в shadow namespace; gRPC выставляется при необходимости
+
+restEndpoints:
+  - POST /api/v1/replay/sessions
+  - GET /api/v1/replay/sessions
+  - GET /api/v1/replay/sessions/{id}
+  - GET /api/v1/replay/sessions/{id}/summary
+  - GET /api/v1/replay/sessions/{id}/agentlogs
+  - POST /api/v1/replay/sessions/{id}/retry
+  - DELETE /api/v1/replay/sessions/{id}
+  - GET /api/v1/replay/compare
+  - POST /api/v1/replay/audit-runs
+
+config:
+  env:
+    KAFKA_BROKERS: redpanda:9092
+    BACKTEST_METRICS_PORT: 8087
+    BACKTEST_CLICKHOUSE_URL: http://clickhouse:8123
+    BACKTEST_CLICKHOUSE_DB: default
+    BACKTEST_CLICKHOUSE_BATCHRESULTS_TABLE: batchresults
+    BACKTEST_CLICKHOUSE_FILLS_TABLE: fills
+    BACKTEST_CLICKHOUSE_REPLAY_AGENTLOGS_RETENTION_DAYS: 90
+    BACKTEST_POSTGRES_DSN: postgres://...
+    BACKTEST_HTTP_PORT: 8087
+    REPLAY_REWARD_DEFAULT_MODE: pnl
+
+ports:
+  exposes:
+    - http: 8087        # REST API + Prometheus metrics
+  internal:
+    - kafka consumer (replay.commands)
+    - kafka consumer (batch.outputs parity)
+    - kafka consumer (venue.snapshots)
+    - kafka producer (replay.results)
+
+knownIssues:
+  - id: web-ui-missing
+    severity: feature-gap
+    description: UI экраны (Backtest form, Results, A/B, Audit, Equity) не реализованы.
+  - id: websocket-bridge-missing
+    severity: feature-gap
+    description: Gateway WebSocket bridge для `replay.results` ещё не реализован.
+  - id: replay-agentlogs-ddl-divergence
+    severity: doc-drift
+    description: |
+      DDL для `replay_agentlogs` в коде (clickhouse_storage.cpp) расширена
+      относительно IN-006: ReplacingMergeTree, поля log_id, fills_applied,
+      solver_error_flag, risk_status, error_code, failure_component,
+      snapshot_version. Source-of-truth: код (deployed).
+  - id: lob-fob-replay-beyond-scope
+    severity: feature-extension
+    description: |
+      lob_fob_replay_uc.cpp реализует quality-replay LOB→FOB вне IN-006.
+      Это F-11 parity, добавленная вместе с F-15.
+
+tests:
+  unit:
+    actual:
+      - cpp/backtest/tests/  # см. F-15 traceability.yaml
+  integration:
+    actual:
+      - cpp/backtest/tests/infra/postgres_replay_session_repository_test.cpp
+      - Testing/f15_test2_e2e.sh
+  load:
+    actual:
+      - cpp/backtest/tests/f15_load_harness.cpp
+      - Testing/f15_perf_slo.py

@@ -1,0 +1,20 @@
+.git
+.gitignore
+
+# Local build artifacts
+build/
+build_*/
+build-ninja/
+build_ninja/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Not needed for C++ service image builds
+legacy_mvp/
+frontend/

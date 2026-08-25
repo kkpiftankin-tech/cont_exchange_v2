@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F13-UC-F13-01-services
+level: sea
+---
+-->
+
 # SEQ-F13-UC-F13-01-services. Post-Trade Report: service view
 
 ## Type

@@ -1,0 +1,415 @@
+openapi: 3.0.3
+info:
+  title: F-12 HedgeFlow Monitor API
+  version: 1.0.0
+  description: >
+    API для мониторинга и управления хеджированием нетто-позиций провайдера
+    на внешних площадках (CEX/DEX/AMM) в рамках фичи F-12 Execution Hedge.
+    Предоставляет доступ к HedgeFlow, child-ордерам и отчётам об исполнении,
+    а также операторские действия: ручной запуск, отмена и повтор хеджа.
+servers:
+  - url: /api/v1
+paths:
+
+  /hedge/flows:
+    get:
+      summary: Получить список HedgeFlow с фильтрацией
+      operationId: listHedgeFlows
+      tags: [HedgeFlow]
+      parameters:
+        - name: provider_id
+          in: query
+          schema: { type: string }
+        - name: symbol
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '../schemas/hedge.json#/definitions/HedgeFlowStatus' }
+        - name: side
+          in: query
+          schema: { $ref: '../schemas/hedge.json#/definitions/Side' }
+        - name: batch_id
+          in: query
+          schema: { type: string }
+        - name: date_from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: date_to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Список HedgeFlow
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '../schemas/hedge.json#/definitions/HedgeFlow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /hedge/flows/{hedgeFlowId}:
+    get:
+      summary: Получить детальную карточку HedgeFlow
+      operationId: getHedgeFlow
+      tags: [HedgeFlow]
+      parameters:
+        - name: hedgeFlowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Карточка HedgeFlow
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/hedge.json#/definitions/HedgeFlow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: HedgeFlow не найден
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /hedge/flows/{hedgeFlowId}/child-orders:
+    get:
+      summary: Получить child-ордера HedgeFlow
+      operationId: listChildOrders
+      tags: [HedgeFlow]
+      parameters:
+        - name: hedgeFlowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '../schemas/hedge.json#/definitions/ChildOrderStatus' }
+        - name: venue_id
+          in: query
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Список child-ордеров
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '../schemas/hedge.json#/definitions/ChildOrder'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: HedgeFlow не найден
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /hedge/flows/{hedgeFlowId}/execution-reports:
+    get:
+      summary: Получить отчёты об исполнении HedgeFlow
+      operationId: listExecutionReports
+      tags: [HedgeFlow]
+      parameters:
+        - name: hedgeFlowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '../schemas/hedge.json#/definitions/ExecutionReportStatus' }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Список ExecutionReport
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '../schemas/hedge.json#/definitions/ExecutionReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: HedgeFlow не найден
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /hedge/intents/manual:
+    post:
+      summary: Создать ExecutionIntent вручную (операторский хедж)
+      operationId: createManualIntent
+      tags: [HedgeIntent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualIntentRequest'
+      responses:
+        '201':
+          description: Intent принят, HedgeFlow создан и открыт
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/hedge.json#/definitions/HedgeFlow'
+        '400':
+          description: Ошибка валидации параметров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: VALIDATION_ERROR
+                message: "target_qty must be positive"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет прав оператора для ручного запуска хеджа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: PERMISSION_DENIED
+                message: "Operator role required"
+        '422':
+          description: Бизнес-ошибка — хедж не может быть запущен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                risk_rejected:
+                  summary: Risk Manager отклонил Intent
+                  value:
+                    error_code: RISK_REJECTED
+                    message: "Pre-hedge check failed: notional limit exceeded"
+                    details: { reason: "NOTIONAL_LIMIT", limit: 1000000, requested: 1500000 }
+                venue_unavailable:
+                  summary: Все запрошенные venues недоступны
+                  value:
+                    error_code: VENUE_UNAVAILABLE
+                    message: "No healthy venues available for requested symbol"
+                    details: { venues: ["binance", "coinbase"], reason: "CIRCUIT_BREAKER_OPEN" }
+
+  /hedge/flows/{hedgeFlowId}/cancel:
+    post:
+      summary: Отменить активный HedgeFlow
+      operationId: cancelHedgeFlow
+      tags: [HedgeFlow]
+      parameters:
+        - name: hedgeFlowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: HedgeFlow отменён; возвращается обновлённое состояние
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/hedge.json#/definitions/HedgeFlow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет прав оператора для отмены хеджа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: PERMISSION_DENIED
+                message: "Operator role required"
+        '404':
+          description: HedgeFlow не найден
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: HedgeFlow уже завершён или отменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: INVALID_STATE
+                message: "HedgeFlow is already in terminal state"
+                details: { current_status: "COMPLETED" }
+
+  /hedge/flows/{hedgeFlowId}/retry:
+    post:
+      summary: Повторить хедж остатка (retry для UNDERFILLED или CANCELLED)
+      operationId: retryHedgeFlow
+      tags: [HedgeFlow]
+      parameters:
+        - name: hedgeFlowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryRequest'
+      responses:
+        '201':
+          description: Новый HedgeFlow создан для остатка; возвращается его состояние
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/hedge.json#/definitions/HedgeFlow'
+        '400':
+          description: Ошибка валидации параметров retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет прав оператора для повтора хеджа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: PERMISSION_DENIED
+                message: "Operator role required"
+        '404':
+          description: HedgeFlow не найден
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: HedgeFlow не находится в состоянии, допускающем retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error_code: INVALID_STATE
+                message: "Retry is only allowed for UNDERFILLED or CANCELLED flows"
+                details: { current_status: "OPEN" }
+        '422':
+          description: Бизнес-ошибка — повтор не может быть исполнен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                risk_rejected:
+                  summary: Risk Manager отклонил повторный хедж
+                  value:
+                    error_code: RISK_REJECTED
+                    message: "Pre-hedge check failed for retry: exposure limit exceeded"
+                venue_unavailable:
+                  summary: Нет доступных venues для повтора
+                  value:
+                    error_code: VENUE_UNAVAILABLE
+                    message: "No healthy venues available for retry"
+                underfilled:
+                  summary: Остаток слишком мал для исполнения
+                  value:
+                    error_code: UNDERFILLED
+                    message: "Remaining quantity is below minimum order size"
+                    details: { remaining_qty: 0.00001, min_qty: 0.001 }
+                timeout:
+                  summary: Retry отклонён по истечении общего таймаута
+                  value:
+                    error_code: TIMEOUT
+                    message: "Hedge retry rejected: overall hedge timeout exceeded"
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code: { type: string }
+        message:    { type: string }
+        details:    { type: object }
+
+    ManualIntentRequest:
+      type: object
+      required: [provider_id, symbol, side, target_qty, urgency]
+      properties:
+        provider_id:
+          type: string
+          description: Провайдер, для которого выполняется хедж
+        symbol:
+          type: string
+          examples: [BTCUSDT]
+        side:
+          $ref: '../schemas/hedge.json#/definitions/Side'
+        target_qty:
+          type: number
+          exclusiveMinimum: 0
+        urgency:
+          $ref: '../schemas/hedge.json#/definitions/ExecutionUrgency'
+        allowed_venues:
+          type: array
+          items: { type: string }
+          description: Белый список venues; если не указан — используются все доступные
+        price_constraint:
+          type: number
+          description: Ценовой лимит (max для BUY, min для SELL)
+        max_slippage_bps:
+          type: integer
+          minimum: 0
+          description: Максимально допустимый slippage в bps
+        timeout_ms:
+          type: integer
+          minimum: 0
+          description: Таймаут исполнения; если не указан — берётся из политики urgency
+
+    RetryRequest:
+      type: object
+      properties:
+        urgency_override:
+          $ref: '../schemas/hedge.json#/definitions/ExecutionUrgency'
+        allowed_venues:
+          type: array
+          items: { type: string }
+          description: Ограничить venues для повторного хеджа
+
+  responses:
+    Unauthorized:
+      description: Неавторизованный доступ
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Доступ запрещён
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

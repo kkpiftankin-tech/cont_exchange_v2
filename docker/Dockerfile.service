@@ -1,41 +1,52 @@
-# syntax=docker/dockerfile:1
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=24.04
 FROM ubuntu:${UBUNTU_VERSION} AS builder
 
-ARG TARGET
-
-# Base build tools + deps for gRPC/protobuf + Kafka + Boost + Eigen + PostgreSQL
-# (eigen + pqxx are matching-only; left enabled for all services to keep one image)
+# Base build tools + deps for gRPC/protobuf + Kafka + Boost
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     build-essential cmake pkg-config git \
     libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
-    librdkafka-dev \
-    libboost-system-dev libboost-thread-dev \
+    libabsl-dev \
     libeigen3-dev \
-    libpqxx-dev \
+    librdkafka-dev \
+    libcurl4-openssl-dev \
+    libpq-dev libpqxx-dev \
+    libboost-all-dev \
+    libasio-dev \
+    nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . /src
 
-# Build only requested target (faster dev cycles).
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-RUN cmake --build build --target ${TARGET} -j
-
-FROM ubuntu:${UBUNTU_VERSION} AS runtime
+ARG BUILD_JOBS=1
 ARG TARGET
 
-# Runtime deps. Includes libpqxx for matching's Postgres flow_orders/solver_config
-# access. Eigen3 is header-only and consumed at build time; no runtime entry.
+# Build a requested binary target when provided; otherwise build the full tree for ctest.
+RUN cmake -S . -B /tmp/build -DCMAKE_BUILD_TYPE=Release
+RUN if [ -n "${TARGET}" ]; then \
+      cmake --build /tmp/build --parallel "${BUILD_JOBS}" --target "${TARGET}"; \
+    else \
+      cmake --build /tmp/build --parallel "${BUILD_JOBS}"; \
+    fi
+
+FROM ubuntu:${UBUNTU_VERSION} AS runtime
+
+# Runtime deps (keep simple for MVP: install same packages).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgrpc++-dev libprotobuf-dev \
+    libabsl-dev \
+    libeigen3-dev \
     librdkafka-dev \
-    libboost-system-dev libboost-thread-dev \
-    libpqxx-dev \
+    libcurl4 \
+    libpq5 libpqxx-dev \
+    libboost-all-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/build/bin/${TARGET} /usr/local/bin/service
+ARG TARGET
+COPY --from=builder /tmp/build/bin/${TARGET} /usr/local/bin/${TARGET}
+RUN ln -sf /usr/local/bin/${TARGET} /usr/local/bin/service
 
 ENV TZ=UTC
 ENTRYPOINT ["/usr/local/bin/service"]

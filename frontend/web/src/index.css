@@ -1,0 +1,24 @@
+/* Резервируем место под вертикальный скроллбар всегда (gutter stable), иначе при
+ * переходе между страницами с/без вертикального скролла (pnl/live/alerts/override/
+ * policy) ширина вьюпорта прыгает на ширину скроллбара и центрированное меню
+ * визуально сдвигается. НЕ используем overflow-y: scroll — в связке с
+ * min-width:100vw у .profile-container это дало бы постоянный горизонтальный скролл
+ * (100vw включает ширину скроллбара). scrollbar-gutter резервирует место в
+ * content-box, не расширяя вьюпорт. */
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}

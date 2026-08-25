@@ -231,6 +231,9 @@ std::string SerializeReplayResultMessage(const ReplayResultMessage& msg) {
   AppendLine(out, "max_drawdown", msg.max_drawdown);
   AppendLine(out, "std_pnl", msg.std_pnl);
   AppendLine(out, "avg_vwap", msg.avg_vwap);
+  AppendLine(out, "avgis_rule", msg.avgis_rule);
+  AppendLine(out, "decision_price_source", msg.decision_price_source);
+  AppendLine(out, "no_requested_volume", msg.no_requested_volume);
   AppendLine(out, "error_details", msg.error_details);
   AppendLine(out, "error_code", msg.error_code);
   return out.str();
@@ -280,6 +283,15 @@ bool ParseReplayResultMessage(const std::string& payload, ReplayResultMessage* o
                           : 0.0;
   out->std_pnl = fields.contains("std_pnl") ? ParseDouble(fields.at("std_pnl")) : 0.0;
   out->avg_vwap = fields.contains("avg_vwap") ? ParseDouble(fields.at("avg_vwap")) : 0.0;
+  out->avgis_rule = fields.contains("avgis_rule") ? fields.at("avgis_rule")
+                                                   : "volume_weighted";
+  out->decision_price_source =
+      fields.contains("decision_price_source")
+          ? fields.at("decision_price_source")
+          : "marketdata_mid_with_clearprice_fallback";
+  out->no_requested_volume = fields.contains("no_requested_volume")
+                                 ? ParseBool(fields.at("no_requested_volume"))
+                                 : false;
   out->error_details = fields.contains("error_details") ? fields.at("error_details") : "";
   out->error_code = fields.contains("error_code") ? fields.at("error_code") : "";
   return true;
@@ -317,7 +329,12 @@ std::string ReplayResultMessageToJson(const ReplayResultMessage& msg) {
     out << "\"avg_solve_time_ms\":" << msg.avg_solve_time_ms << ",";
     out << "\"max_drawdown\":" << msg.max_drawdown << ",";
     out << "\"std_pnl\":" << msg.std_pnl << ",";
-    out << "\"avg_vwap\":" << msg.avg_vwap;
+    out << "\"avg_vwap\":" << msg.avg_vwap << ",";
+    out << "\"avgis_rule\":\"" << JsonEscape(msg.avgis_rule) << "\",";
+    out << "\"decision_price_source\":\""
+        << JsonEscape(msg.decision_price_source) << "\",";
+    out << "\"no_requested_volume\":"
+        << (msg.no_requested_volume ? "true" : "false");
     out << "}";
   }
   out << "}";

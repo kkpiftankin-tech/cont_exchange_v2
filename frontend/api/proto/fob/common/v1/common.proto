@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package fob.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message EventMeta {
+  // Globally unique id for the message/event (UUID as string).
+  string event_id = 1;
+
+  // When the event was produced.
+  google.protobuf.Timestamp ts_event = 2;
+
+  // Producing service name: "gateway", "order_flow", "matching", ...
+  string source = 3;
+
+  // End-to-end correlation id (trace a user request through async topics).
+  string correlation_id = 4;
+
+  // Optional tracing identifiers (Jaeger/OTel).
+  string trace_id = 5;
+  string span_id = 6;
+
+  // Recommended Kafka partition key (producer should use it as record key).
+  string partition_key = 7;
+
+  // Free-form tags: e.g. {"symbol":"BTC/USDT","venue":"binance","env":"dev"}
+  map<string, string> tags = 8;
+}
+
+// Fixed-point decimal: value = units * 10^(-scale).
+// Example: units=123456, scale=2  => 1234.56
+message Decimal {
+  sint64 units = 1;
+  int32 scale = 2;
+}
+
+message Money {
+  string currency = 1;   // "USDT", "BTC", ...
+  Decimal amount = 2;
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;   // buy base, pay quote
+  SIDE_SELL = 2;  // sell base, receive quote
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_NEW = 1;
+  ORDER_STATUS_PARTIALLY_FILLED = 2;
+  ORDER_STATUS_FILLED = 3;
+  ORDER_STATUS_CANCELED = 4;
+  ORDER_STATUS_REJECTED = 5;
+  ORDER_STATUS_EXPIRED = 6;
+}
+
+enum TimeInForce {
+  TIF_UNSPECIFIED = 0;
+  TIF_GTC = 1;  // Good Till Cancel
+  TIF_IOC = 2;  // Immediate Or Cancel
+  TIF_FOK = 3;  // Fill Or Kill
+}
+
+message Fee {
+  // maker/taker/etc (free-form, but keep stable in your system)
+  string fee_type = 1;
+
+  // Commission rate, e.g. 0.001 (0.1%)
+  Decimal rate = 2;
+
+  // Absolute fee paid
+  Money cost = 3;
+}
+
+message Instrument {
+  // Internal canonical symbol, e.g. "BTC/USDT"
+  string symbol = 1;
+
+  string base = 2;
+  string quote = 3;
+}
+
+message Error {
+  string code = 1;     // e.g. "RISK_LIMIT", "INSUFFICIENT_FUNDS"
+  string message = 2;  // human-readable
+  string details = 3;  // optional payload
+}

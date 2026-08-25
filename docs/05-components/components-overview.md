@@ -13,7 +13,7 @@ related:
 | Component | Code | Role | Status |
 | --- | --- | --- | --- |
 | gateway | [cpp/gateway/](../../cpp/gateway/) | HTTP edge | active |
-| order-flow | [cpp/order_flow/](../../cpp/order_flow/) | order lifecycle orchestrator | active |
+| order-flow | [cpp/order_flow/](../../cpp/order_flow/) | order lifecycle orchestrator (aka **Provider-Client Backend**) | active |
 | risk-manager | [cpp/risk/](../../cpp/risk/) | pre/post-trade risk | active-mvp |
 | ledger | [cpp/ledger/](../../cpp/ledger/) | balances/reservations | active-mvp |
 | matching-fob-core | [cpp/matching/](../../cpp/matching/) | batch clearing solver | mvp-simulator |

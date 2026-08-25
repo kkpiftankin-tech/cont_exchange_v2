@@ -41,7 +41,7 @@ Pipeline: register → segment → classify → map → normalize → insert/mer
 
 ### Auto-archive of chat attachments
 
-A `UserPromptSubmit` hook ([tools/auto-archive-attachments.py](tools/auto-archive-attachments.py), registered in [.claude/settings.local.json](.claude/settings.local.json)) парсит `<document>` блоки в каждом пользовательском промте и сохраняет их в `incoming-docs/YYYY-MM-DD-<slug>-<sha8>.md` **до** того, как ассистент увидит сообщение. Хук эмиттит `additionalContext` с отчётом, какие файлы были сохранены.
+A `UserPromptSubmit` hook ([tools/auto-archive-attachments.py](tools/auto-archive-attachments.py), registered in [.claude/settings.json](.claude/settings.json) — shared, committed, AUDIT-001 T-AUDIT-004) парсит `<document>` блоки в каждом пользовательском промте и сохраняет их в `incoming-docs/YYYY-MM-DD-<slug>-<sha8>.md` **до** того, как ассистент увидит сообщение. Хук эмиттит `additionalContext` с отчётом, какие файлы были сохранены. Smoke-тест: `python3 tools/auto-archive-attachments.py --self-test` (CI запускает на каждый PR).
 
 Поведение ассистента:
 
@@ -79,6 +79,8 @@ Before modifying files, show a plan. After modifying files, report: created / up
 
 - `incoming-docs/` — immutable archive of incoming source documents. Index: [`incoming-docs/index.md`](incoming-docs/index.md).
 - `docs/00-methodology/` — methodology, repository rules, ingestion workflow, templates.
+  - `docs/00-methodology/audits/` — process audits (AUDIT-NNN). See [AUDIT-001](docs/00-methodology/audits/AUDIT-001-feature-development-process.md).
+  - `docs/00-methodology/postmortems/` — process post-mortems (PM-NNN). See [PM-001..004](docs/00-methodology/postmortems/README.md).
 - `docs/01-business/` — vision, goals, stakeholders, glossary, business constraints.
 - `docs/02-system/` — system behavior, actors, requirements, features, use cases.
 - `docs/03-architecture/` — C4/C1/C2, architecture overview, ADR.
@@ -97,17 +99,34 @@ Before modifying files, show a plan. After modifying files, report: created / up
 
 ## 0c. Feature / Use Case / Sequence Placement Rules (summary)
 
+Документация имеет **две оси** (IN-013):
+
+1. **Ось этапов** — папки `01-business`..`11-operations` (когда создаётся).
+2. **Ось уровней декомпозиции** (Cockburn) — **L0 Kite ☁️ / L1 Sea 🌊 / L2 Fish 🐟** (насколько глубоко смотрим).
+
+Полное описание двухосевой модели — [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](docs/00-methodology/functional-hierarchy-and-decomposition.md).
+
+**Placement по уровням** (существующий каркас НЕ меняется):
+
+| Уровень | Артефакт | Путь |
+| --- | --- | --- |
+| **L0 ☁️** | Feature | `docs/02-system/features/F-XX-*/` |
+| **L0 ☁️** | System sequence (actor ↔ [System]) | `docs/02-system/use-cases/{UC-ID}/sequences/SEQ-{UC-ID}-system.md` |
+| **L1 🌊** | Use case | `docs/02-system/use-cases/{UC-ID}/use-case.md` |
+| **L1 🌊** | Service-level sequence (cross-component) | `docs/05-components/sequences/SEQ-{F-ID}-{UC-ID}-services.md` |
+| **L2 🐟** | Component-internal sequence | `docs/05-components/{component-name}/sequences/SEQ-{COMPONENT}-NNN-{topic}.md` |
+
 Features live only in `docs/02-system/features/`. Do not create `docs/05-features/`.
 
-Use cases live only in `docs/02-system/use-cases/{UC-ID}/use-case.md`.
+Каждый новый артефакт обязан иметь поле `level:` в frontmatter / feature.yaml (`kite` / `sea` / `fish`). Существующие артефакты дополняются `level:` при следующем касании (не backfill всё сразу).
 
-System-level sequence diagrams (external actors ↔ Continuous Exchange System as black box) live only in `docs/02-system/use-cases/{UC-ID}/sequences/SEQ-{UC-ID}-system.md`.
+Traceability матрицы по уровням:
 
-Service-level cross-component sequence diagrams live only in `docs/05-components/sequences/SEQ-{F-ID}-{UC-ID}-services.md`.
+- [`docs/traceability/feature-to-uc.md`](docs/traceability/feature-to-uc.md) — F-XX → UCs (ось функционала).
+- [`docs/traceability/uc-to-sequences.md`](docs/traceability/uc-to-sequences.md) — UC → L0/L1/L2 sequences (ось декомпозиции).
+- [`docs/traceability/sequence-to-code.md`](docs/traceability/sequence-to-code.md) — L2 → `cpp/...` (ось реализации).
 
-Internal component sequence diagrams live only in `docs/05-components/{component-name}/sequences/`.
-
-Detailed rules and required sections — in [`docs/00-methodology/sequence-diagram-rules.md`](docs/00-methodology/sequence-diagram-rules.md) and §26a below.
+Detailed rules — [`docs/00-methodology/sequence-diagram-rules.md`](docs/00-methodology/sequence-diagram-rules.md) и §26a ниже.
 
 ## 1. Идентичность проекта
 
@@ -290,11 +309,23 @@ Dev topics создаются в `infra/kafka/create_topics.sh`:
 |---|---|---|---|
 | `marketdata.raw` | `venues` | `market_data`, потенциально `matching` | сырые внешние котировки / стаканы / trades |
 | `orders.normalized` | `order_flow` | `matching` | нормализованные FlowOrder commands |
-| `batch.outputs` | `matching` | `ledger`, `risk`, `observability`, UI stream | clearing result, fills, order updates |
-| `execution.intents` | `risk`/`matching`/future execution policy | `venues` | child order / hedge instruction |
-| `execution.reports` | `venues` | `ledger`, `observability` | результат внешнего исполнения |
+| `batch.outputs` | `matching` | `ledger`, `order_flow`, `market_data`, `backtest`, `risk`, `observability`, UI stream | clearing result, fills, order updates |
+| `fills` | `matching` | (no live consumer; reserved for downstream analytics) | per-fill events extracted from `batch.outputs` |
+| `venue.snapshots` | `venues` | `market_data`, `backtest` | normalized venue LOB snapshots |
+| `venue.liquidity.fob` | `venues` | `matching`, `market_data`, `backtest` | venue LOB→FOB liquidity curves (F-11) |
+| `venue.health` | `venues` | `matching`, `risk`, `observability` | venue health + routing recommendations (F-11) |
+| `execution.intents` | `risk`/`matching`/future execution policy | `venues`, `ledger` | child order / hedge instruction |
+| `execution.venue` | `venues` | `ledger`, `market_data`, `risk` | venue execution reports (canonical post-IN-005 name) |
+| `execution.reports` | `venues` (legacy mirror of `execution.venue`) | `ledger` | backwards-compatible alias kept during migration — IN-005 / ADR-pending |
+| `backtest.execution.venue` | `venues` (replay mode only) | `backtest` | F-12 backtest execution reports, isolated from live history |
 | `risk.alerts` | `risk` | `observability`, operator UI | alert stream |
 | `agent.logs` | будущие agent policies | `backtest`, `research`, `observability` | state–action–reward trail |
+
+Note on `execution.venue` vs `execution.reports`: `venues` publishes each
+ExecutionReport to BOTH topics (see `cpp/venues/src/infra/execution_report_producer.cpp`).
+`ledger` consumes both in one consumer group with idempotency on `report_id`,
+so the dual publish is safe and the legacy topic can be retired later without
+breaking running ledger instances.
 
 При добавлении нового топика обнови:
 
@@ -882,23 +913,31 @@ curl -X POST "http://localhost:8088/v1/flow-orders" \
 
 ## 26a. Sequence diagram placement rules
 
-1. **System-level sequence diagrams** (внешний участник ↔ Continuous Exchange System как black box) хранятся **только** в:
+Каждая sequence-диаграмма имеет **уровень декомпозиции** (IN-013, Cockburn). Полное описание — [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](docs/00-methodology/functional-hierarchy-and-decomposition.md).
+
+1. **L0 ☁️ System-level sequence diagrams** (внешний участник ↔ Continuous Exchange System как black box) хранятся **только** в:
 
    ```text
    docs/02-system/use-cases/{UC-ID}/sequences/SEQ-{UC-ID}-system.md
    ```
 
-2. **Service-level sequence diagrams** (cross-component, e.g. `API Gateway → Matching → Risk → Kafka → Ledger`) хранятся **только** в:
+   Frontmatter: `level: kite`. Участники: только actors + `[System]`. Запрещены имена внутренних сервисов (`matching`, `risk`, ...).
+
+2. **L1 🌊 Service-level sequence diagrams** (cross-component, e.g. `API Gateway → Matching → Risk → Kafka → Ledger`) хранятся **только** в:
 
    ```text
    docs/05-components/sequences/SEQ-{F-ID}-{UC-ID}-services.md
    ```
 
-3. **Internal component sequence diagrams** (внутренняя последовательность одного сервиса) хранятся **только** в:
+   Frontmatter: `level: sea`. Участники: только компоненты верхнего уровня + Kafka topics + PG/CH tables. Запрещены имена классов/методов внутри компонента.
+
+3. **L2 🐟 Component-internal sequence diagrams** (внутренняя последовательность одного сервиса) хранятся **только** в:
 
    ```text
    docs/05-components/{component-name}/sequences/SEQ-{COMPONENT}-NNN-{topic}.md
    ```
+
+   Frontmatter: `level: fish`. Участники: только модули/классы ЭТОГО компонента. Чужие компоненты — `participant X as X [external]` без раскрытия.
 
 4. Каждая sequence-диаграмма обязана ссылаться на:
    - Feature (`docs/02-system/features/`)
@@ -907,16 +946,18 @@ curl -X POST "http://localhost:8088/v1/flow-orders" \
    - Related Contracts (`docs/06-api/`)
    - Related Data Objects (`docs/07-data/`)
 
-5. Каждая стрелка service-level диаграммы должна иметь backing-контракт: REST endpoint в `docs/06-api/rest/`, gRPC method в `docs/06-api/grpc/`, Kafka topic в `docs/06-api/messaging/`, или SQL/DDL в `docs/07-data/`.
+   Ссылки размещаются **ВНЕ** mermaid-блока, в виде markdown-таблицы или секции `## Трассировка`. Markdown-ссылки `[text](url)` внутри mermaid рушат рендеринг (IN-013).
+
+5. Каждая стрелка L1 service-level диаграммы должна иметь backing-контракт: REST endpoint в `docs/06-api/rest/`, gRPC method в `docs/06-api/grpc/`, Kafka topic в `docs/06-api/messaging/`, или SQL/DDL в `docs/07-data/`.
 
 6. **Запрещено** генерировать код, если у фичи нет:
-   - Feature-файла,
-   - Use Case-файла,
-   - System-level и Service-level sequence diagram,
+   - Feature-файла (L0),
+   - Use Case-файла (L1),
+   - L0 System-level и L1 Service-level sequence diagram,
    - Контрактов в `docs/06-api/`,
    - Data schema в `docs/07-data/`.
 
-7. **Запрещено** размещать system-level диаграммы вне `02-system/use-cases/`, service-level — вне `05-components/sequences/`. Любое нарушение — fail в traceability.
+7. **Запрещено** размещать L0 system-level диаграммы вне `02-system/use-cases/`, L1 service-level — вне `05-components/sequences/`, L2 component-internal — вне `05-components/{component}/sequences/`. Любое нарушение — fail в traceability.
 
 ## 27. Минимальный ответ Claude Code после изменения
 

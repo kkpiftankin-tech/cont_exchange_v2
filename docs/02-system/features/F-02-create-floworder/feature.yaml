@@ -3,6 +3,7 @@ feature:
   name: Create FlowOrder
   status: in-progress-mvp
   owner: core-team
+  level: kite
 
 description: >
   Клиент создаёт FlowOrder через HTTP API gateway или напрямую через gRPC.
@@ -29,11 +30,18 @@ codePaths:
   - cpp/order_flow/src/infra/risk_client.cpp
   - cpp/order_flow/src/infra/ledger_client.cpp
   - cpp/order_flow/src/infra/orders_kafka_publisher.cpp
+  - cpp/order_flow/src/infra/postgres/postgres_flow_order_repository.cpp
 
 kafkaTopics:
   produces:
     - orders.normalized
-  consumes: []
+  consumes:
+    - batch.outputs   # ApplyBatchResult: обновляет in-memory статус/remaining_qty
+
+postgresTables:
+  writes:
+    - flow_orders         # status='active' после успешного reserve (PR-F02-001)
+    - flow_order_legs     # 1 строка single-leg, weight=±1 по side
 
 grpcServices:
   exposes:
@@ -68,6 +76,22 @@ knownIssues:
   - id: orders-cache-not-thread-safe
     severity: bug
     description: in-memory orders_ в order_flow_uc без мьютекса
+  - id: order-flow-postgres-write-pending
+    severity: resolved
+    description: >
+      Был основной разрыв F-02 ↔ F-04 в PG-режиме (order_flow не писал
+      flow_orders → matching видел пустой набор). Закрыто в PR-F02-001:
+      PostgresFlowOrderRepository пишет flow_orders + flow_order_legs
+      со status='active' после успешного reserve. См.
+      cpp/order_flow/src/infra/postgres/postgres_flow_order_repository.cpp.
+  - id: proto-status-active-missing
+    severity: feature-gap
+    description: >
+      В proto common.OrderStatus enum нет ORDER_STATUS_ACTIVE, есть только
+      NEW/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/EXPIRED. БД-схема
+      использует 'active' для прошедших risk+reserve заявок. PG writer
+      пишет 'active', proto-ответ остаётся NEW. Чистое решение —
+      добавить ORDER_STATUS_ACTIVE в proto и согласовать enum-маппинг.
 
 tests:
   unit: []

@@ -23,13 +23,19 @@ UserPromptSubmit hook: автоматически сохраняет вложе�
   - При любой ошибке тихо выходит с 0; пропуск архивации не должен ломать чат.
 
 Регистрация:
-  .claude/settings.local.json:
+  .claude/settings.json (shared, AUDIT-001 T-AUDIT-004):
     "hooks": {
       "UserPromptSubmit": [
         {"hooks": [{"type": "command",
                     "command": "python3 \\"$CLAUDE_PROJECT_DIR/tools/auto-archive-attachments.py\\""}]}
       ]
     }
+
+Self-test:
+  python3 tools/auto-archive-attachments.py --self-test
+  Возвращает exit 0 если parser корректно извлекает <document> блоки,
+  exit 1 при поломке regex / API. CI запускает это smoke-test'ом, чтобы
+  ловить regression раньше пользователей.
 """
 
 import datetime
@@ -91,7 +97,67 @@ def archive_documents(prompt: str, repo_root: pathlib.Path) -> list[str]:
     return saved
 
 
+SELF_TEST_PROMPT = """\
+Lorem ipsum
+<document index="1" media_type="text/markdown">
+<source>self-test-sample.md</source>
+<document_content>
+# Self-test document
+Hello, world.
+</document_content>
+</document>
+Trailing text.
+"""
+
+
+def run_self_test() -> int:
+    """Smoke-test parser without touching the filesystem.
+
+    Runs the regex against a known prompt and confirms that exactly
+    one block is matched with the expected source/content. Returns 0
+    on success, 1 on any mismatch (CI fails on non-zero).
+    """
+    matches = list(DOCUMENT_PATTERN.finditer(SELF_TEST_PROMPT))
+    if len(matches) != 1:
+        sys.stderr.write(
+            f"[auto-archive-attachments] self-test FAIL: "
+            f"expected 1 match, got {len(matches)}\n"
+        )
+        return 1
+    m = matches[0]
+    if m.group("source").strip() != "self-test-sample.md":
+        sys.stderr.write(
+            f"[auto-archive-attachments] self-test FAIL: source mismatch: "
+            f"{m.group('source')!r}\n"
+        )
+        return 1
+    if "Hello, world." not in m.group("content"):
+        sys.stderr.write(
+            "[auto-archive-attachments] self-test FAIL: content mismatch\n"
+        )
+        return 1
+
+    # Verify slug + digest stable for sanity.
+    slug = slugify(m.group("source").strip())
+    digest = hashlib.sha1(m.group("content").encode("utf-8")).hexdigest()[:8]
+    if slug != "self-test-sample":
+        sys.stderr.write(
+            f"[auto-archive-attachments] self-test FAIL: slug={slug!r}\n"
+        )
+        return 1
+    if len(digest) != 8:
+        sys.stderr.write(
+            f"[auto-archive-attachments] self-test FAIL: digest={digest!r}\n"
+        )
+        return 1
+    print("[auto-archive-attachments] self-test OK")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return run_self_test()
+
     try:
         payload = json.load(sys.stdin)
     except Exception:

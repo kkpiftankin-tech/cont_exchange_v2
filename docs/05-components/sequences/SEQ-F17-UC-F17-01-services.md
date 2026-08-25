@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-F17-UC-F17-01-services
+level: sea
+---
+-->
+
 # SEQ-F17-UC-F17-01-services. Alert: service view
 
 ## Type

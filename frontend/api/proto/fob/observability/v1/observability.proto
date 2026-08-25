@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package fob.observability.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+message MetricPoint {
+  // Kafka topic: metrics
+  fob.common.v1.EventMeta meta = 1;
+
+  string name = 2; // e.g. "http_requests_total"
+  double value = 3;
+
+  // Labels/tags
+  map<string, string> labels = 4;
+
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message LogEvent {
+  // Kafka topic: logs
+  fob.common.v1.EventMeta meta = 1;
+
+  enum Level { LEVEL_UNSPECIFIED = 0; DEBUG = 1; INFO = 2; WARN = 3; ERROR = 4; }
+  Level level = 2;
+
+  string message = 3;
+  map<string, string> fields = 4;
+
+  google.protobuf.Timestamp timestamp = 5;
+}

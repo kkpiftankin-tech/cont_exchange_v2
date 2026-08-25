@@ -1,0 +1,89 @@
+/* F-09 — Combo Order create + result. Mirrors ops-page visual system. */
+.cbo-page { min-height: 100vh; background: linear-gradient(135deg, #0a0a1a 0%, #14132a 60%, #1a1a35 100%); color: #fff; }
+.cbo-shell { padding: 28px 36px 80px; max-width: 1500px; margin: 0 auto; }
+.cbo-hero { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.cbo-hero h1 { margin: 6px 0 6px; font-size: 24px; }
+.cbo-hero p { margin: 0; color: rgba(255,255,255,0.6); font-size: 13px; max-width: 900px; }
+.cbo-kicker { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: rgba(180,160,255,0.85); background: rgba(180,140,255,0.1); padding: 3px 8px; border-radius: 6px; }
+
+.cbo-grid { display: grid; grid-template-columns: 1.4fr 1.2fr 0.7fr; gap: 16px; align-items: start; }
+@media (max-width: 1200px) { .cbo-grid { grid-template-columns: 1fr; } }
+
+.cbo-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 12px; padding: 16px 18px; }
+.cbo-card h2 { margin: 0 0 12px; font-size: 16px; }
+.cbo-card h3 { margin: 16px 0 6px; font-size: 13px; color: rgba(255,255,255,0.7); }
+.cbo-warn-h { color: #ffd479 !important; }
+
+.cbo-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.cbo-row label, .cbo-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em; color: rgba(255,255,255,0.55); }
+.cbo-form select, .cbo-form input, .cbo-legs select, .cbo-legs input {
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); color: #fff;
+  padding: 6px 8px; border-radius: 6px; font-size: 13px; }
+
+.cbo-legs { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.cbo-legs th { text-align: left; font-size: 10px; text-transform: uppercase; color: rgba(255,255,255,0.45);
+  padding: 4px 4px; }
+.cbo-legs td { padding: 3px 4px; }
+.cbo-legs input { width: 78px; }
+.cbo-mid { font-variant-numeric: tabular-nums; color: #6ee7a8; white-space: nowrap; font-weight: 600; }
+.cbo-mid-na { color: rgba(255,255,255,0.35); font-weight: 400; font-size: 10px; }
+/* Прогресс исполнения ноги (combo): бар + % поверх. */
+.cbo-legs-prog td { font-variant-numeric: tabular-nums; }
+.cbo-prog { position: relative; width: 120px; height: 14px; border-radius: 4px;
+  background: rgba(255,255,255,0.10); overflow: hidden; }
+.cbo-prog-bar { position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, #7c3aed, #6ee7a8); transition: width .4s ease; }
+.cbo-prog-pct { position: absolute; left: 0; right: 0; top: 0; line-height: 14px;
+  font-size: 10px; text-align: center; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,0.6); }
+.cbo-sync-ok { font-size: 11px; color: #6ee7a8; font-weight: 600; }
+.cbo-sync-warn { font-size: 11px; color: #fbbf24; font-weight: 600; }
+.cbo-stepper { display: inline-flex; align-items: stretch; gap: 2px; }
+.cbo-stepper input { width: 70px; }
+.cbo-arrows { display: flex; flex-direction: column; }
+.cbo-arrows button { background: rgba(180,140,255,0.18); color: #fff; border: 1px solid rgba(180,140,255,0.3);
+  border-radius: 4px; cursor: pointer; font-size: 8px; line-height: 1; padding: 1px 4px; }
+.cbo-arrows button:hover { background: rgba(180,140,255,0.32); }
+.cbo-x { background: rgba(244,67,54,0.18); color: #ff8a80; border: 1px solid rgba(244,67,54,0.3);
+  border-radius: 5px; cursor: pointer; padding: 2px 7px; }
+
+.cbo-actions { display: flex; gap: 10px; margin-top: 14px; }
+.cbo-add { background: rgba(255,255,255,0.06); color: #fff; border: 1px solid rgba(255,255,255,0.18);
+  padding: 7px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.cbo-submit { background: rgba(180,140,255,0.22); color: #fff; border: 1px solid rgba(180,140,255,0.4);
+  padding: 7px 18px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.cbo-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.cbo-err { margin-top: 12px; color: #ff8a80; font-size: 13px; }
+.cbo-create-result { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+.cbo-create-result.ok { background: rgba(76,175,80,0.12); border: 1px solid rgba(76,175,80,0.3); color: #b9f6ca; }
+.cbo-create-result.rej { background: rgba(244,67,54,0.12); border: 1px solid rgba(244,67,54,0.3); color: #ff8a80; }
+.cbo-create-result code, .cbo-detail code, .cbo-list code { font-family: 'Roboto Mono', monospace;
+  background: rgba(180,140,255,0.14); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+.cbo-empty { color: rgba(255,255,255,0.45); font-size: 13px; padding: 12px 0; }
+.cbo-detail-head { display: flex; align-items: center; gap: 10px; font-size: 12px; color: rgba(255,255,255,0.65); flex-wrap: wrap; }
+.cbo-cancel { margin-left: auto; background: rgba(244,67,54,0.18); color: #ff8a80;
+  border: 1px solid rgba(244,67,54,0.3); border-radius: 6px; cursor: pointer; padding: 4px 10px; font-size: 12px; }
+
+.cbo-mini { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Roboto Mono', monospace; margin-top: 4px; }
+.cbo-mini th { text-align: left; font-size: 10px; text-transform: uppercase; color: rgba(255,255,255,0.45);
+  padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.cbo-mini td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.side-buy { color: #6fdc6f; } .side-sell { color: #ff8a80; }
+
+.cbo-badge, .cbo-legst, .cbo-grpst { display: inline-block; padding: 1px 7px; border-radius: 5px; font-size: 11px;
+  font-family: 'Roboto Mono', monospace; background: rgba(255,255,255,0.08); }
+.st-filled { background: rgba(76,175,80,0.18); color: #b9f6ca; }
+.st-active, .st-partial, .st-partially_filled { background: rgba(180,140,255,0.18); color: #d6c2ff; }
+.st-cancelled { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.55); }
+.st-failed_external, .st-rejected { background: rgba(244,67,54,0.18); color: #ff8a80; }
+
+.cbo-list ul { list-style: none; margin: 0; padding: 0; }
+.cbo-list li { display: flex; align-items: center; gap: 8px; padding: 7px 6px; cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 12px; }
+.cbo-list li:hover { background: rgba(255,255,255,0.04); }
+.cbo-list li.sel { background: rgba(180,140,255,0.1); }
+.cbo-li-type { color: rgba(255,255,255,0.6); }

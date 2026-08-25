@@ -1,53 +1,985 @@
 feature:
   id: F-12
   name: Execution Hedge
-  status: not-implemented
+  status: doc-complete-impl-partial
   owner: core-team
+  level: kite
 
 description: >
-  Хедж необработанной внутренним клирингом части FlowOrder на внешних venues.
-  matching формирует ExecutionIntent, venues исполняет, отдаёт ExecutionReport,
-  ledger применяет хедж-учёт.
+  Автоматическое хеджирование нетто-позиций провайдера на внешних площадках
+  (CEX/DEX/AMM) после внутреннего матчинга. Цепочка:
+  netPosition -> ExecutionIntent (Kafka execution.intents) -> Execution Planning
+  (routing plan по VenueLiquidityCurve + venue.health) -> Risk Manager
+  pre-hedge check -> Venue Execution Adapter (HedgeFlow + child_orders) ->
+  External Venues Connector -> ExecutionReport (Kafka execution.venue) ->
+  Settlement Ledger обновляет позиции и HedgePnL, ClickHouse сохраняет
+  историю исполнения.
+
+  Источник истины: IN-005 (`incoming-docs/2026-05-20-F-12-execution-hedge-v1.md`).
 
 primaryComponents:
-  - venues
-  - risk
-  - ledger
-  - matching
+  - venue-execution-adapter
+  - execution-planning
+  - matching-fob-core      # эмитент ExecutionIntent (auto-hedge after batch)
+  - risk-manager           # pre-hedge check + post-hedge exposure
+  - external-venues        # EVC: реальные REST/WS/RPC к CEX/DEX/AMM
+  - ledger                 # потребитель execution.venue
+  - observability-reporting
+  - market-data            # источник venue.health, venue.liquidity.fob (через F-11)
 
 protoContracts:
-  - contracts/proto/fob/execution/v1/execution.proto
-  - contracts/proto/fob/risk/v1/risk.proto
-  - contracts/proto/fob/ledger/v1/ledger.proto
+  - contracts/proto/fob/execution/v1/execution.proto       # ExecutionIntent, ExecutionReport, ExecutionStrategy, ExecutionUrgency, HedgeSource
+  - contracts/proto/fob/hedge/v1/hedge.proto               # HedgeFlow, ChildOrder, HedgeFlowStatus, ChildOrderStatus
+  - contracts/proto/fob/risk/v1/risk.proto                 # PreHedgeCheck RPC (планируется как extension)
+  - contracts/proto/fob/ledger/v1/ledger.proto             # ApplyExecutionReport
+  - contracts/proto/fob/venue/v1/venue.proto               # cross-link к F-11: SideLiquidityCurve, VenueSnapshot, venue.health
+  - contracts/proto/fob/common/v1/common.proto             # Decimal, Money, Fee, EventMeta, Instrument, Side, TimeInForce
+  - contracts/openapi/fob/hedge/v1/api/hedge.yaml          # REST API HedgeFlow Monitor (operator UI)
+
+storageDependencies:
+  postgresql:
+    - hedgeflows      # сессия хеджа: targetQty, filledQty, avgFillPrice, hedgePnL, status; источник истины при OPEN
+    - child_orders    # дочерние ордера на конкретных venues: venueId, price, qty, status, clientOrderId
+  clickhouse:
+    - execution_reports  # история исполнения: report by venue, slippageBps, hedgePnL, latency; retention >= 90 дней
 
 codePaths:
+  # matching publishes ExecutionIntent после batch clearing (F-12 эмитент)
+  - cpp/matching/src/app/hedge_trigger_policy.cpp
+  - cpp/matching/src/app/hedge_trigger_policy.hpp
+  - cpp/matching/src/app/execution_intent_builder.cpp
+  - cpp/matching/src/app/execution_intent_builder.hpp
+  - cpp/matching/src/app/hedge_execution_intents_publisher.cpp
+  - cpp/matching/src/app/hedge_execution_intents_publisher.hpp
+  - cpp/matching/src/app/external_venue_filter.cpp
+  - cpp/matching/src/app/external_venue_filter.hpp
+  - cpp/matching/src/app/position_snapshot_calculator.cpp
+  - cpp/matching/src/app/position_snapshot_calculator.hpp
+  # AUDIT-001 follow-up (2026-06-08): stub `execution_planning_uc.hpp` was never
+  # created; real execution-planning interface lives in execution_planner.{cpp,hpp}.
+  - cpp/matching/src/app/execution_planner.hpp
+  # venues currently hosts Venue Execution Adapter + EVC concerns (Conflict Note C-1)
+  - cpp/venues/src/app/execute_on_venue.cpp
+  - cpp/venues/src/app/execute_on_venue.hpp
   - cpp/venues/src/app/venues_loop.cpp
+  - cpp/venues/src/infra/execution_intents_consumer.cpp
+  - cpp/venues/src/infra/execution_intents_consumer.hpp
+  - cpp/venues/src/infra/execution_report_producer.cpp
+  - cpp/venues/src/infra/execution_report_producer.hpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.cpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.hpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.hpp
+  - cpp/venues/src/infra/venue_sim_adapter.cpp
+  - cpp/venues/src/infra/venue_sim_adapter.hpp
+  - cpp/venues/src/infra/simulated_venue_adapter.cpp
+  - cpp/venues/src/domain/venue_adapter.hpp
+  # ledger applies ExecutionReport (хедж-учёт)
+  - cpp/ledger/src/app/ledger_uc.cpp
+  - cpp/ledger/src/infra/kafka_consumers.cpp
 
 kafkaTopics:
   produces:
-    - execution.intents
-    - execution.reports
-  consumes: []
+    - execution.intents   # producer: matching (auto-batch), planning (retry), gateway (manual override); key = hedge_flow_id
+    - execution.venue     # producer: venue-execution-adapter (через venues); key = hedge_flow_id; ExecutionReport
+    - risk.alerts         # producer: risk; alerts типа HEDGE_REJECTED, HEDGE_UNDERFILL
+  consumes:
+    - venue.liquidity.fob # из F-11: SideLiquidityCurve по venue/symbol; вход для routing plan
+    - venue.health        # из F-11: статус venue (CONNECTED/STALE/DISCONNECTED), latencyMs
+    - execution.intents   # consumed by execution-planning (multi-venue routing)
+    - execution.venue     # consumed by ledger (apply hedge), risk (post-hedge), clickhouse, observability
 
 grpcServices:
-  exposes: []
-  calls: []
+  exposes:
+    - fob.risk.v1.RiskService.PreHedgeCheck    # планируется: pre-hedge gate (3 проверки)
+  calls:
+    - fob.ledger.v1.LedgerService.ApplyExecutionReport  # alternative path к Kafka execution.venue
+    - fob.marketdata.v1.MarketDataService.GetReferencePrices  # на reference mid; cross-link к F-04
 
 acceptanceCriteria:
-  - "matching формирует ExecutionIntent на остаток непокрытой позиции"
-  - "venues отправляет реальный ордер на внешнюю площадку"
-  - "ExecutionReport возвращается с ID venue и заполнениями"
-  - "ledger корректно учитывает хедж: списания на venue + balance adjust"
+  - "F12-1: ExecutionIntent генерируется автоматически при |netQty| >= hedgeTriggerThreshold (cpp/matching/src/app/hedge_trigger_policy.cpp)."
+  - "F12-2: Поддержка urgency LOW/MEDIUM/HIGH с маппингом на ExecutionStrategy и TimeInForce согласно политике."
+  - "F12-3: Мульти-venue routing по VenueLiquidityCurve (доля Lv / SumLv) и venue.health (исключение venue со статусом != CONNECTED)."
+  - "F12-4: Overfill guard: при accumulatedFilledQty > targetQty + overfillThreshold publish ExecutionReport(OVERFILL_GUARD) и cancel остальных child orders."
+  - "F12-5: Reconciliation по истечении hedgeTimeoutMs; при gap > reconciliationGapThreshold создаётся retry ExecutionIntent с urgency=HIGH или risk.alert(HEDGE_UNDERFILL)."
+  - "F12-6: Все ExecutionReport публикуются в Kafka execution.venue с partitionKey = hedge_flow_id."
+  - "F12-7: HedgeFlow, child_orders сохраняются в PostgreSQL; execution_reports в ClickHouse."
+  - "F12-8: Pre-hedge risk check через Risk Manager (PreHedgeCheck RPC) с тремя проверками: maxNotionalPerHedge, hedgeExposureLimit, expectedSlippage <= maxSlippage[urgency]."
+  - "F12-9: Backtest-режим через VenueSim (VenueSimAdapter в cpp/venues/src/infra/venue_sim_adapter.cpp) даёт идентичную execution logic без изменения кода Adapter."
+  - "F12-10: p95 latency от ExecutionIntent до first child order <= 100 ms для CEX (p95 <= 1000 ms для DEX/AMM)."
+  - "F12-11: HedgePnL рассчитывается Settlement Ledger по формуле (avgFillPrice vs referenceMid) и доступен в UI через REST GET /api/v1/hedge/flows/{id}."
+  - "F12-12: Rejection fallback: при ExecutionReport(REJECTED) Execution Planning исключает venue и формирует новый routing plan на оставшиеся."
+
+# Definition of Done — 18-item checklist из IN-008 (v2 spec, §6).
+# Используется как Jira-чек-лист при закрытии feature F-12.
+# Каждый пункт ссылается на artifact / код / тест, демонстрирующий завершённость.
+definitionOfDone:
+  - id: DoD-1
+    status: implemented
+    title: ExecutionIntent публикуется в Kafka execution.intents
+    description: >
+      Producer matching/risk/manual override; payload содержит все обязательные
+      поля (hedgeFlowId, batchId, providerId, symbol, side, targetQty,
+      referenceMid, urgency, timeoutMs, allowedVenues).
+      PR-F12-5 (2026-05-26): HedgeTriggerConfig + HedgeExecutionIntentConfig
+      теперь читаются из env (HEDGE_TRIGGER_QTY_<SYM>, HEDGE_INTENT_URGENCY и
+      т.д.). Реальные F-12 intent'ы с source=HEDGE_SOURCE_AUTO_BATCH, deterministic
+      hedge_flow_id "<batch>|hedge|<provider>|<symbol>", urgency/strategy/tif/
+      allowed_venues. E2E проверено на ubuntu-dev: PG hedgeflows получает
+      строки с |hedge| суффиксом, статус COMPLETED после исполнения venues.
+    evidence: |
+      cpp/matching/src/app/matching_loop.cpp (LoadHedgeTriggerConfig,
+      LoadHedgeExecutionIntentConfig + структурный лог "F-12 hedge config loaded"),
+      cpp/matching/src/app/execution_intent_builder.cpp:279-357
+      (BuildFromHedgeTriggerDecisions),
+      cpp/matching/src/app/hedge_execution_intents_publisher.cpp,
+      cpp/venues/src/app/venues_loop.cpp (propagation
+      intent.hedge_flow_id → report.hedge_flow_id для PG update),
+      infra/env/.env-example (HEDGE_TRIGGER_* + HEDGE_INTENT_* vars)
+  - id: DoD-2
+    status: implemented
+    title: Execution Planning Forecast потребляет execution.intents + venue.liquidity.fob + venue.health
+    description: >
+      Строит routing-план (qty split по venues, urgency, fallback list),
+      передаёт в Venue Execution Adapter.
+
+      PR-F12-15 (2026-05-27): multi-venue routing реализован в matching.
+      Новый модуль `cpp/matching/src/app/execution_planner.{hpp,cpp}`:
+        - `BuildMultiVenuePlan(request, config)` — pure function,
+          фильтрует planner_inputs по allowed_venues + usable + health,
+          вычисляет L(v) = max(q_grid) на нужной стороне curve,
+          распределяет target_qty proportionally to L(v), отбрасывает
+          sub-threshold allocations (default 5% от target) и
+          перераспределяет share на выживших.
+        - `FanOutIntentByPlan(intent, plan)` — клонирует
+          ExecutionIntent на N штук, по одному на venue allocation.
+          Каждый клон: hedge_flow_id = <base>|<venue>,
+          intent_id = <new_hedge_flow_id>|intent,
+          target_qty = allocated_qty, venue = venue_id,
+          allowed_venues = [venue_id], partition_key обновлён.
+      Wiring в `matching_loop.cpp` перед PublishAutoHedgeExecutionIntents:
+        - snapshot planner_inputs_cache_ для symbol под mutex,
+        - для каждого intent вызвать BuildMultiVenuePlan,
+        - если plan.feasible && >=2 allocations → FanOutIntentByPlan и
+          использовать клонов вместо оригинала,
+        - иначе оригинальный intent сохраняется (fallback-safe).
+
+      PR-F12-16 (2026-05-28): verified.
+      - Unit test `matching_execution_planner_test` (7 cases) — ALL PASS:
+        proportional split (L=3/1 → 0.30/0.10 of 0.40), circuit-breaker
+        venue exclusion, allow-list filter, infeasible (no liquidity),
+        sub-threshold prune+redistribute (dust venue dropped, sum still
+        == target), fan-out cloning (venue suffix + locked allowed_venues),
+        single-allocation passthrough.
+      - Live integration on ubuntu-dev: matching emits
+        "Multi-venue routing plan computed" per hedge intent; for a
+        triggered SELL hedge the planner produced a feasible plan with
+        correct qty (e.g. uniswap_v3:0.068 = hedge target). Venue
+        filtering confirmed (coinbase excluded via circuit breaker,
+        planner_inputs=2). Fallback path confirmed (single usable
+        venue → 1 allocation → original intent emitted, hedges keep
+        flowing).
+
+      Note on live N>=2 fan-out: in the current dev venue-sim state only
+      uniswap_v3 reliably carries usable ask-side liquidity at hedge
+      trigger time (binance ask curve intermittently empty), so the live
+      2-venue SPLIT is data-gated. The split arithmetic itself is proven
+      deterministically by the unit test rather than relying on flaky
+      dev curve availability.
+
+      Ограничения текущей реализации:
+        - PreHedgeCheck НЕ вызывается перед fan-out (caller integration
+          для DoD-3 — отдельный PR, см. DoD-3 description).
+        - Urgency → strategy mapping остаётся config-driven из env,
+          не per-allocation.
+        - reject_reason из plan'а попадает только в structured log,
+          не в risk.alerts.
+    evidence: |
+      cpp/matching/tests/app/execution_planner_test.cpp (7 unit cases, ALL PASS),
+      cpp/matching/src/app/execution_planner.hpp (PlanRequest, PlanResult,
+      VenueAllocation, BuildMultiVenuePlan, FanOutIntentByPlan),
+      cpp/matching/src/app/execution_planner.cpp,
+      cpp/matching/src/app/matching_loop.cpp (fan-out integration
+      before PublishAutoHedgeExecutionIntents),
+      cpp/matching/CMakeLists.txt (new source registered).
+    blocked_by_ac: [F12-3]
+  - id: DoD-3
+    status: implemented
+    title: Pre-hedge risk check (RPC RiskService.PreHedgeCheck)
+    description: >
+      Проверки maxNotionalPerHedge, hedgeExposureLimit, expectedSlippage;
+      при fail publish risk.alerts{type=HEDGE_RISK_REJECT}.
+
+      PR-F12-13 (2026-05-27): RPC реализован в cpp/risk. Пять проверок
+      в фиксированном порядке (см. proto §111):
+        1. PROVIDER_HALTED      — kill-switch state (per-symbol или global)
+        2. NOTIONAL_EXCEEDED    — target_qty * reference_mid > RISK_HEDGE_MAX_NOTIONAL
+        3. EXPOSURE_EXCEEDED    — current + target > RISK_HEDGE_EXPOSURE_LIMIT
+        4. SLIPPAGE_EXCEEDED    — expected_slippage_bps > RISK_HEDGE_MAX_SLIPPAGE_<URGENCY>_BPS
+        5. VENUES_UNAVAILABLE   — все allowed_venues с circuit breaker OPEN
+
+      Решение ACCEPT или REJECT (без RESIZE — частичный хедж создаёт
+      «тихий» риск с residual exposure без auto-follow-up, оператор
+      должен переиздать меньший intent).
+
+      `details` (PreHedgeCheckDetails) заполняется всегда, в том числе
+      на ACCEPT — содержит notional_used/limit, exposure_after/limit,
+      slippage_limit_bps, per-venue health snapshot.
+
+      Caller integration (Execution Planning блокирующий вызов перед
+      публикацией intent) — отдельный PR. Сейчас RPC доступен,
+      thresholds конфигурируются через env в `.env-example`.
+
+      Publish risk.alerts на REJECT — отложен в follow-up PR
+      (структурный лог "PreHedgeCheck REJECTED" пишется, alert не
+      эмитируется).
+
+      E2E verified on ubuntu-dev: grpcurl против infra-risk-1
+      (172.19.0.3:50052) — ACCEPT (0.05 BTC at 76k = 3800 USDT <
+      100k limit) + REJECT NOTIONAL_EXCEEDED + REJECT SLIPPAGE_EXCEEDED
+      + REJECT EXPOSURE_EXCEEDED. Все ответы содержат корректные
+      diagnostic details.
+    evidence: |
+      contracts/proto/fob/risk/v1/risk.proto (PreHedgeCheck RPC, PR-F12-2),
+      cpp/risk/src/app/risk_uc.{hpp,cpp} (PreHedgeCheck method, 5 checks,
+      HedgeRiskConfig env loader),
+      cpp/risk/src/transport/grpc_risk_service.{hpp,cpp} (gRPC handler),
+      infra/env/.env-example (RISK_HEDGE_MAX_NOTIONAL, _EXPOSURE_LIMIT,
+      _MAX_SLIPPAGE_{LOW,MEDIUM,HIGH}_BPS).
+  - id: DoD-4
+    status: implemented
+    title: Venue Execution Adapter создаёт HedgeFlow + child_orders в PostgreSQL
+    description: >
+      INSERT в hedgeflows (status=OPEN) + child_orders (status=PENDING)
+      перед адаптер-вызовом; UPDATE по обоим (status, filled_qty,
+      avg_price) после Publish ExecutionReport. Идемпотентность через
+      ON CONFLICT DO NOTHING. Implemented in PR-F12-3a (2026-05-25).
+    evidence: |
+      cpp/venues/src/infra/postgres_hedgeflow_repository.{hpp,cpp},
+      cpp/venues/src/infra/postgres_child_order_repository.{hpp,cpp},
+      wired in venues_loop.cpp + main.cpp. E2E verified on ubuntu-dev:
+      order 98ab9c8c → hedgeflows.status=COMPLETED + child_orders.status=FILLED.
+    resolved_in: PR-F12-3a
+    remaining_gaps: |
+      Multi-venue split (PR-F12-5) — current code assumes 1 intent → 1 child.
+      provider_id is empty for external_fill intents (matching gap).
+  - id: DoD-5
+    status: implemented
+    title: ExecutionReport публикуется в Kafka execution.venue
+    description: >
+      Producer ExecutionReportProducer (cpp/venues/src/infra/execution_report_producer.cpp);
+      зеркалирование в execution.reports для backward compatibility.
+    evidence: IN-007 runtime confirmation (2026-05-22, 70 reports за 3 мин)
+    blocked_by_ac: [F12-6]
+  - id: DoD-6
+    status: implemented
+    title: Settlement Ledger потребляет execution.venue и обновляет positions/balances/HedgePnL
+    description: >
+      Consumer (cpp/ledger/src/infra/kafka_consumers.cpp) подписан на оба
+      топика execution.venue/execution.reports с идемпотентностью по
+      report_id. HedgePnL рассчитывается в
+      LedgerUseCases::calculate_hedge_pnl по формуле
+      pnl = (executed - internal) * qty (sign-flip для BUY) — что
+      эквивалентно IN-009 §4.6 для favorable side. После расчёта
+      аккумулируется в PG hedgeflows row через PostgresHedgeflowPnlSink
+      (PR-F12-3c).
+    evidence: |
+      cpp/ledger/src/app/ledger_uc.cpp::calculate_hedge_pnl,
+      cpp/ledger/src/infra/postgres_repositories.cpp::PostgresHedgeflowPnlSink.
+      E2E verified on ubuntu-dev (2026-05-26): order 71f8b9c1 ->
+      hedgeflows row gets hedge_pnl + tot_fee columns populated (NUMERIC,
+      not NULL); ledger emits structured log "Hedge PnL computed (F-12 DoD-6)".
+    resolved_in: PR-F12-3c
+    remaining_gaps: |
+      For matching's external_fill intents, internal_price == executed_price
+      by construction (single-leg fill against external liquidity), so
+      hedge_pnl_delta = 0. Real non-zero PnL requires the proper F-12 hedge
+      path (hedge_trigger_policy → execution_intent_builder → routing plan)
+      that ships in PR-F12-5.
+      ClickHouse execution_reports.hedge_pnl still receives 0 (market_data
+      reads it from ExecutionReport proto field, which matching does not
+      populate). Cross-PG join workaround documented in IN-009 §7.
+  - id: DoD-7
+    status: implemented
+    title: ClickHouse table execution_reports с retention >= 90 дней
+    description: >
+      Canonical 20-field schema создана в init.sql (PR-F12-2) и в C++
+      CREATE TABLE через ClickHouseBatchStorage::EnsureSchema (PR-F12-3b).
+      cpp/market_data dual-write'ит ExecutionReport в обе таблицы:
+      legacy execution_venue (Int32 status, 19 полей) и canonical
+      execution_reports (LowCardinality(String) status, 20 полей с
+      hedge_pnl, slippage_bps, hedge_flow_id, child_order_id, side).
+      Partition by toYYYYMM(event_time_ms), TTL 90 дней.
+    evidence: |
+      infra/clickhouse/init.sql + cpp/market_data/src/infra/clickhouse_storage.cpp
+      (BuildExecutionReportV2JsonRow). E2E verified on ubuntu-dev:
+      order bb28e3bd → 1 row в execution_reports, venue_id=binance,
+      status=FILLED, filled_qty=0.05, avg_price=76814.1.
+    resolved_in: PR-F12-3b
+    remaining_gaps: |
+      side, hedge_flow_id, slippage_bps, hedge_pnl остаются пустыми для
+      external_fill intents из matching (matching не заполняет эти поля).
+      Полная заливка приходит с PR-F12-5 (multi-venue routing + proper
+      hedge_trigger_policy intents).
+  - id: DoD-8
+    status: implemented
+    title: PostgreSQL OLTP tables hedgeflows / child_orders / execution_reports_raw с индексами
+    description: >
+      Индексы по hedgeFlowId, providerId, symbol, status для SLA UI/services.
+
+      Все три таблицы существуют в `infra/postgres/init.sql`:
+        - `hedgeflows` (line 126-153): PK hedge_flow_id (TEXT), индексы
+          provider_id+symbol, batch_id, status (OPEN), status
+          (UNDERFILLED/REJECTED). NUMERIC(38,18) для qty/price/pnl.
+        - `child_orders` (line 163-185): PK child_order_id (TEXT), FK
+          hedge_flow_id, индексы venue_id+status, hedge_flow_id,
+          venue_order_id; unique (hedge_flow_id, client_order_id) для
+          idempotency.
+        - `execution_reports_raw` (line 196-222): optional landing
+          zone для нормализованных ExecutionReport (опционально пишется
+          ledger для audit). Индексы hedge_flow_id, venue_id+applied_at.
+
+      Drift correction (см. DoD-18 / PR-F12-11): id-колонки TEXT (не
+      UUID) — чтобы accommodate matching's composite intent_id формат
+      от F-04 external_fill path. NUMERIC precision (38,18) (не 24,8).
+
+      Этот DoD был помечен not-implemented до PR-F12-13 (2026-05-27),
+      но фактически таблицы доставлены в PR-F12-2 / PR-F12-3a. Status
+      обновлён в PR-F12-14 после re-audit.
+    evidence: |
+      infra/postgres/init.sql:123-222 (3 tables + 8 indexes),
+      docs/07-data/{hedgeflows,child-orders,execution-reports}.md
+      (актуальные DDL с drift notes, обновлено в PR-F12-11).
+    resolved_in: PR-F12-2 (schema), PR-F12-3a (C++ repos wired),
+      PR-F12-14 (status update)
+  - id: DoD-9
+    status: implemented
+    title: Unit-тесты Venue Execution Adapter U1-U10
+    description: >
+      Happy path, partial+retry, overfill guard, rejection+fallback,
+      timeout→UNDERFILLED, urgency→orderType mapping, reconciliation gap,
+      clientOrderId idempotency, multi-venue split, pre-hedge risk reject.
+
+      PR-F12-17 (2026-05-28): U-suite доставлен. ExecuteOnVenue —
+      тонкий adapter (строит child intent, reconnect, маппит
+      VenueOrderResult → ExecutionReport), поэтому U-кейсы разнесены
+      по слоям. cpp/venues/tests/execute_on_venue_test.cpp расширен
+      с 5 до 13 тестов (ALL PASS, verified on ubuntu-dev):
+        - U1 happy path FILLED — маппинг status/filled_qty/avg_price/venue_order_id
+        - U2 partial fill — PARTIALLY_FILLED + remaining_qty
+        - U3 overfill — passthrough БЕЗ trim (документирует gap:
+          трим не реализован, есть только enum EXECUTION_REPORT_STATUS_OVERFILL_GUARD
+          в PG mapping)
+        - U4 rejection — REJECTED + error code/message propagation
+        - U5 timeout/UNDERFILLED — status passthrough
+        - U6 strategy/tif defaults (at-layer slice; urgency→strategy
+          полный mapping в matching execution_intent_builder)
+        - U8 clientOrderId idempotency fallback (true dedup = PG
+          ON CONFLICT в postgres_child_order_repository)
+        - + fee/slippage enrichment + 5 support (symbol map, reconnect,
+          missing-adapter, runtime override).
+
+      Кейсы вне слоя ExecuteOnVenue (cross-referenced в header теста):
+        - U7 reconciliation gap → ledger/venues_loop watchdog
+        - U9 multi-venue split → matching execution_planner_test (DoD-2)
+        - U10 pre-hedge risk reject → risk PreHedgeCheck (DoD-3,
+          verified via grpcurl).
+
+      Honest gap: U2 "retry" и U4 "fallback" — это venues_loop/planning
+      concerns, не ExecuteOnVenue; покрыт только маппинг исходов, не
+      retry/fallback orchestration. Полный retry/fallback E2E — DoD-10
+      (integration tests).
+    evidence: |
+      cpp/venues/tests/execute_on_venue_test.cpp (13 tests, ALL PASS),
+      built via builder stage TARGET=venues_execute_on_venue_test,
+      run on ubuntu-dev exit 0.
+      Cross-refs: cpp/matching/tests/app/execution_planner_test.cpp (U9),
+      cpp/risk/src/app/risk_uc.cpp PreHedgeCheck (U10).
+  - id: DoD-10
+    status: partial
+    title: Integration-тесты IT-1..IT-4 (E2E через docker compose)
+    description: >
+      Полный цикл ExecutionIntent → ExecutionReport → Ledger; partial fill+retry;
+      rejection+fallback; timeout+UNDERFILLED+risk alert.
+
+      PR-F12-18 (2026-05-28): `Testing/f12_it_e2e.sh` — shell E2E поверх
+      running dev stack. Драйвит gateway HTTP, ассертит PG/CH/ledger.
+
+      IT-1 (full happy-path chain) — ✅ implemented + verified on
+      ubuntu-dev, 5/5 assertions pass:
+        - flow order → matching hedge_trigger → ExecutionIntent →
+          venues execute → PG hedgeflows COMPLETED (filled_qty>0)
+        - child_orders FILLED >= 1
+        - ClickHouse execution_reports >= 1 для hedge_flow_id
+        - ledger "Ledger applied execution report" log present
+
+      IT-2 (partial+retry), IT-3 (rejection+fallback), IT-4 (timeout+
+      UNDERFILLED+alert) — ⏸ SKIP с явной причиной в скрипте: требуют
+      FAULT INJECTION на venue side (partial fill / forced reject /
+      response timeout), которого dev sim adapter не поддерживает.
+      Это домен F-20 Live Venue Simulator (partialFillMode /
+      RejectionModel / LatencyModel). Маппинг исходов покрыт unit-тестами
+      execute_on_venue_test U2/U4/U5; полный E2E этих сценариев
+      разблокируется после F-20.
+
+      Поэтому DoD-10 — `partial`: 1 из 4 IT реализован E2E, 3 ждут
+      F-20 fault injection (не блок MVP happy-path).
+    evidence: |
+      Testing/f12_it_e2e.sh (IT-1 verified 5/5; IT-2/3/4 documented skips),
+      docs/10-testing/features/F-12-test-plan.md §2 (IT-1 ✅, IT-2/3/4 ⏸),
+      cross-ref unit coverage: cpp/venues/tests/execute_on_venue_test.cpp
+      (U2/U4/U5).
+  - id: DoD-11
+    status: not-implemented
+    title: SLA-тест IT-5 latency p95 <= 100 ms (CEX)
+    description: >
+      50 ExecutionIntent burst, измеренная задержка от publish до первого
+      PlaceChildOrder; p50<=50ms, p95<=100ms, p99<=200ms, max<=500ms.
+    evidence: нет latency-test
+    blocked_by_ac: [F12-10]
+  - id: DoD-12
+    status: not-implemented
+    title: Нагрузочный тест IT-6 throughput >= 50 HedgeFlow/sec
+    description: >
+      60 сек × 50 intents/sec = 3000 hedges; assertion: fill rate >= 95%,
+      Kafka consumer lag 0, ClickHouse записей = 3000 ± δ.
+    evidence: нет load-test
+  - id: DoD-13
+    status: not-implemented
+    title: Backtest parity тест IT-7 (production vs Backtest Replay Engine)
+    description: >
+      Одинаковый input (100 intents + recorded VenueSim events) → identical
+      filledQty/avgPrice/status в обоих прогонах. Determinism check.
+    evidence: cpp/venues/tests/backtest_parity_check_test.cpp (smoke есть, full parity нет)
+    blocked_by_ac: [F12-9]
+  - id: DoD-14
+    status: implemented
+    title: Admin UI HedgeFlow Monitor
+    description: >
+      Список HedgeFlow с filter по symbol/batchId/provider/status/period,
+      drill-down (Overview + Child Orders + Execution Timeline tabs),
+      экспорт CSV. См. uxScreens.hedge_flow_monitor.
+      PR-F12-6 (2026-05-26): доставлен минимальный PG-backed monitor —
+      страница /hedge-flows-live с polling-2s, фильтрами по
+      status/period, badge-индикатором источника. GET /api/v1/hedge/flows
+      запрашивает PG hedgeflows напрямую (frontend-api → pg pool).
+      PR-F12-7 (2026-05-26): drill-down реализован — клик по строке
+      открывает side panel с 3 tabs (Overview, Child Orders, Execution
+      Timeline). GET /api/v1/hedge/flows/:id агрегирует PG hedgeflows
+      row + child_orders rows + ClickHouse execution_reports timeline.
+      E2E проверено: для COMPLETED hedge flow возвращается 1 child_order
+      (FILLED) + 1 timeline event с venue_id/filled_qty.
+      Остаётся в scope DoD-14 (out of MVP): CSV export, фильтры по
+      venue + batchId/provider, multi-row select. Не блокирующее.
+    evidence: |
+      frontend/api/server.js (handleHedgeFlowsV1, handleHedgeFlowV1ById,
+      PG pool, fetchHedgeFlowTimeline → CH execution_reports),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js
+      (row onClick handler, selectedFlowId state),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.js (side panel),
+      frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowDrillPanel.css,
+      route /hedge-flows-live в App.js
+  - id: DoD-15
+    status: implemented
+    title: Admin UI Execution Live Feed + Hedge PnL Dashboard + Reconciliation Alerts + Manual Override + Policy Config
+    description: >
+      Все 5 live-страниц uxScreens реализованы и доступны через публичный Funnel URL.
+
+      PR-F12-8 (2026-05-26): Hedge PnL Dashboard (/hedge-pnl-live) — polling-5s,
+      фильтры period/symbol/venue, 8 summary cards, cumulative PnL sparkline,
+      2 breakdown tables. GET /api/v1/hedge/pnl агрегирует CH execution_reports.
+
+      PR-F12-9a (2026-05-27): Reconciliation Alerts (/reconciliation-alerts-live) —
+      polling-5s, PG hedgeflows WHERE status IN (UNDERFILLED, REJECTED,
+      RISK_REJECTED), severity badges, in-memory acknowledge (PG-persist deferred).
+
+      PR-F12-9b (2026-05-27): Execution Live Feed (/execution-live-feed-live) —
+      polling-3s c pause-кнопкой, CH execution_reports recent 100, фильтры
+      venue/symbol/status, fresh-row анимация. Истинный SSE из Kafka отложен.
+
+      PR-F12-9c (2026-05-27): Manual Override (/manual-override-live) — polling-5s
+      read-only listing PG hedgeflows с derived origin (intent_id pattern:
+      |external_fill_N → f04, |hedge| → f12 auto, иное → manual). POST endpoint
+      создания override отложен в отдельный PR (нужен proto-extension + audit).
+
+      PR-F12-9d (2026-05-27): Policy Config (/policy-config-live) — read-only
+      view PG solver_config + matching service env (HEDGE_TRIGGER_*,
+      HEDGE_INTENT_*) через env mirror в frontend-api. PUT/edit отложен
+      (нужен audit log table + Kafka hot-reload).
+
+      Все 5 страниц доступны на https://nik.tail318efe.ts.net/* (verified
+      HTTP 200 через Funnel URL).
+
+      Остаётся в scope DoD-15 (deferred follow-ups, не блок MVP):
+      - SSE/WebSocket из Kafka execution.venue для Live Feed
+      - POST /api/v1/hedge/manual-overrides + audit log
+      - PUT /api/v1/hedge/policy-config + audit log + Kafka hot-reload
+      - PG persistence для reconciliation-alerts acknowledge (column в hedgeflows)
+    evidence: |
+      frontend/api/server.js (handleHedgePnlV1, handleReconciliationAlertsV1,
+      handleReconciliationAlertAckV1, handleExecutionLiveFeedV1,
+      handleManualOverridesV1, handlePolicyConfigV1),
+      frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.{js,css},
+      frontend/web/src/pages/ReconciliationAlerts/ReconciliationAlertsLive.{js,css},
+      frontend/web/src/pages/ExecutionLiveFeed/ExecutionLiveFeedLive.{js,css},
+      frontend/web/src/pages/ManualOverride/ManualOverrideLive.{js,css},
+      frontend/web/src/pages/PolicyConfig/PolicyConfigLive.{js,css},
+      routes /hedge-pnl-live, /execution-live-feed-live,
+      /reconciliation-alerts-live, /manual-override-live, /policy-config-live в App.js,
+      frontend/docker-compose.yml (HEDGE_TRIGGER_*/HEDGE_INTENT_* env mirror)
+  - id: DoD-16
+    status: implemented
+    title: Observability — Prometheus metrics + Grafana dashboard
+    description: >
+      Метрики f12_hedge_intent_total, f12_hedge_latency_ms, f12_slippage_bps,
+      f12_underfill_total, f12_venue_circuit_state. Grafana dashboard
+      F-12-execution-hedge.json. Алерты HEDGE_UNDERFILLED, SLIPPAGE_EXCEEDED,
+      LATENCY_SLA_BREACH.
+
+      PR-F12-12 (2026-05-27): observability stack доставлен.
+      Источник метрик — `GET /metrics` на frontend-api (агрегирует PG
+      hedgeflows + CH execution_reports в Prometheus exposition format),
+      не per-service C++ collector. Trade-off задокументирован в
+      server.js: единый источник истины с UI, ниже latency-fidelity,
+      приемлем для MVP observability tier. Per-service C++ metrics
+      (matching's hedge_trigger_decisions counter etc.) — отложены в
+      отдельный PR; будут добавлены в `cpp/matching/src/app/solver_metrics.cpp`
+      аналогично существующему solver_solve_time_ms histogram.
+
+      Метрики экспортированы (gauge):
+      - f12_hedgeflows_total{status, symbol}
+      - f12_hedge_open_total / underfill_total / reject_total{symbol}
+      - f12_hedgeflow_filled_qty_total / target_qty_total{symbol}
+      - f12_hedge_pnl_sum / fee_sum{symbol}
+      - f12_hedge_open_age_seconds_max{symbol} (stuck-flow detector)
+      - f12_hedge_reports_total / filled_total / rejected_total{venue_id, symbol}
+      - f12_hedge_slippage_bps_avg / p95{venue_id, symbol}
+      - frontend_api_up / generated_at_seconds (process meta)
+
+      Alert rules: 8 правил в `infra/prometheus/alerts/F-12-hedge.rules.yml`:
+      F12HedgeUnderfilled (warning + critical tier), F12SlippageExceeded
+      (warning + critical), F12HedgeFlowStuck, F12HedgeRejectRateHigh,
+      F12HedgePnlNegativeDrift, F12MetricsExporterDown.
+
+      Grafana dashboard: `infra/grafana/dashboards/F-12-execution-hedge.json`
+      — 12 panels (6 stat tiles + 6 timeseries/table), 2 template
+      variables (symbol, venue), uid `f12-execution-hedge`.
+
+      E2E проверено на ubuntu-dev: prometheus `frontend-api-hedge`
+      target = up, PromQL `f12_hedgeflows_total` returns OPEN=16
+      COMPLETED=69 для BTC/USDT, F-12 alert group loaded (8 rules).
+      В dev SLIPPAGE_EXCEEDED не сработает из-за
+      `venues-sim-zero-execution-price` knownIssue (slippage_bps=0).
+    evidence: |
+      frontend/api/server.js (renderF12HedgeMetrics, handlePrometheusMetrics),
+      infra/prometheus/prometheus.yml (frontend-api-hedge job),
+      infra/prometheus/alerts/F-12-hedge.rules.yml (8 rules),
+      infra/grafana/dashboards/F-12-execution-hedge.json (12 panels).
+  - id: DoD-17
+    status: implemented
+    title: Operations runbook docs/11-operations/runbooks/F-12-incidents.md
+    description: >
+      Диагностические сценарии: повышенный slippage, массовые UNDERFILLED,
+      падение venue (circuit breaker), SLA-нарушение latency. Decision tree
+      для on-call (change config, disable venue, manual override).
+      PR-F12-10 (2026-05-27): runbook доставлен. Покрывает 8 incident
+      playbooks (slippage, mass-underfilled, latency SLA, venue circuit,
+      ledger HedgePnL outlier, reconciliation UI empty, live page won't
+      load, no |hedge| rows in monitor) + 3 routine ops (urgency switch,
+      pause F-12 emission, re-enable venue) + escalation table + links
+      на feature.yaml#knownIssues для актуальных gap-ов.
+      Включает готовые SQL-запросы (PG + CH) и docker logs grep-снайпеты
+      для каждого playbook'а.
+      Marked `draft` until production deploys; threshold numbers reflect
+      current dev/staging env. Escalation contacts pending.
+    evidence: |
+      docs/11-operations/runbooks/F-12-incidents.md (created),
+      links from feature.yaml DoD-17 + IDE search confirms все 5
+      live-страниц (HedgeFlow Monitor, PnL, Reconciliation Alerts,
+      Execution Live Feed, Manual Override, Policy Config) упомянуты
+      как dashboard references.
+  - id: DoD-18
+    status: implemented
+    title: Архитектурная документация синхронна с реализацией
+    description: >
+      Sequence diagrams (SEQ-F12-01..03), контракты Kafka/REST/gRPC,
+      схемы PG/CH, cross-links к F-04/F-06/F-11/F-15 актуальны и согласованы
+      с фактическим кодом cpp/venues + cpp/matching + cpp/ledger + frontend.
+      PR-F12-11 (2026-05-27): docs-sync sweep после всех PR-F12-3..10.
+
+      Обновлено:
+      - docs/06-api/rest/hedgeflows.md: статус-таблица 10 endpoints
+        (7 ✅ wired через frontend/api/server.js, 4 ❌ deferred), путь
+        prefix /api/v1/hedge/ задокументирован.
+      - docs/07-data/hedgeflows.md: DDL переписан под actual schema
+        (TEXT не UUID, NUMERIC(38,18) не (24,8), отсутствие `source`
+        колонки задокументировано).
+      - docs/07-data/child-orders.md: то же; PARTIALLY_FILLED status
+        присутствует в CHECK constraint но dev sim adapter его не
+        генерирует — задокументировано.
+      - docs/07-data/execution-reports.md: 20-field actual schema
+        + drift-table vs IN-005 §1 (LowCardinality string не Enum8,
+        event_time_ms не DateTime64+intent_created_at, direct HTTP
+        INSERT не Kafka engine + MV).
+      - docs/05-components/sequences/SEQ-F12-01-auto-hedge-services.md:
+        7 drift-correction notes (deterministic hedge_flow_id format,
+        venues InsertOpen step, hedge_flow_id propagation fix,
+        ledger HedgePnL sink, CH dual-write, UI read-path,
+        env-gated trigger).
+      - docs/06-api/messaging/execution-intents.md: implementation
+        notes по composite hedge_flow_id, HEDGE_SOURCE_AUTO_BATCH,
+        env thresholds, allowed_venues CSV.
+      - docs/06-api/messaging/execution-venue.md: notes по dual publish
+        (execution.venue + execution.reports legacy), hedge_flow_id
+        propagation в venues_loop, Money→Float64 conversion, sim
+        executed_price=0 caveat.
+      - docs/traceability/feature-traceability.md F-12 row: contracts,
+        data objects, components, tests, code пути обновлены с TODO
+        на actual file paths.
+    evidence: |
+      Per-file drift correction notes referenced above; commit
+      PR-F12-11 (b...). Single-pass sync — re-check needed when next
+      F-12 PR lands.
+
+# UX Screens из IN-008 (v2 spec, §2.5).
+# Каждый экран — отдельная React-страница, потребляющая один или несколько
+# REST endpoints. Layout mockups: см. §2.5.1..2.5.6 в чат-источнике.
+uxScreens:
+  - id: hedge_flow_monitor
+    title: HedgeFlow Monitor
+    route: /hedge/flows
+    purpose: >
+      Operations dashboard со списком HedgeFlow (target/filled/status/PnL),
+      filter по symbol/batchId/provider/status/period, drill-down в детали
+      одного HedgeFlow (3 tabs: Overview, Child Orders, Execution Timeline).
+    primary_data_source: PostgreSQL hedgeflows + child_orders + ClickHouse execution_reports
+    api_endpoints:
+      - GET /api/v1/hedge/flows (list, filter)
+      - GET /api/v1/hedge/flows/{id} (detail)
+      - GET /api/v1/hedge/flows/{id}/child-orders
+      - GET /api/v1/hedge/flows/{id}/execution-timeline
+  - id: execution_live_feed
+    title: Execution Live Feed
+    route: /execution/live
+    purpose: >
+      Real-time stream ExecutionReport (table + ticker view) с filter
+      по symbol/venue/side/status. Быстрые фильтры (slippage>10bps, fee<1.0).
+    primary_data_source: Kafka execution.venue (SSE) + ClickHouse history fallback
+    api_endpoints:
+      - GET /api/v1/execution/live (SSE stream)
+  - id: hedge_pnl_dashboard
+    title: Hedge PnL Dashboard
+    route: /hedge/pnl
+    purpose: >
+      Аналитика hedge PnL: KPI cards (total PnL, avg slippage bps, fill ratio,
+      underfilled share), графики (PnL over time, clearingPrice vs avgFillPrice
+      scatter, slippage histogram), таблица HedgeFlow с PnL по выбранному фильтру.
+    primary_data_source: ClickHouse execution_reports + batchresults (cross-join по batchId)
+    api_endpoints:
+      - GET /api/v1/hedge/pnl?from=&to=&symbol=&venue=&provider=
+  - id: reconciliation_alerts
+    title: Reconciliation Alerts
+    route: /hedge/reconciliation-alerts
+    purpose: >
+      Incident management: UNDERFILLED / REJECTED HedgeFlow с gap, decision tree
+      ("отметить обработанным", "create manual override", "export для ticket").
+    primary_data_source: PostgreSQL hedgeflows.status IN ('UNDERFILLED','REJECTED') + risk.alerts
+    api_endpoints:
+      - GET /api/v1/hedge/reconciliation-alerts
+      - POST /api/v1/hedge/reconciliation-alerts/{id}/acknowledge
+  - id: manual_override
+    title: Manual Override (create ExecutionIntent)
+    route: /hedge/manual-override
+    purpose: >
+      Operator form для создания ExecutionIntent вручную с валидацией лимитов
+      и preview ожидаемого slippage. origin=MANUAL для audit trail.
+    primary_data_source: solverconfig (limits preview) + Risk Manager (preview check)
+    api_endpoints:
+      - POST /api/v1/execution-intents (origin=MANUAL)
+      - GET /api/v1/risk/preview-limits?notional=&urgency=
+  - id: policy_config
+    title: Policy Config (solverconfig F-12 section)
+    route: /hedge/policy-config
+    purpose: >
+      Настройка Hedge Urgency Policy (LOW/MED/HIGH профили: orderTypes,
+      maxSlippageBps, defaultTimeoutMs), Hedge Trigger Threshold (per symbol +
+      notional), Venue-specific overrides, аудит изменений.
+    primary_data_source: PostgreSQL solver_config + audit log
+    api_endpoints:
+      - GET /api/v1/policy-config/f12
+      - PUT /api/v1/policy-config/f12 (требует подтверждения)
+      - GET /api/v1/policy-config/f12/audit
+    refresh_mode: on-demand (operator click)
+
+# Refresh modes для всех 6 UI экранов из IN-009 §7.3 (v2.0-final).
+# Применяются дополнительно к описанию каждого экрана в uxScreens[].
+uxRefreshModes:
+  hedge_flow_monitor: polling-2s        # PG.hedgeflows + child_orders
+  execution_live_feed: sse-realtime     # Kafka execution.venue (через OBS slot)
+  hedge_pnl_dashboard: polling-batch    # ClickHouse execution_reports, ~10s refresh
+  reconciliation_alerts: polling-5s     # PG.hedgeflows(UNDERFILLED) + Kafka risk.alerts
+  manual_override: on-demand            # write-path → execution.intents
+  policy_config: on-demand              # solver_config
+
+# Architecture section из IN-009 §7.4 (v2.0-final).
+# Описывает роль Observability Reporting как read-side компонента между
+# Admin UI и хранилищами PG/CH/Kafka. UI никогда не ходит напрямую в
+# хранилища — все запросы идут через Observability Reporting (REST/SSE).
+architecture:
+  observabilityReporting:
+    role: read-side only
+    description: >
+      Единственная точка доступа Admin UI к данным F-12. Подписан на Kafka
+      (execution.venue, risk.alerts), читает PG/CH, обслуживает UI через
+      REST API и SSE. НЕ участвует в pipeline исполнения (никогда не пишет
+      в execution.intents). Исключения: Manual Override и Policy Config
+      проксируются через OBS в API Matching Backend / Venue Execution Adapter.
+    data_flows:
+      ingest_background:
+        - source: Kafka execution.venue
+          consumer: Observability Reporting
+          targets: [PostgreSQL hedgeflows/child_orders (aggregates), ClickHouse execution_reports (history)]
+          characteristic: непрерывный фон, не зависит от UI
+        - source: Kafka risk.alerts
+          consumer: Observability Reporting
+          targets: [PostgreSQL risk_alerts_log]
+      ui_request:
+        pattern: "UI → OBS → DB → OBS → UI (строгий линейный порядок)"
+        examples:
+          - "GET /api/v1/hedge/flows → SELECT FROM hedgeflows"
+          - "GET /api/v1/hedge/flows/{id}/child-orders → SELECT FROM child_orders"
+          - "GET /api/v1/hedge/flows/{id}/execution-timeline → SELECT FROM execution_reports"
+          - "GET /api/v1/execution/live → SSE stream из execution_reports/Kafka"
+    conflict_note: |
+      В текущем MVP роль "Observability Reporting" исполняется frontend-api
+      (Node.js в frontend/api/server.js), а cpp/observability — минимальный
+      Kafka logger без PG/CH access. Полноценный OBS-сервис (C++ с REST API,
+      Kafka ingest в PG/CH, SSE-стрим) — отдельный компонент будущего;
+      требует ADR-016 для выбора между:
+      (a) расширить cpp/observability до full OBS service
+      (b) формализовать frontend-api как Observability Reporting role
+      (c) выделить новый cpp/observability_reporting сервис
+
+# Operator timeline из IN-009 §7.2 (v2.0-final).
+# Step-by-step хронология того, что видит оператор в Admin UI после
+# завершения матчинга и публикации ExecutionIntent.
+# Полезно для QA test cases (можно превратить в test plan UI scenarios)
+# и для UX flow design.
+operatorTimeline:
+  - step: 1
+    actor: Matching Backend
+    action: Публикует ExecutionIntent → Kafka execution.intents
+    ui_visibility: (не видно, хедж ещё не начат)
+  - step: 2
+    actor: Venue Execution Adapter
+    action: INSERT hedgeflows (status=OPEN) → PostgreSQL
+    ui_visibility: HedgeFlow Monitor — новая строка со статусом OPEN
+  - step: 3
+    actor: Venue Execution Adapter
+    action: INSERT child_orders (status=PENDING) → PostgreSQL
+    ui_visibility: Drill-down — child-ордера со статусом PENDING
+  - step: 4
+    actor: External Venues Connector
+    action: Отправляет child-ордера на venue (CEX/DEX)
+    ui_visibility: (не видно)
+  - step: 5
+    actor: Venue
+    action: Возвращает Execution Report (FILLED/PARTIALLY_FILLED/REJECTED)
+    ui_visibility: (не видно)
+  - step: 6
+    actor: Venue Execution Adapter
+    action: Publishes ExecutionReport → Kafka execution.venue
+    ui_visibility: Execution Live Feed — новая строка в real-time
+  - step: 7
+    actor: Venue Execution Adapter
+    action: UPDATE child_orders, UPDATE hedgeflows.filledQty → PostgreSQL
+    ui_visibility: HedgeFlow Monitor — обновляется filledQty + fillRatio
+  - step: 8
+    actor: Observability Reporting
+    action: Reads execution_reports → ClickHouse
+    ui_visibility: Hedge PnL Dashboard — обновляются slippageBps, hedgePnL
+  - step: 9
+    actor: Venue Execution Adapter
+    action: Reconciliation → UPDATE hedgeflows.status = COMPLETED / UNDERFILLED
+    ui_visibility: HedgeFlow Monitor — статус меняется OPEN → COMPLETED/UNDERFILLED
+  - step: 10
+    actor: Risk Manager
+    action: risk.alerts(HEDGE_UNDERFILL) → Kafka → Observability
+    ui_visibility: Reconciliation Alerts — новая строка с gap и timestamp
 
 knownIssues:
-  - id: no-intent-generation
-    severity: blocker
-    description: matching не генерирует ExecutionIntent
-  - id: no-hedge-accounting
-    severity: blocker
-    description: ledger ApplyExecutionReport только логирует, не обновляет балансы
+  - id: no-venue-execution-adapter-service
+    severity: feature-gap
+    description: >
+      В коде нет отдельного сервиса `cpp/venue_execution_adapter/`. Реализация
+      сосредоточена в `cpp/venues/src/` (ExecuteOnVenue, VenueAdapter implementations,
+      ExecutionIntentsConsumer, ExecutionReportProducer). Архитектурно это
+      допустимо для MVP, но требует ADR-решения о финальной декомпозиции
+      (см. ADR-012 в docs/03-architecture/adr/).
+    location: cpp/venues/src/
+  - id: no-execution-planning-service
+    severity: feature-gap
+    description: >
+      Multi-venue routing plan (F12-PLAN-1..4) реализован частично:
+      ExecutionIntent эмитируется matching-сервисом (через
+      HedgeExecutionIntentsPublisher), но логика routing по venue.liquidity.fob
+      + venue.health (формула qty[v] = L(v)/Sum L(v') * targetQty) ещё
+      не имплементирована. Интерфейс `IExecutionPlanningUseCases` присутствует,
+      но без полной реализации.
+    location: cpp/matching/src/app/execution_planner.hpp
+  - id: venues-sim-zero-execution-price
+    severity: dev-limitation
+    description: >
+      In simulate_orders mode (default in dev), venue adapters publish
+      ExecutionReport with executed_price = 0 (no price simulation for
+      MARKET strategy). As a result, Settlement Ledger computes
+      hedge_pnl_delta = (executed_price - internal_price) * qty = 0
+      for every real F-12 hedge intent — even though the flow is fully
+      wired and PG.hedgeflows.filled_qty/status/completed_at update correctly.
+      A non-zero PnL demonstration requires either (a) wiring sim adapters
+      to set executed_price ≈ internal_price ± slippage, or (b) running
+      against real CEX/DEX adapters (CEX_SIMULATE_ORDERS=0).
+    location: cpp/venues/src/infra/cex_ws_rest_adapter.cpp, cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+    surfaced_in: PR-F12-5 E2E (2026-05-26)
+  - id: no-hedgeflows-postgres-schema
+    severity: resolved
+    status: resolved
+    description: >
+      RESOLVED in PR-F12-3a (2026-05-25). Schemas in init.sql + C++
+      repos (postgres_hedgeflow_repository, postgres_child_order_repository)
+      wired into cpp/venues. E2E verified: order → row in hedgeflows +
+      child_orders with terminal status. Schema is TEXT (not UUID) to
+      accept matching's composite external_fill intent_id format.
+    location: infra/postgres/init.sql, cpp/venues/src/infra/postgres_*
+    resolved_in: PR-F12-3a
+  - id: no-execution-reports-clickhouse
+    severity: resolved
+    status: resolved
+    description: >
+      RESOLVED in PR-F12-3b (2026-05-26). Schema in init.sql + C++
+      EnsureSchema; cpp/market_data dual-writes ExecutionReport via
+      SaveExecutionReport (both legacy execution_venue + canonical
+      execution_reports). Live verified: 1 row appears in execution_reports
+      after a single test sell order. Hedge PnL Dashboard and
+      Reconciliation Alerts (UI screens in PR-F12-6) can now query this table.
+    location: infra/clickhouse/init.sql, cpp/market_data/src/infra/clickhouse_storage.*
+    resolved_in: PR-F12-3b
+  - id: no-pre-hedge-rpc
+    severity: resolved
+    status: resolved
+    description: >
+      RESOLVED in PR-F12-13 (2026-05-27). PreHedgeCheck RPC реализован
+      в cpp/risk/src/app/risk_uc.cpp + grpc_risk_service.cpp. Пять
+      проверок (PROVIDER_HALTED, NOTIONAL_EXCEEDED, EXPOSURE_EXCEEDED,
+      SLIPPAGE_EXCEEDED, VENUES_UNAVAILABLE) в фиксированном порядке.
+      Thresholds конфигурируются через env (RISK_HEDGE_MAX_NOTIONAL,
+      _EXPOSURE_LIMIT, _MAX_SLIPPAGE_{LOW,MEDIUM,HIGH}_BPS).
+      Diagnostic details (notional_used/limit, exposure_after/limit,
+      slippage_limit_bps, venue health snapshot) возвращаются всегда.
+
+      Остаётся в follow-up: (a) caller integration — Execution Planning
+      должен вызывать PreHedgeCheck блокирующе перед публикацией intent,
+      (b) publish risk.alerts на REJECT (сейчас только structured log).
+    location: cpp/risk/src/app/risk_uc.cpp, cpp/risk/src/transport/grpc_risk_service.cpp
+    resolved_in: PR-F12-13
+  - id: hedge-pnl-not-computed
+    severity: resolved
+    status: resolved
+    description: >
+      RESOLVED in PR-F12-3c (2026-05-26). calculate_hedge_pnl in
+      ledger_uc.cpp already had correct math (sign-flip for BUY) —
+      what was missing was persistence. New PostgresHedgeflowPnlSink
+      writes computed hedge_pnl + tot_fee deltas into PG hedgeflows row.
+      Live verified: hedge_pnl column transitions NULL -> NUMERIC on
+      first ExecutionReport. UI HedgeFlow Monitor (PR-F12-6) can now
+      display per-flow PnL.
+    location: cpp/ledger/src/app/ledger_uc.cpp, cpp/ledger/src/infra/postgres_repositories.cpp
+    resolved_in: PR-F12-3c
+  - id: execution-reports-topic-name-mismatch
+    severity: conflict
+    description: >
+      IN-005 спецификация использует имя топика `execution.venue` (producer:
+      Venue Execution Adapter; consumer: Ledger/Risk/CH). В создании топиков
+      infra/kafka/create_topics.sh заведены и `execution.venue`, и `execution.reports`.
+      Существующая документация docs/06-api/messaging/execution-reports.md
+      опирается на старое имя `execution.reports`. Источник истины IN-005:
+      `execution.venue`. Старый топик остаётся для обратной совместимости
+      на период миграции.
+
+      Runtime confirmation (IN-007, 2026-05-22): cpp/venues публикует в
+      топик `execution.venue` (поле `topic` в JSON-логе "Produced
+      execution report"). CLAUDE.md §7.3 всё ещё перечисляет только
+      `execution.reports`. Требуется либо обновить CLAUDE.md, либо
+      ADR-015 «execution.venue заменяет execution.reports».
+    location: infra/kafka/create_topics.sh#L60-L61, CLAUDE.md §7.3
+    target_pr: PR-C (см. IN-007.meta.md)
+  - id: ledger-not-consuming-execution-venue-events
+    severity: critical
+    source: IN-007 (runtime finding 2026-05-22)
+    description: >
+      cpp/venues публикует 70 execution reports в `execution.venue` за
+      ~3 минуты теста (order 89b0a0aa-...), при этом в `docker logs
+      infra-ledger-1` за тот же период ноль строк о consumption этого
+      топика. Hedge balances в PostgreSQL не обновляются → любой
+      auto-hedge сценарий из F-12-01 / F-12-05 молчаливо ломается.
+
+      Возможные причины: (1) ledger подписан только на старый
+      `execution.reports` (без producer), (2) consumer для
+      `execution.venue` есть, но handler ApplyExecutionReport не
+      логирует. Нужно явно подтвердить и закрыть.
+
+      Связано с issue execution-reports-topic-name-mismatch
+      (топик-naming) и hedge-pnl-not-implemented (бизнес-логика).
+    location: cpp/ledger/src/main.cpp, cpp/ledger/src/app/ledger_uc.cpp
+    target_pr: PR-C+ (см. IN-007.meta.md)
+  - id: venue-id-vs-venue-symbol-mapping
+    severity: feature-gap
+    description: >
+      Маппинг internal symbol -> venue_symbol реализован простой override-таблицей
+      в ExecuteOnVenue (SetVenueSymbolOverride). Полноценный per-venue mapping
+      (tick_size, lot_size, fee_bps) приходит из VenueSnapshot, но не
+      используется при формировании child orders.
+    location: cpp/venues/src/app/execute_on_venue.cpp
+  - id: observability-reporting-vs-frontend-api
+    severity: conflict
+    source: IN-009 (v2.0-final, 2026-05-25)
+    description: >
+      IN-009 §7 описывает Observability Reporting как полноценный C++ компонент
+      между Admin UI и хранилищами PG/CH/Kafka: подписан на Kafka, читает PG/CH,
+      обслуживает UI через REST/SSE. В текущем MVP эту роль исполняет
+      frontend-api (Node.js в frontend/api/server.js), а cpp/observability —
+      минимальный Kafka logger без PG/CH access.
+
+      Решение требует ADR-016 для выбора одного из трёх путей:
+      (a) расширить cpp/observability до full OBS service (C++ + libpqxx +
+          Crow REST + SSE);
+      (b) формализовать frontend-api как Observability Reporting role (Node.js
+          остаётся, но переименовывается в архитектурной документации);
+      (c) выделить новый cpp/observability_reporting сервис, оставив
+          cpp/observability как pure Kafka logger.
+
+      До решения ADR-016: используется путь (b) — frontend-api играет роль
+      OBS-слоя, но не называется так в коде. Спецификация IN-009 фиксирует
+      это явно через architecture.observabilityReporting.conflict_note.
+    location: |
+      docs/05-components/observability-reporting/ (current C++ service description)
+      vs
+      frontend/api/server.js (actual OBS implementation in MVP)
+    target_pr: ADR-016 (architecture decision pending)
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    - cpp/matching/tests/app/hedge_trigger_policy_test.cpp
+    - cpp/matching/tests/app/execution_intent_builder_test.cpp
+    - cpp/matching/tests/app/external_venue_filter_test.cpp
+    - cpp/matching/tests/app/position_snapshot_calculator_test.cpp
+    - cpp/venues/tests/execute_on_venue_test.cpp
+    - cpp/venues/tests/execution_report_producer_test.cpp
+    - cpp/venues/tests/venue_sim_adapter_test.cpp
+    - cpp/venues/tests/simulated_venue_adapter_test.cpp
+    - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+    - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+  integration:
+    - cpp/venues/tests/backtest_parity_check_test.cpp
+    - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
   contract: []

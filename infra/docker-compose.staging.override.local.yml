@@ -1,0 +1,26 @@
+# =============================================================================
+# Локальный override для запуска staging-стенда поверх СТАРЫХ ghcr-образов
+# (где ENTRYPOINT в Dockerfile.service был сломан: ["/usr/local/bin/${TARGET}"]
+# без подстановки переменной).
+#
+# Этот файл — НЕ в production-пути. После того как Dockerfile.service починен
+# и CI пересобрал и запушил новые образы — этот override становится не нужен,
+# его можно удалить локально.
+#
+# Запуск с этим override:
+#   DOCKER_DEFAULT_PLATFORM=linux/amd64 \
+#     docker compose \
+#       -f docker-compose.staging.yml \
+#       -f docker-compose.staging.override.local.yml \
+#       up -d
+# =============================================================================
+
+services:
+  risk:          { entrypoint: ["/usr/local/bin/risk"] }
+  ledger:        { entrypoint: ["/usr/local/bin/ledger"] }
+  order_flow:    { entrypoint: ["/usr/local/bin/order_flow"] }
+  matching:      { entrypoint: ["/usr/local/bin/matching"] }
+  venues:        { entrypoint: ["/usr/local/bin/venues"] }
+  market_data:   { entrypoint: ["/usr/local/bin/market_data"] }
+  observability: { entrypoint: ["/usr/local/bin/observability"] }
+  gateway:       { entrypoint: ["/usr/local/bin/gateway"] }

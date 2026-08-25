@@ -1,3 +1,10 @@
+<!-- IN-013 frontmatter — Cockburn decomposition level.
+---
+id: SEQ-UC-F01-01-system
+level: kite
+---
+-->
+
 # SEQ-UC-F01-01-system. Authentication: system view
 
 ## Type

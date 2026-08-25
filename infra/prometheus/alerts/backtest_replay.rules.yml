@@ -1,0 +1,92 @@
+groups:
+  - name: backtest-replay
+    rules:
+      - alert: BacktestReplayHistoryLoadTooSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(backtest_replay_history_load_latency_ms_bucket[10m]))) > 5000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay historical load latency is elevated
+          description: p95 historical load latency for replay has been above 5s for 10 minutes.
+
+      - alert: BacktestReplayClickHouseInsertTooSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(backtest_replay_clickhouse_insert_latency_ms_bucket[5m]))) > 250
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay ClickHouse inserts are slow
+          description: p95 ClickHouse insert latency for replay data has been above 250ms for 10 minutes.
+
+      - alert: BacktestReplayClickHouseInsertErrorsDetected
+        expr: increase(backtest_replay_clickhouse_insert_total{result="error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: replay ClickHouse insert errors detected
+          description: replay failed to insert rows into ClickHouse during the last 5 minutes.
+
+      - alert: BacktestReplayKafkaPublishErrorsDetected
+        expr: increase(backtest_replay_kafka_publish_total{result="error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: replay Kafka publish errors detected
+          description: replay progress or lifecycle events failed to publish to Kafka during the last 5 minutes.
+
+      - alert: BacktestReplaySolverP95TooHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(backtest_replay_solve_time_ms_bucket[5m]))) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay solver latency is above target
+          description: p95 replay solve time has been above 1000ms for 10 minutes.
+
+      - alert: BacktestReplayProgressLagTooHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(backtest_replay_progress_lag_ms_bucket[5m]))) > 60000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay progress lag is high
+          description: p95 replay progress lag has been above 60s for 10 minutes.
+
+      - alert: BacktestReplaySolverFailuresDetected
+        expr: increase(backtest_replay_failures_total{component="solver"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay solver failures detected
+          description: replay observed soft or hard solver failures during the last 10 minutes.
+
+      - alert: BacktestReplayLedgerHardFailuresDetected
+        expr: increase(backtest_replay_failures_total{failure_type="hard",component="ledger"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: replay ledger hard failures detected
+          description: replay observed hard ledger failures during the last 10 minutes.
+
+      - alert: BacktestReplayShadowNamespaceFailuresDetected
+        expr: increase(backtest_replay_shadow_namespace_init_total{result="error"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: replay shadow namespace initialization is failing
+          description: replay failed to create isolated shadow namespaces during the last 10 minutes.
+
+      - alert: BacktestReplayShadowNamespaceLeakSuspected
+        expr: max_over_time(backtest_replay_shadow_namespaces_active[30m]) > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: replay shadow namespace count is unusually high
+          description: active replay shadow namespaces stayed above 100 for 15 minutes, which may indicate cleanup or isolation drift.

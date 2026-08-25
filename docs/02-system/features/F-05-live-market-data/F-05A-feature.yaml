@@ -1,0 +1,203 @@
+feature:
+  id: F-05A
+  name: Vectorized External Liquidity for F-09 Batch/Combo Clearing
+  status: planned
+  owner: core-team
+  level: kite
+
+description: >
+  Расширение F-05 Live Market Data для поддержки F-09 multileg_vector_solver.
+  market_data преобразует внешние дискретные orderbook levels из CEX/DEX/AMM в
+  векторные flow-сегменты w_i (столбцы матрицы W ∈ R^{N×I}, N — активы, I — order
+  levels), собирает единую матрицу W и передаёт её в matching. Клиринг возникает
+  из условия баланса активов Wx=0 (multi-asset / triangular), БЕЗ создания
+  отдельной синтетической книги по парам — каждый внешний order level остаётся
+  отдельным flow-сегментом (сохранён provenance venue/source_order_id).
+
+source:
+  in: IN-014
+  file: incoming-docs/2026-07-07-F-05A-vectorized-external-liquidity-v1.md
+  meta: incoming-docs/IN-014.meta.md
+  fragmentMap: incoming-docs/IN-014.fragment-map.md
+  algorithm: variant_1_external_orders_to_W
+
+# L0 → L1 декомпозиция (IN-013). Use cases создаются на ingress-close.
+decomposedInto:
+  - UC-F05A-01  # Vectorize External Order Book
+  - UC-F05A-02  # Run Vector Clearing with F-09 Solver
+  - UC-F05A-03  # Display Vector Liquidity in UI
+  - UC-F05A-04  # Validate Algorithm on Real Exchange Order Books
+  - UC-F05A-05  # Replay Vector Clearing Scenario
+
+relatedFeatures:
+  - F-04   # общий batch cycle, BatchResult, FillEvent
+  - F-05   # базовая фича (Market Data), primary owner
+  - F-09   # основной потребитель (multileg_vector_solver, ExecutionGroup)
+  - F-11   # источник/нормализация внешних venue-стаканов (venue.liquidity.fob)
+  - F-12   # может использовать solver-результат для hedge/child orders
+  - F-13   # post-trade analytics
+  - F-15   # детерминированный replay
+  - F-17   # observability
+
+primaryComponents:
+  - market-data
+  - external-venues
+  - matching
+  - ledger
+  - risk
+  - observability
+  - gateway
+  - backtest
+
+executionMode:
+  - multileg_vector_solver
+
+# Код НЕ реализован (planned). Планируемые пути — см. implementation-plan.
+codePaths: []  # TODO: cpp/market_data/src/domain/vector_flow_segment.hpp и др. — при реализации
+
+protoContracts:
+  - contracts/proto/fob/marketdata/v1/vector_liquidity.proto  # TODO create (T-F05A-101)
+
+kafkaTopics:
+  produces:
+    - marketdata.vectorized   # TODO register (T-F05A-102)
+    - marketdata.snapshots
+    - risk.alerts
+  consumes:
+    - marketdata.raw
+    - venue.liquidity.fob     # F-11 нормализация (вход векторизации, D2/CN-IN014-03)
+    - batch.outputs
+    - fills
+    - execution.groups
+
+grpcServices:
+  exposes:
+    - fob.marketdata.v1.VectorLiquidityService.GetVectorizedLiquidity        # proto ✅, server TODO
+    - fob.marketdata.v1.VectorLiquidityService.GetVectorClearingDiagnostics  # proto ✅, server TODO
+  calls:
+    - MatchingInternal.solveVectorClearing  # internal
+
+restEndpoints:
+  - GET /api/v1/marketdata/vector-liquidity
+  - GET /api/v1/marketdata/vector-liquidity/{fixtureId}
+  - GET /api/v1/marketdata/vector-liquidity/{fixtureId}/W
+  - GET /api/v1/marketdata/vector-liquidity/{fixtureId}/solver-result
+  - GET /api/v1/execution-groups/{id}/vector-diagnostics
+webSocket:
+  - ws://api/market/vector
+
+postgresTables:   # TODO create (T-F05A-104)
+  - marketdata_config
+  - asset_basis
+  - venue_order_levels
+  - vector_flow_segments
+  - vectorization_runs
+clickhouseTables: # TODO create (T-F05A-105)
+  - vector_flow_segments_history
+  - vector_clearing_results
+  - surplus_events
+  - marketdata_snapshots
+  - effective_spreads
+
+uiScreens:
+  - Raw Order Book Depth
+  - Vector Liquidity Explorer
+  - W Matrix Heatmap
+  - Solver Result x_i
+  - Asset Residual Wx
+  - Clearing Graph
+  - Surplus / Exchange PnL
+  - Replay Fixture Diagnostics
+
+userStories:
+  - id: US-F05A-001
+    text: "Как трейдер, вижу, какие реальные уровни внешнего стакана были использованы для grouped execution."
+  - id: US-F05A-002
+    text: "Как маркет-мейкер, вижу, как стакан CEX/DEX преобразуется в vector flow liquidity."
+  - id: US-F05A-003
+    text: "Как оператор, вижу residual (Wx), surplus и статус solver convergence."
+  - id: US-F05A-004
+    text: "Как исследователь, загружаю реальные order book snapshots и доказываю корректность (W) и (x)."
+  - id: US-F05A-005
+    text: "Как пользователь F-09 combo, вижу, что grouped execution использует multi-asset liquidity, а не независимые legs."
+
+acceptanceCriteria:
+  - id: AC-F05A-001
+    text: "Каждый внешний order book level преобразуется в VectorFlowSegment."
+  - id: AC-F05A-002
+    text: "BID X/Y → w=e_X-P_eff·e_Y; ASK X/Y → w=-e_X+P_eff·e_Y (покрыто unit tests)."
+  - id: AC-F05A-003
+    text: "W, pH, D, q и sourceMap формируются для каждого vectorization run; каждый внешний level — отдельный столбец W (no synthetic pair book)."
+  - id: AC-F05A-004
+    text: "Solver проверяет Wx и записывает residual/residualNorm."
+  - id: AC-F05A-005
+    text: "Surplus явно показывается и не скрывается (ADR-044)."
+  - id: AC-F05A-006
+    text: "Используются реальные captured exchange order book fixtures минимум из двух venues; CI offline."
+  - id: AC-F05A-007
+    text: "UI показывает raw order book, W, x, Wx, residualNorm и source trace."
+  - id: AC-F05A-008
+    text: "UI-графики подтверждают корректность: residual по активам близок к нулю либо явно показан surplus."
+  - id: AC-F05A-009
+    text: "marketdata.vectorized публикуется и потребляется Matching."
+  - id: AC-F05A-010
+    text: "F-09 ExecutionGroup содержит ссылки на vectorized source levels."
+  - id: AC-F05A-011
+    text: "F-15 replay воспроизводит W, x, pi, residual детерминированно."
+  - id: AC-F05A-012
+    text: "Все данные диагностики сохраняются в ClickHouse."
+  - id: AC-F05A-013
+    text: "REST/WebSocket API отдают vector diagnostics для UI."
+  - id: AC-F05A-014
+    text: "Observability содержит метрики vectorization/solver/surplus/staleness."
+  - id: AC-F05A-015
+    text: "Definition of Done выполнен полностью."
+
+architectureDecisions:
+  - id: ADR-044
+    title: Surplus / EXCHANGE_PNL policy
+    status: proposed
+    file: docs/03-architecture/adr/ADR-044-surplus-exchange-pnl-policy.md
+  - id: ADR-045
+    title: QP solver backend (OSQP) — активирует/расширяет ADR-034
+    status: proposed
+    file: docs/03-architecture/adr/ADR-045-qp-solver-backend.md
+
+knownIssues:
+  - id: surplus-policy-open
+    severity: blocker
+    description: "ADR-044 surplus/EXCHANGE_PNL policy — proposed, нужно решение владельца (prod-default)."
+  - id: qp-solver-backend
+    severity: blocker
+    description: "ADR-045 QP backend (OSQP) — proposed; QP-решателя в matching пока нет (только bisection)."
+  - id: unit-dimensional-validation
+    severity: major
+    description: "KI-F05A-003 — строгая валидация размерностей активов/цен/rate/batch (dimensional_guard)."
+  - id: external-staleness
+    severity: major
+    description: "KI-F05A-004 — политика stale external order level до live execution."
+  - id: vector-replay-backtest-gap
+    severity: major
+    description: "AC-F05A-011 зависит от grouped/vector пути в cpp/backtest (тот же незакрытый разрыв AC-F09-010, CN-IN014-05)."
+  - id: docs-gate-not-satisfied
+    severity: process
+    description: "Preconditions (UC/sequences/contracts/data/test-plan) НЕ выполнены — код нельзя начинать (ingress-close IN-014 pending)."
+
+tests:
+  unit: []          # U-F05A-001..010 — plan (T-F05A-502)
+  integration: []   # I-F05A-001..010 — plan (T-F05A-503)
+  ui: []            # UI-F05A-001..008 — plan
+  replay: []        # R-F05A-001 — plan (T-F05A-504)
+  performance: []   # P-F05A-001..005 — plan (T-F05A-505)
+
+definitionOfDone:
+  docs: required
+  contracts: required
+  data: required
+  backend: required
+  ui: required
+  real_orderbook_tests: required
+  replay: required
+  observability: required
+
+implementationPlan: docs/implementation-plan/F-05A-vectorized-external-liquidity.tasks.md

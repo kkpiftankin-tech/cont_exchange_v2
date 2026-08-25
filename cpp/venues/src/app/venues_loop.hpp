@@ -1,46 +1,178 @@
 #pragma once
-// =============================================================================
-// VenuesLoop — MVP-симулятор внешних торговых площадок.
-//
-// Ответственности (в архитектуре):
-//   * Адаптеры к внешним venue (Binance/Coinbase/...). Сейчас это симулятор.
-//   * Публикация marketdata.raw — данные поступают в market_data сервис.
-//   * Чтение execution.intents и публикация execution.reports — это поток
-//     хедж-операций (matching попросил исполнить — venues исполнили).
-//
-// В MVP intents считаются мгновенно "filled" по limit_price (или по 100.00,
-// если limit не указан). Этого достаточно для проверки сквозного флоу.
-// =============================================================================
-
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <memory>
+#include <optional>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
+#include "app/execute_on_venue.hpp"
+#include "app/liquidity_curve_producer.hpp"
+#include "app/sim_execution_assembler.hpp"
+#include "app/sim_session_registry.hpp"
+#include "app/venue_sim_router.hpp"
+#include "app/snapshot_producer.hpp"
 #include "cex/common/kafka.hpp"
+#include "domain/venue_adapter.hpp"
+#include "infra/execution_report_producer.hpp"
+#include "infra/kafka_message_publisher.hpp"
+#include "infra/postgres_child_order_repository.hpp"
+#include "infra/postgres_hedgeflow_repository.hpp"
+#include "infra/postgres_synthetic_order_repository.hpp"
+#include "infra/venue_observability_producer.hpp"
 
 namespace cex::venues::app {
 
+struct VenueConfigRecord {
+  std::string venue_id;
+  std::string adapter_mode;
+  std::string ws_url;
+  std::string rest_base_url;
+  std::string rpc_url;
+  std::string chain_id;
+  std::string pool_address;
+  std::string venue_symbol;
+  uint32_t depth_levels{20};
+  std::string curve_level{"L3"};
+  bool synthetic_enabled{false};
+  uint32_t stale_threshold_ms{3000};
+  bool circuit_breaker_enabled{true};
+  uint32_t circuit_breaker_errors{10};
+  uint32_t circuit_breaker_window_ms{30000};
+  uint32_t circuit_breaker_cooldown_ms{30000};
+  bool is_active{true};
+  std::string routing_mode{"auto"};
+  int64_t updated_at_ms{0};
+};
+
+struct VenueRuntimeMetrics {
+  double stale_rate{0.0};
+  double snapshots_per_sec{0.0};
+  double last_curve_build_latency_ms{0.0};
+  double last_curve_confidence{0.0};
+  std::string last_curve_requested_level;
+  std::string last_curve_effective_level;
+  std::string last_curve_degradation_reason;
+  std::string last_curve_quality_action;
+};
+
+// "Venues" service responsibilities in architecture:
+// - adapters to external venues (CCXT in other language; here MVP simulator).
+// - publish marketdata.raw
+// - consume execution.intents and publish execution.venue (+ legacy execution.reports)
 class VenuesLoop {
  public:
-  explicit VenuesLoop(const std::string& brokers);
+  explicit VenuesLoop(const std::string& brokers,
+                      ISnapshotStorage* snapshot_storage = nullptr);
 
-  // Поднимает оба фоновых потока. Не блокирующий вызов.
   void start();
-  // Останов и join обоих потоков (для тестов / graceful shutdown).
   void stop();
 
+  std::vector<VenueConfigRecord> ListVenueConfigs() const;
+  std::optional<VenueConfigRecord> GetVenueConfig(const std::string& venue_id) const;
+  bool UpsertVenueConfig(const VenueConfigRecord& config, std::string* error = nullptr);
+  bool DeleteVenueConfig(const std::string& venue_id);
+  bool ForceReconnect(const std::string& venue_id, std::string* error = nullptr);
+
+  std::vector<domain::VenueHeartbeat> ListVenueHeartbeats() const;
+  std::optional<domain::VenueHeartbeat> GetVenueHeartbeat(const std::string& venue_id) const;
+  std::optional<VenueRuntimeMetrics> GetVenueRuntimeMetrics(const std::string& venue_id) const;
+  std::optional<fob::venue::v1::VenueSnapshot> GetLastVenueSnapshot(
+      const std::string& venue_id) const;
+  std::optional<fob::venue::v1::VenueLiquidityCurve> GetLastVenueCurve(
+      const std::string& venue_id) const;
+  std::vector<fob::venue::v1::VenueSnapshot> GetVenueSnapshots(
+      const std::string& venue_id, std::size_t limit) const;
+  std::vector<fob::venue::v1::VenueLiquidityCurve> GetVenueCurves(
+      const std::string& venue_id, std::size_t limit) const;
+  std::vector<fob::orders::v1::SyntheticFlowOrder> GetVenueSynthetics(
+      const std::string& venue_id, std::size_t limit) const;
+
+  // F-12 / IN-008 DoD-4 — externally owned PG repos for hedgeflows and
+  // child_orders. Pointers may be null (degrades to "no-persistence" path
+  // — VenuesLoop continues to publish to Kafka and PG simply doesn't
+  // reflect HedgeFlow state).
+  void SetHedgeflowRepository(infra::PostgresHedgeflowRepository* repo) {
+    hedgeflow_repo_ = repo;
+  }
+  void SetChildOrderRepository(infra::PostgresChildOrderRepository* repo) {
+    child_order_repo_ = repo;
+  }
+
+  // F-20 Phase 4 — live registry of active SimSessions, populated by the
+  // sim.config consume loop (hot reload). Exposed so the VenueSimRouter
+  // (next wiring step) can read routing decisions from it.
+  SimSessionRegistry& sim_session_registry() { return sim_session_registry_; }
+
  private:
-  // Поток-1: периодически публикует синтетические тикеры в marketdata.raw.
   void md_publish_loop();
-  // Поток-2: читает execution.intents и сразу публикует execution.reports.
   void exec_consume_loop();
+  void sim_config_consume_loop();
+  // F-09 UX: лёгкий тикер-фид по доп. символам (VENUES_FEED_SYMBOLS) — отдельно от
+  // core md_publish_loop, чтобы не задеть F-11/F-12. Публикует только тикеры.
+  void extra_ticker_loop();
+  // F-20 Phase 4 — SIM/SHADOW fork: simulate the child order against the
+  // cached live LOB and publish the sim ExecutionReport + SimExecutionAnnotation
+  // to the isolated sim.* topics (ADR-015). Applies the sampled venue latency
+  // as a (capped) delay before publishing.
+  void PublishSimExecution(const fob::execution::v1::ExecutionIntent& intent,
+                           const RouteDecision& decision);
+  void connect_and_subscribe_defaults();
+  domain::VenueAdapter* find_adapter(const std::string& venue_id);
+  void reload_producers_locked();
+  void apply_runtime_config_locked(const VenueConfigRecord& config);
 
   std::string brokers_;
-  cex::common::KafkaProducer producer_;  // публикует и MD, и репорты
-  cex::common::KafkaConsumer consumer_;  // читает execution.intents
+  ISnapshotStorage* snapshot_storage_{nullptr};
+  cex::common::KafkaProducer producer_;
+  cex::common::KafkaConsumer consumer_;
+  infra::VenueObservabilityProducer observability_;
+  std::unique_ptr<infra::ExecutionReportProducer> execution_report_producer_;
+  std::unique_ptr<infra::KafkaMessagePublisher> kafka_publisher_;
+  std::unique_ptr<infra::PostgresSyntheticOrderRepository> synthetic_order_repository_;
+  // F-12 / IN-008 DoD-4 — non-owning pointers (lifetime managed by main.cpp).
+  infra::PostgresHedgeflowRepository* hedgeflow_repo_{nullptr};
+  infra::PostgresChildOrderRepository* child_order_repo_{nullptr};
+  std::vector<std::unique_ptr<domain::VenueAdapter>> adapters_;
+  std::unique_ptr<SnapshotProducer> snapshot_producer_;
+  std::unique_ptr<LiquidityCurveProducer> liquidity_curve_producer_;
+  ExecuteOnVenue execute_on_venue_;
+  SimSessionRegistry sim_session_registry_;
+  VenueSimRouter sim_router_{sim_session_registry_};
+  SimExecutionAssembler sim_assembler_;
+  SnapshotProducerConfig snapshot_config_{};
+  LiquidityCurveProducerConfig curve_config_{};
+  domain::VenueSubscription default_subscription_{};
+  domain::VenueSnapshotRequest default_snapshot_request_{};
+  mutable std::mutex runtime_mu_;
+  std::unordered_map<std::string, VenueConfigRecord> venue_configs_;
+  mutable std::mutex config_mu_;
+  std::size_t history_capacity_{200};
+  mutable std::mutex data_mu_;
+  std::unordered_map<std::string, domain::VenueHeartbeat> last_heartbeats_;
+  std::unordered_map<std::string, fob::venue::v1::VenueSnapshot> last_snapshots_;
+  std::unordered_map<std::string, std::deque<fob::venue::v1::VenueSnapshot>> snapshot_history_;
+  std::unordered_map<std::string, std::deque<fob::venue::v1::VenueLiquidityCurve>> curve_history_;
+  std::unordered_map<std::string, std::deque<fob::orders::v1::SyntheticFlowOrder>> synthetic_history_;
+  std::unordered_map<std::string, uint64_t> total_snapshots_by_venue_;
+  std::unordered_map<std::string, uint64_t> stale_snapshots_by_venue_;
+  std::unordered_map<std::string, VenueRuntimeMetrics> runtime_metrics_by_venue_;
+  std::chrono::steady_clock::time_point md_started_at_{};
+  std::size_t next_exec_adapter_idx_{0};
 
   std::atomic<bool> running_{false};
   std::thread t_md_;
   std::thread t_exec_;
+  std::thread t_sim_config_;
+  std::thread t_extra_ticker_;
+  // Сериализует RequestSnapshot между md_publish_loop и extra_ticker_loop
+  // (общий binance-адаптер; rest_client_->Get не потокобезопасен на shared handle).
+  std::mutex snapshot_mu_;
 };
 
 }  // namespace cex::venues::app

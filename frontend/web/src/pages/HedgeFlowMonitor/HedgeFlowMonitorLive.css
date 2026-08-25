@@ -1,0 +1,139 @@
+/* PR-F02-014: PR-F02-013 swapped the page wrapper from .hedge-page to
+ * .profile-container so the page picks up the customer-app radial
+ * gradient instead of standalone ops-monitor chrome. But
+ * .hedge-summary-card / .hedge-list-panel / .hedge-drilldown all read
+ * `background: var(--hedge-panel)` (defined originally in .hedge-page
+ * which is gone now). Without those vars they fell back to transparent,
+ * which over the bright gradient read as "white panels".
+ * Re-declare the same hedge-* variables on .hedge-shell so they cascade
+ * the same way they did before. .hedge-shell is now the local
+ * variable scope for everything F-12 specific.
+ */
+.hedge-shell {
+  --hedge-bg: #0a0514;
+  --hedge-panel: rgba(20, 10, 40, 0.86);
+  --hedge-panel-strong: rgba(27, 14, 50, 0.94);
+  --hedge-border: rgba(167, 74, 255, 0.26);
+  --hedge-border-strong: rgba(167, 74, 255, 0.45);
+  --hedge-text: #f6f2ff;
+  --hedge-muted: #a799bf;
+  --hedge-soft: #d6c2ff;
+  color: var(--hedge-text);
+}
+
+/* Явный тёмный фон панели и таблицы — НЕ полагаемся только на var(--hedge-panel).
+ * .hedge-summary-card имеет собственный explicit-градиент (потому карточки тёмные
+ * всегда), а .hedge-list-panel зависит лишь от переменной. Если var не
+ * разрезолвится (другой scope / устаревший кэш), панель становится прозрачной, а
+ * текст строк td — почти белый (#ffffffeb) → числовые значения исчезают на светлом
+ * фоне (видны лишь цветные BUY/бейджи). Даём гарантированно тёмную базу. */
+.hedge-list-panel {
+  background: linear-gradient(180deg, #1e1237f0, #0d071af5);
+}
+
+.hedge-live-table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.hedge-live-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-family: 'Roboto Mono', 'Menlo', monospace;
+  background: #120a26;
+}
+
+.hedge-live-table thead th {
+  text-align: left;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+
+.hedge-live-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+}
+
+.hedge-live-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hedge-live-table tbody tr.hedge-row-clickable {
+  cursor: pointer;
+}
+
+.hedge-live-table tbody tr.hedge-row-clickable:hover {
+  background: rgba(180, 140, 255, 0.08);
+}
+
+.hedge-live-table .hedge-id {
+  color: rgba(180, 160, 255, 0.9);
+  font-family: 'Roboto Mono', monospace;
+  cursor: help;
+}
+
+.hedge-live-table .hedge-side-buy {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.hedge-live-table .hedge-side-sell {
+  color: #f44336;
+  font-weight: 600;
+}
+
+.hedge-live-table .pnl-pos {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.hedge-live-table .pnl-neg {
+  color: #f44336;
+  font-weight: 600;
+}
+
+.hedge-status-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.hedge-status-badge.status-OPEN {
+  background: rgba(80, 130, 255, 0.18);
+  color: #6fa8ff;
+}
+
+.hedge-status-badge.status-COMPLETED {
+  background: rgba(76, 175, 80, 0.18);
+  color: #4caf50;
+}
+
+.hedge-status-badge.status-UNDERFILLED {
+  background: rgba(255, 180, 0, 0.18);
+  color: #ffb400;
+}
+
+.hedge-status-badge.status-REJECTED,
+.hedge-status-badge.status-RISK_REJECTED {
+  background: rgba(244, 67, 54, 0.18);
+  color: #f44336;
+}
+
+.hedge-status-badge.status-CANCELLED {
+  background: rgba(160, 160, 160, 0.18);
+  color: #999;
+}

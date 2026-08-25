@@ -1,46 +1,246 @@
 feature:
   id: F-11
-  name: External Venues LOB to FOB
-  status: not-implemented
+  name: External Venues / LOB to FOB
+  status: in-progress-mvp
   owner: core-team
+  level: kite
+
+# Theoretical foundation (IN-012, 2026-04-15) — типология 1D/2D агентов
+# для калибровки depth_curve_builder (LOB→FOB conversion).
+# См. ADR-035, entities.md §Continuous-Order Primitives, depth_curve_builder.cpp.
+theoreticalFoundation:
+  source: IN-012
+  ref: incoming-docs/2026-04-15-continuous-order-market-academic-v1.md
+  sections: ["§5.1", "§5.2", "§A"]
+  adr: ADR-035
+  primitives: [StandardAgent, LinearFeeAgent, IndependentAgent2D, PortfolioAgent]
 
 description: >
-  Преобразование внешнего лимитного ордербука (LOB) с Binance/Coinbase в
-  FOB-представление (price range + speed) для подачи в matching solver
-  как источник внешней ликвидности.
+  Подключение внешних торговых площадок (CEX/DEX/AMM), нормализация их
+  ордербуков в VenueSnapshot и непрерывное преобразование LOB → FOB в
+  VenueLiquidityCurve. Кривые публикуются в Kafka (venue.liquidity.fob)
+  и опционально материализуются в SyntheticFlowOrder для совместимости
+  с FlowOrder-моделью matching. Параллельно работает Venue Health &
+  Routing Service: считает health-score, управляет circuit breaker
+  per-venue (CLOSED/OPEN/HALF_OPEN) и публикует venue.health для
+  Matching / Risk / Execution Planning. Конфигурация площадок хранится
+  в PostgreSQL venue_config с hot reload через Admin API.
+  Реализация делится на два compose-сервиса: cpp/venues (External
+  Venues Connector + Normalizer + Liquidity Curve Builder + Execution
+  Adapter) и cpp/venue_health (Health & Routing).
 
 primaryComponents:
-  - venues
-  - market-data
-  - matching
+  - external-venues-connector
+  - venue-market-data-normalizer
+  - venue-liquidity-curve-builder
+  - venue-health-routing
+  - venue-execution-adapter
 
 protoContracts:
+  - contracts/proto/fob/venue/v1/venue.proto
   - contracts/proto/fob/marketdata/v1/marketdata_raw.proto
   - contracts/proto/fob/execution/v1/execution.proto
+  - contracts/proto/fob/orders/v1/orders.proto         # SyntheticFlowOrder
+  - contracts/proto/fob/common/v1/common.proto
+
+storageDependencies:
+  postgresql:
+    - venue_config        # площадки + конфиг адаптера, hot reload через Admin API
+    - synthetic_orders    # производные SyntheticFlowOrder (lifecycle/audit)
+  clickhouse:
+    - venue_snapshots          # history of VenueSnapshot (≥ 90 days retention)
+    - venue_liquidity_curves   # history of VenueLiquidityCurve
 
 codePaths:
+  - cpp/venues/src/main.cpp
   - cpp/venues/src/app/venues_loop.cpp
+  - cpp/venues/src/app/venues_loop.hpp
+  - cpp/venues/src/app/snapshot_producer.cpp
+  - cpp/venues/src/app/snapshot_producer.hpp
+  - cpp/venues/src/app/liquidity_curve_producer.cpp
+  - cpp/venues/src/app/liquidity_curve_producer.hpp
+  - cpp/venues/src/app/execute_on_venue.cpp
+  - cpp/venues/src/app/execute_on_venue.hpp
+  - cpp/venues/src/domain/normalize_snapshot.cpp
+  - cpp/venues/src/domain/normalize_snapshot.hpp
+  - cpp/venues/src/domain/snapshot_status.cpp
+  - cpp/venues/src/domain/snapshot_status.hpp
+  - cpp/venues/src/domain/depth_canonicalizer.cpp
+  - cpp/venues/src/domain/depth_canonicalizer.hpp
+  - cpp/venues/src/domain/depth_curve_builder.cpp
+  - cpp/venues/src/domain/depth_curve_builder.hpp
+  - cpp/venues/src/domain/amm_pool_extractor.cpp
+  - cpp/venues/src/domain/amm_pool_extractor.hpp
+  - cpp/venues/src/domain/amm_virtual_lob.cpp
+  - cpp/venues/src/domain/amm_virtual_lob.hpp
+  - cpp/venues/src/domain/amm_direct_fob.cpp
+  - cpp/venues/src/domain/amm_direct_fob.hpp
+  - cpp/venues/src/domain/venue_adapter.hpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.cpp
+  - cpp/venues/src/infra/cex_ws_rest_adapter.hpp
+  - cpp/venues/src/infra/cex_local_lob_assembler.cpp
+  - cpp/venues/src/infra/cex_local_lob_assembler.hpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+  - cpp/venues/src/infra/dex_amm_rpc_adapter.hpp
+  - cpp/venues/src/infra/simulated_venue_adapter.cpp
+  - cpp/venues/src/infra/venue_sim_adapter.cpp
+  - cpp/venues/src/infra/snapshot_clickhouse_writer.cpp
+  - cpp/venues/src/infra/snapshot_clickhouse_writer.hpp
+  - cpp/venues/src/infra/postgres_venue_config_repository.cpp
+  - cpp/venues/src/infra/postgres_venue_config_repository.hpp
+  - cpp/venues/src/infra/postgres_synthetic_order_repository.cpp
+  - cpp/venues/src/infra/postgres_synthetic_order_repository.hpp
+  - cpp/venues/src/infra/execution_intents_consumer.cpp
+  - cpp/venues/src/infra/execution_intents_consumer.hpp
+  - cpp/venues/src/infra/execution_report_producer.cpp
+  - cpp/venues/src/infra/execution_report_producer.hpp
+  - cpp/venues/src/infra/venue_observability_producer.cpp
+  - cpp/venues/src/infra/venue_observability_producer.hpp
+  - cpp/venue_health/src/main.cpp
+  - cpp/venue_health/src/app/service.cpp
+  - cpp/venue_health/src/app/service.hpp
+  - cpp/venue_health/src/domain/entities/venue_state.cpp
+  - cpp/venue_health/src/domain/entities/venue_state.hpp
+  - cpp/venue_health/src/domain/entities/circuit_breaker.cpp
+  - cpp/venue_health/src/domain/entities/circuit_breaker.hpp
+  - cpp/venue_health/src/domain/entities/config.hpp
+  - cpp/venue_health/src/domain/entities/raw_report.hpp
+  - cpp/venue_health/src/domain/ports/i_health_state_publisher.hpp
+  - cpp/venue_health/src/infra/kafka/kafka_consumer.cpp
+  - cpp/venue_health/src/infra/kafka/kafka_producer.cpp
+  - cpp/venue_health/src/infra/mappers/raw_report.cpp
+  - cpp/venue_health/src/infra/mappers/venue_state.cpp
 
 kafkaTopics:
   produces:
-    - marketdata.raw
-  consumes: []
+    - venue.snapshots          # VenueSnapshot (cpp/venues)
+    - venue.liquidity.fob      # VenueLiquidityCurve (cpp/venues)
+    - venue.synthetic          # SyntheticFlowOrder (cpp/venues, опционально)
+    - venue.health             # VenueHealth (cpp/venues — RAW, cpp/venue_health — AGGREGATED)
+    - execution.venue          # ExecutionReport for cross-venue hedging (cpp/venues)
+    - marketdata.raw           # legacy MarketDataRaw (для F-05; постепенно вытесняется venue.snapshots)
+    - execution.reports        # legacy execution reports (совместимость)
+  consumes:
+    - execution.intents        # ExecutionIntent → child orders (cpp/venues)
+    - venue.health             # raw → aggregated (cpp/venue_health)
 
 grpcServices:
-  exposes: []
+  exposes: []                   # F-11 публикует только REST Admin API + Kafka
   calls: []
 
+restApi:
+  base: /api/v1/venues
+  endpoints:
+    - GET /api/v1/venues
+    - GET /api/v1/venues/{venueId}
+    - POST /api/v1/venues
+    - PUT /api/v1/venues/{venueId}
+    - DELETE /api/v1/venues/{venueId}
+    - POST /api/v1/venues/{venueId}/reconnect
+    - POST /api/v1/venues/{venueId}/enable
+    - POST /api/v1/venues/{venueId}/disable
+    - POST /api/v1/venues/{venueId}/routing-mode
+    - GET /api/v1/venues/{venueId}/snapshots
+    - GET /api/v1/venues/{venueId}/curves
+    - GET /api/v1/venues/{venueId}/synthetics
+    - GET /api/v1/venues/health
+
 acceptanceCriteria:
-  - "venues подключается к real venue (REST/WS)"
-  - "OrderBookL2 transformиruется в FOB-curve и публикуется"
-  - "matching solver использует внешнюю ликвидность через виртуальные FlowOrder"
+  - "External Venues Connector подключается минимум к 2 CEX (Binance, Coinbase) и 1 DEX/AMM (Uniswap v3) и эмитит нормализованные VenueSnapshot."
+  - "Venue Market Data Normalizer публикует VenueSnapshot в Kafka venue.snapshots и в ClickHouse venue_snapshots с retention ≥ 90 дней."
+  - "Venue Liquidity Curve Builder строит p(q), S(q), L(v) в режимах L1/L2/L3 и публикует VenueLiquidityCurve в venue.liquidity.fob."
+  - "Stale detection: при превышении STALE_THRESHOLD_MS не строятся новые FOB-кривые; обновляется venue.health со status=STALE."
+  - "Circuit breaker per-venue реализует FSM CLOSED → OPEN → HALF_OPEN → CLOSED по параметрам CIRCUIT_BREAKER_ERRORS/WINDOW_S/COOLDOWN_S."
+  - "Venue Health & Routing Service агрегирует health-score (0..1) и публикует AGGREGATED VenueHealth ≤ 1 секунды после инцидента."
+  - "DEX/AMM без классического стакана: синтез virtual LOB через AMM pool extractor + amm_virtual_lob."
+  - "Admin API CRUD venue_config + hot reload без рестарта сервиса; изменения применяются ≤ batch_interval_ms."
+  - "Производное построение SyntheticFlowOrder из VenueLiquidityCurve по signal synthetic_enabled (опционально, для совместимости с matching v1)."
+  - "Venue Execution Adapter принимает ExecutionIntent → child orders → publishes ExecutionReport в execution.venue."
+  - "p95 latency получения VenueSnapshot < 500 ms."
+  - "p95 LOB→FOB conversion < 50 ms на инструмент в режимах L1/L2."
+  - "Cost approximation error epsilon1 ≤ 1% на рабочем диапазоне объёмов."
+  - "Graceful degradation L3 → L2 → L1 → OFF при ухудшении данных."
+  - "Логирование версий моделей LOB-FOB (level, schema_version, producer_version) для backtest/replay (F-15)."
 
 knownIssues:
-  - id: no-real-venue-connector
-    severity: blocker
-    description: В cpp/venues только симулятор; нет реальных коннекторов
+  - id: l3-calibration-source-undefined
+    severity: feature-gap
+    description: >
+      L3 (Calibrated) калибруется по execution reports, но источник
+      (execution.reports vs execution.venue, окно ретроспективы,
+      политика отбора венюй) не зафиксирован спецификацией. См.
+      open-questions.md §2.
+  - id: routing-policy-not-formalized
+    severity: feature-gap
+    description: >
+      routing_recommendation (allow/caution/avoid/block) рассчитывается
+      в cpp/venues (venues_loop.cpp:170-184), но единого формального
+      описания политики (пороги health-score, веса метрик) нет.
+      Дублируется в Execution Planning (F-12).
+  - id: marketdata-raw-vs-venue-snapshots-overlap
+    severity: contract-drift
+    description: >
+      cpp/venues публикует и в legacy marketdata.raw (для F-05), и в
+      новый venue.snapshots (для F-11). Дублирование данных. План —
+      постепенно перенести consumers F-05 на venue.snapshots, оставив
+      marketdata.raw только для совместимости. Conflict Note C-2 в
+      venue-topics.md.
+  - id: venue-health-dual-producer
+    severity: contract-drift
+    description: >
+      В venue.health пишут оба сервиса: cpp/venues публикует RAW
+      heartbeat (через VenueObservabilityProducer), cpp/venue_health
+      потребляет и публикует AGGREGATED. event_type разделяет, но
+      одна topic+consumer-group может смешать их. Conflict Note C-3
+      в venue-topics.md.
+  - id: synthetic-orders-table-shape
+    severity: doc-drift
+    description: >
+      Поля таблицы synthetic_orders в IN-004 (syntheticid, venueid,
+      pl, ph, qrate, qmax, curveid, snapshotid, status) частично не
+      совпадают с тем, что использует
+      PostgresSyntheticOrderRepository (см. cpp/venues/src/infra/
+      postgres_synthetic_order_repository.cpp). Требуется выравнивание
+      перед T-F11-150.
+  - id: rest-api-versioning-mixed
+    severity: doc-drift
+    description: >
+      HTTP-маршруты venues admin/public смешаны: /admin/v1/venue-config/*
+      (только GET/POST/PUT/DELETE по venue_config) и /api/v1/venues/*
+      (полный набор операций). Спецификация описывает только
+      /api/v1/venues/*. /admin/v1/* считать deprecated alias.
 
 tests:
-  unit: []
-  integration: []
+  unit:
+    - cpp/venues/tests/normalize_snapshot_test.cpp
+    - cpp/venues/tests/depth_canonicalizer_test.cpp
+    - cpp/venues/tests/depth_curve_builder_test.cpp
+    - cpp/venues/tests/depth_curve_dual_test.cpp
+    - cpp/venues/tests/depth_curve_regularization_test.cpp
+    - cpp/venues/tests/amm_pool_extractor_test.cpp
+    - cpp/venues/tests/amm_virtual_lob_test.cpp
+    - cpp/venues/tests/snapshot_status_test.cpp
+    - cpp/venues/tests/snapshot_producer_test.cpp
+    - cpp/venues/tests/liquidity_curve_producer_test.cpp
+    - cpp/venues/tests/venue_adapter_contract_test.cpp
+    - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+    - cpp/venues/tests/cex_local_lob_assembler_test.cpp
+    - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+    - cpp/venues/tests/simulated_venue_adapter_test.cpp
+    - cpp/venues/tests/venue_sim_adapter_test.cpp
+    - cpp/venues/tests/venue_observability_producer_test.cpp
+    - cpp/venues/tests/execute_on_venue_test.cpp
+    - cpp/venues/tests/execution_report_producer_test.cpp
+    - cpp/venue_health/tests/domain/venue_state_test.cpp
+    - cpp/venue_health/tests/domain/circuit_breaker_test.cpp
+    - cpp/venue_health/tests/app/service_test.cpp
+  integration:
+    - cpp/venues/tests/backtest_parity_check_test.cpp
+    - cpp/venues/tests/backtest_synthetic_scenarios_test.cpp
+    - Testing/f11_test2_e2e.sh
+    - Testing/f11_test4_quality.sh
+  load:
+    - Testing/f11_test3_load.sh
+  manual:
+    - Testing/f11_dex_mock.py
   contract: []

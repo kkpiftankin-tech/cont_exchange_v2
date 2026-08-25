@@ -1,0 +1,154 @@
+# F-12 Execution Hedge alert rules (DoD-16 / PR-F12-12).
+#
+# Source metrics: frontend-api job (job_name=frontend-api-hedge),
+# aggregated from PG hedgeflows + CH execution_reports.
+#
+# Thresholds calibrated for dev/staging. Production tightening pending
+# first real workload; document re-tunes in the change log of
+# docs/11-operations/runbooks/F-12-incidents.md.
+#
+# Alert names match the labels used in feature.yaml DoD-16:
+#   HEDGE_UNDERFILLED, SLIPPAGE_EXCEEDED, LATENCY_SLA_BREACH,
+#   VENUE_CIRCUIT_OPEN (last one is sourced from F-11 venue.health
+#   topic and lives outside this rules file).
+
+groups:
+  - name: f12-hedge-execution
+    rules:
+
+      # DoD-16 alert: HEDGE_UNDERFILLED.
+      # Fires when underfilled hedgeflow count for any symbol > 0 over
+      # the past 5 min. Underfilled = target_qty - filled_qty exceeded
+      # the policy tolerance and the flow expired.
+      - alert: F12HedgeUnderfilled
+        expr: max by (symbol) (f12_hedge_underfill_total) > 0
+        for: 5m
+        labels:
+          severity: warning
+          feature: F-12
+        annotations:
+          summary: F-12 hedge flow(s) ended UNDERFILLED for symbol {{ $labels.symbol }}
+          description: |
+            Over the last 24h, {{ $value }} hedgeflow(s) for {{ $labels.symbol }}
+            terminated with status=UNDERFILLED. Check the Reconciliation Alerts
+            page (/reconciliation-alerts-live) and follow the
+            "Mass UNDERFILLED" playbook in F-12-incidents.md.
+          runbook: docs/11-operations/runbooks/F-12-incidents.md#incident-2--mass-underfilled-hedge_underfill-alert-spam
+
+      # DoD-16 alert: HEDGE_UNDERFILLED — escalation tier.
+      - alert: F12HedgeUnderfilledHigh
+        expr: max by (symbol) (f12_hedge_underfill_total) >= 10
+        for: 5m
+        labels:
+          severity: critical
+          feature: F-12
+        annotations:
+          summary: F-12 hedge flows are mass-underfilling for {{ $labels.symbol }}
+          description: |
+            10+ hedgeflows in the last 24h ended UNDERFILLED for
+            {{ $labels.symbol }}. Possible causes: venue degradation,
+            timeout_ms too tight, venues consumer lag. Escalate to
+            core-team if not resolved in 15m.
+
+      # DoD-16 alert: SLIPPAGE_EXCEEDED.
+      # Fires when 5-min p95 slippage for any (venue, symbol) exceeds
+      # the policy maximum (HEDGE_INTENT_MAX_SLIPPAGE_BPS, default 50
+      # in dev). NOTE: in dev sim mode this metric stays at 0 due to
+      # venues-sim-zero-execution-price knownIssue — the alert will
+      # never fire until real adapters land.
+      - alert: F12SlippageExceeded
+        expr: f12_hedge_slippage_bps_p95 > 50
+        for: 5m
+        labels:
+          severity: warning
+          feature: F-12
+        annotations:
+          summary: F-12 hedge slippage p95 exceeded 50 bps on {{ $labels.venue_id }} / {{ $labels.symbol }}
+          description: |
+            5-minute p95 slippage_bps was {{ $value }} bps for
+            venue={{ $labels.venue_id }} symbol={{ $labels.symbol }}.
+            Threshold: 50 bps. Run the "Elevated slippage" playbook
+            (Incident 1) — likely a venue-specific issue.
+
+      - alert: F12SlippageExceededCritical
+        expr: f12_hedge_slippage_bps_p95 > 200
+        for: 2m
+        labels:
+          severity: critical
+          feature: F-12
+        annotations:
+          summary: F-12 hedge slippage p95 above 200 bps on {{ $labels.venue_id }}
+          description: |
+            Slippage p95 = {{ $value }} bps — extreme. Consider
+            disabling {{ $labels.venue_id }} from
+            HEDGE_INTENT_ALLOWED_VENUES until investigation completes.
+
+      # DoD-16 alert: stuck-flow detector.
+      # Fires when the oldest OPEN hedgeflow age exceeds 5 minutes.
+      # Typical timeout_ms is 30s; > 5m means the flow is stuck or
+      # venues consumer is lagging badly.
+      - alert: F12HedgeFlowStuck
+        expr: f12_hedge_open_age_seconds_max > 300
+        for: 2m
+        labels:
+          severity: warning
+          feature: F-12
+        annotations:
+          summary: F-12 hedgeflow stuck OPEN > 5min on {{ $labels.symbol }}
+          description: |
+            The oldest OPEN hedgeflow for {{ $labels.symbol }} is
+            {{ $value }} seconds old. Expected timeout_ms is 30000
+            (30s). Check venues consumer lag (rpk group describe
+            venues) and matching+venues service logs.
+          runbook: docs/11-operations/runbooks/F-12-incidents.md#incident-3--latency-sla-breach-latency_sla_breach
+
+      # DoD-16 alert: high reject rate.
+      - alert: F12HedgeRejectRateHigh
+        expr: |
+          sum by (symbol) (f12_hedge_reject_total)
+          /
+          (sum by (symbol) (f12_hedge_reject_total) +
+           sum by (symbol) (f12_hedge_reports_filled_total) + 1)
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          feature: F-12
+        annotations:
+          summary: F-12 hedge reject rate > 10% for {{ $labels.symbol }}
+          description: |
+            More than 10% of hedge attempts for {{ $labels.symbol }}
+            are being rejected over the past period. Likely a venue
+            issue, a tight risk policy, or a pre-hedge check
+            misconfiguration.
+
+      # Aggregated PnL alert — sanity check that hedge_pnl isn't running
+      # away into the negative.
+      - alert: F12HedgePnlNegativeDrift
+        expr: sum(f12_hedge_pnl_sum) < -1000
+        for: 10m
+        labels:
+          severity: warning
+          feature: F-12
+        annotations:
+          summary: F-12 cumulative hedge PnL has drifted below -1000 USDT
+          description: |
+            The 24-hour aggregate hedge_pnl sum is {{ $value }} USDT.
+            This may indicate consistently adverse slippage, an
+            incorrect reference_mid feed, or sign-flip bugs in the
+            ledger. Verify on the Hedge PnL Dashboard
+            (/hedge-pnl-live) and run Incident 5 playbook.
+
+      # Self-test: frontend-api scrape itself works.
+      - alert: F12MetricsExporterDown
+        expr: up{job="frontend-api-hedge"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          feature: F-12
+        annotations:
+          summary: frontend-api metrics endpoint is down
+          description: |
+            Prometheus cannot scrape frontend-api:8090/metrics.
+            All F-12 dashboard data is also unavailable. Check
+            frontend-api container status.

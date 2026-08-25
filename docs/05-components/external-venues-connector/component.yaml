@@ -1,0 +1,107 @@
+component:
+  id: external-venues-connector
+  name: External Venues Connector
+  layer: edge
+  status: active-mvp
+  codePath: cpp/venues
+  runtime: cpp/venues
+  owner: core-team
+
+responsibility:
+  summary: >
+    Низкоуровневый компонент подключения к внешним площадкам (CEX/DEX/AMM).
+    WebSocket / REST для CEX; RPC + event subscription для DEX/AMM.
+    Управляет соединениями, heartbeat'ом, reconnect (с backoff), локальной
+    сборкой LOB из инкрементов. Передаёт сырые сообщения Normalizer'у,
+    отдельно публикует RAW VenueHealth в Kafka venue.health.
+
+sourceTreeEvidence:
+  app:
+    - cpp/venues/src/app/venues_loop.cpp
+    - cpp/venues/src/app/venues_loop.hpp
+  domain:
+    - cpp/venues/src/domain/venue_adapter.hpp
+  infra:
+    - cpp/venues/src/infra/cex_ws_rest_adapter.cpp
+    - cpp/venues/src/infra/cex_ws_rest_adapter.hpp
+    - cpp/venues/src/infra/cex_local_lob_assembler.cpp
+    - cpp/venues/src/infra/cex_local_lob_assembler.hpp
+    - cpp/venues/src/infra/dex_amm_rpc_adapter.cpp
+    - cpp/venues/src/infra/dex_amm_rpc_adapter.hpp
+    - cpp/venues/src/infra/simulated_venue_adapter.cpp
+    - cpp/venues/src/infra/venue_sim_adapter.cpp
+    - cpp/venues/src/infra/venue_observability_producer.cpp
+  build:
+    - cpp/venues/CMakeLists.txt
+
+features:
+  - F-11
+  - F-12
+
+protoContracts:
+  - contracts/proto/fob/venue/v1/venue.proto
+  - contracts/proto/fob/common/v1/common.proto
+
+entities:
+  - VenueConfig
+  - VenueAdapter (interface)
+  - VenueHeartbeat
+  - VenueConnectionStatus (connected / stale / disconnected / empty)
+
+dependencies:
+  upstream: []
+  downstream:
+    - venue-market-data-normalizer
+    - venue-health-routing
+
+kafkaProduces:
+  - topic: venue.health
+    messageType: fob.venue.v1.VenueHealth
+    eventType: RAW
+    partitionKey: venue_id
+  - topic: marketdata.raw
+    messageType: fob.marketdata.v1.MarketDataRaw
+    partitionKey: venue|symbol
+    status: legacy-overlap-with-venue.snapshots
+
+kafkaConsumes: []
+
+env:
+  - name: VENUES_ADAPTER_MODE
+    default: multi_real
+    note: multi_real | cex_ws_rest | dex_amm_rpc | simulator
+  - name: BINANCE_VENUE_ID
+    default: binance
+  - name: COINBASE_VENUE_ID
+    default: coinbase
+  - name: UNISWAP_VENUE_ID
+    default: uniswap_v3
+  - name: STALE_THRESHOLD_MS
+    default: 15000
+  - name: VENUES_POSTGRES_DSN
+    note: optional; if set — конфиг площадок загружается из venue_config
+
+knownIssues:
+  - id: legacy-marketdata-overlap
+    severity: contract-drift
+    description: >
+      Connector публикует и в venue.snapshots (через Normalizer), и в legacy
+      marketdata.raw. См. Conflict Note C-2 в feature/F-11/README.md.
+  - id: no-rate-limit-token-bucket
+    severity: nice-to-have
+    description: >
+      Binance/Coinbase имеют per-key REST/WS квоты; явный token-bucket не
+      реализован — полагаемся на adapter-internal backoff.
+
+tests:
+  unit:
+    - cpp/venues/tests/cex_ws_rest_adapter_test.cpp
+    - cpp/venues/tests/cex_local_lob_assembler_test.cpp
+    - cpp/venues/tests/dex_amm_rpc_adapter_test.cpp
+    - cpp/venues/tests/simulated_venue_adapter_test.cpp
+    - cpp/venues/tests/venue_sim_adapter_test.cpp
+    - cpp/venues/tests/venue_adapter_contract_test.cpp
+    - cpp/venues/tests/venue_observability_producer_test.cpp
+  integration:
+    - Testing/f11_test2_e2e.sh
+  contract: []
