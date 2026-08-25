@@ -29,6 +29,7 @@ Trader
 
 - Operator
 - Provider (external market data)
+- **Exchange-provider** (`providerType=provider`, v2/IN-015) — создаёт заявки через тот же API; после матчинга читает `FillEvent` (`batch.outputs`) и хеджирует позицию через Venue Execution Adapter (F-12).
 
 ## Preconditions
 
@@ -63,11 +64,18 @@ Trader отправляет команду создания FlowOrder через
 1. Risk Manager возвращает `THROTTLE` со скорректированными параметрами.
 2. UI предлагает принять скорректированные параметры.
 
+### A3. Exchange-provider создаёт заявку (v2/IN-015, F2-17)
+
+1. Exchange-provider (`providerType=provider`) отправляет заявку через тот же API (Main Flow 1–7).
+2. После батч-клиринга (F-04) Exchange-provider читает `FillEvent` из `batch.outputs`.
+3. Exchange-provider рассчитывает позицию и инициирует хедж-ордер через Venue Execution Adapter (F-12).
+
 ## Postconditions
 
 - Запись в `flow_orders`.
 - Резерв в `ledger.reservations`.
 - Событие `orders.normalized` опубликовано.
+- (A3) Exchange-provider получил `FillEvent` и может хеджировать (F2-17).
 
 ## Related Sequence Diagrams
 

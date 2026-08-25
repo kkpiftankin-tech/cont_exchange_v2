@@ -59,6 +59,22 @@ acceptanceCriteria:
   - "При risk REJECT: HTTP 200 с accepted=false и error.code."
   - "При недостатке средств: accepted=false с error.code=INSUFFICIENT_FUNDS."
   - "CancelFlowOrder идемпотентен по order_id."
+  # v2 (IN-015): роль Exchange-provider
+  - "F2-17: Exchange-provider (providerType=provider) поддержан как создатель заявки; получает FillEvent через Kafka и может использовать его для хеджа (F-04 → F-12)."
+
+# v2-обновление источника: IN-015 (F-02 Create FlowOrder v2)
+sourceUpdates:
+  - in: IN-015
+    summary: >
+      Добавлена роль Exchange-provider (получает FillEvent → хеджирует на внешних venues).
+      11 правок (реестр в IN-015): §1.4 роль, §2.3.2 шаг 12, §2.4 сценарий provider,
+      §2.6 критерий, §3.1 F2-17, §4.1 компонент, §4.2 participant EP, §4.3.1 batch.outputs→provider,
+      §5.1 тест №9, §6 DoD, формулы → LaTeX. Изменения аддитивные (без противоречий v1).
+
+relatedFeatures:
+  - F-04  # FillEvent из batch clearing
+  - F-12  # хедж Exchange-provider через Venue Execution Adapter
+  - F-07  # pre-trade risk gate
 
 knownIssues:
   - id: no-auth
