@@ -160,7 +160,7 @@ architectureDecisions:
     file: docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
   - id: ADR-048
     title: QP solver backend (OSQP) — активирует/расширяет ADR-034
-    status: proposed
+    status: accepted   # принято 2026-08-25 (решение владельца)
     file: docs/03-architecture/adr/ADR-048-qp-solver-backend.md
 
 knownIssues:
@@ -168,8 +168,8 @@ knownIssues:
     severity: blocker
     description: "ADR-047 surplus/EXCHANGE_PNL policy — proposed, нужно решение владельца (prod-default)."
   - id: qp-solver-backend
-    severity: blocker
-    description: "ADR-048 QP backend (OSQP) — proposed; QP-решателя в matching пока нет (только bisection)."
+    severity: major
+    description: "ADR-048 QP backend (OSQP) — accepted 2026-08-25; QP-решателя в matching пока нет (только bisection) — реализация Phase 3 разблокирована."
   - id: unit-dimensional-validation
     severity: major
     description: "KI-F05A-003 — строгая валидация размерностей активов/цен/rate/batch (dimensional_guard)."
