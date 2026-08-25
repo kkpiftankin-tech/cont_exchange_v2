@@ -122,16 +122,22 @@ AC: AC-F05A-012.
 
 ### Phase 3 — QP solver (matching) — **критический путь** ([ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md))
 
-#### T-F05A-301. Подключить OSQP
-- FetchContent (pinned) в matching CMake + `docker/Dockerfile.service` **И** `.github/workflows/cpp-build.yml` синхронно (урок F-09 `libabsl`/protoc). Зависимости: T-F05A-004 (ADR-048 accepted).
+> **Прогресс (2026-08-25):** доменное ядро QP-солвера смержено в `main` (PR #24) —
+> сборка standard-form, residual/статусы, квантование Decimal, hand-rolled тест
+> (cpp-build ✅, ctest `matching_vector_qp_solver_test` Passed). Реальный OSQP —
+> за портом `IQpBackend` (T-F05A-301, следующий).
 
-#### T-F05A-302. `vector_qp_solver`
+#### T-F05A-301. Подключить OSQP  ⏳ next
+- `OsqpBackend : IQpBackend` (`cpp/matching/src/infra/`) + FetchContent (pinned) в matching CMake + `docker/Dockerfile.service` **И** `.github/workflows/cpp-build.yml` синхронно (урок F-09 `libabsl`/protoc). Зависимости: T-F05A-004 (ADR-048 accepted). Порт `IQpBackend` уже готов (PR #24) — остаётся адаптер + сборка.
+
+#### T-F05A-302. `vector_qp_solver`  ✅ domain core (PR #24)
 AC: AC-F05A-004, AC-F05A-005. (U-F05A-005/006/007/008)
-- `cpp/matching/src/domain/vector_qp_solver.{hpp,cpp}` за `IVectorClearingSolver`. Отображение в OSQP: `P=D, q=−pH, A=[W;I], l=[0;0], u=[0;q]`. **Детерминированный режим** (fixed max_iter, no adaptive-rho). `double→Decimal` квантование на выходе (§9).
+- [x] `cpp/matching/src/domain/vector_qp_solver.{hpp,cpp}` за `IVectorClearingSolver` (Eigen-only). Отображение в OSQP: `P=D, q=−pH, A=[W;I], l=[0;0], u=[0;q]`. **Детерминированный режим** (fixed max_iter, no adaptive-rho). `double→Decimal` квантование на выходе (§9).
+- [ ] реальный solve — через `OsqpBackend` (T-F05A-301).
 
-#### T-F05A-303. Residual + diagnostics
+#### T-F05A-303. Residual + diagnostics  ✅ (PR #24)
 AC: AC-F05A-004.
-- `r=Wx`, `residualNorm`, solver_status (converged/degraded/failed), solveTimeMs, iterations.
+- [x] `r=Wx`, `residualNorm`, solver_status (converged/degraded/failed), iterations. `solveTimeMs` — при интеграции OSQP (T-F05A-301).
 
 #### T-F05A-304. Surplus policy ([ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md))
 AC: AC-F05A-005, AC-F05A-007. (U-F05A-009)
