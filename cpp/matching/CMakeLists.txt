@@ -51,6 +51,7 @@ add_executable(matching
   src/domain/child_graph_transitions.cpp
   src/domain/constraint_evaluator.cpp
   src/domain/trigger_condition.cpp
+  src/domain/vector_qp_solver.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -145,6 +146,22 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_grouped_solver_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_grouped_solver_test COMMAND matching_grouped_solver_test)
+
+  # F-05A (T-F05A-302/303): QP vector-clearing solver domain core (Eigen-only,
+  # fake QP backend). Реальный OSQP-backend — T-F05A-301 (следующий PR).
+  add_executable(matching_vector_qp_solver_test
+    tests/domain/vector_qp_solver_test.cpp
+    src/domain/vector_qp_solver.cpp
+  )
+  target_include_directories(matching_vector_qp_solver_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_vector_qp_solver_test PRIVATE
+    cex_common
+    Eigen3::Eigen
+  )
+  target_compile_options(matching_vector_qp_solver_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_vector_qp_solver_test COMMAND matching_vector_qp_solver_test)
 
   # F-09 (T-F09-045): child graph transitions (OCO cancel / bracket resize).
   add_executable(matching_child_graph_transitions_test
