@@ -47,6 +47,15 @@ Acceptance: F-02.
 
 Acceptance: F-03 ([UC-F03-01](use-cases/UC-F03-01-amend-cancel-order/use-case.md)).
 
+### FR-ORDER-004. Exchange-provider (F2-17, v2/IN-015)
+
+Система должна поддерживать **Exchange-provider** как провайдера (`providerType=provider`):
+он создаёт заявки через тот же API создания FlowOrder и после матчинга **получает
+`FillEvent`** через Kafka (`batch.outputs`, F-04), что позволяет ему хеджировать позицию
+на внешних площадках через Venue Execution Adapter (F-12). Цепочка: F-02 → F-04 → F-12.
+
+Acceptance: F-02 ([UC-F02-01 A3](use-cases/UC-F02-01-create-flow-order/use-case.md)); источник IN-015 §3.1 F2-17.
+
 ## FR-MM. Market making
 
 ### FR-MM-001. Публикация и обновление кривых

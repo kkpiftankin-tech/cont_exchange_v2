@@ -347,7 +347,7 @@ breaking running ledger instances.
 - `Price` — количество quote asset за единицу base asset.
 - `Side` — buy или sell.
 - `Trading speed` — поток объёма в единицу времени, в base units/sec.
-- `Execution window` — интервал исполнения \([t_{\text{start}}, t_{\text{end}}]\).
+- `Execution window` — интервал исполнения $[t_{\text{start}}, t_{\text{end}}]$.
 
 ### 8.2. FlowOrder
 
@@ -390,10 +390,10 @@ Continuous Scaled Limit Order — кривая спроса/предложени
 
 Типичная параметризация:
 
-- \(P_L\) — нижняя граница цены;
-- \(P_H\) — верхняя граница цены;
-- \(Q\) — максимальный объём;
-- \(U\) — максимальная скорость.
+- $P_L$ — нижняя граница цены;
+- $P_H$ — верхняя граница цены;
+- $Q$ — максимальный объём;
+- $U$ — максимальная скорость.
 
 FlowOrder в текущем MVP — минимальная DTO-форма, совместимая с CSLO/FOB моделью.
 
@@ -422,9 +422,9 @@ FlowOrder в текущем MVP — минимальная DTO-форма, со�
 
 Для отчётности используй стандартную формулу VWAP:
 
-\[
+$$
 \text{VWAP} = \frac{\sum_i p_i q_i}{\sum_i q_i}
-\]
+$$
 
 Implementation Shortfall должен трактоваться как разница между идеальной стоимостью исполнения по цене принятия решения и фактической стоимостью с учётом spread, temporary impact, permanent impact, fees и volatility.
 
@@ -837,8 +837,8 @@ curl -X POST "http://localhost:8088/v1/flow-orders" \
 - Документация проекта — на русском, если пользователь не попросит иначе.
 - Имена сервисов, proto packages, code identifiers — на английском.
 - Термины сохранять единообразно: FlowOrder, CSLO, FOB, BatchResult, FillEvent, RiskSnapshot, ExecutionIntent, ExecutionReport, AgentLog.
-- Формулы в Markdown писать с LaTeX-delimiters `\(` `\)` или display `\[` `\]`.
-- Для display math всегда ставь перенос строки после `\[` и перед `\]`.
+- Формулы в Markdown писать с LaTeX-delimiters `$...$` (inline) или `$$...$$` (display).
+- Для display math всегда ставь перенос строки после открывающего `$$` и перед закрывающим `$$`.
 
 ## 25. Шаблон действий для типовой задачи
 
