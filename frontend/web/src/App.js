@@ -26,6 +26,8 @@ import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
 import ReconciliationAlerts from './pages/ReconciliationAlerts/ReconciliationAlerts';
 import ManualOverride from './pages/ManualOverride/ManualOverride';
 import PolicyConfig from './pages/PolicyConfig/PolicyConfig';
+import MarketDataTest from './pages/MarketDataTest/MarketDataTest';
+import Positions from './pages/Positions/Positions';
 import LanguageSwitcher from './components/LanguageSwitcher';
 import './App.css';
 
@@ -36,6 +38,8 @@ function App() {
       <Routes>
         {/* F-20 dev/demo: open URL -> trader screen directly, no login. */}
         <Route path="/" element={<Navigate to="/main" replace />} />
+        {/* F-05: изолированная тест-страница, без авторизации */}
+        <Route path="/market-data-test" element={<MarketDataTest />} />
         <Route path="/about" element={<PublicRoute><About /></PublicRoute>} />
         <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
         <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
@@ -65,6 +69,7 @@ function App() {
         <Route path="/policy-config" element={<AuthRoute><PolicyConfig /></AuthRoute>} />
         <Route path="/replay" element={<AuthRoute><BacktestReplay /></AuthRoute>} />
         <Route path="/lobfob" element={<AuthRoute><LobFobDashboard /></AuthRoute>} />
+        <Route path="/positions" element={<AuthRoute><Positions /></AuthRoute>} />
         <Route path="*" element={<AuthRoute><Main /></AuthRoute>} />
       </Routes>
     </Router>

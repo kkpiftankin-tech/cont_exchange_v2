@@ -355,6 +355,50 @@ ORDER BY (sim_session_id, event_time_ms, client_order_id)
 TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
 
 -- ---------------------------------------------------------------------------
+-- F-05 Live Market Data: marketdata_snapshots
+-- One row per MarketDataSnapshot published after each BatchResult or
+-- external venue update. Used by REST history API and GetReferencePrices.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS marketdata_snapshots (
+  snapshot_id       String,
+  asset             String,
+  mid               String,
+  best_bid          String,
+  best_ask          String,
+  spread            String,
+  spread_bps        String,
+  volume_24h        String,
+  volume_quote_24h  String,
+  bid_depth         String,   -- JSON [{price, qty}, ...]
+  ask_depth         String,
+  clear_price       String,
+  executed_rate     String,
+  source            String,   -- internal | cex | dex | composite
+  stale             UInt8 DEFAULT 0,
+  batch_id          String,
+  timestamp         DateTime64(3, 'UTC')
+) ENGINE = MergeTree
+ORDER BY (asset, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------------
+-- F-05 Live Market Data: effective_spreads
+-- One row per FillEvent: post-trade effective spread for TCA / F-13.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS effective_spreads (
+  fill_id               String,
+  asset                 String,
+  exec_price            String,
+  mid_at_exec           String,
+  effective_spread      String,
+  effective_spread_bps  String,
+  batch_id              String,
+  timestamp             DateTime64(3, 'UTC')
+) ENGINE = MergeTree
+ORDER BY (asset, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 365 DAY
+SETTINGS index_granularity = 8192;
 -- F-09 / ADR-042: единый read-слой батчей (одномерные + многоногие combo).
 --
 -- batchresults (этот файл, выше) — иммутабельные single_leg батчи (F-04),

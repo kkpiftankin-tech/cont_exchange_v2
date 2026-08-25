@@ -289,6 +289,31 @@ CREATE TABLE IF NOT EXISTS sim_hedge_pnl (
   PRIMARY KEY (sim_session_id, venue_id, instrument_symbol)
 );
 
+-- ---------------------------------------------------------------------------
+-- F-05 Live Market Data: marketdata_config
+-- Per-instrument configuration for Market Data Service:
+-- snapshot interval, depth levels, spread alert threshold, kill-switch.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS marketdata_config (
+  asset                       VARCHAR(32) PRIMARY KEY,
+  snapshot_interval_ms        INTEGER         NOT NULL DEFAULT 1000,
+  depth_levels                INTEGER         NOT NULL DEFAULT 10,
+  volume_window_sec           INTEGER         NOT NULL DEFAULT 86400,
+  spread_alert_threshold_bps  NUMERIC(10, 4)  NOT NULL DEFAULT 50.0,
+  stale_threshold_sec         INTEGER         NOT NULL DEFAULT 30,
+  external_sources            JSONB           NOT NULL DEFAULT '[]',
+  is_active                   BOOLEAN         NOT NULL DEFAULT TRUE,
+  updated_at                  TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+-- Seed data: active instruments for dev environment
+INSERT INTO marketdata_config (asset, snapshot_interval_ms, depth_levels, is_active)
+VALUES
+  ('BTCUSDT', 500,  10, TRUE),
+  ('ETHUSDT', 500,  10, TRUE),
+  ('SOLUSDT', 1000, 5,  TRUE)
+ON CONFLICT (asset) DO NOTHING;
+
 -- ===========================================================================
 -- F-15 Backtest / Replay: config registries (solver / risk / fee / reward).
 -- Schema mirrors PostgresReplayConfigRepository::EnsureSchema (id, version,
@@ -705,3 +730,207 @@ CREATE TABLE IF NOT EXISTS venue_order_levels (
 );
 CREATE INDEX IF NOT EXISTS idx_venue_order_levels_batch
   ON venue_order_levels (batch_id);
+-- F-06 Positions / PnL / Margin (T-F06-010, T-F06-011).
+-- Sources: docs/07-data/oltp-schema.md (§accounts, §positions, §risk_limits,
+--   §risk_snapshots); docs/implementation-plan/F-06-positions-pnl-margin.tasks.md.
+-- Owner-services:
+--   accounts, positions  -> ledger  (single writer; risk + gateway read).
+--   risk_limits          -> risk    (writer; matching + gateway read).
+--   risk_snapshots       -> risk    (writer; ledger + gateway + observability read).
+-- All monetary / qty / price fields: NUMERIC(38,18) per CLAUDE.md §9 and the
+--   precision already used by flow_orders / hedgeflows in this file.
+-- NOTE: user_id is TEXT (no FK to `users`) — there is no `users` table in this
+--   init.sql (matching the rest of the schema: flow_orders.user_id is TEXT too).
+--   The oltp-schema.md doc shows `REFERENCES users` as the eventual target once
+--   an Auth/Identity `users` table lands; adding the FK now would break a clean
+--   apply. entity_id / updated_by are likewise TEXT for the same reason.
+-- These tables are DISTINCT from the runtime-created `ledger_positions`
+--   (user_id, currency, amount) and `ledger_entries` tables that
+--   cpp/ledger/src/infra/postgres_repositories.cpp creates on the fly — those
+--   are the legacy per-currency balance ledger, NOT the F-06 position book.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- accounts: client collateral accounts, one row per (user, asset).
+-- Writer: ledger (Collateral & Ledger) — settles fills, reserves/releases.
+-- Readers: risk (margin / pre-trade), gateway (balance display).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS accounts (
+  account_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           TEXT NOT NULL,
+  asset             TEXT NOT NULL,               -- BTC, ETH, USDT, ...
+  free_balance      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- available for trading
+  reserved_balance  NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- locked under orders
+  venue_allocated   NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- placed on external venues
+  pending_transfer  NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- in-flight transfer
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT accounts_free_balance_nonneg     CHECK (free_balance >= 0),
+  CONSTRAINT accounts_reserved_balance_nonneg CHECK (reserved_balance >= 0),
+  CONSTRAINT accounts_user_asset_unique       UNIQUE (user_id, asset)
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_user_asset
+  ON accounts (user_id, asset);
+
+-- ---------------------------------------------------------------------------
+-- positions: current per-instrument net position book (F-06).
+-- Writer: ledger — apply fill / reduce / flip, mark-to-market.
+-- Readers: risk (margin, VAR, liquidation), gateway (display).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS positions (
+  position_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           TEXT NOT NULL,
+  symbol            TEXT NOT NULL,               -- e.g. BTCUSDT
+  -- side: long | short | flat
+  side              TEXT NOT NULL DEFAULT 'flat'
+                    CHECK (side IN ('long', 'short', 'flat')),
+  quantity          NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  avg_entry_price   NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  unrealized_pnl    NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- mark-to-market
+  realized_pnl      NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT positions_quantity_nonneg  CHECK (quantity >= 0),
+  CONSTRAINT positions_user_symbol_unique UNIQUE (user_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_user_symbol
+  ON positions (user_id, symbol);
+
+-- ---------------------------------------------------------------------------
+-- risk_limits: limits by user / role / symbol / global.
+-- initial_margin_rate / maintenance_margin_rate added for F-06 margin
+--   calculation (MarginCalculator, T-F06-031).
+-- Writer: risk. Readers: matching (kill_switch), gateway/UI (operator view).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS risk_limits (
+  limit_id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- entity_type: user | role | symbol | global
+  entity_type              TEXT NOT NULL
+                           CHECK (entity_type IN ('user', 'role', 'symbol', 'global')),
+  entity_id                TEXT NOT NULL,        -- user_id / role / symbol / 'global'
+  max_notional             NUMERIC(38, 18),
+  max_position             NUMERIC(38, 18),
+  max_leverage             NUMERIC(10, 4),
+  max_order_rate           INTEGER,              -- orders / minute
+  asset_whitelist          TEXT[],
+  kill_switch              BOOLEAN NOT NULL DEFAULT FALSE,
+  -- F-06 margin rates: initial / maintenance margin as a fraction of notional.
+  initial_margin_rate      NUMERIC(10, 4),
+  maintenance_margin_rate  NUMERIC(10, 4),
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by               TEXT,                 -- who changed it (user_id)
+
+  CONSTRAINT risk_limits_entity_unique UNIQUE (entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_limits_entity
+  ON risk_limits (entity_type, entity_id);
+
+-- ---------------------------------------------------------------------------
+-- risk_snapshots: margin-state snapshots written after each batch / event.
+-- Writer: risk. Readers: ledger (liquidation/rebalance), gateway,
+--   observability (dashboards).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS risk_snapshots (
+  snapshot_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  entity_id            TEXT NOT NULL,            -- user_id or venue_id
+  -- batch_id: T-F06-073 idempotency key (ADR-046/ADR-020). The matching batch
+  -- this snapshot was built from. NULL for snapshots not tied to a batch
+  -- (legacy rows / event-driven snapshots) — those bypass the unique index.
+  batch_id             TEXT,
+  free_collateral      NUMERIC(38, 18) NOT NULL,
+  reserved_collateral  NUMERIC(38, 18) NOT NULL,
+  initial_margin       NUMERIC(38, 18) NOT NULL,
+  maintenance_margin   NUMERIC(38, 18) NOT NULL,
+  -- risk_flags: { margin_call, liquidation, throttled }
+  risk_flags           JSONB,
+  "timestamp"          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Idempotent re-apply on an already-created table (column may pre-exist).
+ALTER TABLE risk_snapshots ADD COLUMN IF NOT EXISTS batch_id TEXT;
+
+-- Latest-snapshot-per-entity lookup (GetRiskSnapshot reads ORDER BY timestamp DESC).
+CREATE INDEX IF NOT EXISTS idx_risk_snapshots_entity_timestamp
+  ON risk_snapshots (entity_id, "timestamp" DESC);
+
+-- T-F06-073 idempotency (ADR-046/ADR-020): at-least-once batch.outputs
+-- redelivery (rebalance / replay) must NOT create a duplicate snapshot row,
+-- and must NOT re-emit a margin-call alert. Partial unique index on
+-- (entity_id, batch_id) WHERE batch_id IS NOT NULL — legacy rows without a
+-- batch_id never conflict. InsertSnapshot uses ON CONFLICT DO NOTHING and
+-- reports inserted vs duplicate so the use case suppresses repeat alerts.
+CREATE UNIQUE INDEX IF NOT EXISTS risk_snapshots_entity_batch_unique
+  ON risk_snapshots (entity_id, batch_id)
+  WHERE batch_id IS NOT NULL;
+
+-- C1 (ADR-046 cosmetics): integrity CHECK that entity_id is non-empty. Added
+-- via ALTER ... ADD CONSTRAINT guarded by a catalog lookup so a clean apply
+-- and a re-apply are both no-throw (Postgres has no ADD CONSTRAINT IF NOT
+-- EXISTS for table constraints). Seed rows use non-empty entity_ids so this
+-- never breaks existing data.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'risk_snapshots_entity_id_nonempty'
+  ) THEN
+    ALTER TABLE risk_snapshots
+      ADD CONSTRAINT risk_snapshots_entity_id_nonempty CHECK (entity_id <> '');
+  END IF;
+END $$;
+
+-- Seed (T-F06-010): demo balance for demo-user, ported from the in-memory
+-- ledger constructor (10000 USDT, 1 BTC). Idempotent via the (user_id, asset)
+-- unique constraint.
+INSERT INTO accounts (user_id, asset, free_balance)
+VALUES
+  ('demo-user', 'USDT', 10000),
+  ('demo-user', 'BTC', 1)
+ON CONFLICT (user_id, asset) DO NOTHING;
+
+-- Seed (T-F06-011): default per-role risk limits with margin rates so the
+-- MarginCalculator has a baseline before operator overrides land.
+--   initial_margin_rate = 1 / max_leverage; maintenance ≈ half of initial.
+INSERT INTO risk_limits (
+  entity_type, entity_id, max_leverage, max_order_rate,
+  initial_margin_rate, maintenance_margin_rate
+)
+VALUES
+  ('role', 'demo',   3,  20, 0.3333, 0.1667),
+  ('role', 'client', 10, 60, 0.1000, 0.0500)
+ON CONFLICT (entity_type, entity_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- C1 (ADR-046 cosmetics): non-empty identity CHECKs on the F-06 tables.
+-- accounts.user_id, positions.user_id, risk_limits.entity_id must not be the
+-- empty string. Independent of F-01 (no users FK). Each ALTER is guarded by a
+-- pg_constraint catalog lookup so a clean apply and a re-apply are both
+-- idempotent (no ADD CONSTRAINT IF NOT EXISTS for table constraints in PG16).
+-- Seed rows ('demo-user', 'demo', 'client') are non-empty, so this never
+-- breaks the existing seed data.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'accounts_user_id_nonempty'
+  ) THEN
+    ALTER TABLE accounts
+      ADD CONSTRAINT accounts_user_id_nonempty CHECK (user_id <> '');
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'positions_user_id_nonempty'
+  ) THEN
+    ALTER TABLE positions
+      ADD CONSTRAINT positions_user_id_nonempty CHECK (user_id <> '');
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'risk_limits_entity_id_nonempty'
+  ) THEN
+    ALTER TABLE risk_limits
+      ADD CONSTRAINT risk_limits_entity_id_nonempty CHECK (entity_id <> '');
+  END IF;
+END $$;

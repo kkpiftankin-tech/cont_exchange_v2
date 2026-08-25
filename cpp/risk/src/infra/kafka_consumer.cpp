@@ -3,7 +3,11 @@
 #include "cex/common/kafka.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
+#include "cex/common/time.hpp"
+#include "cex/common/uuid.hpp"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/matching/v1/batch.pb.h"
+#include "fob/matching/v1/batch_outputs.pb.h"
 #include "fob/venue/v1/venue.pb.h"
 
 namespace cex::risk::infra {
@@ -43,6 +47,15 @@ KafkaConsumer::KafkaConsumer(std::string brokers, app::RiskUseCases& uc)
           .group_id = "risk",
           .client_id = "synthetic_orders",
           .enable_auto_commit = false,
+      }),
+      // F-06 (T-F06-030): отдельная consumer-group, чтобы post-trade margin
+      // snapshot не делил offset с pre-trade/health consumer'ами (ledger
+      // применяет fills в своей группе 'ledger-batch' независимо).
+      batch_outputs_consumer_({
+          .brokers = brokers_,
+          .group_id = "risk-batch",
+          .client_id = "batch_outputs",
+          .enable_auto_commit = false,
       }) {}
 
 void KafkaConsumer::start() {
@@ -50,6 +63,7 @@ void KafkaConsumer::start() {
   venue_health_consumer_.subscribe({"venue.health"});
   execution_reports_consumer_.subscribe({"execution.venue", "execution.reports"});
   synthetic_orders_consumer_.subscribe({"venue.synthetic"});
+  batch_outputs_consumer_.subscribe({"batch.outputs"});
 
   running_.store(true);
   venue_liquidity_fob_t_ =
@@ -57,6 +71,7 @@ void KafkaConsumer::start() {
   venue_health_t_ = std::thread([this]() { venue_health_loop(); });
   execution_reports_t_ = std::thread([this]() { execution_reports_loop(); });
   synthetic_orders_t_ = std::thread([this]() { synthetic_orders_loop(); });
+  batch_outputs_t_ = std::thread([this]() { batch_outputs_loop(); });
 }
 
 void KafkaConsumer::stop() {
@@ -66,6 +81,7 @@ void KafkaConsumer::stop() {
   venue_health_t_.join();
   execution_reports_t_.join();
   synthetic_orders_t_.join();
+  if (batch_outputs_t_.joinable()) batch_outputs_t_.join();
 }
 
 void KafkaConsumer::venue_liquidity_fob_loop() {
@@ -206,6 +222,57 @@ void KafkaConsumer::execution_reports_loop() {
   while (running_.load()) {
     if (bool ok = execution_reports_consumer_.poll_once(timeout_ms, handler);
         !ok) {
+      break;
+    }
+  }
+}
+
+// ============================================================================
+// batch_outputs_loop — F-06 (T-F06-030). Consumes batch.outputs, парсит
+// BatchOutputs envelope или голый BatchResult (тот же dual-parse, что ledger),
+// оборачивает в PostTradeUpdateRequest и вызывает OnBatchResult →
+// buildRiskSnapshot для затронутых пользователей.
+// ============================================================================
+void KafkaConsumer::batch_outputs_loop() {
+  const int timeout_ms = 500;
+
+  auto handler = [this](const std::string&,
+                        const std::string&,
+                        const std::string& payload) {
+    fob::matching::v1::BatchResult batch;
+    fob::matching::v1::BatchOutputs out;
+    if (common::from_bytes(payload, out)) {
+      batch = out.result();
+    } else if (!common::from_bytes(payload, batch)) {
+      common::log_json("ERROR",
+                       "Failed to parse batch.outputs payload as BatchOutputs/BatchResult");
+      return;
+    }
+
+    common::log_json("INFO", "Risk consumed batch.outputs",
+                     {{"service", "risk"},
+                      {"component", "risk_consumer"},
+                      {"participant", "Risk Manager"},
+                      {"stage", "consume_batch_result"},
+                      {"topic", "batch.outputs"},
+                      {"batch_id", batch.batch_id()},
+                      {"fills", std::to_string(batch.fills_size())},
+                      {"clear_prices", std::to_string(batch.clear_prices_size())},
+                      {"source_file", "cpp/risk/src/infra/kafka_consumer.cpp"}});
+
+    fob::risk::v1::PostTradeUpdateRequest req;
+    auto* meta = req.mutable_meta();
+    meta->set_event_id(common::uuid_v4());
+    *meta->mutable_ts_event() = common::now_ts();
+    meta->set_source("risk");
+    meta->set_correlation_id(batch.meta().correlation_id());
+    *req.mutable_batch() = batch;
+
+    uc_.OnBatchResult(req);
+  };
+
+  while (running_.load()) {
+    if (bool ok = batch_outputs_consumer_.poll_once(timeout_ms, handler); !ok) {
       break;
     }
   }

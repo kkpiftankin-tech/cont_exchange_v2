@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import NavBar from "../../components/NavBar";
 import MarketChart from '../../components/MarketChart';
+import MarketDataWidget from '../../components/MarketDataWidget';
 import { useNavigate } from 'react-router-dom';
 import { isAuthenticated, logout } from '../../api/authService';
 import {
-  getBalance,
   createDeposit,
   createWithdraw,
-  createBid,
 } from '../../api/marketService';
+import { createFlowOrder, getDemoBalances } from '../../api/flowOrderService';
 import { getClearingPrice } from '../../api/matchingEngineService';
 import './Main.css';
 import logo from '../../assets/logo-purple.svg';
@@ -22,6 +22,8 @@ const Main = () => {
 
   const navigate = useNavigate();
   const [isAuth, setIsAuth] = useState(null);
+  const [selectedAsset, setSelectedAsset] = useState("BTCUSDT");
+  const [orderStatus, setOrderStatus] = useState(null); // {type:'success'|'error', msg}
   const [tradeType, setTradeType] = useState("buy");
   const [isCopied, setIsCopied] = useState(false);
   const [formData, setFormData] = useState({
@@ -103,7 +105,7 @@ const Main = () => {
 
   const loadData = async () => {
     try {
-      const balanceResponse = await getBalance();
+      const balanceResponse = await getDemoBalances();
       const newBalances = { USDT: 0, BTC: 0 };
       balanceResponse.forEach(item => {
         newBalances[item.currency] = item.amount;
@@ -112,7 +114,6 @@ const Main = () => {
       await loadPrice();
     } catch (error) {
       console.error('Failed to load data:', error);
-      showError(t('main.error'));
     }
   };
 
@@ -202,29 +203,25 @@ const Main = () => {
     }
 
     try {
-      const bidData = {
-        from_currency: tradeType === 'buy' ? 'USDT' : 'BTC',
-        to_currency: tradeType === 'buy' ? 'BTC' : 'USDT',
-        min_price: parseFloat(formData.minPrice),
-        max_price: parseFloat(formData.maxPrice),
-        amount_to_buy: parseFloat(formData.amount),
-        buy_speed: parseFloat(formData.speed)
-      };
-
-      await createBid(bidData);
+      const result = await createFlowOrder({
+        side:     tradeType,
+        minPrice: parseFloat(formData.minPrice),
+        maxPrice: parseFloat(formData.maxPrice),
+        totalQty: parseFloat(formData.amount),
+        speed:    parseFloat(formData.speed),
+      });
       await loadData();
-      showError(t('main.success'));
+      setFormData({ minPrice: '', maxPrice: '', amount: '', speed: '' });
+      setSubmitAttempted(false);
+      setOrderStatus({ type: 'success', msg: `Заявка принята: ${result.order_id?.slice(0,8)}...` });
+      setTimeout(() => { setOrderStatus(null); navigate('/profile'); }, 3000);
     } catch (error) {
-      console.error('Failed to create bid:', error);
-      let errorMessage = t('main.error');
-      if (error.response) {
-        if (error.response.status === 400) {
-          errorMessage = error.response.data.error_message || t('main.invalidData');
-        } else if (error.response.status === 403) {
-          errorMessage = t('main.insufficientBalance');
-        }
-      }
-      showError(errorMessage);
+      console.error('Order error:', error);
+      const msg = error.message || t('main.error');
+      const isBalanceError = msg.toLowerCase().includes('balance') ||
+                             msg.toLowerCase().includes('funds') ||
+                             msg.toLowerCase().includes('insufficient');
+      setOrderStatus({ type: 'error', msg, isBalanceError });
     }
   };
 
@@ -323,6 +320,32 @@ const Main = () => {
   return (
     <div className="main-container">
       <NavBar />
+
+      {/* F-05: Live Market Data виджет с переключателем актива.
+          Вынесен НАД .content (которая flex-row), чтобы не сжимать график/панель.
+          Фиксированная ширина карточки — иначе на широком экране колонки
+          разъезжаются по краям. */}
+      <div style={{ width: 'min(820px, calc(100vw - 40px))', marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          {['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].map(a => (
+            <button key={a}
+              onClick={() => setSelectedAsset(a)}
+              style={{
+                padding: '4px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12,
+                background: selectedAsset === a ? '#7c3aed' : '#1e1b2e',
+                color: '#fff', border: selectedAsset === a ? '1px solid #7c3aed' : '1px solid #3d3a4f',
+              }}>
+              {a.replace('USDT', '')}
+            </button>
+          ))}
+          {selectedAsset !== 'BTCUSDT' && (
+            <span style={{ fontSize: 11, color: '#64748b', alignSelf: 'center' }}>
+              ⚠ Данные только для BTC — venues настроен на BTCUSDT
+            </span>
+          )}
+        </div>
+        <MarketDataWidget asset={selectedAsset} />
+      </div>
 
       <div className="content">
         <div className="chart-section">
@@ -427,6 +450,37 @@ const Main = () => {
               >
                 {t('main.proceed')}
               </button>
+
+              {orderStatus && (
+                <div style={{
+                  marginTop: 10, padding: '8px 12px', borderRadius: 6, fontSize: 13,
+                  background: orderStatus.type === 'success' ? '#1a3a2a' : '#3a1a1a',
+                  color:      orderStatus.type === 'success' ? '#4ade80' : '#f87171',
+                  border: `1px solid ${orderStatus.type === 'success' ? '#166534' : '#7f1d1d'}`,
+                }}>
+                  {orderStatus.type === 'success' ? '✓ ' : '✗ '}{orderStatus.msg}
+                  {orderStatus.isBalanceError && (
+                    <button
+                      onClick={async () => {
+                        const CURVES = process.env.REACT_APP_CURVES_API_BASE_URL || 'http://localhost:8090';
+                        try {
+                          const r = await fetch(`${CURVES}/api/reset-balance`, { method: 'POST' });
+                          const d = await r.json();
+                          setOrderStatus({ type: 'success', msg: `Баланс сброшен (отменено ${d.canceled} ордеров). Перезапуск...` });
+                          setTimeout(() => { setOrderStatus(null); window.location.reload(); }, 2000);
+                        } catch { window.location.reload(); }
+                      }}
+                      style={{
+                        marginLeft: 10, padding: '2px 8px', borderRadius: 4, fontSize: 12,
+                        background: '#7f1d1d', color: '#fca5a5', border: '1px solid #f87171',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Сбросить баланс
+                    </button>
+                  )}
+                </div>
+              )}
             </form>
           </div>
         </div>

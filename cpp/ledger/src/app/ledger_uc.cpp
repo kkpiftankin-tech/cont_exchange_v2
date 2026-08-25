@@ -215,6 +215,28 @@ std::chrono::system_clock::time_point timestamp_to_time_point(
       std::chrono::duration_cast<std::chrono::system_clock::duration>(duration)};
 }
 
+// ----------------------------------------------------------------------------
+// F-06 (T-F06-023) — Decimal scale canonicalization.
+//
+// Known issue `scale-inflation`: Decimal::mul складывает scale операндов
+// (price[scale=2] * qty[scale=8] → scale=10). Без нормализации scale денежных
+// величин неконтролируемо растёт после серии mul, что нарушает CLAUDE.md §9.
+// rescale() приводит Decimal к каноническому per-currency scale: округляет вниз
+// по scale (half-up через Decimal::div на 1) или дополняет нулями вверх,
+// сохраняя точное значение в пределах target_scale.
+// ----------------------------------------------------------------------------
+constexpr int32_t kPriceScale = 2;    // quote/USDT price precision (cents)
+constexpr int32_t kPnlScale = 2;      // realised/unrealised PnL — quote currency
+constexpr int32_t kQtyScale = 8;      // crypto base quantity (8 знаков, CLAUDE.md §9)
+
+/// Приводит Decimal к ровно target_scale знакам (half-up при усечении вниз).
+/// Реализация через Decimal::div(value, 1, target_scale) — div уже округляет
+/// half-up и выставляет result_scale, не теряя знак.
+Decimal rescale(const Decimal& value, int32_t target_scale) {
+  if (value.scale == target_scale) return value;
+  return Decimal::div(value, Decimal{1, 0}, target_scale);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -340,76 +362,21 @@ LedgerUseCases::Position& LedgerUseCases::ensure_position_locked(
 }
 
 // ============================================================================
-// calculate_and_record_pnl — реализует SELL логику с realised PnL.
+// calculate_and_record_pnl — applies a SELL fill to the signed position.
 //
-// Физический смысл:
-//   Продаём sell_qty по цене sell_price из существующей long-позиции.
-//   PnL = (sell_price - avg_entry_price) * sellable_qty.
-//
-//   sellable = min(sell_qty, pos.amount) — не можем продать больше чем есть.
-//   short selling пока НЕ поддерживается (документировано в WARN log).
-//
-// CRITICAL: использует double для PnL math, потом конвертирует обратно в
-// Decimal с scale=2 (USDT precision). Это TECHNICAL DEBT — для production
-// должно быть pure Decimal arithmetic. См. CLAUDE.md §9.
+// F-06 (T-F06-022/023): this is now a thin wrapper that delegates to the
+// unified signed-position transition. SELL is modelled as a negative qty delta
+// (fill_dir = -1) so reduce / close / flip-through-zero and short positions all
+// share one Decimal-only code path. Pure Decimal arithmetic (no double) —
+// CLAUDE.md §9. Kept for ABI compatibility with the header / existing callers.
 // ============================================================================
 void LedgerUseCases::calculate_and_record_pnl(
     const std::string& user,
     const std::string& instrument,
     const Decimal& sell_qty,
     const Decimal& sell_price) {
-
   Position& pos = ensure_position_locked(user, instrument);
-
-  // Only long positions have positive amount
-  if (Decimal::cmp(pos.amount, Decimal{0, pos.amount.scale}) <= 0) {
-    // No position to sell from (short selling not implemented yet)
-    cex::common::log_json("WARN", "Cannot sell without long position",
-                          {{"user", user},
-                           {"instrument", instrument},
-                           {"position_amount", pos.amount.to_string()}});
-    return;
-  }
-
-  // Calculate how much we can sell from this position
-  Decimal sellable = Decimal::min(sell_qty, pos.amount);
-
-  // Convert to double for PnL calculation
-  // pow(10, scale) — стандартный приём для inverse scale.
-  double sell_qty_d = static_cast<double>(sellable.units) / std::pow(10.0, sellable.scale);
-  double sell_price_d = static_cast<double>(sell_price.units) / std::pow(10.0, sell_price.scale);
-  double avg_price_d = static_cast<double>(pos.avg_entry_price.units) / std::pow(10.0, pos.avg_entry_price.scale);
-
-  // PnL = (sell_price - avg_entry_price) * sell_qty
-  double pnl_d = (sell_price_d - avg_price_d) * sell_qty_d;
-
-  // Convert back to Decimal with scale 2 (USDT)
-  // llround — round-to-nearest int64. * 100 = scale 2 conversion.
-  int64_t pnl_units = static_cast<int64_t>(std::llround(pnl_d * 100.0));
-  Decimal pnl{pnl_units, 2};
-
-  // Update realised PnL
-  pos.realised_pnl = Decimal::add(pos.realised_pnl, pnl);
-
-  // Reduce position amount
-  double remaining_d = (static_cast<double>(pos.amount.units) / std::pow(10.0, pos.amount.scale)) - sell_qty_d;
-  int64_t remaining_units = static_cast<int64_t>(std::llround(remaining_d * std::pow(10.0, pos.amount.scale)));
-  pos.amount = Decimal{remaining_units, pos.amount.scale};
-
-  // If position fully closed, reset avg price
-  if (Decimal::cmp(pos.amount, Decimal{0, pos.amount.scale}) == 0) {
-    pos.avg_entry_price = Decimal{0, pos.avg_entry_price.scale};
-  }
-
-  cex::common::log_json("INFO", "Realised PnL calculated",
-                        {{"user", user},
-                         {"instrument", instrument},
-                         {"sell_qty", sellable.to_string()},
-                         {"sell_price", sell_price.to_string()},
-                         {"avg_entry_price", pos.avg_entry_price.to_string()},
-                         {"pnl", pnl.to_string()},
-                         {"cumulative_pnl", pos.realised_pnl.to_string()},
-                         {"remaining_position", pos.amount.to_string()}});
+  apply_signed_fill(pos, /*fill_dir=*/-1, sell_qty, sell_price, user, instrument);
 }
 
 // ============================================================================
@@ -476,8 +443,111 @@ void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup
                          {"legs", std::to_string(eg.leg_results_size())}});
 }
 
-// Weighted avg формула: new_avg = (old_amount * old_avg + new_qty * new_price) / (old_amount + new_qty).
-// Также через double — TECHNICAL DEBT, см. above.
+// ============================================================================
+// apply_signed_fill — F-06 (T-F06-022) unified signed-position transition.
+//
+// pos.amount — net signed position (positive = long, negative = short).
+// fill_dir   — +1 для BUY, -1 для SELL. fill_qty — абсолютная величина.
+//
+// Покрывает все доменные переходы из SEQ-LEDGER-002 для long И short:
+//   * increase (fill_dir совпадает со знаком позиции, либо позиция flat):
+//       weighted-average avg_entry_price; realised_pnl без изменений.
+//   * reduce  (противоположное направление, |fill| <= |amount|):
+//       realised_pnl += (close_price - entry) * closed_signed_qty;
+//       avg_entry_price сохраняется; при amount==0 → side flat (avg=0).
+//   * flip    (противоположное направление, |fill| > |amount|):
+//       закрываем всю текущую ногу (realised на закрытом объёме),
+//       открываем остаток в противоположную сторону по avg_entry = fill_price.
+//
+// Вся арифметика — Decimal (CLAUDE.md §9). Результаты нормализуются к
+// каноническому scale (T-F06-023, known issue scale-inflation).
+// ============================================================================
+void LedgerUseCases::apply_signed_fill(Position& pos,
+                                       int fill_dir,
+                                       const Decimal& fill_qty,
+                                       const Decimal& fill_price,
+                                       const std::string& user,
+                                       const std::string& instrument) {
+  if (Decimal::cmp(fill_qty, Decimal::zero()) <= 0) return;
+
+  // Signed delta of this fill: +qty for BUY, -qty for SELL.
+  Decimal signed_fill = (fill_dir >= 0) ? fill_qty : Decimal{-fill_qty.units, fill_qty.scale};
+
+  const int pos_sign = Decimal::cmp(pos.amount, Decimal::zero());  // >0 long, <0 short, 0 flat
+
+  // ----- Case 1: increase (same direction or flat) --------------------------
+  if (pos_sign == 0 || (pos_sign > 0 && fill_dir >= 0) || (pos_sign < 0 && fill_dir < 0)) {
+    // Weighted average: new_avg = (|old|*old_avg + qty*price) / (|old| + qty).
+    Decimal abs_old = (pos_sign < 0) ? Decimal{-pos.amount.units, pos.amount.scale} : pos.amount;
+    Decimal old_value = Decimal::mul(abs_old, pos.avg_entry_price);
+    Decimal new_value = Decimal::mul(fill_qty, fill_price);
+    Decimal total_value = Decimal::add(old_value, new_value);
+    Decimal total_abs = Decimal::add(abs_old, fill_qty);
+
+    if (Decimal::cmp(total_abs, Decimal::zero()) > 0) {
+      pos.avg_entry_price = Decimal::div(total_value, total_abs, kPriceScale);
+    } else {
+      pos.avg_entry_price = Decimal{0, kPriceScale};
+    }
+    pos.amount = rescale(Decimal::add(pos.amount, signed_fill), kQtyScale);
+
+    cex::common::log_json("INFO", "Position increased",
+                          {{"user", user},
+                           {"instrument", instrument},
+                           {"side", fill_dir >= 0 ? "BUY" : "SELL"},
+                           {"qty", fill_qty.to_string()},
+                           {"price", fill_price.to_string()},
+                           {"new_amount", pos.amount.to_string()},
+                           {"new_avg_price", pos.avg_entry_price.to_string()}});
+    return;
+  }
+
+  // ----- Opposite direction: reduce / close / flip -------------------------
+  Decimal abs_pos = (pos_sign < 0) ? Decimal{-pos.amount.units, pos.amount.scale} : pos.amount;
+  // closed = min(fill_qty, |pos|) — фактически закрытый объём.
+  Decimal closed = Decimal::min(fill_qty, abs_pos);
+
+  // realised on the closed volume:
+  //   long  closed by SELL: (close_price - entry) * closed
+  //   short closed by BUY:  (entry - close_price) * closed
+  Decimal price_diff = (pos_sign > 0)
+                           ? Decimal::sub(fill_price, pos.avg_entry_price)
+                           : Decimal::sub(pos.avg_entry_price, fill_price);
+  Decimal realised = rescale(Decimal::mul(price_diff, closed), kPnlScale);
+  pos.realised_pnl = rescale(Decimal::add(pos.realised_pnl, realised), kPnlScale);
+
+  // New net amount = old + signed_fill.
+  Decimal new_amount = rescale(Decimal::add(pos.amount, signed_fill), kQtyScale);
+  const int new_sign = Decimal::cmp(new_amount, Decimal::zero());
+
+  if (new_sign == 0) {
+    // Full close → flat. avg_entry reset.
+    pos.amount = Decimal{0, kQtyScale};
+    pos.avg_entry_price = Decimal{0, kPriceScale};
+  } else if ((pos_sign > 0) == (new_sign > 0)) {
+    // Partial reduce — same side remains. avg_entry preserved.
+    pos.amount = new_amount;
+  } else {
+    // FLIP through zero: opposite leg opened with avg_entry = fill_price.
+    pos.amount = new_amount;
+    pos.avg_entry_price = rescale(fill_price, kPriceScale);
+  }
+
+  cex::common::log_json("INFO", "Realised PnL calculated",
+                        {{"user", user},
+                         {"instrument", instrument},
+                         {"fill_dir", fill_dir >= 0 ? "BUY" : "SELL"},
+                         {"closed_qty", closed.to_string()},
+                         {"fill_price", fill_price.to_string()},
+                         {"avg_entry_price", pos.avg_entry_price.to_string()},
+                         {"pnl", realised.to_string()},
+                         {"cumulative_pnl", pos.realised_pnl.to_string()},
+                         {"remaining_position", pos.amount.to_string()}});
+}
+
+// ============================================================================
+// update_position_for_fill — диспетчер: BUY → fill_dir=+1, SELL → fill_dir=-1.
+// Вся математика делегирована apply_signed_fill (pure Decimal, short-aware).
 // ============================================================================
 void LedgerUseCases::update_position_for_fill(const fob::matching::v1::FlowFill& fill) {
   const std::string user = fill.user_id();
@@ -488,42 +558,9 @@ void LedgerUseCases::update_position_for_fill(const fob::matching::v1::FlowFill&
   Position& pos = ensure_position_locked(user, instrument);
 
   if (fill.side() == fob::common::v1::SIDE_BUY) {
-    // BUY: increase position, update average entry price
-
-    // Convert to double for calculation
-    double old_amount_d = static_cast<double>(pos.amount.units) / std::pow(10.0, pos.amount.scale);
-    double old_avg_d = static_cast<double>(pos.avg_entry_price.units) / std::pow(10.0, pos.avg_entry_price.scale);
-    double qty_d = static_cast<double>(qty.units) / std::pow(10.0, qty.scale);
-    double price_d = static_cast<double>(price.units) / std::pow(10.0, price.scale);
-
-    double old_value_d = old_amount_d * old_avg_d;
-    double new_value_d = qty_d * price_d;
-    double total_value_d = old_value_d + new_value_d;
-    double total_amount_d = old_amount_d + qty_d;
-
-    if (total_amount_d > 1e-12) {
-      double avg_price_d = total_value_d / total_amount_d;
-      // Store with scale 2 (USDT price precision)
-      int64_t avg_units = static_cast<int64_t>(std::llround(avg_price_d * 100.0));
-      pos.avg_entry_price = Decimal{avg_units, 2};
-    } else {
-      pos.avg_entry_price = Decimal{0, 2};
-    }
-
-    // Store amount with original qty scale
-    int64_t new_amount_units = static_cast<int64_t>(std::llround(total_amount_d * std::pow(10.0, qty.scale)));
-    pos.amount = Decimal{new_amount_units, qty.scale};
-
-    cex::common::log_json("INFO", "Position increased (BUY)",
-                          {{"user", user},
-                           {"instrument", instrument},
-                           {"qty", qty.to_string()},
-                           {"price", price.to_string()},
-                           {"new_amount", pos.amount.to_string()},
-                           {"new_avg_price", pos.avg_entry_price.to_string()}});
+    apply_signed_fill(pos, /*fill_dir=*/+1, qty, price, user, instrument);
   } else if (fill.side() == fob::common::v1::SIDE_SELL) {
-    // SELL: calculate PnL and decrease position
-    calculate_and_record_pnl(user, instrument, qty, price);
+    apply_signed_fill(pos, /*fill_dir=*/-1, qty, price, user, instrument);
   }
 }
 
@@ -566,39 +603,44 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
 
-  std::lock_guard<std::mutex> lg(mu_);
-
-  // Idempotency: if reservation exists, return success (MVP).
-  if (reservations_.count(req.reservation_id())) {
-    resp.set_success(true);
-    *resp.mutable_reserved_amount() = reservations_[req.reservation_id()].amount.to_proto();
-    return resp;
-  }
-
-  auto& b = ensure_balance_locked(req.user_id(), req.currency());
-
   Decimal want = Decimal::from_proto(req.amount());
-  // Align scales for comparison
-  if (Decimal::cmp(b.available, want) < 0) {
-    resp.set_success(false);
-    auto* e = resp.mutable_error();
-    e->set_code("INSUFFICIENT_FUNDS");
-    e->set_message("Not enough available balance to reserve.");
-    return resp;
+  bool mirror_needed = false;
+
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+
+    // Idempotency: if reservation exists, return success (MVP).
+    if (reservations_.count(req.reservation_id())) {
+      resp.set_success(true);
+      *resp.mutable_reserved_amount() = reservations_[req.reservation_id()].amount.to_proto();
+      return resp;
+    }
+
+    auto& b = ensure_balance_locked(req.user_id(), req.currency());
+
+    // Align scales for comparison
+    if (Decimal::cmp(b.available, want) < 0) {
+      resp.set_success(false);
+      auto* e = resp.mutable_error();
+      e->set_code("INSUFFICIENT_FUNDS");
+      e->set_message("Not enough available balance to reserve.");
+      return resp;
+    }
+
+    // Атомарно: available -= want, reserved += want.
+    b.available = Decimal::sub(b.available, want);
+    b.reserved  = Decimal::add(b.reserved, want);
+
+    // Сохраняем reservation для последующих lookup'ов в ApplyBatchResult и
+    // ReleaseFunds. designated initializer (C++20).
+    reservations_[req.reservation_id()] = Reservation{
+        .user_id=req.user_id(),
+        .order_id=req.order_id(),
+        .currency=req.currency(),
+        .amount=want,
+    };
+    mirror_needed = true;
   }
-
-  // Атомарно: available -= want, reserved += want.
-  b.available = Decimal::sub(b.available, want);
-  b.reserved  = Decimal::add(b.reserved, want);
-
-  // Сохраняем reservation для последующих lookup'ов в ApplyBatchResult и
-  // ReleaseFunds. designated initializer (C++20).
-  reservations_[req.reservation_id()] = Reservation{
-      .user_id=req.user_id(),
-      .order_id=req.order_id(),
-      .currency=req.currency(),
-      .amount=want,
-  };
 
   resp.set_success(true);
   *resp.mutable_reserved_amount() = want.to_proto();
@@ -608,6 +650,24 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
                          {"currency", req.currency()},
                          {"amount", want.to_string()},
                          {"reservation_id", req.reservation_id()}});
+
+  // F-06 P0-A (T-F06-070, ADR-044): mirror the in-memory reserve into the PG
+  // `accounts` table (free -> reserved) so accounts.reserved_balance reflects
+  // open reservations BEFORE the fill. Done OUTSIDE the lock, like other DB
+  // calls. Best-effort during the transitional mirror phase: a PG failure logs
+  // but does not fail the (authoritative) in-memory reservation.
+  if (mirror_needed && account_reserve_tx_) {
+    try {
+      account_reserve_tx_->ReserveTx(req.user_id(), req.currency(), want,
+                                     req.reservation_id());
+    } catch (const std::exception& ex) {
+      cex::common::log_json("ERROR", "AccountReserveTxPort::ReserveTx failed",
+                            {{"user", req.user_id()},
+                             {"currency", req.currency()},
+                             {"reservation_id", req.reservation_id()},
+                             {"error", ex.what()}});
+    }
+  }
   return resp;
 }
 
@@ -617,26 +677,53 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
 // ApplyBatchResult'ом или не существовать вовсе).
 // ============================================================================
 void LedgerUseCases::ReleaseFunds(const fob::ledger::v1::ReleaseFundsRequest& req) {
-  std::lock_guard<std::mutex> lg(mu_);
+  std::string rel_user, rel_currency;
+  Decimal rel_amount{0, 0};
+  bool mirror_needed = false;
 
-  auto it = reservations_.find(req.reservation_id());
-  if (it == reservations_.end()) {
-    cex::common::log_json("WARN", "ReleaseFunds: reservation not found",
-                          {{"reservation_id", req.reservation_id()}});
-    return;
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+
+    auto it = reservations_.find(req.reservation_id());
+    if (it == reservations_.end()) {
+      cex::common::log_json("WARN", "ReleaseFunds: reservation not found",
+                            {{"reservation_id", req.reservation_id()}});
+      return;
+    }
+
+    auto& b = ensure_balance_locked(it->second.user_id, it->second.currency);
+    // Атомарно: reserved -= amount, available += amount.
+    b.reserved = Decimal::sub(b.reserved, it->second.amount);
+    b.available = Decimal::add(b.available, it->second.amount);
+
+    cex::common::log_json("INFO", "Released funds",
+                          {{"user", it->second.user_id},
+                           {"currency", it->second.currency},
+                           {"amount", it->second.amount.to_string()},
+                           {"reservation_id", req.reservation_id()}});
+
+    // Snapshot for the PG mirror before erasing the reservation.
+    rel_user = it->second.user_id;
+    rel_currency = it->second.currency;
+    rel_amount = it->second.amount;
+    mirror_needed = true;
+    reservations_.erase(it);
   }
 
-  auto& b = ensure_balance_locked(it->second.user_id, it->second.currency);
-  // Атомарно: reserved -= amount, available += amount.
-  b.reserved = Decimal::sub(b.reserved, it->second.amount);
-  b.available = Decimal::add(b.available, it->second.amount);
-
-  cex::common::log_json("INFO", "Released funds",
-                        {{"user", it->second.user_id},
-                         {"currency", it->second.currency},
-                         {"amount", it->second.amount.to_string()},
-                         {"reservation_id", req.reservation_id()}});
-  reservations_.erase(it);
+  // F-06 P0-A (T-F06-070, ADR-044): mirror release into PG `accounts`
+  // (reserved -> free), outside the lock. Best-effort during the mirror phase.
+  if (mirror_needed && account_reserve_tx_) {
+    try {
+      account_reserve_tx_->ReleaseTx(rel_user, rel_currency, rel_amount,
+                                     req.reservation_id());
+    } catch (const std::exception& ex) {
+      cex::common::log_json("ERROR", "AccountReserveTxPort::ReleaseTx failed",
+                            {{"user", rel_user},
+                             {"currency", rel_currency},
+                             {"reservation_id", req.reservation_id()},
+                             {"error", ex.what()}});
+    }
+  }
 }
 
 // ============================================================================
@@ -712,12 +799,10 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
         qbal.available = Decimal::add(qbal.available, notional);
       }
 
-      // Если reservation полностью consumed (amount ≤ 0) — erase запись.
-      if (reservation_it != reservations_.end() &&
-          Decimal::cmp(reservation_it->second.amount,
-                       Decimal{0, reservation_it->second.amount.scale}) <= 0) {
-        reservations_.erase(reservation_it);
-      }
+      // T-F06-023 (buy-reserve-leak): НЕ erase reservation здесь, даже если
+      // amount<=0. Освобождение остатка reserved выполняется ниже по terminal
+      // order_update — иначе при FILLED BUY по цене ниже price_high разница
+      // (reserved - executed_notional) «протекает» и остаётся залоченной.
 
       // Position update — BUY/SELL разные пути (см. update_position_for_fill).
       update_position_for_fill(fill);
@@ -736,6 +821,47 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
           auto& pos = ensure_position_locked(user, fill.instrument().symbol());
           pos.realised_pnl = Decimal::sub(pos.realised_pnl, fee_amount);
         }
+      }
+    }
+
+    // ----- T-F06-023: release leftover reserved on terminal orders ----------
+    // Когда заявка достигает терминального статуса (FILLED/CANCELED/REJECTED/
+    // EXPIRED), любой остаток reserved для неё возвращается в available и
+    // reservation удаляется. Закрывает known issue buy-reserve-leak: BUY,
+    // исполненный дешевле зарезервированного notional, больше не оставляет
+    // «застрявшие» средства в reserved.
+    for (const auto& upd : req.batch().order_updates()) {
+      const bool terminal =
+          upd.status() == fob::common::v1::ORDER_STATUS_FILLED ||
+          upd.status() == fob::common::v1::ORDER_STATUS_CANCELED ||
+          upd.status() == fob::common::v1::ORDER_STATUS_REJECTED ||
+          upd.status() == fob::common::v1::ORDER_STATUS_EXPIRED;
+      if (!terminal) continue;
+
+      auto res_it = reservations_.find(upd.order_id());
+      if (res_it == reservations_.end()) continue;
+
+      Decimal leftover = res_it->second.amount;
+      if (Decimal::cmp(leftover, Decimal::zero()) > 0) {
+        auto& bal = ensure_balance_locked(res_it->second.user_id, res_it->second.currency);
+        bal.reserved = Decimal::sub(bal.reserved, leftover);
+        bal.available = Decimal::add(bal.available, leftover);
+        cex::common::log_json("INFO", "Released leftover reserve on terminal order",
+                              {{"order_id", upd.order_id()},
+                               {"user", res_it->second.user_id},
+                               {"currency", res_it->second.currency},
+                               {"leftover", leftover.to_string()}});
+      }
+      reservations_.erase(res_it);
+    }
+
+    // Подчистка полностью consumed резерваций без terminal order_update
+    // (например partial → next batch добьёт остаток): amount<=0 → erase.
+    for (auto it = reservations_.begin(); it != reservations_.end();) {
+      if (Decimal::cmp(it->second.amount, Decimal{0, it->second.amount.scale}) <= 0) {
+        it = reservations_.erase(it);
+      } else {
+        ++it;
       }
     }
   }
@@ -767,6 +893,55 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
              {"error", ex.what()}});
       }
     }
+
+    // F-06 (T-F06-022): persist position snapshot + account deltas in ONE TX
+    // (SEQ-LEDGER-002). The in-memory map already holds the post-fill position;
+    // snapshot it (signed amount → side + abs qty) and emit the matching
+    // free/reserved account deltas for this fill.
+    if (position_account_tx_) {
+      try {
+        const std::string& user = fill.user_id();
+        const std::string base = fill.instrument().base();
+        const std::string quote = fill.instrument().quote();
+        const Decimal qty = Decimal::from_proto(fill.executed_qty());
+        const Decimal notional = Decimal::from_proto(fill.executed_notional());
+
+        PositionRow prow;
+        {
+          std::lock_guard<std::mutex> lg(mu_);
+          const Position& pos = ensure_position_locked(user, fill.instrument().symbol());
+          const int sign = Decimal::cmp(pos.amount, Decimal::zero());
+          prow.user_id = user;
+          prow.symbol = fill.instrument().symbol();
+          prow.side = sign > 0 ? "long" : (sign < 0 ? "short" : "flat");
+          prow.quantity = sign < 0 ? Decimal{-pos.amount.units, pos.amount.scale} : pos.amount;
+          prow.avg_entry_price = pos.avg_entry_price;
+          prow.unrealized_pnl = Decimal::zero();   // mark-to-market done in GetPositions
+          prow.realized_pnl = pos.realised_pnl;
+        }
+
+        std::vector<AccountRow> deltas;
+        if (fill.side() == fob::common::v1::SIDE_BUY) {
+          // BUY: reserved(quote) -= notional; free(base) += qty.
+          deltas.push_back(AccountRow{user, quote, Decimal::zero(),
+                                      Decimal{-notional.units, notional.scale}});
+          deltas.push_back(AccountRow{user, base, qty, Decimal::zero()});
+        } else if (fill.side() == fob::common::v1::SIDE_SELL) {
+          // SELL: reserved(base) -= qty; free(quote) += notional.
+          deltas.push_back(AccountRow{user, base, Decimal::zero(),
+                                      Decimal{-qty.units, qty.scale}});
+          deltas.push_back(AccountRow{user, quote, notional, Decimal::zero()});
+        }
+
+        position_account_tx_->ApplyFillTx(prow, deltas);
+      } catch (const std::exception& ex) {
+        cex::common::log_json(
+            "ERROR", "PositionAccountTxPort::ApplyFillTx failed",
+            {{"batch_id", batch_id},
+             {"order_id", fill.order_id()},
+             {"error", ex.what()}});
+      }
+    }
   }
 
   // Mark batch as processed — idempotency для next replay.
@@ -778,6 +953,30 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     } catch (const std::exception& e) {
       cex::common::log_json("ERROR", "Failed to mark batch as processed",
                             {{"batch_id", batch_id}, {"error", e.what()}});
+    }
+  }
+
+  // F-06 / F6-5 (T-F06-072, ADR-046): эмиттим лёгкий invalidation-сигнал
+  // positions.update по каждому затронутому user_id. Дедуп пользователей в
+  // рамках батча (один сигнал на user). key=user_id, payload JSON {user_id,
+  // batch_id, ts}. Best-effort: ошибка publish логируется и НЕ срывает обработку
+  // батча (push — вторичный сигнал, потребитель идемпотентен по batch_id; потеря
+  // приводит максимум к polling-fallback на стороне gateway, не к рассинхрону).
+  if (positions_update_publisher_) {
+    const int64_t ts_unix = cex::common::now_ts().seconds();
+    std::unordered_set<std::string> seen_users;
+    for (const auto& fill : req.batch().fills()) {
+      const std::string& user = fill.user_id();
+      if (user.empty()) continue;
+      if (!seen_users.insert(user).second) continue;  // дедуп user_id в батче
+      try {
+        positions_update_publisher_->Publish(user, batch_id, ts_unix);
+      } catch (const std::exception& ex) {
+        cex::common::log_json("ERROR", "positions.update publish threw",
+                              {{"batch_id", batch_id},
+                               {"user_id", user},
+                               {"error", ex.what()}});
+      }
     }
   }
 
@@ -880,6 +1079,110 @@ std::unordered_map<std::string, LedgerUseCases::Position> LedgerUseCases::GetPos
   auto user_it = positions_.find(user_id);
   if (user_it == positions_.end()) return {};
   return user_it->second;
+}
+
+// ============================================================================
+// GetPositionsView — F-06 (T-F06-021), implements SEQ-LEDGER-001.
+//
+// Source of positions: PG repo (position_repo_) if wired, else in-memory.
+// For each non-flat position recompute unrealized_pnl on the supplied mark
+// price (long: (mark-entry)*qty; short: (entry-mark)*qty). side="flat" or
+// qty==0 → unrealized_pnl=0, no mark lookup. Missing mark → keep last
+// persisted unrealized_pnl (no silent zeroing). Decimal-only (CLAUDE.md §9),
+// PnL normalized to the quote scale.
+// ============================================================================
+fob::ledger::v1::GetPositionsResponse LedgerUseCases::GetPositionsView(
+    const fob::ledger::v1::GetPositionsRequest& req,
+    const std::unordered_map<std::string, Decimal>& mark_prices) {
+  fob::ledger::v1::GetPositionsResponse resp;
+
+  // Build a uniform list of (symbol, side, abs_qty, entry, realized, last_upnl).
+  struct Row {
+    std::string symbol;
+    std::string side;       // long | short | flat
+    Decimal abs_qty{0, 0};
+    Decimal entry{0, 0};
+    Decimal realized{0, 0};
+    Decimal last_upnl{0, 0};
+  };
+  std::vector<Row> rows;
+
+  if (position_repo_) {
+    // Persisted F-06 positions table is authoritative when available.
+    for (auto& p : position_repo_->ListByUser(req.user_id())) {
+      Row r;
+      r.symbol = p.symbol;
+      r.side = p.side;
+      r.abs_qty = p.quantity;       // already absolute in the table
+      r.entry = p.avg_entry_price;
+      r.realized = p.realized_pnl;
+      r.last_upnl = p.unrealized_pnl;
+      rows.push_back(std::move(r));
+    }
+  } else {
+    // In-memory fallback: signed amount → side + absolute quantity.
+    std::lock_guard<std::mutex> lg(mu_);
+    auto user_it = positions_.find(req.user_id());
+    if (user_it != positions_.end()) {
+      for (const auto& [symbol, pos] : user_it->second) {
+        Row r;
+        r.symbol = symbol;
+        const int sign = Decimal::cmp(pos.amount, Decimal::zero());
+        r.side = sign > 0 ? "long" : (sign < 0 ? "short" : "flat");
+        r.abs_qty = sign < 0 ? Decimal{-pos.amount.units, pos.amount.scale} : pos.amount;
+        r.entry = pos.avg_entry_price;
+        r.realized = pos.realised_pnl;
+        rows.push_back(std::move(r));
+      }
+    }
+  }
+
+  for (const auto& r : rows) {
+    const bool flat = (r.side == "flat") ||
+                      Decimal::cmp(r.abs_qty, Decimal::zero()) == 0;
+
+    Decimal mark = r.entry;       // default mark = entry (upnl 0) for flat
+    Decimal upnl = Decimal::zero();
+    bool have_mark = false;
+
+    if (!flat) {
+      auto mit = mark_prices.find(r.symbol);
+      if (mit != mark_prices.end()) {
+        mark = mit->second;
+        have_mark = true;
+        // long: (mark-entry)*qty ; short: (entry-mark)*qty.
+        Decimal diff = (r.side == "short")
+                           ? Decimal::sub(r.entry, mark)
+                           : Decimal::sub(mark, r.entry);
+        upnl = rescale(Decimal::mul(diff, r.abs_qty), kPnlScale);
+      } else {
+        // No mark price → keep last persisted unrealized_pnl (SEQ-LEDGER-001).
+        upnl = r.last_upnl;
+        mark = r.entry;
+      }
+    }
+
+    auto* out = resp.add_positions();
+    out->set_symbol(r.symbol);
+    out->set_side(r.side);
+    *out->mutable_quantity() = r.abs_qty.to_proto();
+    *out->mutable_avg_entry_price() = r.entry.to_proto();
+    *out->mutable_mark_price() = mark.to_proto();
+    *out->mutable_unrealized_pnl() = upnl.to_proto();
+    *out->mutable_realized_pnl() = r.realized.to_proto();
+
+    cex::common::log_json("DEBUG", "GetPositions row",
+                          {{"user", req.user_id()},
+                           {"symbol", r.symbol},
+                           {"side", r.side},
+                           {"qty", r.abs_qty.to_string()},
+                           {"entry", r.entry.to_string()},
+                           {"mark", mark.to_string()},
+                           {"mark_source", have_mark ? "provided" : "stale_or_flat"},
+                           {"unrealized_pnl", upnl.to_string()}});
+  }
+
+  return resp;
 }
 
 // ============================================================================

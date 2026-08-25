@@ -80,6 +80,21 @@ class LedgerUseCases {
   void SetIdempotencyRepo(std::shared_ptr<IdempotencyRepositoryPort> repo) {
     idempotency_repo_ = std::move(repo);
   }
+  // F-06 (T-F06-020/021): repositories for the F-06 positions/accounts tables.
+  void SetPositionRepo(std::shared_ptr<PositionRepositoryPort> repo) {
+    position_repo_ = std::move(repo);
+  }
+  void SetAccountRepo(std::shared_ptr<AccountRepositoryPort> repo) {
+    account_repo_ = std::move(repo);
+  }
+  void SetPositionAccountTx(std::shared_ptr<PositionAccountTxPort> tx) {
+    position_account_tx_ = std::move(tx);
+  }
+  // F-06 P0-A (T-F06-070, ADR-044): mirror reserve/release into PG `accounts`.
+  // Optional — nullptr keeps legacy in-memory-only behaviour.
+  void SetAccountReserveTx(std::shared_ptr<AccountReserveTxPort> tx) {
+    account_reserve_tx_ = std::move(tx);
+  }
   void SetHedgeEntriesRepo(std::shared_ptr<HedgeLedgerEntriesRepositoryPort> repo) {
     hedge_entries_repo_ = std::move(repo);
   }
@@ -87,6 +102,13 @@ class LedgerUseCases {
   // deltas into PG `hedgeflows` row. Optional — nullptr is valid.
   void SetHedgeflowPnlSink(std::shared_ptr<HedgeflowPnlSinkPort> sink) {
     hedgeflow_pnl_sink_ = std::move(sink);
+  }
+  // F-06 / F6-5 (T-F06-072, ADR-046): publisher для топика positions.update.
+  // После успешного ApplyBatchResult ledger эмиттит лёгкий invalidation-сигнал
+  // по каждому затронутому user_id (дедуп внутри батча). Optional — nullptr
+  // отключает push (best-effort, не влияет на применение батча).
+  void SetPositionsUpdatePublisher(std::shared_ptr<PositionsUpdatePublisherPort> publisher) {
+    positions_update_publisher_ = std::move(publisher);
   }
   void SeedBalance(const std::string& user_id,
                    const std::string& currency,
@@ -100,6 +122,16 @@ class LedgerUseCases {
                         cex::common::Decimal::zero());
   Position GetPosition(const std::string& user_id, const std::string& instrument_symbol) const;
   std::unordered_map<std::string, Position> GetPositions(const std::string& user_id) const;
+
+  // F-06 (T-F06-021): build the gRPC GetPositions response (SEQ-LEDGER-001).
+  // Reads positions (PG repo if wired, else in-memory), recomputes
+  // unrealized_pnl against the supplied mark prices:
+  //   long:  (mark - entry) * qty;  short: (entry - mark) * qty.
+  // Positions with side="flat"/qty==0 → unrealized_pnl = 0, no mark lookup.
+  // When a symbol has no mark price, the last persisted unrealized_pnl is kept.
+  fob::ledger::v1::GetPositionsResponse GetPositionsView(
+      const fob::ledger::v1::GetPositionsRequest& req,
+      const std::unordered_map<std::string, cex::common::Decimal>& mark_prices);
 
   struct ExecutionReconciliationStats {
     uint64_t queued_reports{0};
@@ -179,9 +211,17 @@ class LedgerUseCases {
   std::shared_ptr<PositionsRepositoryPort> positions_repo_;
   std::shared_ptr<LedgerEntriesRepositoryPort> entries_repo_;
   std::shared_ptr<IdempotencyRepositoryPort> idempotency_repo_;
+  // F-06 (T-F06-020/021) — F-06 positions/accounts tables.
+  std::shared_ptr<PositionRepositoryPort> position_repo_;
+  std::shared_ptr<AccountRepositoryPort> account_repo_;
+  std::shared_ptr<PositionAccountTxPort> position_account_tx_;
+  // F-06 P0-A (T-F06-070, ADR-044) — reserve/release mirror into PG `accounts`.
+  std::shared_ptr<AccountReserveTxPort> account_reserve_tx_;
   std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo_;
   // F-12 / IN-009 DoD-6 (PR-F12-3c) — optional PG sink for hedge_pnl/fee.
   std::shared_ptr<HedgeflowPnlSinkPort> hedgeflow_pnl_sink_;
+  // F-06 / F6-5 (T-F06-072, ADR-046) — optional positions.update publisher.
+  std::shared_ptr<PositionsUpdatePublisherPort> positions_update_publisher_;
 
   // Helpers
   Balance& ensure_balance_locked(const std::string& user, const std::string& currency);
@@ -190,10 +230,18 @@ class LedgerUseCases {
   
   // PnL calculation helpers
   void update_position_for_fill(const fob::matching::v1::FlowFill& fill);
-  void calculate_and_record_pnl(const std::string& user, 
+  void calculate_and_record_pnl(const std::string& user,
                                  const std::string& instrument,
                                  const cex::common::Decimal& sell_qty,
                                  const cex::common::Decimal& sell_price);
+  // F-06 (T-F06-022/023): unified signed-position transition (long+short,
+  // increase/reduce/close/flip). fill_dir = +1 BUY, -1 SELL. Pure Decimal.
+  void apply_signed_fill(Position& pos,
+                         int fill_dir,
+                         const cex::common::Decimal& fill_qty,
+                         const cex::common::Decimal& fill_price,
+                         const std::string& user,
+                         const std::string& instrument);
   
   // Hedge PnL helper
   cex::common::Decimal calculate_hedge_pnl(

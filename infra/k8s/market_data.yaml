@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-data
+  labels:
+    app: market-data
+    feature: F-05
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: market-data
+  template:
+    metadata:
+      labels:
+        app: market-data
+    spec:
+      containers:
+      - name: market-data
+        image: cex/market_data:latest
+        ports:
+        - name: grpc
+          containerPort: 50054
+        env:
+        - name: MARKET_DATA_GRPC_LISTEN
+          value: "0.0.0.0:50054"
+        - name: KAFKA_BROKERS
+          value: "redpanda:9092"
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse"
+        - name: CLICKHOUSE_PORT
+          value: "8123"
+        - name: CLICKHOUSE_TCP_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DB
+          value: "default"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-secret
+              key: password
+              optional: true
+        - name: POSTGRES_CONN
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: market-data-conn
+              optional: true
+        - name: CLICKHOUSE_TIMEOUT_MS
+          value: "3000"
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        livenessProbe:
+          grpc:
+            port: 50054
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          grpc:
+            port: 50054
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-data
+  labels:
+    app: market-data
+spec:
+  selector:
+    app: market-data
+  ports:
+  - name: grpc
+    port: 50054
+    targetPort: 50054
+  type: ClusterIP

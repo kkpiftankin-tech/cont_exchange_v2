@@ -18,12 +18,17 @@ services:
   postgres:
     restart: unless-stopped
     image: postgres:16-alpine
+    # ADR-045: per-service connection pools (ledger/risk) + headroom for
+    # other services. Raise max_connections above stock 100 accordingly.
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=256MB"]
     environment:
       POSTGRES_DB: cex
       POSTGRES_USER: cex
       POSTGRES_PASSWORD: cex
     volumes:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/001_cex_init.sql:ro
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cex -d cex >/dev/null 2>&1"]
       interval: 5s
@@ -111,6 +116,23 @@ services:
     depends_on:
       topics-init:
         condition: service_completed_successfully
+      # F-06 (T-F06-031): risk reads positions/accounts/risk_limits and writes
+      # risk_snapshots — needs postgres up before margin snapshots can persist.
+      postgres:
+        condition: service_healthy
+
+  # При старте ledger'а сбрасываем активные ордера чтобы резервы не накапливались между сессиями
+  ledger-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: cex
+    command: >
+      psql -h postgres -U cex -d cex -c
+      "UPDATE flow_orders SET status='canceled' WHERE status NOT IN ('filled','canceled');"
+    restart: "no"
 
   ledger:
     restart: unless-stopped
@@ -124,6 +146,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ledger-init:
+        condition: service_completed_successfully
       topics-init:
         condition: service_completed_successfully
 
@@ -182,6 +206,8 @@ services:
         BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
     environment:
+      # multi_real: Binance geo-blocked → упадёт через circuit breaker
+      # Coinbase доступен → будет основным источником реальных данных
       VENUES_ADAPTER_MODE: "multi_real"
       CURVE_LEVEL: "L3"
       BINANCE_VENUE_ID: "binance"
@@ -198,6 +224,10 @@ services:
       COINBASE_VENUE_SYMBOL: "BTC-USD"
       UNISWAP_VENUE_ID: "uniswap_v3"
       UNISWAP_VENUE_SYMBOL: "WBTCUSDC"
+      # Ускоряем срабатывание circuit breaker для Binance чтобы быстрее переключиться на Coinbase
+      CIRCUIT_BREAKER_ERRORS: "3"
+      CIRCUIT_BREAKER_WINDOW_S: "10"
+      CIRCUIT_BREAKER_COOLDOWN_S: "60"
     depends_on:
       topics-init:
         condition: service_completed_successfully
@@ -224,8 +254,11 @@ services:
     env_file: [ ./env/.env-example ]
     environment:
       MARKET_DATA_TRACE_EACH_MESSAGE: "1"
+      POSTGRES_CONN: "host=postgres port=5432 dbname=cex user=cex password=cex"
     depends_on:
       clickhouse:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       topics-init:
         condition: service_completed_successfully

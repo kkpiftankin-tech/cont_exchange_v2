@@ -15,8 +15,11 @@
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
+#include "cex/common/kafka.hpp"
+
 #include "app/ledger_uc.hpp"
 #include "infra/kafka_consumers.hpp"
+#include "infra/positions_update_publisher.hpp"
 #include "infra/postgres_repositories.hpp"
 #include "transport/grpc_ledger_service.hpp"
 
@@ -42,16 +45,35 @@ int main() {
 
   // Если DSN задан — инициализируем PG-репозитории. Иначе остаёмся в
   // in-memory режиме (теряем state при restart, OK для dev).
+  // F-06 (T-F06-020/021) — F-06 positions/accounts repositories.
+  std::shared_ptr<cex::ledger::app::PositionRepositoryPort> position_repo;
+  std::shared_ptr<cex::ledger::app::AccountRepositoryPort> account_repo;
+  std::shared_ptr<cex::ledger::app::PositionAccountTxPort> position_account_tx;
+  // F-06 P0-A (T-F06-070, ADR-044) — mirror reserve/release into PG `accounts`.
+  std::shared_ptr<cex::ledger::app::AccountReserveTxPort> account_reserve_tx;
+
   if (!pg_dsn.empty()) {
-    positions_repo = std::make_shared<cex::ledger::infra::PostgresPositionsRepository>(pg_dsn);
-    entries_repo = std::make_shared<cex::ledger::infra::PostgresLedgerEntriesRepository>(pg_dsn);
-    hedge_entries_repo = std::make_shared<cex::ledger::infra::PostgresHedgeLedgerEntriesRepository>(pg_dsn);
-    idempotency_repo = std::make_shared<cex::ledger::infra::PostgresIdempotencyRepository>(pg_dsn);
-    hedgeflow_pnl_sink = std::make_shared<cex::ledger::infra::PostgresHedgeflowPnlSink>(pg_dsn);
+    // ADR-045: единый пул PG-соединений на сервис (вместо нового
+    // pqxx::connection на каждый вызов). Размер — через env.
+    const std::size_t pool_size = static_cast<std::size_t>(
+        cex::common::Env::get_int("LEDGER_PG_POOL_SIZE", 16));
+    auto pg_pool = cex::ledger::infra::MakeLedgerPgPool(pg_dsn, pool_size);
+
+    positions_repo = std::make_shared<cex::ledger::infra::PostgresPositionsRepository>(pg_pool);
+    entries_repo = std::make_shared<cex::ledger::infra::PostgresLedgerEntriesRepository>(pg_pool);
+    hedge_entries_repo = std::make_shared<cex::ledger::infra::PostgresHedgeLedgerEntriesRepository>(pg_pool);
+    idempotency_repo = std::make_shared<cex::ledger::infra::PostgresIdempotencyRepository>(pg_pool);
+    hedgeflow_pnl_sink = std::make_shared<cex::ledger::infra::PostgresHedgeflowPnlSink>(pg_pool);
+    position_repo = std::make_shared<cex::ledger::infra::PostgresPositionRepository>(pg_pool);
+    account_repo = std::make_shared<cex::ledger::infra::PostgresAccountRepository>(pg_pool);
+    position_account_tx = std::make_shared<cex::ledger::infra::PostgresPositionAccountTx>(pg_pool);
+    account_reserve_tx = std::make_shared<cex::ledger::infra::PostgresAccountReserveTx>(pg_pool);
 
     cex::common::log_json("INFO", "PostgreSQL repositories initialized",
                           {{"dsn", pg_dsn},
-                           {"hedgeflow_pnl_sink", "ready"}});
+                           {"pool_size", std::to_string(pool_size)},
+                           {"hedgeflow_pnl_sink", "ready"},
+                           {"f06_positions_accounts", "ready"}});
   } else {
     cex::common::log_json("WARN", "PostgreSQL DSN not set, persistence disabled");
   }
@@ -61,6 +83,19 @@ int main() {
                                        positions_repo, entries_repo, hedge_entries_repo);
   uc.SetIdempotencyRepo(idempotency_repo);
   uc.SetHedgeflowPnlSink(hedgeflow_pnl_sink);
+  uc.SetPositionRepo(position_repo);
+  uc.SetAccountRepo(account_repo);
+  uc.SetPositionAccountTx(position_account_tx);
+  uc.SetAccountReserveTx(account_reserve_tx);
+
+  // F-06 / F6-5 (T-F06-072, ADR-046): producer топика positions.update.
+  // После успешного ApplyBatchResult ledger эмиттит лёгкий invalidation-сигнал
+  // (key=user_id) → ws-gateway реагрегирует снимок и пушит клиенту по WS.
+  auto positions_update_publisher =
+      std::make_shared<cex::ledger::infra::PositionsUpdatePublisher>(
+          cex::common::KafkaProducer(
+              cex::common::KafkaConfig{.brokers = brokers, .client_id = "ledger"}));
+  uc.SetPositionsUpdatePublisher(positions_update_publisher);
 
   // Start Kafka consumers in background (batch.outputs, execution.intents, execution.reports, execution.venue)
   // ВАЖНО: ApplyBatchResult идempotent через idempotency_repo → safe при rebalance.

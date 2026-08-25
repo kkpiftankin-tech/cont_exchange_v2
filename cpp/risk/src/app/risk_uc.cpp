@@ -32,12 +32,14 @@
 #include "app/risk_uc.hpp"
 
 #include <algorithm>           // std::max для severity escalation
+#include <unordered_set>       // дедуп affected users в OnBatchResult
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"   // env vars для конфигов RISK_*
 #include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
+#include "domain/margin_calculator.hpp"
 #include "fob/venue/v1/venue.pb.h"
 
 namespace cex::risk::app {
@@ -271,21 +273,222 @@ fob::risk::v1::KillSwitchResponse RiskUseCases::SetKillSwitch(
   return resp;
 }
 
-/// OnBatchResult — observer Kafka batch.outputs. MVP: только логирует
-/// solver diagnostics. Production: должно вычислять post-trade risk
-/// (positions, margin requirements, liquidations).
+// ============================================================================
+// OnBatchResult — observer Kafka batch.outputs (T-F06-030).
+//
+// Логирует solver diagnostics, затем извлекает затронутых user_id из fills и
+// строит RiskSnapshot для каждого (T-F06-031 buildRiskSnapshot). Дедуп —
+// один проход на пользователя за батч (несколько fills одного user → один
+// снапшот). Snapshot-pipeline активен только если задан snapshot_repo_;
+// иначе — поведение как раньше (только лог diagnostics).
+// ============================================================================
 void RiskUseCases::OnBatchResult(
     const fob::risk::v1::PostTradeUpdateRequest& req) {
-  // MVP: just log diagnostics from the batch solver.
-  const auto& d = req.batch().diagnostics();
+  const auto& batch = req.batch();
+  const auto& d = batch.diagnostics();
   cex::common::log_json(
       "INFO",
       "OnBatchResult",
       {
-          {     "batch_id",            req.batch().batch_id()},
+          {     "batch_id",            batch.batch_id()},
+          {        "fills", std::to_string(batch.fills_size())},
           {"residual_norm", std::to_string(d.residual_norm())},
           {     "solve_ms", std::to_string(d.solve_time_ms())}
   });
+
+  if (snapshot_repo_ == nullptr || !snapshot_repo_->enabled()) {
+    return;  // degraded mode: нет PG → нет post-trade margin snapshot.
+  }
+
+  // Дедуп user_id: один снапшот на пользователя за батч.
+  std::unordered_set<std::string> affected;
+  for (const auto& fill : batch.fills()) {
+    if (!fill.user_id().empty()) {
+      affected.insert(fill.user_id());
+    }
+  }
+
+  for (const auto& user_id : affected) {
+    buildRiskSnapshot(user_id, batch);
+  }
+}
+
+// ============================================================================
+// buildRiskSnapshot — F-06 / T-F06-031 / SEQ-RISK-001.
+//
+// Шаги:
+//   1. Читает открытые позиции (positions, side != flat) и коллатерал
+//      (accounts) пользователя.
+//   2. Резолвит margin rates из risk_limits (user → role → global → дефолт).
+//   3. mark price берётся из batch.clear_prices[symbol]; если для символа нет
+//      clear price (stale) — fallback на avg_entry_price позиции.
+//   4. MarginCalculator считает initial/maintenance margin, free/reserved
+//      collateral и margin-state флаги.
+//   5. INSERT в risk_snapshots.
+//   6. При margin_call/liquidation — RiskAlert в risk.alerts ПОСЛЕ INSERT
+//      (T-F06-032: нет alert без персистентного снапшота).
+//
+// Возвращает true при успешной записи снапшота.
+// ============================================================================
+bool RiskUseCases::buildRiskSnapshot(
+    const std::string& user_id,
+    const fob::matching::v1::BatchResult& batch) {
+  if (snapshot_repo_ == nullptr || !snapshot_repo_->enabled()) {
+    return false;
+  }
+
+  const auto positions = snapshot_repo_->ListOpenPositions(user_id);
+  const auto collateral = snapshot_repo_->LoadCollateral(user_id);
+  // role резолвится из env (demo-окружение); production — из users-таблицы.
+  const std::string role = cex::common::Env::get_string("RISK_DEFAULT_ROLE", "client");
+  const auto rates = snapshot_repo_->ResolveRates(user_id, role);
+
+  // Собираем domain-вход: mark price = clear_prices[symbol] или avg_entry.
+  std::vector<domain::MarginPosition> margin_positions;
+  margin_positions.reserve(positions.size());
+  const auto& clear_prices = batch.clear_prices();
+  for (const auto& p : positions) {
+    domain::MarginPosition mp;
+    mp.symbol = p.symbol;
+    mp.quantity = p.quantity;
+    mp.unrealized_pnl = p.unrealized_pnl;
+    auto it = clear_prices.find(p.symbol);
+    if (it != clear_prices.end()) {
+      mp.mark_price = Decimal::from_proto(it->second);
+    } else {
+      // Stale mark: clear price для символа в этом батче нет — используем
+      // последнюю известную (avg_entry_price). Снапшот всё равно пишется
+      // (SEQ-RISK-001 idempotency/failure: stale mark не подавляет alert).
+      mp.mark_price = p.avg_entry_price;
+    }
+    margin_positions.push_back(std::move(mp));
+  }
+
+  domain::MarginRates margin_rates;
+  margin_rates.initial_margin_rate = rates.initial_margin_rate;
+  margin_rates.maintenance_margin_rate = rates.maintenance_margin_rate;
+
+  const auto margin = domain::ComputeMargin(margin_positions, margin_rates,
+                                            collateral.free_balance,
+                                            collateral.reserved_balance);
+
+  infra::RiskSnapshotInsert snap;
+  snap.entity_id = user_id;
+  // T-F06-073: idempotency-ключ — батч-источник снапшота. Повторная доставка
+  // того же batch.outputs (at-least-once / rebalance / replay) не создаст
+  // дубль-строку и не пошлёт повторный margin-call alert.
+  snap.batch_id = batch.batch_id();
+  snap.free_collateral = margin.free_collateral;
+  snap.reserved_collateral = margin.reserved_collateral;
+  snap.initial_margin = margin.initial_margin;
+  snap.maintenance_margin = margin.maintenance_margin;
+  snap.throttled = margin.throttled;
+  snap.margin_call = margin.margin_call;
+  snap.liquidation = margin.liquidation;
+
+  const infra::InsertResult insert_result = snapshot_repo_->InsertSnapshot(snap);
+  const bool persisted = insert_result == infra::InsertResult::kInserted;
+  const bool duplicate = insert_result == infra::InsertResult::kDuplicate;
+
+  cex::common::log_json(
+      "INFO", "buildRiskSnapshot",
+      {{"service", "risk"},
+       {"stage", "build_risk_snapshot"},
+       {"batch_id", batch.batch_id()},
+       {"user_id", user_id},
+       {"positions", std::to_string(margin_positions.size())},
+       {"free_collateral", margin.free_collateral.to_string()},
+       {"initial_margin", margin.initial_margin.to_string()},
+       {"maintenance_margin", margin.maintenance_margin.to_string()},
+       {"margin_call", margin.margin_call ? "true" : "false"},
+       {"liquidation", margin.liquidation ? "true" : "false"},
+       {"persisted", persisted ? "true" : "false"},
+       {"duplicate", duplicate ? "true" : "false"},
+       {"source_file", "cpp/risk/src/app/risk_uc.cpp"}});
+
+  if (duplicate) {
+    // T-F06-073: повторная доставка того же (entity_id, batch_id). Снапшот уже
+    // персистентен из первой доставки — не дублируем строку и НЕ шлём повторный
+    // margin-call alert (иначе — ложные алерты на каждый rebalance/replay).
+    // Считаем обработку успешной (offset можно коммитить).
+    return true;
+  }
+
+  if (!persisted) {
+    // Hard failure для этого user (CLAUDE.md §16 audit-критично): не
+    // публикуем alert без персистентного снапшота.
+    return false;
+  }
+
+  // T-F06-032: alert ТОЛЬКО после успешного (нового) INSERT.
+  if (margin.liquidation) {
+    PublishMarginAlert(user_id, batch.batch_id(), /*liquidation=*/true);
+  } else if (margin.margin_call) {
+    PublishMarginAlert(user_id, batch.batch_id(), /*liquidation=*/false);
+  }
+  return true;
+}
+
+// ============================================================================
+// PublishMarginAlert — F-06 / T-F06-032. RiskAlert MARGIN_CALL / LIQUIDATION
+// в risk.alerts (key = user_id). Severity: WARN для margin_call, CRITICAL для
+// liquidation (см. SEQ-RISK-001 «Margin state»).
+// ============================================================================
+void RiskUseCases::PublishMarginAlert(const std::string& user_id,
+                                      const std::string& batch_id,
+                                      bool liquidation) {
+  fob::risk::v1::RiskAlert alert;
+  auto* meta = alert.mutable_meta();
+  meta->set_event_id(cex::common::uuid_v4());
+  *meta->mutable_ts_event() = cex::common::now_ts();
+  meta->set_source("risk");
+  meta->set_partition_key(user_id.empty() ? "GLOBAL" : user_id);
+
+  alert.set_alert_id(cex::common::uuid_v4());
+  alert.set_severity(liquidation ? fob::risk::v1::RISK_SEVERITY_CRITICAL
+                                 : fob::risk::v1::RISK_SEVERITY_WARN);
+  alert.set_user_id(user_id);
+  alert.set_alert_type(liquidation ? "LIQUIDATION" : "MARGIN_CALL");
+  auto* e = alert.mutable_error();
+  e->set_code(liquidation ? "LIQUIDATION" : "MARGIN_CALL");
+  e->set_message(liquidation
+                     ? "free_collateral <= 0; liquidation triggered"
+                     : "free_collateral < maintenance_margin; margin call");
+  (*alert.mutable_details())["batch_id"] = batch_id;
+  *alert.mutable_timestamp() = cex::common::now_ts();
+
+  publisher_.publish(alert);
+}
+
+// ============================================================================
+// GetRiskSnapshot — F-06 / T-F06-032. Отдаёт последний risk_snapshot для
+// entity_id (ORDER BY timestamp DESC LIMIT 1). Пустой snapshot если нет
+// репозитория или строк.
+// ============================================================================
+fob::risk::v1::GetRiskSnapshotResponse RiskUseCases::GetRiskSnapshot(
+    const fob::risk::v1::GetRiskSnapshotRequest& req) {
+  fob::risk::v1::GetRiskSnapshotResponse resp;
+  if (snapshot_repo_ == nullptr || !snapshot_repo_->enabled()) {
+    return resp;  // empty snapshot (gateway деградирует с margin=null).
+  }
+
+  const auto row = snapshot_repo_->LatestSnapshot(req.entity_id());
+  if (!row.has_value()) {
+    return resp;
+  }
+
+  auto* snap = resp.mutable_snapshot();
+  snap->set_entity_id(row->entity_id);
+  *snap->mutable_free_collateral() = row->free_collateral.to_proto();
+  *snap->mutable_reserved_collateral() = row->reserved_collateral.to_proto();
+  *snap->mutable_initial_margin() = row->initial_margin.to_proto();
+  *snap->mutable_maintenance_margin() = row->maintenance_margin.to_proto();
+  snap->set_margin_call(row->margin_call);
+  snap->set_liquidation(row->liquidation);
+  if (row->timestamp_unix > 0) {
+    snap->mutable_timestamp()->set_seconds(row->timestamp_unix);
+  }
+  return resp;
 }
 
 // ============================================================================

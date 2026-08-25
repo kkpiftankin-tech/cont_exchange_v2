@@ -1,10 +1,14 @@
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/batch_outputs.pb.h"
+#include "fob/matching/v1/fill_event.pb.h"
 #include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/orders/v1/orders.pb.h"
 #include "fob/venue/v1/venue.pb.h"
 
+#include <algorithm>
 #include <chrono>
+#include <string>
 #include <thread>
 
 #include "cex/common/env.hpp"
@@ -47,7 +51,10 @@ void MarketDataKafkaConsumer::loop() {
     // F-11 integration path: Market Data Service consumes raw market data,
     // normalized snapshots and FOB curves.
     if (!consumer.subscribe(
-            {"marketdata.raw", "batch.outputs", "venue.liquidity.fob", "venue.snapshots", "execution.venue", "execution.groups"})) {
+            {"marketdata.raw", "batch.outputs", "fills",
+             "orders.normalized",   // F5-3: FlowOrder для FOB aggregate curves
+             "venue.liquidity.fob", "venue.snapshots", "execution.venue",
+             "execution.groups"})) {   // F-09: grouped combo execution
       cex::common::log_json("ERROR", "MarketData Kafka subscribe failed; retrying");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       continue;
@@ -83,6 +90,49 @@ void MarketDataKafkaConsumer::loop() {
                   return;
                 }
                 uc_->OnBatchResult(batch);
+                return;
+              }
+
+              // F5-3: FlowOrder events для FOB aggregate curves
+              if (topic == "orders.normalized") {
+                fob::orders::v1::OrdersNormalized msg;
+                if (!cex::common::from_bytes(payload, msg)) {
+                  cex::common::log_json("ERROR", "Failed to parse OrdersNormalized");
+                  return;
+                }
+                if (msg.has_create()) {
+                  uc_->OnOrderCreate(msg.create().order());
+                } else if (msg.has_cancel()) {
+                  // FlowOrderCancel не содержит instrument — используем RemoveOrderById
+                  uc_->OnOrderCancel(msg.cancel().order_id(), "");
+                }
+                return;
+              }
+
+              // F-05: per-fill events для расчёта effective spread.
+              // Топик `fills` несёт FillEvent (а НЕ FlowFill) — адаптируем к
+              // FlowFill, который ожидают OnFillEvent/ComputeEffectiveSpread.
+              if (topic == "fills") {
+                fob::matching::v1::FillEvent ev;
+                if (!cex::common::from_bytes(payload, ev)) {
+                  cex::common::log_json("ERROR", "Failed to parse FillEvent from fills topic");
+                  return;
+                }
+                fob::matching::v1::FlowFill fill;
+                fill.set_order_id(ev.order_id());
+                if (ev.asset_legs_size() > 0) {
+                  *fill.mutable_instrument() = ev.asset_legs(0);
+                  // Нормализуем символ ("BTC/USDT" → "BTCUSDT"), иначе GetCurrentMid
+                  // не найдёт mid в кэше (он keyed нормализованным asset).
+                  std::string sym = fill.instrument().symbol();
+                  sym.erase(std::remove(sym.begin(), sym.end(), '/'), sym.end());
+                  fill.mutable_instrument()->set_symbol(sym);
+                }
+                if (ev.has_exec_qty())   *fill.mutable_executed_qty() = ev.exec_qty();
+                if (ev.has_exec_price()) *fill.mutable_price()        = ev.exec_price();
+                const auto ts = std::chrono::system_clock::now();
+                const std::string fid = !ev.fill_id().empty() ? ev.fill_id() : key;
+                uc_->OnFillEvent(fill, fid, ev.batch_id(), ts);
                 return;
               }
 

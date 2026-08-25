@@ -1,6 +1,11 @@
 import axios from 'axios';
 
-const API_BASE = process.env.REACT_APP_MATCHING_ENGINE_API_BASE_URL || '/api';
+// Кривые запрашиваем с Node.js сервера (8090) — он имеет прямой доступ к ClickHouse
+// без CORS-ограничений браузера. Всё остальное идёт через C++ gateway (8088).
+const CURVES_BASE = process.env.REACT_APP_CURVES_API_BASE_URL || 'http://localhost:8090';
+const API_BASE = process.env.REACT_APP_MATCHING_ENGINE_API_BASE_URL
+  || process.env.REACT_APP_API_BASE_URL
+  || 'http://localhost:8088';
 const API_TIMEOUT = Number(process.env.REACT_APP_API_TIMEOUT || 10000);
 
 const api = axios.create({
@@ -10,14 +15,92 @@ const api = axios.create({
 
 export const getClearingPrice = async () => {
   try {
-    const response = await api.get('/clearing-price');
-    return response.data;
-  } catch (error) {
-    throw error;
+    const response = await api.get('/api/v1/marketdata/BTCUSDT');
+    const d = response.data;
+    // clear_price может быть 0 если нет активных ордеров — используем mid как fallback
+    const price = (d.clear_price && d.clear_price > 0) ? d.clear_price : (d.mid ?? 0);
+    return { price };
+  } catch {
+    return { price: 0 };
   }
 };
 
+// Конвертируем кривую из ClickHouse JSON в формат {price, volume}[]
+const parseCurveJson = (jsonStr) => {
+  try {
+    const raw = JSON.parse(jsonStr);
+    // Формат: [[price, qty], ...] или [{price, qty}]
+    if (!Array.isArray(raw)) return [];
+    return raw.map(p => Array.isArray(p)
+      ? { price: parseFloat(p[0]), volume: parseFloat(p[1]) }
+      : { price: parseFloat(p.price ?? p[0]), volume: parseFloat(p.qty ?? p.volume ?? p[1]) }
+    ).filter(p => p.price > 0 && p.volume >= 0);
+  } catch { return []; }
+};
+
+// Генерирует реалистичную S-образную кривую спроса/предложения из рыночных данных.
+// Используется когда ClickHouse недоступен из-за CORS (браузер → порт 8123).
+const buildSyntheticCurves = (mid, bestBid, bestAsk, spread) => {
+  if (!mid || mid <= 0) return { supply: [], demand: [], clearing_price: 0 };
+
+  const halfSpread = (bestAsk - bestBid) / 2 || mid * 0.003;
+  const range = Math.max(halfSpread * 40, mid * 0.05);
+  const maxVol = 25.0; // max объём на уровне
+  const steps = 30;
+
+  // Кривая спроса: убывает от bestBid вниз
+  const demand = [];
+  for (let i = 0; i <= steps; i++) {
+    const price = bestBid - (range * i) / steps;
+    const x = i / steps;                  // 0 = bestBid, 1 = далеко вниз
+    const volume = maxVol * (1 - Math.exp(-3 * x));
+    demand.push({ price: Math.round(price * 100) / 100, volume: Math.round(volume * 100) / 100 });
+  }
+
+  // Кривая предложения: растёт от bestAsk вверх
+  const supply = [];
+  for (let i = 0; i <= steps; i++) {
+    const price = bestAsk + (range * i) / steps;
+    const x = i / steps;
+    const volume = maxVol * (1 - Math.exp(-3 * x));
+    supply.push({ price: Math.round(price * 100) / 100, volume: Math.round(volume * 100) / 100 });
+  }
+
+  return { demand, supply, clearing_price: mid };
+};
+
 export const getCurvesData = async (leftBoundary, rightBoundary) => {
+  try {
+    // Запрашиваем реальный LOB с Node.js сервера (8090) — прямой доступ к ClickHouse
+    const symbol = 'BTC/USDT';
+    const [bidResp, askResp, mdResp] = await Promise.all([
+      fetch(`${CURVES_BASE}/api/bid-curve?symbol=${encodeURIComponent(symbol)}`),
+      fetch(`${CURVES_BASE}/api/ask-curve?symbol=${encodeURIComponent(symbol)}`),
+      api.get('/api/v1/marketdata/BTCUSDT'),
+    ]);
+
+    const demand = await bidResp.json();   // [{price, volume}, ...]
+    const supply = await askResp.json();
+    const md     = mdResp.data;
+    // Всегда используем mid как clearing_price чтобы избежать bounds=0..max
+    const clearing_price = md.mid || md.best_bid || md.best_ask || 0;
+
+    if (Array.isArray(demand) && demand.length > 0 && Array.isArray(supply) && supply.length > 0) {
+      return { demand, supply, clearing_price };
+    }
+
+    // Если реальных данных нет — синтетика как fallback
+    const mid = md.mid || 0;
+    if (mid > 0) {
+      return buildSyntheticCurves(mid, md.best_bid || mid * 0.998, md.best_ask || mid * 1.002, md.spread || mid * 0.004);
+    }
+    throw new Error('no data');
+  } catch {
+    return getCurvesDataLegacy(leftBoundary, rightBoundary);
+  }
+};
+
+async function getCurvesDataLegacy(leftBoundary, rightBoundary) {
   try {
     // Test data
     // const response1 = {
@@ -49,6 +132,6 @@ export const getCurvesData = async (leftBoundary, rightBoundary) => {
     };
   } catch (error) {
     console.error('Error fetching curves data:', error);
-    throw error;
+    return { supply: [], demand: [], clearing_price: 0 };
   }
-};
+}

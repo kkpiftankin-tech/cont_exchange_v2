@@ -25,11 +25,11 @@
 
 ## 🏗 Components Involved
 
-| Component | Drill-down → component overview / L2 sequences |
-| --- | --- |
-| [ledger](../../../05-components/ledger/overview.md) | (L2 sequences pending) |
-| `risk` (overview pending) | (L2 sequences pending) |
-| [gateway](../../../05-components/gateway/overview.md) | (L2 sequences pending) |
+| Component                                             | Drill-down → component overview / L2 sequences |
+| ----------------------------------------------------- | ---------------------------------------------- |
+| [ledger](../../../05-components/ledger/overview.md)   | (L2 sequences pending)                         |
+| `risk` (overview pending)                             | (L2 sequences pending)                         |
+| [gateway](../../../05-components/gateway/overview.md) | (L2 sequences pending)                         |
 
 > См. также [`docs/00-methodology/functional-hierarchy-and-decomposition.md`](../../../00-methodology/functional-hierarchy-and-decomposition.md) — полное описание двухосевой модели IN-013.
 

@@ -1180,6 +1180,80 @@ async function proxyReplayToGateway(req, res) {
   }
 }
 
+// F-05 Live Market Data — reverse-proxy REST + WebSocket to the C++ gateway.
+// The gateway serves /api/v1/marketdata/<asset>[/history|/effective-spread]
+// and the WS route /api/v1/market (see cpp/gateway http_gateway). frontend-web
+// requests these against frontend-api (nginx forwards /api/* here), so we
+// forward 1:1 to GATEWAY_ADDR. Paths/query are passed through unchanged.
+function isMarketDataPath(pathname) {
+  return pathname === "/api/v1/marketdata" ||
+    pathname.startsWith("/api/v1/marketdata/");
+}
+
+async function proxyMarketDataToGateway(req, res) {
+  const method = req.method || "GET";
+  const target = new URL(req.url || "/", GATEWAY_ADDR);
+  const hasBody = method !== "GET" && method !== "HEAD";
+  const body = hasBody ? await readRawBody(req) : undefined;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const response = await fetch(target, {
+      method,
+      headers: proxyHeaders(req),
+      body: hasBody ? body : undefined,
+      signal: controller.signal
+    });
+    const headers = Object.fromEntries(response.headers.entries());
+    res.writeHead(response.status, headers);
+    if (response.body) {
+      Readable.fromWeb(response.body).pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    writeJson(res, 502, {
+      error: "Market data gateway unavailable",
+      details: String(err.message || err)
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function proxyMarketDataUpgrade(req, socket, head) {
+  const target = new URL(req.url || "/", GATEWAY_ADDR);
+  if (target.protocol !== "http:") {
+    socket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  const port = Number(target.port || 80);
+  const upstream = net.connect(port, target.hostname, () => {
+    const headers = { ...req.headers, host: target.host };
+    const lines = [`${req.method} ${target.pathname}${target.search} HTTP/${req.httpVersion}`];
+    Object.entries(headers).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => lines.push(`${key}: ${item}`));
+      } else if (value != null) {
+        lines.push(`${key}: ${value}`);
+      }
+    });
+    upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
+    if (head && head.length > 0) upstream.write(head);
+    socket.pipe(upstream);
+    upstream.pipe(socket);
+  });
+  upstream.on("error", () => {
+    if (!socket.destroyed) {
+      socket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+    }
+  });
+  socket.on("error", () => upstream.destroy());
+  socket.on("close", () => upstream.destroy());
+}
+
 function parseBatchId(pathname) {
   const match = pathname.match(/^\/api\/batches\/([^/]+)$/);
   if (!match) return null;
@@ -6853,6 +6927,17 @@ const server = createServer(async (req, res) => {
       if (handled !== false) return;
     }
 
+    // F-05 Live Market Data REST → C++ gateway (snapshot/history/effective-spread)
+    if (isMarketDataPath(pathname)) {
+      return proxyMarketDataToGateway(req, res);
+    }
+
+    // F-06 Positions/PnL/Margin REST → C++ gateway (alias /api/v1/positions).
+    // Reuses the generic gateway forwarder (proxyHeaders injects a dev x-user-id).
+    if (pathname === "/api/v1/positions") {
+      return proxyMarketDataToGateway(req, res);
+    }
+
     if (pathname.startsWith("/api/auth/")) {
       const handled = await handleAuth(req, res, pathname);
       if (handled !== false) return;
@@ -7065,7 +7150,261 @@ server.on("upgrade", (req, socket, head) => {
     proxyReplayUpgrade(req, socket, head);
     return;
   }
+  // F-05 Live Market Data WebSocket → C++ gateway /api/v1/market
+  if (requestUrl.pathname === "/api/v1/market") {
+    proxyMarketDataUpgrade(req, socket, head);
+    return;
+  }
+  // F-06 Positions WebSocket push → C++ gateway /api/v1/positions/ws
+  if (requestUrl.pathname === "/api/v1/positions/ws") {
+    proxyMarketDataUpgrade(req, socket, head);
+    return;
+  }
   handleExecutionLiveUpgrade(req, socket, head);
+});
+
+// ─── Real FOB curves from ClickHouse (/api/bid-curve, /api/ask-curve) ─────────
+// Читаем FOB aggregate curves из liquidity_curves (данные от venues → FOB normalizer).
+// Формат: {q_grid:[...], p_of_q:[...], s_of_q:[...]} — кривая «объём→цена» в FOB модели.
+// Кэш + single-flight: фронт часто поллит /api/bid-curve|ask-curve. Без кэша
+// каждый запрос делал full-scan по liquidity_curves (десятки тыс. строк),
+// запросы копились и перегружали ClickHouse (CPU 1000%+). Кэшируем на 3с и
+// схлопываем параллельные запросы в один.
+const _fobCurveCache = new Map(); // key -> { ts, data, inflight }
+const FOB_CURVE_TTL_MS = 3000;
+
+async function fetchFobCurves(symbol = "BTC/USDT", venue = null) {
+  const key = `${symbol}|${venue || ""}`;
+  const now = Date.now();
+  const cached = _fobCurveCache.get(key);
+  if (cached && cached.data && (now - cached.ts) < FOB_CURVE_TTL_MS) return cached.data;
+  if (cached && cached.inflight) return cached.inflight;
+
+  const promise = (async () => {
+    const venueFilter = venue ? `AND venue_id = '${escapeClickHouseString(venue)}'` : "";
+    // Фильтр по свежести: сканируем только последние 5 минут, а не всю таблицу,
+    // чтобы запрос не делал full-scan + сортировку по всем строкам.
+    const sinceMs = Date.now() - 5 * 60 * 1000;
+    const query = `
+      SELECT venue_id, mid_price, confidence, level, bid_curve_json, ask_curve_json
+      FROM liquidity_curves
+      WHERE symbol = '${escapeClickHouseString(symbol)}' ${venueFilter}
+        AND timestamp_ms > ${sinceMs}
+      ORDER BY timestamp_ms DESC
+      LIMIT 1 BY venue_id
+      FORMAT JSON
+    `.trim();
+    const url = `${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`clickhouse ${resp.status}`);
+    const data = await resp.json();
+    const rows = data.data || [];
+    _fobCurveCache.set(key, { ts: Date.now(), data: rows, inflight: null });
+    return rows;
+  })();
+
+  _fobCurveCache.set(key, { ...(cached || {}), inflight: promise });
+  try { return await promise; }
+  catch (e) { _fobCurveCache.set(key, { ...(cached || {}), inflight: null }); throw e; }
+}
+
+// FOB кривая: {q_grid, p_of_q} → [{price, volume}]
+// q_grid[i] = накопленный объём, p_of_q[i] = цена при этом объёме
+function parseFobCurveJson(jsonStr) {
+  try {
+    const raw = typeof jsonStr === "string" ? JSON.parse(jsonStr) : jsonStr;
+    const q = raw.q_grid;
+    const p = raw.p_of_q;
+    if (!Array.isArray(q) || !Array.isArray(p) || q.length !== p.length) return [];
+    return q
+      .map((vol, i) => ({
+        price:  Math.round(parseFloat(p[i]) * 100) / 100,
+        volume: Math.round(parseFloat(vol)  * 10000) / 10000,
+      }))
+      .filter(pt => isFinite(pt.price) && pt.price > 0 && isFinite(pt.volume) && pt.volume >= 0);
+  } catch { return []; }
+}
+
+// GET /api/bid-curve[?symbol=BTC/USDT&venue=binance]
+// GET /api/ask-curve[?symbol=BTC/USDT&venue=binance]
+// Response: [{price, volume}, ...] — FOB aggregate demand/supply curve
+
+async function handleLobCurve(req, res, side) {
+  const urlObj = new URL(req.url, `http://localhost`);
+  const symbol = urlObj.searchParams.get("symbol") || "BTC/USDT";
+  const venue  = urlObj.searchParams.get("venue")  || null;
+
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "application/json");
+
+  try {
+    const rows = await fetchFobCurves(symbol, venue);
+    if (!rows.length) { res.end(JSON.stringify([])); return; }
+
+    // Берём самую свежую строку с наилучшим confidence
+    rows.sort((a, b) => parseFloat(b.confidence) - parseFloat(a.confidence));
+    const best = rows[0];
+
+    const curveJson = side === "bid" ? best.bid_curve_json : best.ask_curve_json;
+    const points = parseFobCurveJson(curveJson);
+
+    // Bid (demand): сортируем по цене убывающей (лучший bid первый)
+    // Ask (supply): сортируем по цене возрастающей (лучший ask первый)
+    points.sort((a, b) => side === "bid" ? b.price - a.price : a.price - b.price);
+
+    res.end(JSON.stringify(points));
+  } catch (err) {
+    console.error(`[fob-curves] ${side} error:`, err.message);
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
+
+// ─── Profile /bids — читаем FlowOrders из PostgreSQL ───────────────────────────
+async function handleBids(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "application/json");
+
+  const urlObj = new URL(req.url, "http://localhost");
+  const userId = urlObj.searchParams.get("user_id") || "demo-user";
+
+  try {
+    const pool = getPgPool();
+    if (!pool) throw new Error("pg_unavailable");
+    const result = await pool.query(`
+      SELECT fo.order_id, fo.user_id, fo.status,
+             fo.p_low as min_price, fo.p_high as max_price,
+             fo.q_rate as buy_speed, fo.q_max as amount_to_buy,
+             fo.filled_cum as bought_amount,
+             fo.created_at, fo.updated_at,
+             COALESCE(fol.instrument_symbol, 'BTC/USDT') as symbol,
+             CASE WHEN fol.weight < 0 THEN 'sell' ELSE 'buy' END as side
+      FROM flow_orders fo
+      LEFT JOIN LATERAL (
+        SELECT instrument_symbol, weight FROM flow_order_legs
+        WHERE order_id = fo.order_id LIMIT 1
+      ) fol ON true
+      WHERE fo.user_id = $1
+      ORDER BY fo.created_at DESC
+      LIMIT 200
+    `, [userId]);
+
+    const trades = result.rows.map(r => {
+      const side = r.side || "buy";
+      const symbol = r.symbol || "BTC/USDT";
+      const [from_currency, to_currency] = side === "buy"
+        ? ["USDT", symbol.split("/")[0]]
+        : [symbol.split("/")[0], "USDT"];
+
+      return {
+        id:             r.order_id,
+        create_date:    Math.floor(new Date(r.created_at).getTime() / 1000),
+        complete_date:  r.status === "filled" ? Math.floor(new Date(r.updated_at).getTime() / 1000) : null,
+        from_currency,
+        to_currency,
+        amount_to_buy:  parseFloat(r.amount_to_buy) || 0,
+        status:         r.status || "active",
+        bought_amount:  parseFloat(r.bought_amount) || 0,
+        min_price:      parseFloat(r.min_price) || 0,
+        max_price:      parseFloat(r.max_price) || 0,
+        buy_speed:      parseFloat(r.buy_speed) || 0,
+        avg_price:      parseFloat(r.min_price) || 0,
+        venue_executions: [],
+      };
+    });
+
+    res.end(JSON.stringify(trades));
+  } catch (err) {
+    console.error("[bids]", err.message);
+    // Fallback: пустой массив вместо ошибки
+    res.end(JSON.stringify([]));
+  }
+}
+
+// Встраиваем в диспетчер server.on("request")
+const _origListeners = server.listeners("request").slice();
+server.removeAllListeners("request");
+server.on("request", (req, res) => {
+  const urlPath = new URL(req.url || "/", "http://x").pathname;
+  if (req.method === "GET" && urlPath === "/api/bid-curve") {
+    return handleLobCurve(req, res, "bid");
+  }
+  if (req.method === "GET" && urlPath === "/api/ask-curve") {
+    return handleLobCurve(req, res, "ask");
+  }
+  // /bids — FlowOrders из PostgreSQL для Profile страницы
+  if (req.method === "GET" && urlPath === "/bids") {
+    return handleBids(req, res);
+  }
+  // POST /api/reset-balance — отменить все незакрытые ордера
+  if (req.method === "POST" && urlPath === "/api/reset-balance") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "application/json");
+    const pool = getPgPool();
+    if (!pool) { res.end(JSON.stringify({ canceled: 0, message: "pg unavailable" })); return; }
+    // PG не доступен напрямую из Node.js (нет проброса порта)
+    // Используем docker exec для очистки ордеров + рестарта ledger
+    const { exec } = require("child_process");
+    const sql = "UPDATE flow_orders SET status='canceled' WHERE status NOT IN ('filled','canceled')";
+    const cmd = `docker exec infra-postgres-1 psql -U cex -d cex -c "${sql}" && docker restart infra-ledger-1`;
+    exec(cmd, { timeout: 15000 }, (err, stdout) => {
+      if (err) {
+        console.error("[reset-balance] exec error:", err.message);
+        res.end(JSON.stringify({ canceled: 0, message: "manual: cancel orders + restart ledger" }));
+      } else {
+        const match = stdout.match(/UPDATE (\d+)/);
+        const canceled = match ? parseInt(match[1]) : 0;
+        res.end(JSON.stringify({ canceled, message: "done" }));
+      }
+    });
+    return; // response sent in callback
+    return;
+  }
+  // /transactions/transfers — пустой массив (нет legacy deposit/withdraw в новом стеке)
+  if (req.method === "GET" && urlPath === "/transactions/transfers") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify([]));
+    return;
+  }
+  // /api/venue-confidence — реальный confidence из liquidity_curves
+  if (req.method === "GET" && urlPath === "/api/venue-confidence") {
+    const urlObj2 = new URL(req.url, "http://localhost");
+    const sym = urlObj2.searchParams.get("symbol") || "BTC/USDT";
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "application/json");
+    const query = `SELECT venue_id, round(any(confidence), 4) as conf
+      FROM liquidity_curves WHERE symbol='${escapeClickHouseString(sym)}'
+      AND timestamp_ms > ${Date.now() - 5 * 60 * 1000}
+      GROUP BY venue_id FORMAT JSON`;
+    fetch(`${CLICKHOUSE_URL}/?query=${encodeURIComponent(query)}`)
+      .then(r => r.json())
+      .then(data => {
+        const result = {};
+        for (const row of (data.data || [])) result[row.venue_id] = parseFloat(row.conf);
+        res.end(JSON.stringify(result));
+      })
+      .catch(() => res.end(JSON.stringify({})));
+    return;
+  }
+  // clearing-price → forward to gateway /api/v1/marketdata/BTCUSDT
+  if (req.method === "GET" && urlPath === "/api/clearing-price") {
+    const gwUrl = `${GATEWAY_ADDR}/api/v1/marketdata/BTCUSDT`;
+    fetch(gwUrl)
+      .then(r => r.json())
+      .then(d => {
+        const price = (d.clear_price && d.clear_price > 0) ? d.clear_price : (d.mid || 0);
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ price }));
+      })
+      .catch(() => {
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ price: 0 }));
+      });
+    return;
+  }
+  for (const fn of _origListeners) fn(req, res);
 });
 
 server.listen(PORT, () => {

@@ -54,6 +54,8 @@ retention_for_topic() {
 # - venue.synthetic: compatibility SyntheticFlowOrder stream for matching
 create_topic marketdata.raw "$(retention_for_topic marketdata.raw 3600000)"
 create_topic marketdata.vectorized "$(retention_for_topic marketdata.vectorized 3600000)" # F-05A: VectorizedLiquiditySnapshot, key = batch_id
+# F-05: MarketDataSnapshot после каждого batch-clearing; 7 дней retention, partition key = asset
+create_topic marketdata.snapshots "$(retention_for_topic marketdata.snapshots 604800000)"
 create_topic orders.normalized "$(retention_for_topic orders.normalized 604800000)"
 create_topic batch.outputs "$(retention_for_topic batch.outputs 604800000)"
 create_topic fills "$(retention_for_topic fills 604800000)"
@@ -61,6 +63,9 @@ create_topic execution.intents "$(retention_for_topic execution.intents 60480000
 create_topic execution.venue "$(retention_for_topic execution.venue 604800000)" # key = hedge_flow_id
 create_topic execution.reports "$(retention_for_topic execution.reports 604800000)"
 create_topic risk.alerts "$(retention_for_topic risk.alerts 2592000000)"
+# F-06 / F6-5 (ADR-046): positions invalidation signal; ledger -> ws-gateway.
+# key = user_id, retention 7 дней (транзиентный сигнал, история не требуется).
+create_topic positions.update "$(retention_for_topic positions.update 604800000)" # key = user_id (positions invalidation signal; ledger -> ws-gateway)
 
 create_topic venue.liquidity.fob "$(retention_for_topic venue.liquidity.fob 86400000)" # key = {venue_id}|{instrument_symbol}
 create_topic venue.health "$(retention_for_topic venue.health 604800000)" # key = {venue_id}

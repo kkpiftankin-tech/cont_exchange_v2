@@ -87,15 +87,31 @@ std::vector<fob::matching::v1::FillEvent> BatchResultToFillEvents(
         Decimal::add(exec_qty, Decimal::from_proto(flow_fill.executed_qty()));
     event.mutable_exec_qty()->CopyFrom(exec_qty.to_proto());
 
-    auto exec_price = Decimal::from_proto(event.exec_price());
-    exec_price = Decimal::add(
-        exec_price, Decimal::from_proto(flow_fill.executed_notional()));
-    event.mutable_exec_price()->CopyFrom(exec_price.to_proto());
+    // Во время агрегации копим в exec_price СУММУ notional (qty*price) по
+    // FlowFill этого order/provenance — ниже, после цикла, переведём в
+    // средневзвешенную цену исполнения (VWAP = Σnotional / Σqty).
+    auto exec_notional = Decimal::from_proto(event.exec_price());
+    exec_notional = Decimal::add(
+        exec_notional, Decimal::from_proto(flow_fill.executed_notional()));
+    event.mutable_exec_price()->CopyFrom(exec_notional.to_proto());
 
     if (!event.has_provenance()) {
       event.mutable_provenance()->CopyFrom(provenance);
     }
     event.add_fees()->CopyFrom(flow_fill.fee());
+  }
+
+  // exec_price = VWAP-цена исполнения = Σnotional / Σqty (поле exec_price
+  // в FillEvent — именно ЦЕНА, а не notional). Без этого effective spread
+  // (F-05) считается по notional и раздувается в тысячи bps.
+  for (auto& kv : events) {
+    auto& event = kv.second;
+    const auto qty = Decimal::from_proto(event.exec_qty());
+    if (qty.units != 0) {
+      const auto notional = Decimal::from_proto(event.exec_price());
+      const auto vwap = Decimal::div(notional, qty, 8);
+      event.mutable_exec_price()->CopyFrom(vwap.to_proto());
+    }
   }
 
   return ExtractValuesValues(std::move(events));

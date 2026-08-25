@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import NavBar from "../../components/NavBar";
 import { useNavigate } from 'react-router-dom';
@@ -118,6 +118,13 @@ const Profile = () => {
 
   useEffect(() => {
     loadData();
+  }, [loadData]);
+
+  // Автообновление истории каждые 5 сек (чтобы новые заявки появлялись сразу)
+  const pollRef = useRef(null);
+  useEffect(() => {
+    pollRef.current = setInterval(() => loadData(), 5000);
+    return () => clearInterval(pollRef.current);
   }, [loadData]);
 
   const buildTransactionFilters = () => {

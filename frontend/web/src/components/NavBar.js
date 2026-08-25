@@ -10,6 +10,7 @@ import '../pages/Profile/Profile.css';   // единый стиль navbar-main 
 const TABS = [
   { href: '/main', key: 'navbar.trade', label: 'Торговля' },
   { href: '/profile', key: 'navbar.profile', label: 'Профиль' },
+  { href: '/positions', key: 'navbar.positions', label: 'Позиции' },
   { href: '/venues', key: 'navbar.venues', label: 'Площадки' },
   { href: '/combo-order-live', label: 'Combo' },
   { href: '/combo-compensation-live', label: 'Compensation' },

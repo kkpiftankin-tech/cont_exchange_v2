@@ -40,6 +40,7 @@
 #include <cctype>
 #include <cmath>
 #include <chrono>
+#include <future>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -540,6 +541,15 @@ bool can_read_replay_session(const GatewayUserContext& user,
 
 }  // namespace
 
+// F-05: контекст подписки на market data для каждого WS-соединения.
+// Вынесен из run() в namespace-уровень — Crow требует copyable/movable типы в хендлерах.
+struct MarketDataWsState {
+  std::unique_ptr<grpc::ClientContext> grpc_ctx;
+  std::atomic<bool> streaming{false};
+  std::string current_asset;
+  std::mutex mu;
+};
+
 static fob::common::v1::Decimal dec_from_double(double x, int32_t scale) {
   double factor = std::pow(10.0, static_cast<double>(scale));
   int64_t units = static_cast<int64_t>(std::llround(x * factor));
@@ -670,6 +680,34 @@ void close_replay_ws_context(crow::websocket::connection& conn) {
   conn.userdata(nullptr);
 }
 
+// F-06 (T-F06-072, ADR-046): per-connection state для positions WS-push.
+// user_id фиксируется при onopen из auth и НЕ может быть изменён клиентом —
+// listener фильтрует строго по нему, чтобы нельзя было слушать чужие позиции.
+struct PositionsWsContext {
+  std::string user_id;
+  uint64_t listener_id{0};
+  cex::gateway::infra::PositionsHub* hub{nullptr};
+  std::mutex mu;
+  bool closed{false};
+};
+
+void close_positions_ws_context(crow::websocket::connection& conn) {
+  auto* holder = static_cast<std::shared_ptr<PositionsWsContext>*>(conn.userdata());
+  if (holder == nullptr) return;
+  if (*holder) {
+    {
+      std::lock_guard<std::mutex> lock((*holder)->mu);
+      (*holder)->closed = true;
+    }
+    if ((*holder)->hub != nullptr && (*holder)->listener_id != 0) {
+      (*holder)->hub->Unsubscribe((*holder)->listener_id);
+      (*holder)->listener_id = 0;
+    }
+  }
+  delete holder;
+  conn.userdata(nullptr);
+}
+
 static crow::json::wvalue flow_order_to_json(const fob::orders::v1::FlowOrder& order) {
   crow::json::wvalue out;
   out["order_id"] = order.order_id();
@@ -693,6 +731,8 @@ static crow::json::wvalue flow_order_to_json(const fob::orders::v1::FlowOrder& o
 
 HttpGateway::HttpGateway(infra::OrderFlowClient order_flow_client,
                          infra::MarketDataClient market_data_client,
+                         infra::LedgerClient ledger_client,
+                         infra::RiskClient risk_client,
                          std::shared_ptr<SummaryRepository> summary_repo,
                          std::shared_ptr<LogsRepository> logs_repo,
                          std::shared_ptr<SessionsRepository> sessions_repo,
@@ -700,9 +740,12 @@ HttpGateway::HttpGateway(infra::OrderFlowClient order_flow_client,
                          std::shared_ptr<cex::backtest::app::RbacEngine> rbac_engine,
                          infra::ReplayCommandsKafkaPublisher* replay_commands,
                          infra::ReplayResultsHub* replay_results,
-                         std::shared_ptr<AuthMiddleware> auth_middleware)
+                         std::shared_ptr<AuthMiddleware> auth_middleware,
+                         infra::PositionsHub* positions_hub)
     : order_flow_(std::move(order_flow_client)),
       market_data_(std::move(market_data_client)),
+      ledger_(std::move(ledger_client)),
+      risk_(std::move(risk_client)),
       summary_repo_(std::move(summary_repo)),
       logs_repo_(std::move(logs_repo)),
       sessions_repo_(std::move(sessions_repo)),
@@ -710,10 +753,126 @@ HttpGateway::HttpGateway(infra::OrderFlowClient order_flow_client,
       rbac_engine_(std::move(rbac_engine)),
       replay_commands_(replay_commands),
       replay_results_(replay_results),
-      auth_middleware_(std::move(auth_middleware)) {}
+      auth_middleware_(std::move(auth_middleware)),
+      positions_hub_(positions_hub),
+      positions_cache_(infra::PositionsCache::FromEnv()) {}
+
+// F-06 (T-F06-072, ADR-046): единый сборщик снимка позиций/PnL/маржи. REST
+// (GET /v1/positions) и WS-push (/api/v1/positions/ws) вызывают этот метод, что
+// гарантирует идентичный JSON в обоих каналах.
+//
+// Деградация (как в SEQ-F06-UC-F06-01-services):
+//   - ledger недоступен → nullopt (caller отдаёт 503 для REST / не пушит по WS);
+//   - risk недоступен   → снимок есть, margin=null + marginDegraded=true (F6-9).
+std::optional<crow::json::wvalue> HttpGateway::BuildPositionsJson(
+    const std::string& user_id) {
+  // ADR-045: ledger.GetPositions и risk.GetRiskSnapshot независимы — пускаем
+  // risk параллельно, чтобы критпуть был max(ledger, risk), а не их сумма.
+  auto risk_future = std::async(std::launch::async, [this, user_id]() {
+    fob::risk::v1::GetRiskSnapshotRequest risk_req;
+    risk_req.set_entity_id(user_id);
+    fob::risk::v1::GetRiskSnapshotResponse risk_resp;
+    const grpc::Status st = risk_.GetRiskSnapshot(risk_req, &risk_resp);
+    return std::make_pair(st, std::move(risk_resp));
+  });
+
+  // 1. Positions from ledger (mandatory) — выполняется конкурентно с risk.
+  fob::ledger::v1::GetPositionsRequest pos_req;
+  pos_req.set_user_id(user_id);
+  fob::ledger::v1::GetPositionsResponse pos_resp;
+  const grpc::Status pos_status = ledger_.GetPositions(pos_req, &pos_resp);
+  if (!pos_status.ok()) {
+    // risk_future доедет в деструкторе (deadline ограничивает ожидание).
+    cex::common::log_json("WARN", "positions: ledger unavailable",
+                          {{"user_id", user_id},
+                           {"message", pos_status.error_message()}});
+    return std::nullopt;
+  }
+
+  crow::json::wvalue out;
+  out["positions"] = std::vector<crow::json::wvalue>{};
+
+  double realized_total = 0.0;
+  double unrealized_total = 0.0;
+  for (int i = 0; i < pos_resp.positions_size(); ++i) {
+    const auto& p = pos_resp.positions(i);
+    crow::json::wvalue item;
+    item["symbol"] = p.symbol();
+    item["side"] = p.side();
+    item["quantity"] = decimal_to_json(p.quantity());
+    item["avgEntryPrice"] = decimal_to_json(p.avg_entry_price());
+    item["markPrice"] = decimal_to_json(p.mark_price());
+    item["unrealizedPnl"] = decimal_to_json(p.unrealized_pnl());
+    item["realizedPnl"] = decimal_to_json(p.realized_pnl());
+    out["positions"][i] = std::move(item);
+    unrealized_total += decimal_to_double(p.unrealized_pnl());
+    realized_total += decimal_to_double(p.realized_pnl());
+  }
+
+  // Aggregate PnL block. Currency is the quote/settlement currency; default
+  // to USDT for the MVP (positions are quoted vs quote asset).
+  {
+    std::ostringstream realized_oss;
+    realized_oss << std::fixed << std::setprecision(8) << realized_total;
+    std::ostringstream unrealized_oss;
+    unrealized_oss << std::fixed << std::setprecision(8) << unrealized_total;
+    out["pnl"]["realized"] = realized_oss.str();
+    out["pnl"]["unrealized"] = unrealized_oss.str();
+    out["pnl"]["currency"] = "USDT";
+  }
+
+  // 2. Margin from risk (optional — degrade to null on failure).
+  auto risk_pair = risk_future.get();
+  const grpc::Status& risk_status = risk_pair.first;
+  const fob::risk::v1::GetRiskSnapshotResponse& risk_resp = risk_pair.second;
+  if (risk_status.ok() && risk_resp.has_snapshot()) {
+    const auto& s = risk_resp.snapshot();
+    crow::json::wvalue margin;
+    margin["freeCollateral"] = decimal_to_json(s.free_collateral());
+    margin["reservedCollateral"] = decimal_to_json(s.reserved_collateral());
+    margin["initialMargin"] = decimal_to_json(s.initial_margin());
+    margin["maintenanceMargin"] = decimal_to_json(s.maintenance_margin());
+    margin["marginCallFlag"] = s.margin_call();
+    out["margin"] = std::move(margin);
+  } else {
+    // Risk unavailable: positions/PnL still returned, margin degraded to null.
+    out["margin"] = nullptr;
+    out["marginDegraded"] = true;
+    cex::common::log_json("WARN", "positions: risk snapshot unavailable",
+                          {{"user_id", user_id},
+                           {"code", std::to_string(risk_status.error_code())},
+                           {"message", risk_status.error_message()}});
+  }
+
+  return out;
+}
+
+struct CorsMiddleware {
+  struct context {};
+  void before_handle(crow::request& /*req*/, crow::response& /*res*/, context& /*ctx*/) {}
+  void after_handle(crow::request& /*req*/, crow::response& res, context& /*ctx*/) {
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, api_key");
+  }
+};
 
 void HttpGateway::run(uint16_t port) {
-  crow::SimpleApp app;
+  crow::App<CorsMiddleware> app;
+
+  // T-F06-071-cache (ADR-045): инвалидация TTL-кэша позиций по сигналу
+  // positions.update. Подписываемся на тот же PositionsHub, что и WS-push:
+  // при изменении позиций user_id запись кэша протухает немедленно, поэтому
+  // следующий GET/WS-onopen реагрегирует свежий снимок (NFR свежести ≤1с
+  // сохраняется, кэш не задерживает свежие данные на TTL). Listener живёт всё
+  // время процесса — Unsubscribe не нужен. Делает только Invalidate (O(1)),
+  // ничего не пушит, поэтому не мешает WS-push listener'ам того же hub'а.
+  if (positions_hub_ != nullptr && positions_cache_.enabled()) {
+    positions_hub_->Subscribe(
+        [this](const cex::gateway::infra::PositionsHub::Event& event) {
+          positions_cache_.Invalidate(event.user_id);
+        });
+  }
 
   // Liveness/readiness probes.
   CROW_ROUTE(app, "/healthz")([] { return crow::response(200, "ok"); });
@@ -1497,6 +1656,453 @@ void HttpGateway::run(uint16_t port) {
         
         return crow::response(200, out);
     });
+
+  // ─── F-06 Positions / PnL / Margin (T-F06-040, T-F06-041) ────────────────────
+  // GET /v1/positions  (alias: GET /api/v1/positions)
+  //
+  // L1 aggregation (SEQ-F06-UC-F06-01-services): gateway вызывает
+  // LedgerService.GetPositions(user_id) + RiskService.GetRiskSnapshot(user_id)
+  // и собирает единый JSON {positions, pnl, margin}.
+  //
+  // Деградация:
+  //   - ledger недоступен  → 503 (позиции — обязательная часть ответа);
+  //   - risk недоступен    → 200, но margin=null (graceful degradation, F6-9).
+  //
+  // T-F06-072 / F6-5 (ADR-046): помимо REST-polling этого эндпоинта, gateway
+  // теперь пушит снимок по WebSocket (/api/v1/positions/ws, см. ниже) реагируя
+  // на сигнал positions.update из ledger. Оба канала собирают снимок одним и
+  // тем же BuildPositionsJson(user_id) → идентичный JSON. REST остаётся
+  // fallback'ом при недоступности WS (F6-9). Деградация:
+  //   - ledger недоступен → 503 (позиции — обязательная часть ответа);
+  //   - risk недоступен   → 200, но margin=null (graceful degradation, F6-9).
+  auto positions_handler = [this](const crow::request& req) -> crow::response {
+    // Auth: JWT / dev X-User-Id → user_id.
+    std::string user_id;
+    if (auth_middleware_) {
+      auto user = auth_middleware_->ExtractUser(req);
+      if (!user.IsValid()) {
+        return json_error(401, "unauthorized", "missing or invalid credentials");
+      }
+      std::string error;
+      if (!auth_middleware_->Authorize(user, "read", "positions", user.user_id,
+                                       &error)) {
+        return json_error(403, "forbidden", error);
+      }
+      user_id = user.user_id;
+    } else {
+      user_id = req.get_header_value("X-User-Id");
+    }
+    if (user_id.empty()) {
+      return json_error(401, "unauthorized", "user id could not be resolved");
+    }
+
+    // T-F06-071-cache (ADR-045): попадание в короткоживущий TTL-кэш отдаёт
+    // готовый JSON без 2 gRPC. Промах/выключенный кэш → пересборка.
+    if (auto cached = positions_cache_.Get(user_id)) {
+      crow::response res(200, *cached);
+      res.set_header("Content-Type", "application/json");
+      return res;
+    }
+
+    auto snapshot = BuildPositionsJson(user_id);
+    if (!snapshot.has_value()) {
+      // Деградация ledger (503) НЕ кэшируется — каждый запрос ретраит свежо.
+      return json_error(503, "ledger_unavailable",
+                        "positions backend unavailable");
+    }
+    // Кэшируем успешный снимок (включая marginDegraded) на короткий TTL.
+    std::string body = snapshot->dump();
+    positions_cache_.Put(user_id, body);
+    crow::response res(200, std::move(body));
+    res.set_header("Content-Type", "application/json");
+    return res;
+  };
+
+  CROW_ROUTE(app, "/v1/positions").methods(crow::HTTPMethod::Get)(
+      positions_handler);
+  CROW_ROUTE(app, "/api/v1/positions").methods(crow::HTTPMethod::Get)(
+      positions_handler);
+
+  // ─── F-06 Positions WebSocket push (T-F06-072, ADR-046) ──────────────────────
+  // CROW_WEBSOCKET_ROUTE /api/v1/positions/ws
+  //
+  // Поток (SEQ-F06-UC-F06-01-services / ADR-046):
+  //   ledger → Kafka positions.update → PositionsUpdateKafkaConsumer →
+  //   PositionsHub::Publish(user_id, batch_id) → listener этого WS →
+  //   BuildPositionsJson(user_id) → conn.send_text(...).
+  //
+  // Безопасность: user_id фиксируется при onopen из auth (auth_middleware_->
+  // ExtractUser; dev — ?user_id= / X-User-Id) и НЕ перезаписывается клиентом.
+  // listener пушит только при совпадении event.user_id == ctx->user_id, поэтому
+  // нельзя слушать чужие позиции даже подменив ?user_id= после рукопожатия.
+  //
+  // Идентичность JSON: и onopen-snapshot, и push используют BuildPositionsJson —
+  // тот же payload, что отдаёт REST GET /v1/positions.
+  //
+  // Heartbeat: клиентский {"action":"ping"} → {"type":"pong"} (как в market WS);
+  // graceful close через onclose/onerror (Unsubscribe listener'а).
+  CROW_WEBSOCKET_ROUTE(app, "/api/v1/positions/ws")
+      .onaccept([this](const crow::request& req, void** userdata) -> bool {
+        if (positions_hub_ == nullptr) return false;
+
+        // Auth → user_id (строго свой). Тот же путь, что и в positions_handler.
+        std::string user_id;
+        if (auth_middleware_) {
+          auto user = auth_middleware_->ExtractUser(req);
+          if (!user.IsValid()) return false;
+          std::string error;
+          if (!auth_middleware_->Authorize(user, "read", "positions",
+                                           user.user_id, &error)) {
+            return false;
+          }
+          user_id = user.user_id;
+        } else {
+          // Dev/demo: ?user_id= или X-User-Id (нет JWT-инфраструктуры).
+          const char* uid = req.url_params.get("user_id");
+          if (uid == nullptr) uid = req.url_params.get("userid");
+          user_id = uid != nullptr ? uid : req.get_header_value("X-User-Id");
+        }
+        if (user_id.empty()) return false;
+
+        auto ctx = std::make_shared<PositionsWsContext>();
+        ctx->user_id = std::move(user_id);
+        ctx->hub = positions_hub_;
+        *userdata = new std::shared_ptr<PositionsWsContext>(std::move(ctx));
+        return true;
+      })
+      .onopen([this](crow::websocket::connection& conn) {
+        auto* holder =
+            static_cast<std::shared_ptr<PositionsWsContext>*>(conn.userdata());
+        if (holder == nullptr || !*holder || (*holder)->hub == nullptr) {
+          conn.close("Positions hub unavailable");
+          return;
+        }
+        auto ctx = *holder;
+
+        // 1. Текущий снимок сразу при открытии (тот же JSON, что REST).
+        //    onopen-snapshot может переиспользовать TTL-кэш (как REST GET):
+        //    свежесть гарантируется инвалидацией по positions.update.
+        {
+          std::string body;
+          if (auto cached = positions_cache_.Get(ctx->user_id)) {
+            body = std::move(*cached);
+          } else if (auto snapshot = BuildPositionsJson(ctx->user_id)) {
+            body = snapshot->dump();
+            positions_cache_.Put(ctx->user_id, body);
+          }
+          std::lock_guard<std::mutex> lock(ctx->mu);
+          if (!ctx->closed && !body.empty()) {
+            conn.send_text(body);
+          }
+        }
+
+        // 2. Подписка на positions.update с фильтром строго по своему user_id.
+        ctx->listener_id = ctx->hub->Subscribe(
+            [this, ctx, &conn](
+                const cex::gateway::infra::PositionsHub::Event& event) {
+              if (event.user_id != ctx->user_id) return;  // чужой сигнал — игнор
+              auto snapshot = BuildPositionsJson(ctx->user_id);
+              if (!snapshot.has_value()) return;  // ledger недоступен — не пушим
+              std::lock_guard<std::mutex> lock(ctx->mu);
+              if (ctx->closed) return;
+              conn.send_text(snapshot->dump());
+            });
+      })
+      .onmessage([](crow::websocket::connection& conn,
+                    const std::string& msg, bool /*is_binary*/) {
+        // Server-push only. Поддерживаем лишь heartbeat ping (как market WS).
+        if (msg.find("\"ping\"") != std::string::npos) {
+          conn.send_text("{\"type\":\"pong\"}");
+        }
+      })
+      .onclose([](crow::websocket::connection& conn, const std::string&,
+                  uint16_t) { close_positions_ws_context(conn); })
+      .onerror([](crow::websocket::connection& conn, const std::string&) {
+        close_positions_ws_context(conn);
+      });
+
+  // ─── F-05 Live Market Data WebSocket ─────────────────────────────────────────
+  // Spec §4.5 WebSocket API:
+  //   Client connects to ws://host/api/v1/market (без asset в URL)
+  //   Client sends: {"action":"subscribe","asset":"BTCUSDT"}
+  //   Server sends: {"type":"snapshot","data":{...}} then {"type":"update","data":{...}}
+  //   Client sends: {"action":"unsubscribe","asset":"BTCUSDT"}
+  //
+  // Реализация: один gRPC stream per подписка, MVP N:N mapping.
+  // MarketDataWsState определён на namespace-уровне выше.
+
+  CROW_WEBSOCKET_ROUTE(app, "/api/v1/market")
+      .onaccept([](const crow::request&, void** userdata) -> bool {
+        *userdata = new MarketDataWsState();
+        return true;
+      })
+      .onopen([](crow::websocket::connection& conn) {
+        // Приветствие — клиент должен прислать subscribe
+        conn.send_text("{\"type\":\"connected\",\"msg\":\"send subscribe action\"}");
+      })
+      .onmessage([this](crow::websocket::connection& conn,
+                        const std::string& msg, bool /*is_binary*/) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (!state) return;
+
+        // Минимальный JSON-парсинг без внешней библиотеки
+        auto extract = [&](const std::string& key) -> std::string {
+          const std::string needle = "\"" + key + "\":\"";
+          auto pos = msg.find(needle);
+          if (pos == std::string::npos) return {};
+          pos += needle.size();
+          auto end = msg.find('"', pos);
+          return (end == std::string::npos) ? std::string{} : msg.substr(pos, end - pos);
+        };
+
+        const std::string action = extract("action");
+        const std::string asset  = extract("asset");
+
+        if (action == "subscribe" && !asset.empty()) {
+          // Отменяем предыдущий стрим если был
+          {
+            std::lock_guard<std::mutex> lg(state->mu);
+            if (state->grpc_ctx) {
+              state->grpc_ctx->TryCancel();
+            }
+            state->grpc_ctx   = std::make_unique<grpc::ClientContext>();
+            state->streaming  = true;
+            state->current_asset = asset;
+          }
+
+          // Стартуем gRPC stream в фоне
+          std::thread([this, asset, &conn, state]() mutable {
+            grpc::ClientContext* ctx_raw;
+            {
+              std::lock_guard<std::mutex> lg(state->mu);
+              ctx_raw = state->grpc_ctx.get();
+            }
+            if (!ctx_raw) return;
+
+            auto reader = market_data_.SubscribeMarketData(asset, ctx_raw);
+            if (!reader) {
+              try { conn.send_text("{\"type\":\"error\",\"msg\":\"stream unavailable\"}"); }
+              catch (...) {}
+              return;
+            }
+
+            fob::marketdata::v1::MarketDataStreamEvent event;
+            while (state->streaming.load() && reader->Read(&event)) {
+              std::string json;
+              if (event.has_snapshot()) {
+                const auto& s = event.snapshot();
+                auto d2s = [](const fob::common::v1::Decimal& d) -> std::string {
+                  double v = d.scale() == 0 ? static_cast<double>(d.units())
+                           : static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+                  return std::to_string(v);
+                };
+                auto depth2s = [&d2s](const auto& levels) -> std::string {
+                  std::string arr = "[";
+                  bool first = true;
+                  for (const auto& l : levels) {
+                    if (!first) arr += ",";
+                    first = false;
+                    arr += "{\"price\":" + d2s(l.price()) +
+                           ",\"qty\":" + d2s(l.qty()) + "}";
+                  }
+                  arr += "]";
+                  return arr;
+                };
+                json = "{\"type\":\"snapshot\",\"asset\":\"" + s.asset() +
+                       "\",\"mid\":" + d2s(s.mid()) +
+                       ",\"best_bid\":" + d2s(s.best_bid()) +
+                       ",\"best_ask\":" + d2s(s.best_ask()) +
+                       ",\"spread\":" + d2s(s.spread()) +
+                       ",\"spread_bps\":" + d2s(s.spread_bps()) +
+                       ",\"volume_24h\":" + d2s(s.volume_24h()) +
+                       ",\"clear_price\":" + d2s(s.clear_price()) +
+                       ",\"executed_rate\":" + d2s(s.executed_rate()) +
+                       ",\"bid_depth\":" + depth2s(s.bid_depth()) +
+                       ",\"ask_depth\":" + depth2s(s.ask_depth()) +
+                       ",\"batch_id\":\"" + s.batch_id() +
+                       "\",\"source\":\"" + s.source() +
+                       "\",\"stale\":" + (s.stale() ? "true" : "false") + "}";
+              } else if (event.has_update()) {
+                const auto& u = event.update();
+                json = "{\"type\":\"update\",\"asset\":\"" + u.asset() +
+                       "\",\"source\":\"" + u.source() + "\"}";
+              }
+              if (!json.empty()) {
+                try { conn.send_text(json); } catch (...) { break; }
+              }
+            }
+          }).detach();
+
+          conn.send_text("{\"type\":\"subscribed\",\"asset\":\"" + asset + "\"}");
+
+        } else if (action == "unsubscribe") {
+          std::lock_guard<std::mutex> lg(state->mu);
+          state->streaming = false;
+          if (state->grpc_ctx) {
+            state->grpc_ctx->TryCancel();
+            state->grpc_ctx.reset();
+          }
+          conn.send_text("{\"type\":\"unsubscribed\",\"asset\":\"" + asset + "\"}");
+
+        } else if (action == "ping") {
+          conn.send_text("{\"type\":\"pong\"}");
+        }
+      })
+      .onclose([](crow::websocket::connection& conn, const std::string&, uint16_t) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (state) {
+          state->streaming = false;
+          if (state->grpc_ctx) state->grpc_ctx->TryCancel();
+          delete state;
+          conn.userdata(nullptr);
+        }
+      })
+      .onerror([](crow::websocket::connection& conn, const std::string&) {
+        auto* state = static_cast<MarketDataWsState*>(conn.userdata());
+        if (state) {
+          state->streaming = false;
+          if (state->grpc_ctx) state->grpc_ctx->TryCancel();
+          delete state;
+          conn.userdata(nullptr);
+        }
+      });
+
+  // ─── F-05 Live Market Data REST endpoints ───────────────────────────────────
+
+  // GET /api/v1/marketdata/{asset} — текущий snapshot, p95 < 50ms
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& /*req*/, const std::string& asset) {
+        const auto resp = market_data_.GetMarketDataSnapshot(asset);
+        if (!resp.found()) {
+          crow::json::wvalue err;
+          err["error"] = resp.has_error() ? resp.error().message() : "not found";
+          return crow::response(404, err);
+        }
+        const auto& snap = resp.snapshot();
+        // Конвертируем Decimal в double для читаемого JSON (scale=8 у всех полей)
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        auto depth_json = [&to_f](const auto& levels) {
+          crow::json::wvalue arr(crow::json::type::List);
+          size_t i = 0;
+          for (const auto& l : levels) {
+            arr[i]["price"] = to_f(l.price());
+            arr[i]["qty"]   = to_f(l.qty());
+            ++i;
+          }
+          return arr;
+        };
+        crow::json::wvalue out;
+        out["asset"]            = snap.asset();
+        out["mid"]              = to_f(snap.mid());
+        out["best_bid"]         = to_f(snap.best_bid());
+        out["best_ask"]         = to_f(snap.best_ask());
+        out["spread"]           = to_f(snap.spread());
+        out["spread_bps"]       = to_f(snap.spread_bps());
+        out["volume_24h"]       = to_f(snap.volume_24h());
+        out["volume_quote_24h"] = to_f(snap.volume_quote_24h());
+        out["clear_price"]      = to_f(snap.clear_price());
+        out["executed_rate"]    = to_f(snap.executed_rate());
+        out["bid_depth"]        = depth_json(snap.bid_depth());
+        out["ask_depth"]        = depth_json(snap.ask_depth());
+        out["source"]           = snap.source();
+        out["stale"]            = snap.stale();
+        out["batch_id"]         = snap.batch_id();
+        out["snapshot_id"]      = snap.snapshot_id();
+        return crow::response(200, out);
+      });
+
+  // GET /api/v1/marketdata/{asset}/history?limit=N — исторические снимки
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>/history").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& req, const std::string& asset) {
+        const int limit = [&] {
+          const auto lp = req.url_params.get("limit");
+          if (!lp) return 100;
+          try { return std::stoi(lp); } catch (...) { return 100; }
+        }();
+        const auto parse_unix = [&](const char* name) -> int64_t {
+          const auto v = req.url_params.get(name);
+          if (!v) return 0;
+          try { return std::stoll(v); } catch (...) { return 0; }
+        };
+        const auto resp = market_data_.GetMarketDataHistory(
+            asset, std::min(limit, 1000), parse_unix("from"), parse_unix("to"));
+        // Same Decimal→double scaling as the live /marketdata/{asset} endpoint,
+        // so history mid/spread_bps share its magnitude (not raw .units()).
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        crow::json::wvalue out;
+        out["asset"] = asset;
+        std::vector<crow::json::wvalue> items;
+        for (const auto& snap : resp.snapshots()) {
+          crow::json::wvalue s;
+          s["snapshot_id"] = snap.snapshot_id();
+          s["mid"]         = to_f(snap.mid());
+          s["spread_bps"]  = to_f(snap.spread_bps());
+          s["source"]      = snap.source();
+          s["batch_id"]    = snap.batch_id();
+          items.push_back(std::move(s));
+        }
+        out["snapshots"] = std::move(items);
+        out["count"]     = static_cast<int>(resp.snapshots_size());
+        return crow::response(200, out);
+      });
+
+  // GET /api/v1/marketdata/{asset}/effective-spread?limit=N&from=unix&to=unix
+  CROW_ROUTE(app, "/api/v1/marketdata/<string>/effective-spread").methods(crow::HTTPMethod::Get)(
+      [this](const crow::request& req, const std::string& asset) {
+        fob::marketdata::v1::GetEffectiveSpreadRequest grpc_req;
+        grpc_req.mutable_meta()->set_source("gateway");
+        grpc_req.set_asset(asset);
+        const int limit = [&] {
+          const auto lp = req.url_params.get("limit");
+          if (!lp) return 100;
+          try { return std::stoi(lp); } catch (...) { return 100; }
+        }();
+        grpc_req.set_limit(static_cast<uint32_t>(std::min(limit, 1000)));
+        const auto parse_unix = [&](const char* name) -> int64_t {
+          const auto v = req.url_params.get(name);
+          if (!v) return 0;
+          try { return std::stoll(v); } catch (...) { return 0; }
+        };
+        if (const int64_t f = parse_unix("from"); f > 0) grpc_req.mutable_from()->set_seconds(f);
+        if (const int64_t t = parse_unix("to");   t > 0) grpc_req.mutable_to()->set_seconds(t);
+
+        grpc::ClientContext ctx;
+        ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
+        fob::marketdata::v1::GetEffectiveSpreadResponse resp;
+        const auto status = market_data_.GetEffectiveSpreadDirect(grpc_req, &resp);
+        if (!status.ok()) {
+          crow::json::wvalue err;
+          err["error"] = status.error_message();
+          return crow::response(503, err);
+        }
+
+        // Scaled floats, consistent with the snapshot/history endpoints.
+        auto to_f = [](const fob::common::v1::Decimal& d) -> double {
+          if (d.scale() == 0) return static_cast<double>(d.units());
+          return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+        };
+        crow::json::wvalue out;
+        out["asset"] = asset;
+        std::vector<crow::json::wvalue> items;
+        for (const auto& r : resp.records()) {
+          crow::json::wvalue rec;
+          rec["fill_id"]               = r.fill_id();
+          rec["effective_spread_bps"]  = to_f(r.effective_spread_bps());
+          rec["exec_price"]            = to_f(r.exec_price());
+          rec["mid_at_exec"]           = to_f(r.mid_at_exec());
+          rec["batch_id"]              = r.batch_id();
+          items.push_back(std::move(rec));
+        }
+        out["records"] = std::move(items);
+        out["count"]   = static_cast<int>(resp.records_size());
+        return crow::response(200, out);
+      });
 
   // T-F15-007: size the Crow worker pool explicitly. Default 64 leaves ample
   // headroom for REST once SSE streams are capped (REPLAY_SSE_MAX_STREAMS=32),
