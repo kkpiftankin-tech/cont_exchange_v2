@@ -137,7 +137,8 @@ struct TestEnv {
            nullptr, nullptr,
            &snap_storage, &snap_storage,
            &publisher, &risk_pub,
-           &hub, nullptr /*pg_config*/, cfg) {}
+           &hub, nullptr /*pg_config*/,
+           nullptr /*vectorized_publisher, F-05A*/, cfg) {}
 
   ~TestEnv() { ob_channel.Close(); }
 };
