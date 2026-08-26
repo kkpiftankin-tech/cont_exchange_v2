@@ -60,6 +60,7 @@ add_executable(market_data
         src/transport/mappers/order_book.cpp
         # domain
         src/domain/entities/order_book.cpp
+        src/domain/vectorize.cpp
         # infra
         src/infra/kafka_consumer.cpp
         src/infra/kafka_snapshots_producer.cpp
@@ -115,6 +116,20 @@ if (BUILD_TESTING)
     target_compile_options(market_data_uc_test PRIVATE -Wall -Wextra -Wpedantic)
 
     add_test(NAME market_data_uc_test COMMAND market_data_uc_test)
+
+    # F-05A (T-F05A-201/202/203): vectorization domain core (Decimal-only, Eigen-free).
+    add_executable(market_data_vectorize_test
+            tests/vectorize_test.cpp
+            src/domain/vectorize.cpp
+    )
+    target_include_directories(market_data_vectorize_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(market_data_vectorize_test PRIVATE
+            cex_common
+    )
+    target_compile_options(market_data_vectorize_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME market_data_vectorize_test COMMAND market_data_vectorize_test)
 
     add_executable(market_data_clickhouse_storage_test
             tests/clickhouse_storage_test.cpp
