@@ -15,6 +15,28 @@ find_package(Boost REQUIRED COMPONENTS thread)
 find_package(PostgreSQL REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+# F-05A (T-F05A-301 / ADR-048): OSQP QP solver backend via FetchContent (pinned).
+# ADR-048 §7: OSQP добавляется синхронно в matching CMake + docker/Dockerfile.service
+# + .github/workflows/cpp-build.yml (урок F-09/libabsl). Eigen (выше) собирает W/D;
+# OSQP решает QP. Статическая линковка → бинарь самодостаточен для runtime-стадии.
+include(FetchContent)
+set(OSQP_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(osqp
+  GIT_REPOSITORY https://github.com/osqp/osqp.git
+  GIT_TAG        v0.6.3
+)
+FetchContent_MakeAvailable(osqp)
+# 0.6.x экспортирует статическую цель osqpstatic (namespaced или нет — берём что есть).
+if(TARGET osqp::osqpstatic)
+  set(MATCHING_OSQP_TARGET osqp::osqpstatic)
+elseif(TARGET osqpstatic)
+  set(MATCHING_OSQP_TARGET osqpstatic)
+elseif(TARGET osqp::osqp)
+  set(MATCHING_OSQP_TARGET osqp::osqp)
+else()
+  set(MATCHING_OSQP_TARGET osqp)
+endif()
+
 find_package(libpqxx CONFIG QUIET)
 if(libpqxx_FOUND)
   if(TARGET libpqxx::pqxx)
@@ -52,6 +74,7 @@ add_executable(matching
   src/domain/constraint_evaluator.cpp
   src/domain/trigger_condition.cpp
   src/domain/vector_qp_solver.cpp
+  src/infra/osqp_backend.cpp
   src/infra/market_data/market_data_client.cpp
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
@@ -79,6 +102,7 @@ target_link_libraries(matching PRIVATE
   ${MATCHING_PQXX_TARGET}
   PostgreSQL::PostgreSQL
   Eigen3::Eigen
+  ${MATCHING_OSQP_TARGET}
 )
 
 target_compile_definitions(matching PRIVATE CROW_USE_BOOST)
@@ -162,6 +186,24 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_vector_qp_solver_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_vector_qp_solver_test COMMAND matching_vector_qp_solver_test)
+
+  # F-05A (T-F05A-301): OSQP-backend — реальный QP на known-solution задачах +
+  # end-to-end через VectorQpSolver. Линкует OSQP-таргет (для osqp.h) + Eigen.
+  add_executable(matching_osqp_backend_test
+    tests/infra/osqp_backend_test.cpp
+    src/infra/osqp_backend.cpp
+    src/domain/vector_qp_solver.cpp
+  )
+  target_include_directories(matching_osqp_backend_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_osqp_backend_test PRIVATE
+    cex_common
+    Eigen3::Eigen
+    ${MATCHING_OSQP_TARGET}
+  )
+  target_compile_options(matching_osqp_backend_test PRIVATE -Wall -Wextra)
+  add_test(NAME matching_osqp_backend_test COMMAND matching_osqp_backend_test)
 
   # F-09 (T-F09-045): child graph transitions (OCO cancel / bracket resize).
   add_executable(matching_child_graph_transitions_test

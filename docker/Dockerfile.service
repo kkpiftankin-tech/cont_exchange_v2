@@ -2,6 +2,9 @@ ARG UBUNTU_VERSION=24.04
 FROM ubuntu:${UBUNTU_VERSION} AS builder
 
 # Base build tools + deps for gRPC/protobuf + Kafka + Boost
+# F-05A / ADR-048 §7: OSQP (matching QP solver) — через CMake FetchContent (pinned
+# v0.6.3); apt-пакет не нужен, но нужны git + сеть на configure (см. ниже) и Eigen
+# (libeigen3-dev). Держать синхронно с matching CMake и .github/workflows/cpp-build.yml.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential cmake pkg-config git \
