@@ -53,11 +53,13 @@ add_executable(market_data
         src/app/market_data_uc.cpp
         src/app/update_order_book_uc.cpp
         src/app/compute_market_data.cpp
+        src/app/curve_to_levels.cpp
         # infra/postgres
         src/infra/postgres/pg_market_data_config.cpp
         # transport
         src/transport/grpc_market_data_service.cpp
         src/transport/mappers/order_book.cpp
+        src/transport/mappers/vectorized_liquidity.cpp
         # domain
         src/domain/entities/order_book.cpp
         src/domain/vectorize.cpp
@@ -130,6 +132,23 @@ if (BUILD_TESTING)
     )
     target_compile_options(market_data_vectorize_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME market_data_vectorize_test COMMAND market_data_vectorize_test)
+
+    # F-05A (T-F05A-205): curve→levels + proto mapping (needs contracts_proto).
+    add_executable(market_data_vectorize_wiring_test
+            tests/vectorize_wiring_test.cpp
+            src/app/curve_to_levels.cpp
+            src/domain/vectorize.cpp
+            src/transport/mappers/vectorized_liquidity.cpp
+    )
+    target_include_directories(market_data_vectorize_wiring_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(market_data_vectorize_wiring_test PRIVATE
+            cex_common
+            contracts_proto
+    )
+    target_compile_options(market_data_vectorize_wiring_test PRIVATE -Wall -Wextra)
+    add_test(NAME market_data_vectorize_wiring_test COMMAND market_data_vectorize_wiring_test)
 
     add_executable(market_data_clickhouse_storage_test
             tests/clickhouse_storage_test.cpp
