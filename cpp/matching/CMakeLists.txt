@@ -205,6 +205,19 @@ if(BUILD_TESTING)
   target_compile_options(matching_osqp_backend_test PRIVATE -Wall -Wextra)
   add_test(NAME matching_osqp_backend_test COMMAND matching_osqp_backend_test)
 
+  # F-05A (T-F05A-304): surplus policy (ADR-047). Header-only domain logic.
+  add_executable(matching_surplus_policy_test
+    tests/domain/surplus_policy_test.cpp
+  )
+  target_include_directories(matching_surplus_policy_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_surplus_policy_test PRIVATE
+    cex_common
+  )
+  target_compile_options(matching_surplus_policy_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_surplus_policy_test COMMAND matching_surplus_policy_test)
+
   # F-09 (T-F09-045): child graph transitions (OCO cancel / bracket resize).
   add_executable(matching_child_graph_transitions_test
     tests/domain/child_graph_transitions_test.cpp
