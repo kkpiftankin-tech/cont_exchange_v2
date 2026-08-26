@@ -6,6 +6,10 @@
 
 #include "cex/common/log.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
+// F-05A (T-F05A-205): векторизация внешней ликвидности → marketdata.vectorized.
+#include "app/curve_to_levels.hpp"
+#include "app/ports/i_vectorized_publisher.hpp"
+#include "transport/mappers/vectorized_liquidity.hpp"
 
 namespace cex::market_data::app {
 
@@ -30,6 +34,7 @@ MarketDataUseCases::MarketDataUseCases(
     domain::IRiskAlertPublisher* risk_publisher,
     infra::MarketDataStreamHub* stream_hub,
     infra::PgMarketDataConfig* pg_config,
+    IVectorizedPublisher* vectorized_publisher,
     MarketDataConfig md_config)
     : batch_storage_(batch_storage),
       execution_storage_(execution_storage),
@@ -39,6 +44,7 @@ MarketDataUseCases::MarketDataUseCases(
       spread_storage_(spread_storage),
       snapshot_publisher_(snapshot_publisher),
       risk_publisher_(risk_publisher),
+      vectorized_publisher_(vectorized_publisher),
       stream_hub_(stream_hub),
       pg_config_(pg_config),
       md_config_(md_config),
@@ -233,6 +239,34 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                          {"clickhouse_store_enabled",
                           ch_curve_storage_ != nullptr ? "true" : "false"},
                          {"source_file", "cpp/market_data/src/app/market_data_uc.cpp"}});
+
+  // F-05A (T-F05A-205): векторизация кривой → сегменты W → marketdata.vectorized.
+  if (vectorized_publisher_ != nullptr) {
+    auto levels = LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
+    domain::VectorizeResult vr = domain::Vectorize(levels, vectorize_cfg_);
+    if (!vr.segments.empty()) {
+      const std::string batch_id =
+          !curve.snapshot_id().empty()
+              ? curve.snapshot_id()
+              : (!curve.curve_id().empty()
+                     ? curve.curve_id()
+                     : key(curve.venue_id(), curve.instrument().symbol()));
+      const long long ts_ms = curve.timestamp().seconds() * 1000 +
+                              curve.timestamp().nanos() / 1000000;
+      auto snap = transport::ToVectorizedSnapshot(vr, batch_id, ts_ms,
+                                                  vectorize_cfg_.decimal_scale);
+      vectorized_publisher_->Publish(snap);
+      cex::common::log_json("INFO", "Published vectorized liquidity",
+                            {{"service", "market_data"},
+                             {"stage", "vectorize_publish"},
+                             {"topic", "marketdata.vectorized"},
+                             {"venue", curve.venue_id()},
+                             {"symbol", curve.instrument().symbol()},
+                             {"batch_id", batch_id},
+                             {"num_segments", std::to_string(vr.segments.size())},
+                             {"num_assets", std::to_string(vr.basis.num_assets)}});
+    }
+  }
 }
 
 void MarketDataUseCases::OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot) {

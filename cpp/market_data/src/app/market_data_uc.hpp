@@ -22,6 +22,7 @@
 #include "domain/ports/i_order_book_storage.hpp"
 #include "domain/ports/i_snapshot_storage.hpp"
 #include "domain/ports/i_snapshot_publisher.hpp"
+#include "domain/vectorize.hpp"   // F-05A: VectorizeConfig (T-F05A-205)
 #include "app/compute_market_data.hpp"
 #include "update_order_book_uc.hpp"
 #include "infra/market_data_stream_hub.hpp"
@@ -33,6 +34,9 @@ class ClickHouseLiquidityCurveStorage;
 }
 
 namespace cex::market_data::app {
+
+// F-05A (T-F05A-205): порт публикации векторизованной ликвидности.
+struct IVectorizedPublisher;
 
 // Port for persisting batch outputs in analytics storage (ClickHouse).
 class IBatchOutputsStorage {
@@ -73,6 +77,7 @@ class MarketDataUseCases {
       domain::IRiskAlertPublisher* risk_publisher = nullptr,
       infra::MarketDataStreamHub* stream_hub = nullptr,
       infra::PgMarketDataConfig* pg_config = nullptr,
+      IVectorizedPublisher* vectorized_publisher = nullptr,  // F-05A (T-F05A-205)
       MarketDataConfig md_config = {});
 
   // --- существующие обработчики ---
@@ -136,6 +141,8 @@ class MarketDataUseCases {
   domain::IEffectiveSpreadStorage* spread_storage_{nullptr};
   domain::ISnapshotPublisher*      snapshot_publisher_{nullptr};
   domain::IRiskAlertPublisher*     risk_publisher_{nullptr};
+  IVectorizedPublisher*            vectorized_publisher_{nullptr};  // F-05A
+  domain::VectorizeConfig          vectorize_cfg_{};                // F-05A
   infra::MarketDataStreamHub*      stream_hub_{nullptr};
   infra::PgMarketDataConfig*       pg_config_{nullptr};
   MarketDataConfig                 md_config_;

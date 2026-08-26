@@ -66,6 +66,7 @@ add_executable(market_data
         # infra
         src/infra/kafka_consumer.cpp
         src/infra/kafka_snapshots_producer.cpp
+        src/infra/kafka_vectorized_producer.cpp
         src/infra/clickhouse_storage.cpp
         src/infra/clickhouse/order_book_storage.cpp
         src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
@@ -97,7 +98,10 @@ if (BUILD_TESTING)
             src/app/market_data_uc.cpp
             src/app/update_order_book_uc.cpp
             src/app/compute_market_data.cpp
+            src/app/curve_to_levels.cpp                       # F-05A (T-F05A-205)
+            src/domain/vectorize.cpp                          # F-05A
             src/transport/mappers/order_book.cpp
+            src/transport/mappers/vectorized_liquidity.cpp    # F-05A
             src/domain/entities/order_book.cpp
             src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
             src/infra/postgres/pg_market_data_config.cpp
@@ -177,8 +181,11 @@ if (BUILD_TESTING)
                 src/app/market_data_uc.cpp
                 src/app/update_order_book_uc.cpp
                 src/app/compute_market_data.cpp
+                src/app/curve_to_levels.cpp                       # F-05A (T-F05A-205)
+                src/domain/vectorize.cpp                          # F-05A
                 src/domain/entities/order_book.cpp
                 src/transport/mappers/order_book.cpp
+                src/transport/mappers/vectorized_liquidity.cpp    # F-05A
                 src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
                 src/infra/postgres/pg_market_data_config.cpp
         )
