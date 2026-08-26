@@ -122,13 +122,15 @@ AC: AC-F05A-012.
 
 ### Phase 3 — QP solver (matching) — **критический путь** ([ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md))
 
-> **Прогресс (2026-08-25):** доменное ядро QP-солвера смержено в `main` (PR #24) —
-> сборка standard-form, residual/статусы, квантование Decimal, hand-rolled тест
-> (cpp-build ✅, ctest `matching_vector_qp_solver_test` Passed). Реальный OSQP —
-> за портом `IQpBackend` (T-F05A-301, следующий).
+> **Прогресс (2026-08-25/26):** QP-солвер F-05A **полностью реализован** в `main` —
+> доменное ядро (PR #24) + реальный OSQP-backend (PR #26). Оба с зелёными тестами
+> (`matching_vector_qp_solver_test`, `matching_osqp_backend_test` — Passed).
+> Осталось: T-F05A-305 (интеграция в batch loop) и T-F05A-304 (surplus, блокер ADR-047).
 
-#### T-F05A-301. Подключить OSQP  ⏳ next
-- `OsqpBackend : IQpBackend` (`cpp/matching/src/infra/`) + FetchContent (pinned) в matching CMake + `docker/Dockerfile.service` **И** `.github/workflows/cpp-build.yml` синхронно (урок F-09 `libabsl`/protoc). Зависимости: T-F05A-004 (ADR-048 accepted). Порт `IQpBackend` уже готов (PR #24) — остаётся адаптер + сборка.
+#### T-F05A-301. Подключить OSQP  ✅ (PR #26)
+- [x] `OsqpBackend : IQpBackend` (`cpp/matching/src/infra/osqp_backend.{hpp,cpp}`): Eigen standard-form → CSC → `osqp_setup/solve`; детерм. settings (adaptive_rho=0, fixed max_iter/tol, no warm-start).
+- [x] OSQP через FetchContent (pinned v0.6.3, static) в matching CMake; синхронно помечены `docker/Dockerfile.service` и `.github/workflows/cpp-build.yml` (ADR-048 §7 — OSQP из исходников, apt-пакет не нужен).
+- [x] тест `matching_osqp_backend_test`: known-solution QP (interior/box/equality) + end-to-end `VectorQpSolver(OsqpBackend)`.
 
 #### T-F05A-302. `vector_qp_solver`  ✅ domain core (PR #24)
 AC: AC-F05A-004, AC-F05A-005. (U-F05A-005/006/007/008)
