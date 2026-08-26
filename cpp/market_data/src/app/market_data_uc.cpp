@@ -10,6 +10,7 @@
 #include "app/curve_to_levels.hpp"
 #include "app/ports/i_vectorized_publisher.hpp"
 #include "app/ports/i_vector_segment_storage.hpp"
+#include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
 
 namespace cex::market_data::app {
@@ -277,6 +278,24 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                               vector_segment_storage_ != nullptr ? "true" : "false"}});
     }
   }
+}
+
+// F-05A (T-F05A-305 persister): consume matching.vector_clearing → CH
+// vector_clearing_results (аналитика). Денег не трогает.
+void MarketDataUseCases::OnVectorClearingResult(
+    const fob::marketdata::v1::VectorClearingResult& result) {
+  if (vector_clearing_result_storage_ != nullptr) {
+    vector_clearing_result_storage_->SaveResult(result);
+  }
+  cex::common::log_json("INFO", "Vector clearing result",
+                        {{"service", "market_data"},
+                         {"stage", "vector_clearing_persist"},
+                         {"topic", "matching.vector_clearing"},
+                         {"batch_id", result.batch_id()},
+                         {"solver_status", std::to_string(result.solver_status())},
+                         {"leg_count", std::to_string(result.x_size())},
+                         {"persisted",
+                          vector_clearing_result_storage_ != nullptr ? "true" : "false"}});
 }
 
 void MarketDataUseCases::OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot) {
