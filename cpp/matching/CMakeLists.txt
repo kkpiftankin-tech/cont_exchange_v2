@@ -65,6 +65,7 @@ add_executable(matching
   src/app/run_batch_uc.cpp
   src/app/solver_metrics.cpp
   src/app/solve_grouped_batch_use_case.cpp
+  src/app/vector_clearing_use_case.cpp
   src/app/combo_external_routing.cpp
   src/domain/solver_impl.cpp
   src/domain/batch_result_to_fill_events.cpp
@@ -204,6 +205,26 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_osqp_backend_test PRIVATE -Wall -Wextra)
   add_test(NAME matching_osqp_backend_test COMMAND matching_osqp_backend_test)
+
+  # F-05A (T-F05A-305, safe slice): proto VectorClearingInput → solve → surplus
+  # (без эмиссии денег). Линкует proto + Eigen + OSQP.
+  add_executable(matching_vector_clearing_uc_test
+    tests/app/vector_clearing_use_case_test.cpp
+    src/app/vector_clearing_use_case.cpp
+    src/infra/osqp_backend.cpp
+    src/domain/vector_qp_solver.cpp
+  )
+  target_include_directories(matching_vector_clearing_uc_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_vector_clearing_uc_test PRIVATE
+    cex_common
+    contracts_proto
+    Eigen3::Eigen
+    ${MATCHING_OSQP_TARGET}
+  )
+  target_compile_options(matching_vector_clearing_uc_test PRIVATE -Wall -Wextra)
+  add_test(NAME matching_vector_clearing_uc_test COMMAND matching_vector_clearing_uc_test)
 
   # F-05A (T-F05A-304): surplus policy (ADR-047). Header-only domain logic.
   add_executable(matching_surplus_policy_test
