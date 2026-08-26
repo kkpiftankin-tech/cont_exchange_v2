@@ -23,6 +23,7 @@
 #include "infra/clickhouse_storage.hpp"
 #include "infra/kafka_consumer.hpp"
 #include "infra/kafka_snapshots_producer.hpp"
+#include "infra/kafka_vectorized_producer.hpp"  // F-05A (T-F05A-205)
 #include "infra/liquidity_curve_memory_storage.hpp"
 #include "infra/market_data_stream_hub.hpp"
 #include "infra/order_book_channel.hpp"
@@ -78,6 +79,7 @@ int main() {
 
   // ── Kafka producers (F-05) ───────────────────────────────────────────────
   cex::market_data::infra::KafkaSnapshotsProducer snapshots_producer(brokers);
+  cex::market_data::infra::KafkaVectorizedProducer vectorized_producer(brokers);  // F-05A
   cex::market_data::infra::KafkaRiskAlertPublisher risk_publisher(brokers);
 
   // ── In-memory channels ───────────────────────────────────────────────────
@@ -108,7 +110,8 @@ int main() {
       &snapshots_producer,  // ISnapshotPublisher   (F-05)
       &risk_publisher,      // IRiskAlertPublisher  (F-05)
       &stream_hub,          // MarketDataStreamHub  (F-05)
-      &pg_config            // kill-switch via marketdata_config (F-05)
+      &pg_config,           // kill-switch via marketdata_config (F-05)
+      &vectorized_producer  // IVectorizedPublisher (F-05A, T-F05A-205)
   );
 
   // ── F-05: стартуем stale sweeper ─────────────────────────────────────────
