@@ -6,14 +6,14 @@
 - Base feature: [F-05 Live Market Data](../02-system/features/F-05-live-market-data/) (primary owner)
 - Consumer feature: [F-09 Batch/Combo Orders](../02-system/features/F-09-batch-combo-orders/) (`multileg_vector_solver`)
 - Reused infra: [F-11 External Venues](../02-system/features/F-11-external-venues-lob-to-fob/) (venue normalization `venue.liquidity.fob`), [F-15 Backtest/Replay](../02-system/features/F-15-backtest-replay/)
-- ADRs: [ADR-048 QP solver backend (OSQP)](../03-architecture/adr/ADR-048-qp-solver-backend.md) — **accepted 2026-08-25** (QP-путь разблокирован); [ADR-047 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — **`proposed`, остаётся блокером money-path/surplus**; extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
+- ADRs: [ADR-048 QP solver backend (OSQP)](../03-architecture/adr/ADR-048-qp-solver-backend.md) — **accepted 2026-08-25**; [ADR-047 surplus/EXCHANGE_PNL](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — **accepted 2026-08-26** (money-path разблокирован); extends [ADR-034](../03-architecture/adr/ADR-034-grouped-constraint-solver.md), math [ADR-035](../03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md)
 - Math foundation: IN-012 continuous-order market (clearing as Lagrange multiplier), business-rules **R-CLR-003** (flow conservation)
 
 ## Preconditions (docs-as-code gate)
 
 > **Docs-gate почти снят** (ingress-close IN-014 завершён 2026-07-23). **ADR-048 (OSQP)
-> принят 2026-08-25** — QP-путь (Phase 3) разблокирован. Остаётся **ADR-047 (surplus) →
-> accepted** (решение владельца) как блокер money-path/surplus-задач (Phase с ledger-проводками).
+> принят 2026-08-25** — QP-путь (Phase 3) разблокирован. **ADR-047 (surplus) принят
+> 2026-08-26** (prod-default `REJECT_IF_RESIDUAL`) — money-path (T-F05A-304/305) разблокирован.
 
 - [x] `F-05A-feature.yaml` + README (addendum к F-05)
 - [x] Use cases `UC-F05A-01..05` + L0 system sequences
@@ -23,7 +23,7 @@
 - [x] Test plan `docs/10-testing/features/F-05A-test-plan.md`
 - [x] Acceptance criteria (feature.yaml) + business rules §F-05A (R-F05A-001..007) + FR/NFR-F05A
 - [x] **ADR-048 → `accepted`** (2026-08-25, подтверждение OSQP) — QP-путь разблокирован
-- [ ] **ADR-047 → `accepted`** (решение владельца: surplus prod-default) — **оставшийся блокер money-path/surplus**
+- [x] **ADR-047 → `accepted`** (2026-08-26, surplus prod-default `REJECT_IF_RESIDUAL`) — money-path разблокирован
 
 ## Architecture decisions pending (решение владельца)
 
@@ -57,7 +57,7 @@
 #### T-F05A-004. ADR → accepted (частично)
 
 - [x] [ADR-048](../03-architecture/adr/ADR-048-qp-solver-backend.md) (QP/OSQP, D3) → `accepted` **2026-08-25**.
-- [ ] [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) (surplus prod-default, D4) → `accepted` — ожидает решения владельца. Owner: solution-architect + владелец.
+- [x] [ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) (surplus prod-default, D4) → `accepted` **2026-08-26**.
 
 #### T-F05A-005. Test plan + coverage row
 - `docs/10-testing/features/F-05A-test-plan.md` (incl. real-orderbook fixtures policy) + строка F-05A в `docs/traceability/coverage-matrix.md`. Owner: test-architect.
@@ -125,7 +125,7 @@ AC: AC-F05A-012.
 > **Прогресс (2026-08-25/26):** QP-солвер F-05A **полностью реализован** в `main` —
 > доменное ядро (PR #24) + реальный OSQP-backend (PR #26). Оба с зелёными тестами
 > (`matching_vector_qp_solver_test`, `matching_osqp_backend_test` — Passed).
-> Осталось: T-F05A-305 (интеграция в batch loop) и T-F05A-304 (surplus, блокер ADR-047).
+> Осталось: T-F05A-304 (surplus policy — ADR-047 принят) и T-F05A-305 (интеграция в batch loop).
 
 #### T-F05A-301. Подключить OSQP  ✅ (PR #26)
 - [x] `OsqpBackend : IQpBackend` (`cpp/matching/src/infra/osqp_backend.{hpp,cpp}`): Eigen standard-form → CSC → `osqp_setup/solve`; детерм. settings (adaptive_rho=0, fixed max_iter/tol, no warm-start).
@@ -218,4 +218,4 @@ AC: AC-F05A-011.
 
 Feature `implemented` только при выполнении всех DoD-групп из IN-014 §10
 (Documentation / Contract / Data / Backend / UI / Testing / Observability) +
-ADR-048 `accepted` (✅ 2026-08-25) + ADR-047 `accepted` (ожидается) + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.
+ADR-048 `accepted` (✅ 2026-08-25) + ADR-047 `accepted` (✅ 2026-08-26) + все AC-F05A-001..015 покрыты тестами + coverage-matrix ✅.

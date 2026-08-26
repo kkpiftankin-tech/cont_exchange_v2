@@ -156,7 +156,7 @@ acceptanceCriteria:
 architectureDecisions:
   - id: ADR-047
     title: Surplus / EXCHANGE_PNL policy
-    status: proposed
+    status: accepted   # принято 2026-08-26 (решение владельца; prod-default REJECT_IF_RESIDUAL)
     file: docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
   - id: ADR-048
     title: QP solver backend (OSQP) — активирует/расширяет ADR-034
@@ -165,8 +165,8 @@ architectureDecisions:
 
 knownIssues:
   - id: surplus-policy-open
-    severity: blocker
-    description: "ADR-047 surplus/EXCHANGE_PNL policy — proposed, нужно решение владельца (prod-default)."
+    severity: major
+    description: "ADR-047 surplus/EXCHANGE_PNL policy — accepted 2026-08-26 (prod-default REJECT_IF_RESIDUAL); реализация T-F05A-304/305 (money-path) разблокирована."
   - id: qp-solver-backend
     severity: major
     description: "ADR-048 QP backend (OSQP) — accepted 2026-08-25; QP-решателя в matching пока нет (только bisection) — реализация Phase 3 разблокирована."

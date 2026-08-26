@@ -1,14 +1,22 @@
 ---
 id: ADR-047
 title: Surplus / EXCHANGE_PNL policy для vector clearing (F-05A)
-status: proposed
+status: accepted
 date: 2026-07-07
+accepted: 2026-08-26
 level: sea
 feature: F-05A
-related: [ADR-034, ADR-035, ADR-033]
+related: [ADR-034, ADR-035, ADR-033, ADR-048]
 ---
 
 # ADR-047 — Surplus / EXCHANGE_PNL policy для vectorized external clearing
+
+> **Принято 2026-08-26** (решение владельца): surplus-политика с enum-выбором и
+> **prod-дефолтом `REJECT_IF_RESIDUAL`** утверждена. Непереговорный инвариант —
+> ledger никогда не применяет несбалансированный `ExecutionGroup` (§17); остаток —
+> либо в пределах tolerance ($Wx\approx0$), либо явной house-проводкой. `surplus.amount`
+> = `Decimal` (§9), идемпотентно по `execution_group_id`. Разблокирует T-F05A-304
+> (surplus_policy) и money-path T-F05A-305 (эмиссия fills/ExecutionGroup).
 
 ## Контекст
 
