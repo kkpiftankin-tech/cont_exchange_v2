@@ -147,13 +147,15 @@ AC: AC-F05A-004, AC-F05A-005. (U-F05A-005/006/007/008)
 AC: AC-F05A-004.
 - [x] `r=Wx`, `residualNorm`, solver_status (converged/degraded/failed), iterations. `solveTimeMs` — при интеграции OSQP (T-F05A-301).
 
-#### T-F05A-304. Surplus policy ([ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md))
+#### T-F05A-304. Surplus policy ([ADR-047](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md))  ✅ (PR #29)
 AC: AC-F05A-005, AC-F05A-007. (U-F05A-009)
-- `cpp/matching/src/domain/surplus_policy.hpp` (`REJECT_IF_RESIDUAL` default). Эмит `SurplusEvent`.
+- [x] `cpp/matching/src/domain/surplus_policy.hpp` (`REJECT_IF_RESIDUAL` default) — `DecideSurplus`. Эмит `SurplusEvent` — при интеграции (T-F05A-305 money-path).
 
 #### T-F05A-305. Интеграция в batch loop
 AC: AC-F05A-008, AC-F05A-010.
-- `run_batch_uc`/grouped loop принимает `VectorClearingInput` рядом с F-09 combo; эмит `ExecutionGroup`+`FillEvent` c source-trace (переиспользовать `execution.groups` + grouped batch F-09).
+- [x] **Оркестрация (safe slice, PR #34):** `app/vector_clearing_use_case` — proto `VectorClearingInput` → `domain::VectorSegment[]` → `VectorQpSolver(OsqpBackend)` → `surplus_policy.DecideSurplus`; тест end-to-end (proto→OSQP→surplus). БЕЗ эмиссии денег.
+- [ ] **Consumer-wiring:** matching подписать на `marketdata.vectorized` → `VectorClearingUseCase.Clear` → persist диагностики (`vector_clearing_results`; механизм: Kafka-событие vs clickhouse-cpp в matching — решить).
+- [ ] **Money-path:** эмит `ExecutionGroup`+`FillEvent` c source-trace (переиспользовать `execution.groups` + grouped batch F-09), `SurplusEvent`, ledger-проводки. **Трогает деньги — отдельный явный шаг.**
 
 ---
 
