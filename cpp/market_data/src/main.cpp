@@ -18,6 +18,7 @@
 
 #include "app/market_data_uc.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
+#include "infra/clickhouse/clickhouse_vector_segment_storage.hpp"  // F-05A (T-F05A-206)
 #include "infra/clickhouse/order_book_storage.hpp"
 #include "infra/clickhouse/ch_snapshot_storage.hpp"
 #include "infra/clickhouse_storage.hpp"
@@ -113,6 +114,12 @@ int main() {
       &pg_config,           // kill-switch via marketdata_config (F-05)
       &vectorized_producer  // IVectorizedPublisher (F-05A, T-F05A-205)
   );
+
+  // ── F-05A (T-F05A-206): CH persist векторных сегментов ───────────────────
+  cex::market_data::infra::clickhouse::ClickHouseVectorSegmentStorage
+      vector_segment_storage(ch_cfg);
+  vector_segment_storage.EnsureSchema();
+  uc.SetVectorSegmentStorage(&vector_segment_storage);
 
   // ── F-05: стартуем stale sweeper ─────────────────────────────────────────
   uc.StartStaleSweeper();

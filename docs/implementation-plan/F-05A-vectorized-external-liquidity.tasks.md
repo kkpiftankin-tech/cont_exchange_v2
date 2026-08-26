@@ -95,26 +95,32 @@ AC: AC-F05A-010.
 
 ### Phase 2 — Векторизация (market_data)
 
-#### T-F05A-201. Domain value-objects
+> **Прогресс (2026-08-26):** доменное ядро + wiring в `main` (PR #30/#31/#32).
+> Векторизация подключена к живому consumer `venue.liquidity.fob` и публикует
+> `marketdata.vectorized`. Тесты `market_data_vectorize_test` +
+> `market_data_vectorize_wiring_test` — Passed. Остаётся T-F05A-206 (CH-persist).
+
+#### T-F05A-201. Domain value-objects  ✅ (PR #30)
 AC: AC-F05A-001, AC-F05A-002.
-- `cpp/market_data/src/domain/{external_order_level,asset_basis,vector_flow_segment}.hpp` — чистые VO, `Decimal`.
+- [x] `cpp/market_data/src/domain/{external_order_level,asset_basis,vector_flow_segment}.hpp` — чистые VO, `Decimal`.
 
-#### T-F05A-202. Bid/Ask → w_i mapping
+#### T-F05A-202. Bid/Ask → w_i mapping  ✅ (PR #30)
 AC: AC-F05A-002. (U-F05A-001/002)
-- `cpp/market_data/src/domain/vectorize.cpp`: bid `w=e_X−P_eff·e_Y`, ask `w=−e_X+P_eff·e_Y`. Unit-tested.
+- [x] `cpp/market_data/src/domain/vectorize.cpp`: bid `w=e_X−P_eff·e_Y`, ask `w=−e_X+P_eff·e_Y`. Unit-tested.
 
-#### T-F05A-203. Effective price
+#### T-F05A-203. Effective price  ✅ (PR #30)
 AC: (U-F05A-003)
-- `effective_price.*`: fees/latency/slippage buffers → `P_eff`.
+- [x] `effective_price.hpp`: fees/latency/slippage buffers → `P_eff` (double = solver input, §9).
 
-#### T-F05A-204. Dimensional guard (KI-F05A-003)
-- `cpp/market_data/src/domain/dimensional_guard.*` — валидация единиц (base/quote/price/rate/batch). **Высокий риск корректности** → отдельный слой + unit-тесты.
+#### T-F05A-204. Dimensional guard (KI-F05A-003)  ⏳
+- `cpp/market_data/src/domain/dimensional_guard.*` — валидация единиц (base/quote/price/rate/batch). **Высокий риск корректности** → отдельный слой + unit-тесты. (Частично: `Vectorize` уже skip'ает invalid_pair/asset_not_in_basis/non_positive_quantity; отдельный guard-слой — TODO.)
 
-#### T-F05A-205. Vectorize use case + publish
+#### T-F05A-205. Vectorize use case + publish  ✅ (PR #31/#32)
 AC: AC-F05A-009.
-- `cpp/market_data/src/app/vectorize_external_orders_uc.cpp`: вход = F-11 `venue.liquidity.fob` (D2) → `VectorFlowSegment[]` → publish `marketdata.vectorized`. Пропуск невалидных/stale (KI-F05A-004).
+- [x] `app/curve_to_levels` (VenueLiquidityCurve → уровни) + `transport/mappers/vectorized_liquidity` (domain → proto); `MarketDataUseCases::OnLiquidityCurve` → `Vectorize` → publish `marketdata.vectorized` через `KafkaVectorizedProducer` (вход = F-11 `venue.liquidity.fob`, D2). Пропуск невалидных.
+- [ ] staleness-фильтр по `ts_event` (KI-F05A-004) — TODO (нужен clock/порог).
 
-#### T-F05A-206. CH persistence сегментов
+#### T-F05A-206. CH persistence сегментов  ⏳ next
 AC: AC-F05A-012.
 - Персист `vector_flow_segments_history` (переиспользовать паттерн `ClickHouseBatchStorage::SaveExecutionGroup`, F-09).
 

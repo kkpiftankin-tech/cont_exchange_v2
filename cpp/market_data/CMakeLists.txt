@@ -70,6 +70,7 @@ add_executable(market_data
         src/infra/clickhouse_storage.cpp
         src/infra/clickhouse/order_book_storage.cpp
         src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
+        src/infra/clickhouse/clickhouse_vector_segment_storage.cpp
         src/infra/clickhouse/ch_snapshot_storage.cpp
         # headers-only (IDE visibility)
         src/infra/liquidity_curve_memory_storage.hpp
