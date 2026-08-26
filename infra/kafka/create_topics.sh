@@ -54,6 +54,7 @@ retention_for_topic() {
 # - venue.synthetic: compatibility SyntheticFlowOrder stream for matching
 create_topic marketdata.raw "$(retention_for_topic marketdata.raw 3600000)"
 create_topic marketdata.vectorized "$(retention_for_topic marketdata.vectorized 3600000)" # F-05A: VectorizedLiquiditySnapshot, key = batch_id
+create_topic matching.vector_clearing "$(retention_for_topic matching.vector_clearing 3600000)" # F-05A: VectorClearingResult diagnostics (T-F05A-305 1a), key = batch_id
 # F-05: MarketDataSnapshot после каждого batch-clearing; 7 дней retention, partition key = asset
 create_topic marketdata.snapshots "$(retention_for_topic marketdata.snapshots 604800000)"
 create_topic orders.normalized "$(retention_for_topic orders.normalized 604800000)"
