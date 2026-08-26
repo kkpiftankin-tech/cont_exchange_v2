@@ -9,6 +9,7 @@
 // F-05A (T-F05A-205): векторизация внешней ликвидности → marketdata.vectorized.
 #include "app/curve_to_levels.hpp"
 #include "app/ports/i_vectorized_publisher.hpp"
+#include "app/ports/i_vector_segment_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
 
 namespace cex::market_data::app {
@@ -240,8 +241,8 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                           ch_curve_storage_ != nullptr ? "true" : "false"},
                          {"source_file", "cpp/market_data/src/app/market_data_uc.cpp"}});
 
-  // F-05A (T-F05A-205): векторизация кривой → сегменты W → marketdata.vectorized.
-  if (vectorized_publisher_ != nullptr) {
+  // F-05A (T-F05A-205/206): векторизация кривой → сегменты W → publish + persist.
+  if (vectorized_publisher_ != nullptr || vector_segment_storage_ != nullptr) {
     auto levels = LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
     domain::VectorizeResult vr = domain::Vectorize(levels, vectorize_cfg_);
     if (!vr.segments.empty()) {
@@ -253,18 +254,27 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                      : key(curve.venue_id(), curve.instrument().symbol()));
       const long long ts_ms = curve.timestamp().seconds() * 1000 +
                               curve.timestamp().nanos() / 1000000;
-      auto snap = transport::ToVectorizedSnapshot(vr, batch_id, ts_ms,
-                                                  vectorize_cfg_.decimal_scale);
-      vectorized_publisher_->Publish(snap);
-      cex::common::log_json("INFO", "Published vectorized liquidity",
+      if (vectorized_publisher_ != nullptr) {
+        auto snap = transport::ToVectorizedSnapshot(vr, batch_id, ts_ms,
+                                                    vectorize_cfg_.decimal_scale);
+        vectorized_publisher_->Publish(snap);
+      }
+      if (vector_segment_storage_ != nullptr) {  // T-F05A-206: CH persist
+        vector_segment_storage_->SaveSegments(batch_id, vr, ts_ms);
+      }
+      cex::common::log_json("INFO", "Vectorized liquidity",
                             {{"service", "market_data"},
-                             {"stage", "vectorize_publish"},
+                             {"stage", "vectorize"},
                              {"topic", "marketdata.vectorized"},
                              {"venue", curve.venue_id()},
                              {"symbol", curve.instrument().symbol()},
                              {"batch_id", batch_id},
                              {"num_segments", std::to_string(vr.segments.size())},
-                             {"num_assets", std::to_string(vr.basis.num_assets)}});
+                             {"num_assets", std::to_string(vr.basis.num_assets)},
+                             {"published",
+                              vectorized_publisher_ != nullptr ? "true" : "false"},
+                             {"persisted",
+                              vector_segment_storage_ != nullptr ? "true" : "false"}});
     }
   }
 }

@@ -35,8 +35,9 @@ class ClickHouseLiquidityCurveStorage;
 
 namespace cex::market_data::app {
 
-// F-05A (T-F05A-205): порт публикации векторизованной ликвидности.
+// F-05A (T-F05A-205/206): порты публикации + персиста векторной ликвидности.
 struct IVectorizedPublisher;
+struct IVectorSegmentStorage;
 
 // Port for persisting batch outputs in analytics storage (ClickHouse).
 class IBatchOutputsStorage {
@@ -87,6 +88,11 @@ class MarketDataUseCases {
   void OnExecutionGroup(const fob::matching::v1::ExecutionGroup& eg);
   void OnExecutionReport(const fob::execution::v1::ExecutionReport& report);
   void OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCurve& curve);
+
+  // F-05A (T-F05A-206): опциональный персист векторных сегментов (ClickHouse).
+  void SetVectorSegmentStorage(IVectorSegmentStorage* storage) {
+    vector_segment_storage_ = storage;
+  }
   void OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot);
 
   // F-05: обработчик FillEvent для расчёта effective spread
@@ -142,6 +148,7 @@ class MarketDataUseCases {
   domain::ISnapshotPublisher*      snapshot_publisher_{nullptr};
   domain::IRiskAlertPublisher*     risk_publisher_{nullptr};
   IVectorizedPublisher*            vectorized_publisher_{nullptr};  // F-05A
+  IVectorSegmentStorage*           vector_segment_storage_{nullptr};// F-05A (T-F05A-206)
   domain::VectorizeConfig          vectorize_cfg_{};                // F-05A
   infra::MarketDataStreamHub*      stream_hub_{nullptr};
   infra::PgMarketDataConfig*       pg_config_{nullptr};
