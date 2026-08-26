@@ -16,6 +16,7 @@
 #include "app/solve_grouped_batch_use_case.hpp"
 #include "app/solver_metrics.hpp"
 #include "cex/common/kafka.hpp"
+#include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 1a)
 #include "domain/flow_order_repository.hpp"
 #include "domain/grouped_solver_bisection.hpp"
 #include "domain/solver_impl.hpp"
@@ -70,6 +71,9 @@ class MatchingLoop {
 
   void on_order_event(const fob::orders::v1::OrdersNormalized& evt);
   void on_liquidity_curve(const fob::venue::v1::VenueLiquidityCurve& curve);
+  // F-05A (T-F05A-305 1a): consume marketdata.vectorized → solve → publish
+  // matching.vector_clearing (диагностика; БЕЗ эмиссии денег/ledger).
+  void on_vectorized_liquidity(const fob::marketdata::v1::VectorClearingInput& input);
   void on_venue_health(const fob::venue::v1::VenueHealth& health);
   // MVP-5 (ADR-037): провал внешней combo-ноги → combo_compensations(pending).
   void on_external_execution_report(const fob::execution::v1::ExecutionReport& report);

@@ -60,6 +60,11 @@
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
+// F-05A (T-F05A-305 1a): vector clearing (consume marketdata.vectorized).
+#include "app/vector_clearing_use_case.hpp"
+#include "domain/vector_qp_solver.hpp"
+#include "infra/osqp_backend.hpp"
+#include "transport/mappers/vector_clearing_result.hpp"
 #include "cex/common/uuid.hpp"
 #include "fob/venue/v1/venue.pb.h"
 #include "infra/kafka/batch_outputs_producer.hpp"
@@ -431,7 +436,8 @@ void MatchingLoop::start() {
 
   running_.store(true);
   consumer_.subscribe(
-      {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue"});
+      {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue",
+       "marketdata.vectorized"});
   t_consume_ = std::thread([this] { consume_orders_loop(); });
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
@@ -486,6 +492,17 @@ void MatchingLoop::consume_orders_loop() {
               return;
             }
             on_liquidity_curve(curve);
+            return;
+          }
+
+          if (topic == "marketdata.vectorized") {
+            fob::marketdata::v1::VectorizedLiquiditySnapshot snap;
+            if (!cex::common::from_bytes(payload, snap)) {
+              cex::common::log_json("ERROR",
+                                    "Failed to parse VectorizedLiquiditySnapshot");
+              return;
+            }
+            on_vectorized_liquidity(snap.input());
             return;
           }
 
@@ -796,6 +813,44 @@ void MatchingLoop::on_liquidity_curve(
           {"usable_curves",                         std::to_string(usable_curves)},
           {  "source_file",              "cpp/matching/src/app/matching_loop.cpp"}
   });
+}
+
+// F-05A (T-F05A-305 1a): решить векторный клиринг для входа и опубликовать
+// диагностику в matching.vector_clearing. НИКАКИХ денег: не эмитит
+// FillEvent/ExecutionGroup и не трогает ledger. Солвер-стек — локальный
+// (stateless; OSQP workspace создаётся per solve).
+void MatchingLoop::on_vectorized_liquidity(
+    const fob::marketdata::v1::VectorClearingInput& input) {
+  try {
+    infra::OsqpBackend backend;
+    domain::VectorQpSolver solver(backend, domain::QpParams{}, /*tol=*/1e-9);
+    VectorClearingUseCase uc(solver, domain::SurplusPolicy::kRejectIfResidual, 1e-9);
+    const VectorClearingOutcome outcome = uc.Clear(input);
+
+    const std::string batch_id = input.batch_id();
+    const fob::marketdata::v1::VectorClearingResult result =
+        transport::ToVectorClearingResult(outcome, batch_id);
+    if (!producer_.produce("matching.vector_clearing", batch_id,
+                           cex::common::to_bytes(result))) {
+      cex::common::log_json("WARN", "Failed to produce matching.vector_clearing",
+                            {{"batch_id", batch_id}});
+    }
+    cex::common::log_json(
+        "INFO", "F-05A vector clearing",
+        {{"service", "matching"},
+         {"stage", "vector_clearing"},
+         {"topic", "marketdata.vectorized"},
+         {"batch_id", batch_id},
+         {"num_segments", std::to_string(outcome.num_segments)},
+         {"num_assets", std::to_string(outcome.num_assets)},
+         {"solver_status", std::to_string(static_cast<int>(outcome.solve.status))},
+         {"residual_norm", std::to_string(outcome.solve.residual_norm)},
+         {"surplus_action", std::to_string(static_cast<int>(outcome.surplus.action))},
+         {"source_file", "cpp/matching/src/app/matching_loop.cpp"}});
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "vector clearing failed",
+                          {{"batch_id", input.batch_id()}, {"error", e.what()}});
+  }
 }
 
 // ============================================================================
