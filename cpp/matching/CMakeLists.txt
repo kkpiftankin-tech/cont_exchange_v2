@@ -89,6 +89,7 @@ add_executable(matching
   src/infra/execution_groups_producer.cpp
   src/transport/grpc_isolation_matching_service.cpp
   src/transport/grpc_compensation_service.cpp
+  src/transport/mappers/vector_clearing_result.cpp
 )
 
 target_include_directories(matching PRIVATE
@@ -225,6 +226,22 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_vector_clearing_uc_test PRIVATE -Wall -Wextra)
   add_test(NAME matching_vector_clearing_uc_test COMMAND matching_vector_clearing_uc_test)
+
+  # F-05A (T-F05A-305, 1a): VectorClearingOutcome → proto result mapper (диагностика).
+  add_executable(matching_vector_clearing_result_mapper_test
+    tests/transport/vector_clearing_result_mapper_test.cpp
+    src/transport/mappers/vector_clearing_result.cpp
+  )
+  target_include_directories(matching_vector_clearing_result_mapper_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_vector_clearing_result_mapper_test PRIVATE
+    cex_common
+    contracts_proto
+    Eigen3::Eigen
+  )
+  target_compile_options(matching_vector_clearing_result_mapper_test PRIVATE -Wall -Wextra)
+  add_test(NAME matching_vector_clearing_result_mapper_test COMMAND matching_vector_clearing_result_mapper_test)
 
   # F-05A (T-F05A-304): surplus policy (ADR-047). Header-only domain logic.
   add_executable(matching_surplus_policy_test
