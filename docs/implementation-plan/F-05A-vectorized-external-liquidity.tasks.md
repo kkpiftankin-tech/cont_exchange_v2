@@ -154,8 +154,9 @@ AC: AC-F05A-005, AC-F05A-007. (U-F05A-009)
 #### T-F05A-305. Интеграция в batch loop
 AC: AC-F05A-008, AC-F05A-010.
 - [x] **Оркестрация (safe slice, PR #34):** `app/vector_clearing_use_case` — proto `VectorClearingInput` → `domain::VectorSegment[]` → `VectorQpSolver(OsqpBackend)` → `surplus_policy.DecideSurplus`; тест end-to-end (proto→OSQP→surplus). БЕЗ эмиссии денег.
-- [ ] **Consumer-wiring:** matching подписать на `marketdata.vectorized` → `VectorClearingUseCase.Clear` → persist диагностики (`vector_clearing_results`; механизм: Kafka-событие vs clickhouse-cpp в matching — решить).
-- [ ] **Money-path:** эмит `ExecutionGroup`+`FillEvent` c source-trace (переиспользовать `execution.groups` + grouped batch F-09), `SurplusEvent`, ledger-проводки. **Трогает деньги — отдельный явный шаг.**
+- [x] **Consumer-wiring (1a, PR #36/#37):** решено — **Kafka-событие** (matching не пишет CH). `MatchingLoop` подписан на `marketdata.vectorized` → `VectorClearingUseCase.Clear` → `ToVectorClearingResult` → publish `matching.vector_clearing` (топик + `docs/06-api/messaging/matching-vector-clearing.md`) + структурный лог. try/catch, БЕЗ денег. Пайплайн F-05A замкнут живьём end-to-end.
+- [ ] **Persister диагностики:** consumer `matching.vector_clearing` → ClickHouse `vector_clearing_results` (в observability/market_data). Мелкий follow-up.
+- [ ] **Money-path:** эмит `ExecutionGroup`+`FillEvent` c source-trace (переиспользовать `execution.groups` + grouped batch F-09), `SurplusEvent`, ledger-проводки. **Трогает деньги — отдельный явный шаг** (converged-only, feature-flag off; EXCHANGE_PNL требует house-счёта в ledger).
 
 ---
 
