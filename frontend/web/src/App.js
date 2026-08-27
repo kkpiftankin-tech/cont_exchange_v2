@@ -20,6 +20,7 @@ import ReconciliationAlertsLive from './pages/ReconciliationAlerts/Reconciliatio
 import ManualOverrideLive from './pages/ManualOverride/ManualOverrideLive';
 import PolicyConfigLive from './pages/PolicyConfig/PolicyConfigLive';
 import SimSessionsLive from './pages/SimSessions/SimSessionsLive';
+import VectorClearingLive from './pages/VectorClearing/VectorClearingLive';
 import ComboCompensationLive from './pages/ComboCompensation/ComboCompensationLive';
 import ComboOrderLive from './pages/ComboOrder/ComboOrderLive';
 import ExecutionLiveFeed from './pages/ExecutionLiveFeed/ExecutionLiveFeed';
@@ -57,6 +58,7 @@ function App() {
         <Route path="/hedge-pnl" element={<AuthRoute><HedgePnlDashboard /></AuthRoute>} />
         <Route path="/hedge-pnl-live" element={<AuthRoute><HedgePnlDashboardLive /></AuthRoute>} />
         <Route path="/execution-live-feed-live" element={<AuthRoute><ExecutionLiveFeedLive /></AuthRoute>} />
+        <Route path="/vector-clearing-live" element={<AuthRoute><VectorClearingLive /></AuthRoute>} />
         <Route path="/reconciliation-alerts-live" element={<AuthRoute><ReconciliationAlertsLive /></AuthRoute>} />
         <Route path="/manual-override-live" element={<AuthRoute><ManualOverrideLive /></AuthRoute>} />
         <Route path="/policy-config-live" element={<AuthRoute><PolicyConfigLive /></AuthRoute>} />
