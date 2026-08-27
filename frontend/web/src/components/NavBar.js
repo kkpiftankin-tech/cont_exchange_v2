@@ -21,6 +21,7 @@ const TABS = [
   { href: '/manual-override-live', key: 'navbar.manualOverride', label: 'Manual override' },
   { href: '/policy-config-live', key: 'navbar.policyConfig', label: 'Policy' },
   { href: '/sim-sessions', label: 'Sim' },
+  { href: '/vector-clearing-live', label: 'Clearing' },
   { href: '/replay', key: 'navbar.replay', label: 'Replay' }
 ];
 

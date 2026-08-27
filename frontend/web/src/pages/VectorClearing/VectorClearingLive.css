@@ -1,0 +1,132 @@
+.vc-page {
+  min-height: 100vh;
+  background: #0b0f14;
+  color: #dfe6ee;
+}
+
+.vc-content {
+  padding: 20px 28px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.vc-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.vc-title {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+.vc-sub {
+  color: #7fa6c0;
+  font-weight: 400;
+  font-size: 15px;
+}
+
+.vc-desc {
+  color: #8aa;
+  font-size: 13px;
+}
+
+.vc-desc code {
+  background: #1a2531;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+.vc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.vc-chip {
+  background: #131b24;
+  border: 1px solid #223140;
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+
+.vc-updated {
+  color: #6b7f90;
+  font-size: 12px;
+}
+
+.vc-error {
+  background: #3a1a1a;
+  border: 1px solid #6a2a2a;
+  color: #f0b0b0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.vc-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #1c2733;
+  border-radius: 8px;
+}
+
+.vc-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.vc-table th,
+.vc-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #1c2733;
+  white-space: nowrap;
+}
+
+.vc-table th {
+  color: #8aa;
+  font-weight: 600;
+  background: #131b24;
+  position: sticky;
+  top: 0;
+}
+
+.vc-table tbody tr:hover td {
+  background: #111a22;
+}
+
+.vc-mono {
+  font-family: ui-monospace, Menlo, monospace;
+  color: #b8c7d6;
+}
+
+.vc-status {
+  font-weight: 600;
+}
+
+.s-converged {
+  color: #5fd08a;
+}
+
+.s-degraded {
+  color: #e6c15a;
+}
+
+.s-failed {
+  color: #e6725a;
+}
+
+.vc-empty {
+  text-align: center;
+  color: #6b7f90;
+  padding: 24px;
+}

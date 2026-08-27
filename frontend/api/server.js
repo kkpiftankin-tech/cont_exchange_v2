@@ -6451,6 +6451,85 @@ async function handleExecutionLiveFeed(req, res, pathname, query) {
   return false;
 }
 
+// F-05A: живой просмотр vector clearing (ClickHouse vector_clearing_results).
+// Read-only ops-view. /api/vector-clearing/live → JSON; /view → HTML-страница.
+async function fetchVectorClearingRows(limit) {
+  const q = "SELECT event_time_ms, batch_id, solver_status, residual_norm, leg_count"
+    + " FROM " + CLICKHOUSE_DB + ".vector_clearing_results"
+    + " ORDER BY event_time_ms DESC LIMIT " + Number(limit || 50)
+    + " FORMAT JSONEachRow";
+  try {
+    const r = await fetch(CLICKHOUSE_URL + "/?query=" + encodeURIComponent(q), {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error("clickhouse_http_" + r.status + ": " + text);
+    return text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch (err) {
+    console.error("[vector-clearing] CH fetch failed:", err.message || err);
+    return [];
+  }
+}
+
+const VECTOR_CLEARING_VIEW_HTML = [
+  "<!doctype html><html lang='ru'><head><meta charset='utf-8'>",
+  "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+  "<title>F-05A Vector Clearing</title><style>",
+  "body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0b0f14;color:#dfe6ee}",
+  "header{padding:14px 20px;background:#131b24;border-bottom:1px solid #223}",
+  "h1{font-size:16px;margin:0}small{color:#8aa}",
+  ".wrap{padding:16px 20px}.sum{margin:0 0 12px;color:#9fb}",
+  "table{border-collapse:collapse;width:100%;font-size:13px}",
+  "th,td{padding:7px 10px;text-align:left;border-bottom:1px solid #1c2733}",
+  "th{color:#8aa;font-weight:600;position:sticky;top:0;background:#0b0f14}",
+  ".s-converged{color:#5fd08a}.s-degraded{color:#e6c15a}.s-failed{color:#e6725a}",
+  "tr:hover td{background:#111a22}.mono{font-family:ui-monospace,Menlo,monospace}",
+  "</style></head><body>",
+  "<header><h1>F-05A Vector Clearing <small>— live (ClickHouse vector_clearing_results)</small></h1></header>",
+  "<div class='wrap'><p class='sum' id='sum'>загрузка…</p>",
+  "<table><thead><tr><th>time</th><th>batch_id</th><th>status</th>",
+  "<th>residual_norm</th><th>leg_count</th></tr></thead><tbody id='rows'></tbody></table></div>",
+  "<script>",
+  "function fmtTime(ms){try{return new Date(Number(ms)).toLocaleTimeString();}catch(e){return String(ms);}}",
+  "function esc(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}",
+  "async function tick(){try{",
+  " var r=await fetch('/api/vector-clearing/live',{headers:{Accept:'application/json'}});",
+  " var d=await r.json();var items=(d&&d.items)||[];",
+  " var sm=d&&d.summary||{};",
+  " document.getElementById('sum').textContent='всего: '+((d&&d.total)||0)+'  |  converged: '+(sm.converged||0)+'  degraded: '+(sm.degraded||0)+'  failed: '+(sm.failed||0)+'  |  '+new Date().toLocaleTimeString();",
+  " var html=items.map(function(it){",
+  "  var cls='s-'+(it.solver_status||'');",
+  "  return '<tr><td>'+fmtTime(it.event_time_ms)+'</td><td class=mono>'+esc(it.batch_id)+'</td>'+",
+  "   '<td class='+cls+'>'+esc(it.solver_status)+'</td><td class=mono>'+esc(it.residual_norm)+'</td><td>'+esc(it.leg_count)+'</td></tr>';",
+  " }).join('');",
+  " document.getElementById('rows').innerHTML=html;",
+  "}catch(e){document.getElementById('sum').textContent='ошибка: '+e.message;}}",
+  "tick();setInterval(tick,2000);",
+  "</script></body></html>"
+].join("");
+
+async function handleVectorClearing(req, res, pathname, query) {
+  if (req.method !== "GET") return false;
+  if (pathname === "/api/vector-clearing/live") {
+    const items = await fetchVectorClearingRows(query && query.limit);
+    const summary = items.reduce((acc, it) => {
+      const k = it.solver_status || "unknown";
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {});
+    return writeJson(res, 200, {
+      items, summary, total: items.length, generatedAt: new Date().toISOString()
+    });
+  }
+  if (pathname === "/api/vector-clearing/view") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(VECTOR_CLEARING_VIEW_HTML);
+    return true;
+  }
+  return false;
+}
+
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 function websocketAcceptKey(key) {
@@ -7045,6 +7124,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/executions/live") {
       const handled = await handleExecutionLiveFeed(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/vector-clearing/live" || pathname === "/api/vector-clearing/view") {
+      const handled = await handleVectorClearing(req, res, pathname, query);
       if (handled !== false) return;
     }
 
