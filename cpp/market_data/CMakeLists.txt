@@ -25,7 +25,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(clickhouse-cpp)
 
-FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+# nlohmann/json через codeload-archive (github.com/.../archive), а не release-asset
+# (objects.githubusercontent.com) — последний периодически недоступен из dev/CI сети
+# и валит FetchContent build step. codeload — отдельный, стабильный CDN.
+FetchContent_Declare(json URL https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.tar.gz)
 FetchContent_MakeAvailable(json)
 
 find_package(PkgConfig REQUIRED)
