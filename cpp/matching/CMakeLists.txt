@@ -66,6 +66,7 @@ add_executable(matching
   src/app/solver_metrics.cpp
   src/app/solve_grouped_batch_use_case.cpp
   src/app/vector_clearing_use_case.cpp
+  src/app/vector_clearing_hedge_builder.cpp
   src/app/combo_external_routing.cpp
   src/domain/solver_impl.cpp
   src/domain/batch_result_to_fill_events.cpp
@@ -242,6 +243,22 @@ if(BUILD_TESTING)
   )
   target_compile_options(matching_vector_clearing_result_mapper_test PRIVATE -Wall -Wextra)
   add_test(NAME matching_vector_clearing_result_mapper_test COMMAND matching_vector_clearing_result_mapper_test)
+
+  # F-05A (T-F05A-305 money-path, ADR-049): hedge intents builder (proto, Eigen via hdr).
+  add_executable(matching_vector_clearing_hedge_builder_test
+    tests/app/vector_clearing_hedge_builder_test.cpp
+    src/app/vector_clearing_hedge_builder.cpp
+  )
+  target_include_directories(matching_vector_clearing_hedge_builder_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(matching_vector_clearing_hedge_builder_test PRIVATE
+    cex_common
+    contracts_proto
+    Eigen3::Eigen
+  )
+  target_compile_options(matching_vector_clearing_hedge_builder_test PRIVATE -Wall -Wextra)
+  add_test(NAME matching_vector_clearing_hedge_builder_test COMMAND matching_vector_clearing_hedge_builder_test)
 
   # F-05A (T-F05A-304): surplus policy (ADR-047). Header-only domain logic.
   add_executable(matching_surplus_policy_test

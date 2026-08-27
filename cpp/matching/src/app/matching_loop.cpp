@@ -65,6 +65,9 @@
 #include "domain/vector_qp_solver.hpp"
 #include "infra/osqp_backend.hpp"
 #include "transport/mappers/vector_clearing_result.hpp"
+// F-05A money-path (ADR-049): hedge intents за флагом F05A_MONEY_ENABLED.
+#include "app/vector_clearing_hedge_builder.hpp"
+#include "infra/kafka/execution_intents_producer.hpp"
 #include "cex/common/uuid.hpp"
 #include "fob/venue/v1/venue.pb.h"
 #include "infra/kafka/batch_outputs_producer.hpp"
@@ -847,6 +850,24 @@ void MatchingLoop::on_vectorized_liquidity(
          {"residual_norm", std::to_string(outcome.solve.residual_norm)},
          {"surplus_action", std::to_string(static_cast<int>(outcome.surplus.action))},
          {"source_file", "cpp/matching/src/app/matching_loop.cpp"}});
+
+    // F-05A MONEY-PATH (ADR-049): за флагом F05A_MONEY_ENABLED (default off),
+    // ТОЛЬКО converged (kProceedNoSurplus). Эмитим ExecutionIntent (F-12 hedge)
+    // против исходных external-уровней — не user-проводки, не ledger напрямую.
+    if (outcome.surplus.action == domain::SurplusAction::kProceedNoSurplus &&
+        cex::common::Env::get_bool("F05A_MONEY_ENABLED", false)) {
+      auto intents = BuildHedgeIntents(input, outcome);
+      if (!intents.empty()) {
+        infra::ExecutionIntentsProducer intents_producer(producer_);
+        intents_producer.produce(intents);
+        cex::common::log_json("INFO", "F-05A hedge intents emitted",
+                              {{"service", "matching"},
+                               {"stage", "vector_clearing_hedge"},
+                               {"topic", "execution.intents"},
+                               {"batch_id", batch_id},
+                               {"intents", std::to_string(intents.size())}});
+      }
+    }
   } catch (const std::exception& e) {
     cex::common::log_json("ERROR", "vector clearing failed",
                           {{"batch_id", input.batch_id()}, {"error", e.what()}});
