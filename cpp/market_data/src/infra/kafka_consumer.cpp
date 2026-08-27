@@ -5,6 +5,7 @@
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/orders/v1/orders.pb.h"
 #include "fob/venue/v1/venue.pb.h"
+#include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305)
 
 #include <algorithm>
 #include <chrono>
@@ -54,7 +55,8 @@ void MarketDataKafkaConsumer::loop() {
             {"marketdata.raw", "batch.outputs", "fills",
              "orders.normalized",   // F5-3: FlowOrder для FOB aggregate curves
              "venue.liquidity.fob", "venue.snapshots", "execution.venue",
-             "execution.groups"})) {   // F-09: grouped combo execution
+             "execution.groups",   // F-09: grouped combo execution
+             "matching.vector_clearing"})) {  // F-05A (T-F05A-305 persister)
       cex::common::log_json("ERROR", "MarketData Kafka subscribe failed; retrying");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       continue;
@@ -169,6 +171,16 @@ void MarketDataKafkaConsumer::loop() {
                                         "cpp/market_data/src/infra/kafka_consumer.cpp"}});
 
                 uc_->OnLiquidityCurve(curve);
+                return;
+              }
+              if (topic == "matching.vector_clearing") {  // F-05A (T-F05A-305)
+                fob::marketdata::v1::VectorClearingResult vcr;
+                if (!cex::common::from_bytes(payload, vcr)) {
+                  cex::common::log_json("ERROR",
+                                        "Failed to parse VectorClearingResult");
+                  return;
+                }
+                uc_->OnVectorClearingResult(vcr);
                 return;
               }
               if (topic == "venue.snapshots") {

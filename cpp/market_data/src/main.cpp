@@ -19,6 +19,7 @@
 #include "app/market_data_uc.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
 #include "infra/clickhouse/clickhouse_vector_segment_storage.hpp"  // F-05A (T-F05A-206)
+#include "infra/clickhouse/clickhouse_vector_clearing_storage.hpp"  // F-05A (T-F05A-305)
 #include "infra/clickhouse/order_book_storage.hpp"
 #include "infra/clickhouse/ch_snapshot_storage.hpp"
 #include "infra/clickhouse_storage.hpp"
@@ -120,6 +121,11 @@ int main() {
       vector_segment_storage(ch_cfg);
   vector_segment_storage.EnsureSchema();
   uc.SetVectorSegmentStorage(&vector_segment_storage);
+
+  cex::market_data::infra::clickhouse::ClickHouseVectorClearingStorage
+      vector_clearing_storage(ch_cfg);
+  vector_clearing_storage.EnsureSchema();
+  uc.SetVectorClearingResultStorage(&vector_clearing_storage);
 
   // ── F-05: стартуем stale sweeper ─────────────────────────────────────────
   uc.StartStaleSweeper();

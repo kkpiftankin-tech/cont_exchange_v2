@@ -23,6 +23,7 @@
 #include "domain/ports/i_snapshot_storage.hpp"
 #include "domain/ports/i_snapshot_publisher.hpp"
 #include "domain/vectorize.hpp"   // F-05A: VectorizeConfig (T-F05A-205)
+#include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 persister)
 #include "app/compute_market_data.hpp"
 #include "update_order_book_uc.hpp"
 #include "infra/market_data_stream_hub.hpp"
@@ -35,9 +36,10 @@ class ClickHouseLiquidityCurveStorage;
 
 namespace cex::market_data::app {
 
-// F-05A (T-F05A-205/206): порты публикации + персиста векторной ликвидности.
+// F-05A (T-F05A-205/206/305): порты публикации + персиста векторной ликвидности.
 struct IVectorizedPublisher;
 struct IVectorSegmentStorage;
+struct IVectorClearingResultStorage;
 
 // Port for persisting batch outputs in analytics storage (ClickHouse).
 class IBatchOutputsStorage {
@@ -93,6 +95,13 @@ class MarketDataUseCases {
   void SetVectorSegmentStorage(IVectorSegmentStorage* storage) {
     vector_segment_storage_ = storage;
   }
+
+  // F-05A (T-F05A-305 persister): consume matching.vector_clearing → CH.
+  void SetVectorClearingResultStorage(IVectorClearingResultStorage* storage) {
+    vector_clearing_result_storage_ = storage;
+  }
+  void OnVectorClearingResult(
+      const fob::marketdata::v1::VectorClearingResult& result);
   void OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot);
 
   // F-05: обработчик FillEvent для расчёта effective spread
@@ -149,6 +158,7 @@ class MarketDataUseCases {
   domain::IRiskAlertPublisher*     risk_publisher_{nullptr};
   IVectorizedPublisher*            vectorized_publisher_{nullptr};  // F-05A
   IVectorSegmentStorage*           vector_segment_storage_{nullptr};// F-05A (T-F05A-206)
+  IVectorClearingResultStorage*    vector_clearing_result_storage_{nullptr}; // F-05A
   domain::VectorizeConfig          vectorize_cfg_{};                // F-05A
   infra::MarketDataStreamHub*      stream_hub_{nullptr};
   infra::PgMarketDataConfig*       pg_config_{nullptr};
