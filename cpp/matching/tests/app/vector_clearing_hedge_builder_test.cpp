@@ -28,24 +28,39 @@ void SetDec(cv1::Decimal* d, std::int64_t units, std::int32_t scale = 0) {
   d->set_scale(scale);
 }
 
+// basis [BTC=0, ETH=1, USDT=2]
+void SetBasis(mv1::VectorClearingInput* in) {
+  auto* b = in->mutable_basis();
+  b->set_num_assets(3);
+  const char* assets[] = {"BTC", "ETH", "USDT"};
+  for (int i = 0; i < 3; ++i) {
+    auto* e = b->add_assets();
+    e->set_index(i);
+    e->set_asset(assets[i]);
+  }
+}
+
+// w — вектор коэффициентов (в quote-компоненте зашит ∓P_eff).
 mv1::VectorFlowSegment* AddSeg(mv1::VectorClearingInput* in, const std::string& id,
                                const std::string& venue, const std::string& pair,
-                               mv1::VectorLevelSide side, std::int64_t eff_price) {
+                               mv1::VectorLevelSide side,
+                               std::initializer_list<std::int64_t> w) {
   auto* s = in->add_segments();
   s->set_segment_id(id);
   s->set_source_order_id("ord-" + id);
   s->set_venue_id(venue);
   s->set_pair(pair);
   s->set_side(side);
-  SetDec(s->mutable_effective_price(), eff_price);
+  for (std::int64_t wi : w) SetDec(s->add_w(), wi);
   return s;
 }
 
 void TestBuild() {
   mv1::VectorClearingInput in;
   in.set_batch_id("b1");
-  AddSeg(&in, "s0", "vx", "BTC/USDT", mv1::VECTOR_LEVEL_SIDE_BID, 100);
-  AddSeg(&in, "s1", "vy", "ETH/USDT", mv1::VECTOR_LEVEL_SIDE_ASK, 50);
+  SetBasis(&in);
+  AddSeg(&in, "s0", "vx", "BTC/USDT", mv1::VECTOR_LEVEL_SIDE_BID, {1, 0, -100});
+  AddSeg(&in, "s1", "vy", "ETH/USDT", mv1::VECTOR_LEVEL_SIDE_ASK, {0, -1, 50});
 
   app::VectorClearingOutcome o;
   o.solve.x = {Decimal{2, 0}, Decimal{1, 0}};  // оба > 0
@@ -75,8 +90,9 @@ void TestBuild() {
 void TestSkipsZeroX() {
   mv1::VectorClearingInput in;
   in.set_batch_id("b2");
-  AddSeg(&in, "s0", "vx", "BTC/USDT", mv1::VECTOR_LEVEL_SIDE_BID, 100);
-  AddSeg(&in, "s1", "vy", "ETH/USDT", mv1::VECTOR_LEVEL_SIDE_ASK, 50);
+  SetBasis(&in);
+  AddSeg(&in, "s0", "vx", "BTC/USDT", mv1::VECTOR_LEVEL_SIDE_BID, {1, 0, -100});
+  AddSeg(&in, "s1", "vy", "ETH/USDT", mv1::VECTOR_LEVEL_SIDE_ASK, {0, -1, 50});
 
   app::VectorClearingOutcome o;
   o.solve.x = {Decimal{3, 0}, Decimal{0, 0}};  // s1 не исполняется

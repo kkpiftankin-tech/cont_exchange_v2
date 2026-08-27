@@ -5,6 +5,7 @@
 #include "app/vector_clearing_hedge_builder.hpp"
 
 #include <algorithm>  // std::min
+#include <map>
 #include <string>
 
 #include "cex/common/decimal.hpp"
@@ -28,6 +29,13 @@ std::vector<ev1::ExecutionIntent> BuildHedgeIntents(
   const int n =
       std::min(input.segments_size(), static_cast<int>(outcome.solve.x.size()));
 
+  // asset → index (для извлечения P_eff из w[quote]; VectorFlowSegment цену
+  // отдельно не хранит — она зашита в quote-компоненте w = ∓P_eff).
+  std::map<std::string, int> asset_index;
+  for (const auto& e : input.basis().assets()) {
+    asset_index.emplace(e.asset(), e.index());
+  }
+
   for (int i = 0; i < n; ++i) {
     const cex::common::Decimal& x = outcome.solve.x[static_cast<std::size_t>(i)];
     if (!Positive(x)) continue;  // исполняем только сегменты с x_i > 0
@@ -47,9 +55,11 @@ std::vector<ev1::ExecutionIntent> BuildHedgeIntents(
     inst->set_symbol(seg.pair());
     const std::string& pair = seg.pair();
     const auto slash = pair.find('/');
+    std::string quote;
     if (slash != std::string::npos) {
       inst->set_base(pair.substr(0, slash));
-      inst->set_quote(pair.substr(slash + 1));
+      quote = pair.substr(slash + 1);
+      inst->set_quote(quote);
     }
     it.set_venue_symbol(seg.pair());
 
@@ -57,8 +67,16 @@ std::vector<ev1::ExecutionIntent> BuildHedgeIntents(
     it.set_side(seg.side() == mv1::VECTOR_LEVEL_SIDE_BID ? fob::common::v1::SIDE_SELL
                                                          : fob::common::v1::SIDE_BUY);
 
-    *it.mutable_target_qty() = x.to_proto();                 // §9 Decimal
-    *it.mutable_limit_price() = seg.effective_price();       // исходный external price
+    *it.mutable_target_qty() = x.to_proto();  // §9 Decimal
+
+    // limit_price = |w[quote]| = P_eff (исходный external price).
+    const auto qit = asset_index.find(quote);
+    if (qit != asset_index.end() && qit->second >= 0 &&
+        qit->second < seg.w_size()) {
+      cex::common::Decimal p = cex::common::Decimal::from_proto(seg.w(qit->second));
+      if (p.units < 0) p.units = -p.units;  // |·|
+      *it.mutable_limit_price() = p.to_proto();
+    }
 
     intents.push_back(std::move(it));
   }
