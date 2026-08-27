@@ -61,5 +61,6 @@
 | ADR-046 | F-06 топик `positions.update` для WS-push обновлений позиций | [proposed](ADR-046-positions-update-topic.md) |
 | ADR-047 | F-05A Surplus / EXCHANGE_PNL policy для vectorized external clearing | [accepted](ADR-047-surplus-exchange-pnl-policy.md) |
 | ADR-048 | F-05A QP solver backend (OSQP) для vector clearing `Wx=0` | [accepted](ADR-048-qp-solver-backend.md) |
+| ADR-049 | F-05A vector clearing execution → F-12 hedge (converged-only, flag) | [accepted](ADR-049-f05a-vector-clearing-execution-hedge.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).
