@@ -39,6 +39,7 @@
 
 #include "app/ledger_uc.hpp"
 
+#include <chrono>         // F-18 §11: epoch-ms для снапшота позиции по клирингу
 #include <cmath>          // std::pow, std::llround для PnL вычислений
 #include <exception>      // std::exception::what() в catch
 #include <map>            // std::map — агрегат валют в GetExchangeBalances (F-18)
@@ -655,6 +656,82 @@ fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances
     *out->mutable_assets_total() = Decimal::add(a.own, a.venue).to_proto();
   }
   return resp;
+}
+
+// F-18 §11: NOP биржи по валюте (assets − client). Под удержанным mu_.
+std::map<std::string, Decimal> LedgerUseCases::ComputeExchangeNopLocked() const {
+  std::map<std::string, Decimal> nop;  // ccy -> assets−client
+  // assets: house own + Σ venue.
+  auto house_it = balances_.find(kHouseAccountId);
+  if (house_it != balances_.end())
+    for (const auto& [ccy, bal] : house_it->second)
+      nop[ccy] = Decimal::add(nop[ccy], Decimal::add(bal.available, bal.reserved));
+  for (const auto& [venue, vb] : venue_balances_)
+    for (const auto& [ccy, e] : vb)
+      nop[ccy] = Decimal::add(nop[ccy], e.total);
+  // − client liabilities (все пользователи кроме house).
+  for (const auto& [user, ub] : balances_) {
+    if (user == kHouseAccountId) continue;
+    for (const auto& [ccy, bal] : ub)
+      nop[ccy] = Decimal::sub(nop[ccy], Decimal::add(bal.available, bal.reserved));
+  }
+  return nop;
+}
+
+fob::ledger::v1::GetExchangeNopHistoryResponse LedgerUseCases::GetExchangeNopHistory(
+    const fob::ledger::v1::GetExchangeNopHistoryRequest& req) {
+  fob::ledger::v1::GetExchangeNopHistoryResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+  const int limit = req.limit() > 0 ? req.limit() : 12;
+  std::lock_guard<std::mutex> lg(mu_);
+  int n = 0;
+  for (auto it = nop_history_.rbegin(); it != nop_history_.rend() && n < limit; ++it) {
+    if (!req.batch_id().empty() && it->batch_id != req.batch_id()) continue;
+    auto* snap = resp.add_snapshots();
+    snap->set_batch_id(it->batch_id);
+    snap->set_event_time_ms(it->ts_ms);
+    for (const auto& [ccy, ba] : it->nop) {
+      auto* item = snap->add_items();
+      item->set_currency(ccy);
+      *item->mutable_nop_before() = ba.first.to_proto();
+      *item->mutable_nop_after() = ba.second.to_proto();
+      *item->mutable_delta() = Decimal::sub(ba.second, ba.first).to_proto();
+    }
+    ++n;
+    if (!req.batch_id().empty()) break;
+  }
+  return resp;
+}
+
+void LedgerUseCases::ApplyPositionDelta(
+    const std::string& batch_id, long long ts_ms,
+    const std::vector<std::pair<std::string, Decimal>>& deltas) {
+  if (batch_id.empty()) return;
+  std::lock_guard<std::mutex> lg(mu_);
+  if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id
+  pos_delta_applied_.insert(batch_id);
+
+  const auto nop_old = ComputeExchangeNopLocked();
+  // Δpos от вектор-клиринга применяется к house-остаткам (currency vector биржи).
+  for (const auto& [asset, d] : deltas) {
+    auto& bal = ensure_balance_locked(kHouseAccountId, asset);
+    bal.available = Decimal::add(bal.available, d);
+  }
+  const auto nop_new = ComputeExchangeNopLocked();
+
+  BatchNopSnap snap;
+  snap.batch_id = batch_id;
+  snap.ts_ms = ts_ms;
+  for (const auto& [ccy, v] : nop_old) {
+    auto it = nop_new.find(ccy);
+    snap.nop[ccy] = {v, it != nop_new.end() ? it->second : Decimal::zero()};
+  }
+  for (const auto& [ccy, v] : nop_new)
+    if (snap.nop.find(ccy) == snap.nop.end()) snap.nop[ccy] = {Decimal::zero(), v};
+  nop_history_.push_back(std::move(snap));
+  while (nop_history_.size() > 50) nop_history_.pop_front();
+  if (pos_delta_applied_.size() > 1000) pos_delta_applied_.clear();
 }
 
 // ============================================================================

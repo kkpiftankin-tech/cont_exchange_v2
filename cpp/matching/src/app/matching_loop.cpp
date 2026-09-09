@@ -44,9 +44,12 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iterator>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,6 +66,7 @@
 // F-05A (T-F05A-305 1a): vector clearing (consume marketdata.vectorized).
 #include "app/vector_clearing_use_case.hpp"
 #include "domain/vector_qp_solver.hpp"
+#include "fob/treasury/v1/treasury.pb.h"   // F-18 §11: CePositionDeltaBatch
 #include "infra/osqp_backend.hpp"
 #include "transport/mappers/vector_clearing_result.hpp"
 // F-05A money-path (ADR-049): hedge intents за флагом F05A_MONEY_ENABLED.
@@ -395,6 +399,7 @@ MatchingLoop::MatchingLoop(
                             {{"error", ex.what()}});
     }
   }
+
 }
 
 // ============================================================================
@@ -818,6 +823,55 @@ void MatchingLoop::on_liquidity_curve(
   });
 }
 
+namespace {
+// F-18 §11 (variant A): проекция решённого x на активы двойной записью
+// Δbase += x_i ; Δquote −= x_i·exp(λ_quote−λ_base). Только СЧИТАЕТ (matching не
+// владеет книгой) — результат уходит в ce.position.delta, ledger накапливает.
+std::map<std::string, double> ProjectXToDeltas(
+    const fob::marketdata::v1::VectorClearingInput& input,
+    const cex::matching::app::VectorClearingOutcome& outcome) {
+  std::map<std::string, double> delta;
+  const auto& solve = outcome.solve;
+  const int n = input.segments_size();
+  if (static_cast<int>(solve.x.size()) != n || solve.pi.empty()) return delta;
+  // asset → index (λ = pi по индексу basis; иначе отсортированное объединение).
+  std::map<std::string, int> idx;
+  if (input.basis().assets_size() > 0) {
+    for (const auto& e : input.basis().assets()) idx[e.asset()] = e.index();
+  } else {
+    std::set<std::string> uniq;
+    for (const auto& s : input.segments()) {
+      const std::string p = s.pair();
+      const auto sl = p.find('/');
+      if (sl != std::string::npos) { uniq.insert(p.substr(0, sl)); uniq.insert(p.substr(sl + 1)); }
+    }
+    int i = 0; for (const auto& a : uniq) idx[a] = i++;
+  }
+  std::vector<double> lam(solve.pi.size(), 0.0);
+  for (std::size_t i = 0; i < solve.pi.size(); ++i) lam[i] = static_cast<double>(solve.pi[i]);
+  auto lam_of = [&](const std::string& a, double& v) {
+    auto it = idx.find(a);
+    if (it == idx.end() || it->second < 0 || it->second >= static_cast<int>(lam.size())) return false;
+    v = lam[it->second]; return true;
+  };
+  for (int i = 0; i < n; ++i) {
+    const std::string pair = input.segments(i).pair();
+    const auto sl = pair.find('/');
+    if (sl == std::string::npos) continue;
+    const std::string base = pair.substr(0, sl), quote = pair.substr(sl + 1);
+    const double x = static_cast<double>(solve.x[i]);
+    if (!std::isfinite(x) || x == 0.0) continue;
+    delta[base] += x;
+    double lb = 0.0, lq = 0.0;
+    if (lam_of(base, lb) && lam_of(quote, lq)) {
+      const double p = std::exp(lq - lb);
+      if (std::isfinite(p)) delta[quote] += -x * p;
+    }
+  }
+  return delta;
+}
+}  // namespace
+
 // F-05A (T-F05A-305 1a): решить векторный клиринг для входа и опубликовать
 // диагностику в matching.vector_clearing. НИКАКИХ денег: не эмитит
 // FillEvent/ExecutionGroup и не трогает ledger. Солвер-стек — локальный
@@ -826,7 +880,10 @@ void MatchingLoop::on_vectorized_liquidity(
     const fob::marketdata::v1::VectorClearingInput& input) {
   try {
     infra::OsqpBackend backend;
-    domain::VectorQpSolver solver(backend, domain::QpParams{}, /*tol=*/1e-9);
+    // ADR-052: academic двусторонний режим за флагом (default off = F1-путь).
+    const bool two_sided = cex::common::Env::get_bool("F05A_TWO_SIDED_ENABLED", false);
+    domain::VectorQpSolver solver(backend, domain::QpParams{}, /*tol=*/1e-9,
+                                  /*scale=*/12, two_sided);
     VectorClearingUseCase uc(solver, domain::SurplusPolicy::kRejectIfResidual, 1e-9);
     const VectorClearingOutcome outcome = uc.Clear(input);
 
@@ -837,6 +894,33 @@ void MatchingLoop::on_vectorized_liquidity(
                            cex::common::to_bytes(result))) {
       cex::common::log_json("WARN", "Failed to produce matching.vector_clearing",
                             {{"batch_id", batch_id}});
+    }
+
+    // F-18 §11 (variant A): Δpos биржи от этого вектор-клиринга → ce.position.delta.
+    // matching только СЧИТАЕТ проекцию x на активы; ledger накапливает в позицию и
+    // снимает снапшот старая→Δ→новая по batch_id. Гейт: любой решённый x (converged
+    // ИЛИ degraded — в two-sided знаковый x легитимен при residual→surplus); НЕ failed.
+    if (outcome.solve.status != domain::VectorSolveStatus::kFailed) {
+      const std::map<std::string, double> deltas = ProjectXToDeltas(input, outcome);
+      fob::treasury::v1::CePositionDeltaBatch dpb;
+      dpb.set_batch_id(batch_id);
+      dpb.set_event_time_ms(std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+      for (const auto& [asset, d] : deltas) {
+        if (std::fabs(d) < 1e-12) continue;
+        auto* ad = dpb.add_deltas();
+        ad->set_asset(asset);
+        cex::common::Decimal dec{static_cast<std::int64_t>(std::llround(d * 1e8)), 8};
+        *ad->mutable_delta() = dec.to_proto();
+      }
+      cex::common::log_json("INFO", "F-18 ce.position.delta",
+                            {{"batch_id", batch_id},
+                             {"solver_status", std::to_string(static_cast<int>(outcome.solve.status))},
+                             {"num_deltas", std::to_string(dpb.deltas_size())},
+                             {"segments", std::to_string(input.segments_size())}});
+      if (dpb.deltas_size() > 0) {
+        producer_.produce("ce.position.delta", batch_id, cex::common::to_bytes(dpb));
+      }
     }
     cex::common::log_json(
         "INFO", "F-05A vector clearing",

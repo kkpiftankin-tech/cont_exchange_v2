@@ -37,6 +37,14 @@ grpc::Status GrpcLedgerService::GetExchangeBalances(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::GetExchangeNopHistory(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetExchangeNopHistoryRequest* request,
+    fob::ledger::v1::GetExchangeNopHistoryResponse* response) {
+  *response = uc_->GetExchangeNopHistory(*request);
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcLedgerService::ReserveFunds(
     grpc::ServerContext*,
     const fob::ledger::v1::ReserveFundsRequest* request,

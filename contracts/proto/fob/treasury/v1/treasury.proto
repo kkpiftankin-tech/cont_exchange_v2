@@ -66,6 +66,23 @@ message CePositionDelta {
 }
 
 // ---------------------------------------------------------------------------
+// F-18 §11 (variant A): Δ позиции биржи от ОДНОГО вектор-клиринга (проекция x на
+// активы), эмиттится matching в топик ce.position.delta; ledger накапливает в
+// house-позицию и снимает снапшот старая→Δ→новая по batch_id. matching только
+// СЧИТАЕТ и ЭМИТТИТ (не владеет книгой).
+// ---------------------------------------------------------------------------
+message AssetDelta {
+  string asset = 1;
+  fob.common.v1.Decimal delta = 2;    // Δ по активу (base += x, quote −= x·P_clr)
+}
+message CePositionDeltaBatch {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;                  // batch_id вектор-клиринга ("w|<ts>")
+  int64 event_time_ms = 3;
+  repeated AssetDelta deltas = 4;
+}
+
+// ---------------------------------------------------------------------------
 // Одна строка истории по клирингу: позиция ДО → Δ → ПОСЛЕ + θ + хедж (ADR-054 §8).
 // ---------------------------------------------------------------------------
 message CePositionStep {
@@ -73,12 +90,12 @@ message CePositionStep {
   fob.common.v1.Decimal net_before = 2;   // позиция ДО клиринга
   fob.common.v1.Decimal delta = 3;        // Δ клиринга (проекция x)
   fob.common.v1.Decimal net_after = 4;    // ПОСЛЕ = ДО + Δ
-  fob.common.v1.Decimal threshold = 5;    // θ_a (см. has_threshold)
+  fob.common.v1.Decimal threshold = 5;    // θ_a (см. threshold_finite)
   fob.common.v1.Decimal hedge_qty = 6;    // объём хеджа (0 если |after|≤θ)
   string hedge_side = 7;                    // BUY | SELL | ""
   fob.common.v1.Decimal mark = 8;         // mark на момент батча
   bool hedge_armed = 9;                     // |pos| > θ
-  bool has_threshold = 10;                  // false ⇒ θ=∞ (не хеджируется)
+  bool threshold_finite = 10;               // false ⇒ θ=∞ (не хеджируется); не has_ (коллизия аксессора)
 }
 
 // Позиция биржи по одному клирингу (ДО→Δ→ПОСЛЕ для набора активов).

@@ -8,6 +8,10 @@
 
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch_outputs.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // F-18 §11: CePositionDeltaBatch
+
+#include <utility>
+#include <vector>
 
 namespace cex::ledger::infra {
 
@@ -21,6 +25,7 @@ void KafkaConsumers::start() {
   t2_ = std::thread([this] { loop_execution_intents(); });
   t3_ = std::thread([this] { loop_execution_reports(); });
   t4_ = std::thread([this] { loop_execution_groups(); });
+  t5_ = std::thread([this] { loop_ce_position_delta(); });  // F-18 §11
 }
 
 void KafkaConsumers::stop() {
@@ -29,6 +34,36 @@ void KafkaConsumers::stop() {
   if (t2_.joinable()) t2_.join();
   if (t3_.joinable()) t3_.join();
   if (t4_.joinable()) t4_.join();
+  if (t5_.joinable()) t5_.join();
+}
+
+// F-18 §11 (variant A): consume ce.position.delta → ApplyPositionDelta (накопление
+// позиции биржи от вектор-клиринга + снапшот старая→Δ→новая по batch_id).
+void KafkaConsumers::loop_ce_position_delta() {
+  cex::common::KafkaConsumer consumer({
+      .brokers = brokers_,
+      .group_id = "ledger-ce-pos-delta",
+      .client_id = "ledger",
+      .enable_auto_commit = false,
+  });
+  consumer.subscribe({"ce.position.delta"});
+  while (running_.load()) {
+    bool ok = consumer.poll_once(500, [this](const std::string& topic,
+                                             const std::string& key,
+                                             const std::string& payload) {
+      (void)topic; (void)key;
+      fob::treasury::v1::CePositionDeltaBatch dpb;
+      if (!cex::common::from_bytes(payload, dpb)) {
+        cex::common::log_json("ERROR", "Failed to parse CePositionDeltaBatch");
+        return;
+      }
+      std::vector<std::pair<std::string, cex::common::Decimal>> deltas;
+      for (const auto& ad : dpb.deltas())
+        deltas.emplace_back(ad.asset(), cex::common::Decimal::from_proto(ad.delta()));
+      uc_->ApplyPositionDelta(dpb.batch_id(), dpb.event_time_ms(), deltas);
+    });
+    if (!ok) break;
+  }
 }
 
 // F-09 (T-F09-060): consume execution.groups → ApplyExecutionGroup (grouped postings).

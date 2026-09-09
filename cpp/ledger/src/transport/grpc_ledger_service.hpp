@@ -62,6 +62,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                                    const fob::ledger::v1::GetExchangeBalancesRequest* request,
                                    fob::ledger::v1::GetExchangeBalancesResponse* response) override;
 
+  // F-18 (§11): история позиции биржи по клирингам (старая → Δ → новая).
+  grpc::Status GetExchangeNopHistory(grpc::ServerContext* context,
+                                     const fob::ledger::v1::GetExchangeNopHistoryRequest* request,
+                                     fob::ledger::v1::GetExchangeNopHistoryResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

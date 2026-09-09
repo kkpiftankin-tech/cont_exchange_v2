@@ -2,9 +2,13 @@
 
 #include <chrono>
 #include <memory>
+#include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <unordered_set>
 #include <vector>
 
@@ -173,7 +177,26 @@ class LedgerUseCases {
   // Seed остатка house-аккаунта при старте (idempotent — только если пусто).
   void SeedHouseBalance(const std::string& currency, const cex::common::Decimal& amount);
 
+  // F-18 §11: история позиции биржи по клирингам (старая → Δ → новая).
+  fob::ledger::v1::GetExchangeNopHistoryResponse
+  GetExchangeNopHistory(const fob::ledger::v1::GetExchangeNopHistoryRequest& req);
+
+  // F-18 §11 (variant A): применить Δpos от вектор-клиринга (из ce.position.delta)
+  // к house-остаткам и снять снапшот NOP старая→Δ→новая по batch_id (идемпотентно).
+  void ApplyPositionDelta(
+      const std::string& batch_id, long long ts_ms,
+      const std::vector<std::pair<std::string, cex::common::Decimal>>& deltas);
+
  private:
+  // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
+  std::map<std::string, cex::common::Decimal> ComputeExchangeNopLocked() const;
+  // Снапшот позиции по одному клирингу.
+  struct BatchNopSnap {
+    std::string batch_id;
+    long long ts_ms{0};
+    std::map<std::string, std::pair<cex::common::Decimal, cex::common::Decimal>> nop;  // ccy -> {before, after}
+  };
+
   struct Balance {
     cex::common::Decimal available;
     cex::common::Decimal reserved;
@@ -207,6 +230,8 @@ class LedgerUseCases {
   std::unordered_map<std::string, UserPositions> positions_; // user -> instrument -> position
   std::unordered_map<std::string, Reservation> reservations_; // reservation_id -> reservation
   VenueMap venue_balances_; // venue -> currency -> balance
+  std::deque<BatchNopSnap> nop_history_; // F-18 §11: последние N клирингов (old/Δ/new)
+  std::unordered_set<std::string> pos_delta_applied_; // F-18 §11: idempotency по batch_id
   HedgePnlMap hedge_pnl_records_; // venue -> list of hedge records
   std::unordered_map<std::string, cex::common::Decimal> hedge_pnl_summary_; // venue:currency -> total PnL
   std::unordered_map<std::string, fob::execution::v1::ExecutionIntent> execution_intents_; // intent_id -> plan

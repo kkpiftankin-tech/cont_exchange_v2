@@ -24,6 +24,7 @@ class KafkaConsumers {
   void loop_execution_intents();
   void loop_execution_reports();
   void loop_execution_groups();  // F-09 (T-F09-060): execution.groups → ApplyExecutionGroup
+  void loop_ce_position_delta(); // F-18 §11: ce.position.delta → ApplyPositionDelta
 
   app::LedgerUseCases* uc_;
   std::string brokers_;
@@ -33,6 +34,7 @@ class KafkaConsumers {
   std::thread t2_;
   std::thread t3_;
   std::thread t4_;
+  std::thread t5_;  // F-18 §11: ce.position.delta consumer
 };
 
 }  // namespace cex::ledger::infra

@@ -6808,12 +6808,37 @@ function ceBatchPositionFromDetail(clearingPrices, hedgeDrafts, cfg) {
   return { numeraire, mode, armedCount, assets: rows };
 }
 
-// F-18 (ADR-054 §10): позиция по клирингу больше не «проекция x» — позиция = NOP
-// (живая метрика из балансов ledger). Секция «позиция по батчу» на вкладке
-// Clearing снята: возвращаем пусто (UI покажет ссылку на Treasury/NOP).
-async function fetchCeBatchPositionFromPg(_batchId) {
-  return { numeraire: process.env.CE_NUMERAIRE || "USDT", mode: process.env.CE_HEDGE_MODE || "FLATTEN",
-           armedCount: 0, assets: [], engineWired: false, superseded: true };
+// F-18 §11 (variant A): позиция биржи для ОДНОГО вектор-клиринга — старая→Δ→новая
+// из ledger.GetExchangeNopHistory({batch_id}) (matching эмиттил Δpos от x, ledger
+// накопил + снял снапшот по batch_id вектор-клиринга). θ/хедж overlay из env.
+async function fetchCeBatchPositionFromPg(batchId) {
+  const cfg = ceConfig();
+  const base = { numeraire: cfg.numeraire, mode: cfg.mode, armedCount: 0, assets: [], engineWired: false };
+  const led = initLedgerClient();
+  if (!led || !batchId) return base;
+  try {
+    const resp = await grpcCall(led, "GetExchangeNopHistory", { batch_id: batchId, limit: 1 });
+    const snaps = (resp && resp.snapshots) || [];
+    if (!snaps.length) return base;
+    const s = snaps[0];
+    let armed = 0;
+    const assets = (s.items || [])
+      .filter((i) => i.currency !== cfg.numeraire)
+      .map((i) => {
+        const before = decToNum(i.nop_before), delta = decToNum(i.delta), after = decToNum(i.nop_after);
+        const th = cfg.theta[i.currency] != null ? cfg.theta[i.currency] : null;
+        const isArmed = th != null && Math.abs(after) > th;
+        let hedge = null;
+        if (isArmed) {
+          const qty = cfg.mode === "TO_BAND" ? Math.max(0, Math.abs(after) - th) : Math.abs(after);
+          if (qty > 1e-12) { hedge = { side: after > 0 ? "SELL" : "BUY", qty, instrument: i.currency + "/" + cfg.numeraire }; armed++; }
+        }
+        return { asset: i.currency, before, delta, after, mark: null, threshold: th, hedgeArmed: !!hedge, hedge };
+      });
+    return { numeraire: cfg.numeraire, mode: cfg.mode, armedCount: armed, assets, engineWired: assets.length > 0 };
+  } catch (e) {
+    return { ...base, error: e.message };
+  }
 }
 
 // F-18 (ADR-054 §10): валютный вектор биржи у ledger (GetExchangeBalances) +
