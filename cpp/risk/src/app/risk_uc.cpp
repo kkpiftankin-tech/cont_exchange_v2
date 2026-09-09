@@ -33,7 +33,10 @@
 
 #include <grpcpp/grpcpp.h>     // F-18: grpc::ClientContext для вызова ledger
 #include <algorithm>           // std::max для severity escalation
+#include <chrono>              // F-18 Phase E02: epoch-ms для cooldown
 #include <unordered_set>       // дедуп affected users в OnBatchResult
+
+#include "cex/common/proto.hpp"  // F-18 Phase E02: to_bytes(ExecutionIntent)
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"   // env vars для конфигов RISK_*
@@ -1134,6 +1137,70 @@ fob::risk::v1::GetExchangeNOPResponse RiskUseCases::GetExchangeNOP(
     }
   }
   return resp;
+}
+
+// ============================================================================
+// F-18 Phase E02: EmitNetHedges — при CE_NET_HEDGE_ENABLED публикует
+// ExecutionIntent в execution.intents для armed-валют (излишек→SELL, дефицит→BUY).
+// Cooldown per-currency защищает от переэмиссии, пока предыдущий хедж исполняется
+// (NOP уменьшится, когда execution.venue вернёт fill и ledger сократит venue_balances).
+// ============================================================================
+void RiskUseCases::EmitNetHedges() {
+  if (intents_producer_ == nullptr) return;
+  if (!cex::common::Env::get_bool("CE_NET_HEDGE_ENABLED", false)) return;
+
+  const auto nop = GetExchangeNOP(fob::risk::v1::GetExchangeNOPRequest{});
+  const std::string numeraire = nop.numeraire();
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  const long long cooldown = cex::common::Env::get_int("CE_HEDGE_COOLDOWN_MS", 30000);
+  const std::string allowed = cex::common::Env::get_string(
+      "CE_HEDGE_ALLOWED_VENUES",
+      cex::common::Env::get_string("HEDGE_INTENT_ALLOWED_VENUES", "binance,okx"));
+
+  int emitted = 0;
+  for (const auto& item : nop.items()) {
+    if (!item.hedge_armed()) continue;
+    const std::string ccy = item.currency();
+    {
+      std::lock_guard<std::mutex> lg(hedge_mu_);
+      auto it = hedge_cooldown_.find(ccy);
+      if (it != hedge_cooldown_.end() && (now_ms - it->second) < cooldown) continue;
+      hedge_cooldown_[ccy] = now_ms;
+    }
+
+    fob::execution::v1::ExecutionIntent intent;
+    intent.mutable_meta()->set_source("risk");
+    const std::string hedge_flow_id = "ce|hedge|" + ccy;
+    intent.set_intent_id(hedge_flow_id + "|" + std::to_string(now_ms));
+    intent.set_hedge_flow_id(hedge_flow_id);
+    intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+    intent.set_reason("ce_nop_hedge");
+    auto* instr = intent.mutable_instrument();
+    instr->set_symbol(ccy + "/" + numeraire);
+    instr->set_base(ccy);
+    instr->set_quote(numeraire);
+    intent.set_side(item.hedge_side() == "SELL" ? fob::common::v1::SIDE_SELL
+                                                : fob::common::v1::SIDE_BUY);
+    *intent.mutable_target_qty() = item.hedge_qty();
+    intent.set_strategy(fob::execution::v1::EXEC_STRATEGY_MARKET);
+    intent.set_urgency(fob::execution::v1::URGENCY_HIGH);
+    intent.set_tif(fob::common::v1::TIF_IOC);
+    std::string cur;
+    for (char ch : allowed) {
+      if (ch == ',') { if (!cur.empty()) intent.add_allowed_venues(cur); cur.clear(); }
+      else if (ch != ' ') { cur += ch; }
+    }
+    if (!cur.empty()) intent.add_allowed_venues(cur);
+
+    intents_producer_->produce("execution.intents", hedge_flow_id,
+                               cex::common::to_bytes(intent));
+    ++emitted;
+    cex::common::log_json("INFO", "F-18 net-hedge intent emitted",
+                          {{"currency", ccy}, {"side", item.hedge_side()},
+                           {"hedge_flow_id", hedge_flow_id}});
+  }
+  (void)emitted;
 }
 
 }  // namespace cex::risk::app

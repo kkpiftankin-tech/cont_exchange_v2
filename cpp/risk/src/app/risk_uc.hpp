@@ -10,6 +10,7 @@
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
 #include "cex/common/decimal.hpp"
+#include "cex/common/kafka.hpp"             // F-18: producer execution.intents
 #include "fob/ledger/v1/ledger.grpc.pb.h"  // F-18: клиент к ledger (валютный вектор)
 
 namespace cex::risk::app {
@@ -33,6 +34,13 @@ public:
   // F-18: NOP биржи по валюте + размер хеджа (читает ledger.GetExchangeBalances).
   fob::risk::v1::GetExchangeNOPResponse
   GetExchangeNOP(const fob::risk::v1::GetExchangeNOPRequest &req);
+
+  // F-18 Phase E02: продюсер для execution.intents (эмиссия net-хеджа).
+  void SetIntentsProducer(cex::common::KafkaProducer *p) { intents_producer_ = p; }
+  // Периодический драйвер: при CE_NET_HEDGE_ENABLED считает NOP и публикует
+  // ExecutionIntent для armed-валют (излишек→SELL, дефицит→BUY), с cooldown-
+  // защитой от переэмиссии. Вызывается из фонового таймера (risk main).
+  void EmitNetHedges();
 
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
@@ -103,6 +111,9 @@ private:
   infra::RiskAlertsPublisher publisher_;
   infra::RiskSnapshotRepository *snapshot_repo_{nullptr};  // optional, not owned
   fob::ledger::v1::LedgerService::StubInterface *ledger_stub_{nullptr};  // F-18, not owned
+  cex::common::KafkaProducer *intents_producer_{nullptr};  // F-18 Phase E02, not owned
+  std::mutex hedge_mu_;                                     // защищает hedge_cooldown_
+  std::unordered_map<std::string, long long> hedge_cooldown_;  // ccy -> last emit epoch-ms
 };
 
 } // namespace cex::risk::app

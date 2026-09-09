@@ -10,6 +10,9 @@
 // ============================================================================
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
+#include <thread>
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -58,6 +61,23 @@ int main() {
   uc.SetLedgerStub(ledger_stub.get());
   cex::common::log_json("INFO", "Risk → ledger client wired (F-18 NOP)",
                         {{"ledger_addr", ledger_addr}});
+
+  // F-18 Phase E02: producer execution.intents + фоновый драйвер эмиссии net-хеджа
+  // (за флагом CE_NET_HEDGE_ENABLED; cooldown защищает от переэмиссии).
+  cex::common::KafkaProducer intents_producer(
+      {.brokers = brokers, .client_id = "risk-hedge"});
+  uc.SetIntentsProducer(&intents_producer);
+  std::thread hedge_thread([&uc]() {
+    const int interval = cex::common::Env::get_int("CE_HEDGE_INTERVAL_MS", 10000);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+      try { uc.EmitNetHedges(); }
+      catch (const std::exception& e) {
+        cex::common::log_json("ERROR", "EmitNetHedges failed", {{"error", e.what()}});
+      }
+    }
+  });
+  hedge_thread.detach();
 
   cex::risk::transport::GrpcRiskService svc(&uc);
 
