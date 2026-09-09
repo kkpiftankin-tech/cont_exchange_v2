@@ -12,6 +12,12 @@
 // ============================================================================
 #include <grpcpp/grpcpp.h>
 
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
@@ -87,6 +93,35 @@ int main() {
   uc.SetAccountRepo(account_repo);
   uc.SetPositionAccountTx(position_account_tx);
   uc.SetAccountReserveTx(account_reserve_tx);
+
+  // F-18 (ADR-054 §10): seed house-аккаунта ('__ce_house__') капиталом биржи из
+  // env при старте. Валюты — CE_TREASURY_ASSETS (+ CE_NUMERAIRE); сумма —
+  // CE_CAPITAL_SEED_<CCY>. Idempotent (сидит только пустой остаток).
+  {
+    const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+    std::string csv = cex::common::Env::get_string("CE_TREASURY_ASSETS", "BTC,ETH,SOL");
+    std::vector<std::string> ccys;
+    std::string cur;
+    for (char ch : csv) {
+      if (ch == ',') { if (!cur.empty()) ccys.push_back(cur); cur.clear(); }
+      else if (!std::isspace(static_cast<unsigned char>(ch))) { cur += ch; }
+    }
+    if (!cur.empty()) ccys.push_back(cur);
+    ccys.push_back(numeraire);
+    int seeded = 0;
+    for (const auto& c : ccys) {
+      const std::string s = cex::common::Env::get_string("CE_CAPITAL_SEED_" + c, "");
+      if (s.empty()) continue;
+      try {
+        const double v = std::stod(s);
+        cex::common::Decimal amount{static_cast<std::int64_t>(std::llround(v * 1e8)), 8};
+        uc.SeedHouseBalance(c, amount);
+        ++seeded;
+      } catch (...) {}
+    }
+    cex::common::log_json("INFO", "F-18 house account seeded",
+                          {{"account", "__ce_house__"}, {"currencies", std::to_string(seeded)}});
+  }
 
   // F-06 / F6-5 (T-F06-072, ADR-046): producer топика positions.update.
   // После успешного ApplyBatchResult ledger эмиттит лёгкий invalidation-сигнал

@@ -90,6 +90,14 @@ grpc::Status GrpcRiskService::GetRiskSnapshot(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcRiskService::GetExchangeNOP(
+    grpc::ServerContext*,
+    const fob::risk::v1::GetExchangeNOPRequest* request,
+    fob::risk::v1::GetExchangeNOPResponse* response) {
+  *response = uc_->GetExchangeNOP(*request);
+  return grpc::Status::OK;
+}
+
 // F-09 (T-F09-040). Stateless групповой check через pure-domain GroupPreTradeCheck;
 // конфиг лимитов — из env. Alert на reject — structured-лог (Kafka risk.alerts
 // через app-слой — follow-up).

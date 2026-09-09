@@ -31,6 +31,7 @@
 
 #include "app/risk_uc.hpp"
 
+#include <grpcpp/grpcpp.h>     // F-18: grpc::ClientContext для вызова ledger
 #include <algorithm>           // std::max для severity escalation
 #include <unordered_set>       // дедуп affected users в OnBatchResult
 
@@ -1069,6 +1070,70 @@ void RiskUseCases::PublishGroupedRejectAlert(const std::string &user_id,
   *alert.mutable_timestamp() = cex::common::now_ts();
 
   publisher_.publish(alert);
+}
+
+// ============================================================================
+// F-18 (ADR-054 §10): GetExchangeNOP — читает валютный вектор биржи у ledger,
+// считает NOP_a = активы_a − обязательства_a (numeraire исключён) и размер
+// хеджа (θ из env CE_HEDGE_THRESHOLD_<CCY>, режим CE_HEDGE_MODE).
+// ============================================================================
+fob::risk::v1::GetExchangeNOPResponse RiskUseCases::GetExchangeNOP(
+    const fob::risk::v1::GetExchangeNOPRequest& req) {
+  fob::risk::v1::GetExchangeNOPResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("risk");
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const std::string mode = cex::common::Env::get_string("CE_HEDGE_MODE", "FLATTEN");
+  resp.set_numeraire(numeraire);
+  resp.set_mode(mode);
+  if (ledger_stub_ == nullptr) return resp;
+
+  fob::ledger::v1::GetExchangeBalancesRequest lreq;
+  fob::ledger::v1::GetExchangeBalancesResponse lresp;
+  grpc::ClientContext ctx;
+  const grpc::Status st = ledger_stub_->GetExchangeBalances(&ctx, lreq, &lresp);
+  if (!st.ok()) {
+    cex::common::log_json("WARN", "GetExchangeNOP: ledger call failed",
+                          {{"error", st.error_message()}});
+    return resp;
+  }
+
+  const auto zero = cex::common::Decimal::zero();
+  const auto absd = [&](const cex::common::Decimal& d) {
+    return cex::common::Decimal::cmp(d, zero) < 0 ? cex::common::Decimal::sub(zero, d) : d;
+  };
+
+  for (const auto& b : lresp.balances()) {
+    const std::string ccy = b.currency();
+    const bool is_num = (ccy == numeraire);
+    const auto assets = cex::common::Decimal::from_proto(b.assets_total());
+    const auto client = cex::common::Decimal::from_proto(b.client_liability());
+    const auto nop = cex::common::Decimal::sub(assets, client);
+
+    auto* it = resp.add_items();
+    it->set_currency(ccy);
+    it->set_is_numeraire(is_num);
+    *it->mutable_nop() = nop.to_proto();
+    *it->mutable_assets_total() = assets.to_proto();
+    *it->mutable_client_liability() = client.to_proto();
+    if (is_num) { it->set_hedge_armed(false); continue; }
+
+    // θ из env; numeraire исключён (выше). Размер хеджа по режиму.
+    const auto theta = ParseDecimalString(
+        cex::common::Env::get_string("CE_HEDGE_THRESHOLD_" + ccy, ""));
+    *it->mutable_threshold() = theta.to_proto();
+    const bool has_theta = cex::common::Decimal::cmp(theta, zero) > 0;
+    const auto anop = absd(nop);
+    const bool armed = has_theta && cex::common::Decimal::cmp(anop, theta) > 0;
+    it->set_hedge_armed(armed);
+    if (armed) {
+      cex::common::Decimal qty = (mode == "TO_BAND")
+          ? cex::common::Decimal::sub(anop, theta) : anop;
+      *it->mutable_hedge_qty() = qty.to_proto();
+      it->set_hedge_side(cex::common::Decimal::cmp(nop, zero) > 0 ? "SELL" : "BUY");
+    }
+  }
+  return resp;
 }
 
 }  // namespace cex::risk::app

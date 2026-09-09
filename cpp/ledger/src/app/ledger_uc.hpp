@@ -165,6 +165,14 @@ class LedgerUseCases {
   fob::ledger::v1::GetHedgePnLResponse GetHedgePnL(
       const fob::ledger::v1::GetHedgePnLRequest& req);
 
+  // F-18 (ADR-054 §10): валютный вектор биржи (house-аккаунт + Σ venue_balances +
+  // Σ клиентских обязательств) — вход для расчёта NOP в risk и для UI.
+  static constexpr const char* kHouseAccountId = "__ce_house__";
+  fob::ledger::v1::GetExchangeBalancesResponse GetExchangeBalances(
+      const fob::ledger::v1::GetExchangeBalancesRequest& req);
+  // Seed остатка house-аккаунта при старте (idempotent — только если пусто).
+  void SeedHouseBalance(const std::string& currency, const cex::common::Decimal& amount);
+
  private:
   struct Balance {
     cex::common::Decimal available;

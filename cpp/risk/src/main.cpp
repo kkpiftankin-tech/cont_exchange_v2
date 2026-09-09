@@ -13,6 +13,7 @@
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // F-18: ledger stub (валютный вектор)
 #include "app/risk_uc.hpp"
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
@@ -47,6 +48,16 @@ int main() {
         "WARN", "RISK_POSTGRES_DSN not set or libpqxx unavailable; "
                 "margin snapshots disabled");
   }
+
+  // F-18 (ADR-054 §10): stub к ledger для чтения валютного вектора биржи (NOP).
+  const std::string ledger_addr =
+      cex::common::Env::get_string("LEDGER_GRPC_ADDR", "ledger:50053");
+  auto ledger_channel =
+      grpc::CreateChannel(ledger_addr, grpc::InsecureChannelCredentials());
+  auto ledger_stub = fob::ledger::v1::LedgerService::NewStub(ledger_channel);
+  uc.SetLedgerStub(ledger_stub.get());
+  cex::common::log_json("INFO", "Risk → ledger client wired (F-18 NOP)",
+                        {{"ledger_addr", ledger_addr}});
 
   cex::risk::transport::GrpcRiskService svc(&uc);
 

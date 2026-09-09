@@ -57,6 +57,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                             const fob::ledger::v1::GetPositionsRequest* request,
                             fob::ledger::v1::GetPositionsResponse* response) override;
 
+  // F-18 (ADR-054 §10): валютный вектор биржи (house + venue + client liabilities).
+  grpc::Status GetExchangeBalances(grpc::ServerContext* context,
+                                   const fob::ledger::v1::GetExchangeBalancesRequest* request,
+                                   fob::ledger::v1::GetExchangeBalancesResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

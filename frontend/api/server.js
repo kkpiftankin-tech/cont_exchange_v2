@@ -40,6 +40,9 @@ const MATCHING_ADDR = process.env.MATCHING_HTTP_ADDR || 'http://matching:8081';
 const VENUES_ADDR = process.env.VENUES_HTTP_ADDR || 'http://venues:8087';
 const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || 'http://clickhouse:8123';
 const CLICKHOUSE_DB = process.env.CLICKHOUSE_DB || 'default';
+// venues пишет venue_snapshots в отдельную БД (VENUES_CLICKHOUSE_DB, по умолч. backtest)
+// с точной Decimal-сериализацией — оттуда читаем сырой стакан для графика ликвидности.
+const VENUE_SNAPSHOTS_DB = process.env.VENUE_SNAPSHOTS_DB || 'backtest';
 const CLICKHOUSE_EXECUTION_VENUE_TABLE =
   process.env.CLICKHOUSE_EXECUTION_VENUE_TABLE || 'execution_venue';
 const CLICKHOUSE_TIMEOUT_MS = Number(process.env.CLICKHOUSE_TIMEOUT_MS || 5000);
@@ -107,6 +110,42 @@ function initLedgerClient() {
     console.error('[grpc] Failed to create ledger client:', err.message);
   }
   return ledgerClient;
+}
+
+// F-18 CE Treasury read-API (ADR-054 §10): frontend читает валютный вектор биржи
+// у ledger (GetExchangeBalances) и NOP/размер хеджа у risk (GetExchangeNOP) —
+// НЕ ходит в PG напрямую. Позиция = NOP (риск-метрика), балансы = ledger.
+const RISK_GRPC_ADDR = process.env.RISK_GRPC_ADDR || 'risk:50052';
+const RISK_PROTO = join(PROTO_DIR, 'fob/risk/v1/risk.proto');
+let riskClient = null;
+function initRiskClient() {
+  if (riskClient) return riskClient;
+  try {
+    const pd = protoLoader.loadSync([RISK_PROTO, COMMON_PROTO], {
+      keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+      includeDirs: [PROTO_DIR],
+    });
+    const proto = grpc.loadPackageDefinition(pd);
+    riskClient = new proto.fob.risk.v1.RiskService(RISK_GRPC_ADDR, grpc.credentials.createInsecure());
+    console.log(`[grpc] Risk client created, target=${RISK_GRPC_ADDR}`);
+  } catch (err) {
+    console.error('[grpc] Failed to create risk client:', err.message);
+  }
+  return riskClient;
+}
+// proto Decimal {units,scale} → number (units·10^-scale). Для отображения.
+function decToNum(d) {
+  if (!d) return 0;
+  const u = Number(d.units || 0);
+  const s = Number(d.scale || 0);
+  if (!Number.isFinite(u)) return 0;
+  return u / Math.pow(10, s);
+}
+function grpcCall(client, method, req, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const deadline = new Date(Date.now() + timeoutMs);
+    client[method](req, { deadline }, (err, resp) => (err ? reject(err) : resolve(resp)));
+  });
 }
 
 // Initialize gRPC client
@@ -6453,8 +6492,21 @@ async function handleExecutionLiveFeed(req, res, pathname, query) {
 
 // F-05A: живой просмотр vector clearing (ClickHouse vector_clearing_results).
 // Read-only ops-view. /api/vector-clearing/live → JSON; /view → HTML-страница.
+// Есть ли фактически исполняемый объём: x_json = ["0.0..","0.0..",..]; executed,
+// если хоть один элемент не нулевой. На single-pair данных x=0 (нет арбитража).
+function xExecuted(xJson) {
+  if (!xJson) return false;
+  try {
+    const arr = JSON.parse(xJson);
+    if (!Array.isArray(arr)) return false;
+    return arr.some((v) => Math.abs(Number(v)) > 1e-12);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function fetchVectorClearingRows(limit) {
-  const q = "SELECT event_time_ms, batch_id, solver_status, residual_norm, leg_count"
+  const q = "SELECT event_time_ms, batch_id, solver_status, residual_norm, leg_count, x_json"
     + " FROM " + CLICKHOUSE_DB + ".vector_clearing_results"
     + " ORDER BY event_time_ms DESC LIMIT " + Number(limit || 50)
     + " FORMAT JSONEachRow";
@@ -6470,6 +6522,516 @@ async function fetchVectorClearingRows(limit) {
     console.error("[vector-clearing] CH fetch failed:", err.message || err);
     return [];
   }
+}
+
+// --- Детализация одной строки клиринга (клик по строке) --------------------
+// Показывает 3 блока: (1) исходные заявки-сегменты, (2) клиринговые цены (pi),
+// (3) черновики хедж-заявок. Ключ строки — (batch_id, event_time_ms), т.к.
+// batch_id не уникален на цикл (это ключ venue|symbol и переиспользуется).
+async function chJsonEachRow(query) {
+  const r = await fetch(CLICKHOUSE_URL + "/?query=" + encodeURIComponent(query), {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(CLICKHOUSE_TIMEOUT_MS)
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error("clickhouse_http_" + r.status + ": " + text);
+  return text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function safeJsonArray(s) {
+  if (!s) return [];
+  try { const a = JSON.parse(s); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+
+// Порядок активов = отсортированное объединение (как domain BuildAssetBasis),
+// поэтому pi[i] ↔ assetBasis[i] без отдельного persist basis.
+function assetBasisFromSegments(segments) {
+  const set = new Set();
+  for (const s of segments) {
+    const pair = String(s.pair || "");
+    const parts = pair.split("/");
+    if (parts[0]) set.add(parts[0].trim());
+    if (parts[1]) set.add(parts[1].trim());
+  }
+  return Array.from(set).sort();
+}
+
+async function fetchVectorClearingDetail(batchId, ts) {
+  const bid = String(batchId || "").replace(/'/g, "");
+  const tnum = Number(ts);
+  const tsClause = Number.isFinite(tnum) ? " AND event_time_ms = " + tnum : "";
+  const clrRows = await chJsonEachRow(
+    "SELECT batch_id, execution_group_id, x_json, pi_json, residual_json, residual_norm,"
+    + " solver_status, surplus_json, solver_diagnostics_json, leg_count, event_time_ms"
+    + " FROM " + CLICKHOUSE_DB + ".vector_clearing_results"
+    + " WHERE batch_id = '" + bid + "'" + tsClause
+    + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
+  if (!clrRows.length) return null;
+  const clr = clrRows[0];
+  const clrTs = Number(clr.event_time_ms);
+
+  // Сегменты этого цикла: снапшот с тем же batch_id, ближайший на момент ≤ клиринга.
+  const segRows = await chJsonEachRow(
+    "SELECT segment_id, venue_id, source_order_id, pair, side, seg_index, toString(q_rate) AS q_rate, toString(q_max) AS q_max,"
+    + " toString(effective_price) AS effective_price, toString(p_high) AS p_high,"
+    + " toString(anchor) AS anchor, toString(slope) AS slope, toString(q_min) AS q_min,"
+    + " toString(alpha_ext) AS alpha_ext, toString(alpha_t) AS alpha_t,"
+    + " toString(beta_t) AS beta_t, toString(theta) AS theta, translator_model"
+    + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
+    + " WHERE batch_id = '" + bid + "'"
+    + " AND event_time_ms = (SELECT max(event_time_ms) FROM " + CLICKHOUSE_DB
+    + ".vector_flow_segments_history WHERE batch_id = '" + bid + "' AND event_time_ms <= " + clrTs + ")"
+    + " FORMAT JSONEachRow");
+
+  // Выравниваем segRows в порядок входа солвера, чтобы x[i] ↔ segRows[i].
+  // Оконные данные (ADR-050) несут точный seg_index — сортируем по нему.
+  // Старые поканальные строки имеют seg_index=0 у всех → fallback: реконструкция
+  // по (venue, side, k) из source_order_id="venue|pair|side|k" (ORDER BY segment_id
+  // не годится: лексикографически "10" < "2").
+  const hasSegIndex = segRows.some((s) => Number(s.seg_index) > 0);
+  if (hasSegIndex) {
+    segRows.sort((a, b) => Number(a.seg_index) - Number(b.seg_index));
+  } else {
+    const kOf = (s) => {
+      const parts = String(s.source_order_id || "").split("|");
+      const k = Number(parts[parts.length - 1]);
+      return Number.isFinite(k) ? k : 0;
+    };
+    const sideRank = (s) => (String(s.side).toLowerCase().indexOf("bid") >= 0 ? 0 : 1);
+    segRows.sort((a, b) => {
+      if (a.venue_id !== b.venue_id) return a.venue_id < b.venue_id ? -1 : 1;
+      if (sideRank(a) !== sideRank(b)) return sideRank(a) - sideRank(b);
+      return kOf(a) - kOf(b);
+    });
+  }
+
+  const source = segRows.map((s) => {
+    // ADR-052: двусторонний сегмент несёт anchor(mid)/slope/q_min → ОДНА кривая
+    // на венью (не bid/ask раздельно). Признак — заданный slope/anchor.
+    const isTwoSided = Math.abs(Number(s.slope)) > 0 || Math.abs(Number(s.anchor)) > 0;
+    return {
+      segment_id: s.segment_id,
+      instrument: s.pair,
+      exchange: s.venue_id,
+      twoSided: isTwoSided,
+      side: isTwoSided ? "двусторонняя" : s.side,
+      mid: s.effective_price,                       // РЕАЛЬНЫЙ mid (ADR-053: anchor=log(mid))
+      logMid: isTwoSided ? s.anchor : null,         // log(mid) — якорь клиринга
+      slope: isTwoSided ? s.slope : null,          // наклон m = Δlog(price)/ед. (лог-импакт)
+      buyDepth: isTwoSided ? s.q_max : null,        // Q_ask (покупка base)
+      sellDepth: isTwoSided ? String(Math.abs(Number(s.q_min))) : null,  // Q_bid (продажа)
+      // ADR-053 safe-translator (то, что реально клирится): α_ext/α_T/β_T/θ/модель.
+      alphaExt: s.alpha_ext, alphaT: s.alpha_t, betaT: s.beta_t,
+      theta: s.theta, translatorModel: s.translator_model,
+      speed: s.q_rate,          // суммарная пропускная способность
+      q_max: s.q_max,
+      price: s.effective_price
+    };
+  });
+
+  // (2) Клиринговые цены: pi по активам (дуальные Wx=0). Метки — восстановленный
+  // asset basis (отсортированное объединение). Абсолютные pi определены с
+  // точностью до нормировки; клиринговая ЦЕНА инструмента = pi[base]/pi[quote].
+  const piArr = safeJsonArray(clr.pi_json);
+  const basis = assetBasisFromSegments(segRows);
+  const idxOf = {};
+  basis.forEach((a, i) => { idxOf[a] = i; });
+  const clearingPrices = piArr.map((v, i) => {
+    const lam = Number(v);
+    return {
+      asset: basis[i] != null ? basis[i] : "asset#" + i,
+      price: String(v),                                        // λ = log(price)
+      priceReal: Number.isFinite(lam) ? Math.exp(lam) : null,  // цена = exp(λ) (в неявном numéraire)
+    };
+  });
+  // Клиринговый курс по каждому инструменту.
+  // ADR-052 (two-sided academic): pi — дуальные Wx=0 в чистом направлении, курс =
+  // p* = pi[quote] − pi[base] (реальная цена base в quote). Признак two-sided —
+  // знаковый x (есть отрицательные) или сегменты с anchor.
+  const xValsForSign = safeJsonArray(clr.x_json).map(Number);
+  const twoSided = xValsForSign.some((v) => Number.isFinite(v) && v < -1e-9)
+    || segRows.some((s) => Math.abs(Number(s.anchor)) > 0);
+  const clearingRates = [];
+  if (twoSided) {
+    // ADR-053: pi — ЛОГ-дуальные. Курс пары quote/base = exp(pi[quote] − pi[base])
+    // (разность логов = деление реальных цен) → согласовано на циклах (треугольник).
+    const pairs = new Set();
+    for (const s of segRows) { if (s.pair) pairs.add(String(s.pair)); }
+    for (const pair of pairs) {
+      const [base, quote] = pair.split("/").map((x) => (x || "").trim());
+      const lb = Number(piArr[idxOf[base]]);
+      const lq = Number(piArr[idxOf[quote]]);
+      if (Number.isFinite(lb) && Number.isFinite(lq)) {
+        clearingRates.push({ instrument: pair, rate: Math.exp(lq - lb).toFixed(6) });
+      }
+    }
+  } else {
+    // F1/односторонний: курс из дуальных pi[base]/pi[quote].
+    const seenPair = {};
+    for (const s of segRows) {
+      const pair = String(s.pair || "");
+      if (!pair || seenPair[pair]) continue;
+      seenPair[pair] = true;
+      const [base, quote] = pair.split("/").map((x) => (x || "").trim());
+      const pb = Number(piArr[idxOf[base]]);
+      const pq = Number(piArr[idxOf[quote]]);
+      if (Number.isFinite(pb) && Number.isFinite(pq) && Math.abs(pq) > 1e-18) {
+        clearingRates.push({ instrument: pair, rate: (pb / pq).toFixed(6) });
+      }
+    }
+  }
+
+  // (3) Черновики хеджа. two-sided (ADR-052): сторона по ЗНАКУ x (x>0 → BUY base,
+  // x<0 → SELL base), degraded допустим (знаковый клиринг легитимно даёт остаток).
+  // F1/односторонний (ADR-049): сторона из seg.side, только converged (иначе дребезг).
+  const xArr = safeJsonArray(clr.x_json);
+  const drafts = [];
+  const converged = String(clr.solver_status) === "converged";
+  const gateOk = twoSided || converged;
+  const n = gateOk ? Math.min(xArr.length, source.length) : 0;
+  for (let i = 0; i < n; i++) {
+    const xi = Number(xArr[i]);
+    if (!(Math.abs(xi) > 1e-9)) continue;
+    const seg = source[i];
+    let side;
+    if (twoSided) {
+      side = xi > 0 ? "BUY" : "SELL";   // знак x = направление на одной кривой
+    } else {
+      side = String(seg.side).toLowerCase().indexOf("bid") >= 0 ? "SELL" : "BUY";
+    }
+    drafts.push({
+      intent_id: clr.batch_id + "|" + seg.segment_id,
+      venue: seg.exchange,
+      instrument: seg.instrument,
+      side: side,
+      target_qty: String(Math.abs(xi)),
+      limit_price: seg.price,
+      reason: "f05a_vector_clearing"
+    });
+  }
+
+  // F-18: позиция биржи CE для ЭТОГО клиринга (ДО→Δ→ПОСЛЕ + θ + хедж), чтобы
+  // состояние позиций было видно прямо в детали батча на вкладке Clearing.
+  const cePosition = await fetchCeBatchPositionFromPg(clr.batch_id);
+
+  return {
+    batch_id: clr.batch_id,
+    execution_group_id: clr.execution_group_id,
+    event_time_ms: clr.event_time_ms,
+    solver_status: clr.solver_status,
+    residual_norm: clr.residual_norm,
+    leg_count: clr.leg_count,
+    surplus: safeJsonArray(clr.surplus_json),
+    diagnostics: (function () { try { return JSON.parse(clr.solver_diagnostics_json || "{}"); } catch (e) { return {}; } })(),
+    source,
+    clearingPrices,
+    clearingRates,
+    clearingPricesAvailable: piArr.length > 0,
+    hedgeDrafts: drafts,
+    cePosition,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+// F-18 CE Treasury (ADR-054): read-side снапшот капитала/позиции/equity.
+// Движок ce-treasury (matching, F-18 Phase 2) ещё не подключён → BFF выводит
+// снапшот из УЖЕ посчитанного результата клиринга (не из сырого стакана):
+//   marks   = exp(λ) клиринговых цен, нормированные к numeraire;
+//   позиция = проекция вектора клиринга x на активы двойной записью
+//             Δh_base += x, Δh_quote −= x·P_clr  (ADR-054 §3);
+//   seed/θ/numeraire/mode — из env (единая книга holdings, target = seed).
+// Только converged батч применяется (UC-F18-02 Alt A1: degraded → skip).
+// Все вычисления здесь (OBS read-side); React только рендерит снапшот.
+function ceEnvNum(name) {
+  const v = process.env[name];
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// F-18 конфиг из env (numeraire/mode/пороги/reference-quote).
+function ceConfig() {
+  const numeraire = String(process.env.CE_NUMERAIRE || "USDT").trim();
+  const mode = String(process.env.CE_HEDGE_MODE || "FLATTEN").trim().toUpperCase();
+  const netHedgeEnabled = String(process.env.CE_NET_HEDGE_ENABLED || "0") === "1";
+  const seed = {}, theta = {}, quoteRef = {};
+  for (const k of Object.keys(process.env)) {
+    let m;
+    if ((m = k.match(/^CE_CAPITAL_SEED_(.+)$/))) { const n = ceEnvNum(k); if (n != null) seed[m[1]] = n; }
+    else if ((m = k.match(/^CE_HEDGE_THRESHOLD_(.+)$/))) { const n = ceEnvNum(k); if (n != null) theta[m[1]] = n; }
+    else if ((m = k.match(/^CE_HEDGE_QUOTE_REF_(.+)$/))) { quoteRef[m[1]] = String(process.env[k]).trim(); }
+  }
+  return { numeraire, mode, netHedgeEnabled, seed, theta, quoteRef };
+}
+
+// F-18 позиция биржи ДЛЯ ОДНОГО клиринга (ADR-054 §3,§8). Из clearingPrices
+// (marks) + hedgeDrafts (проекция x). Standalone per-batch: ДО = 0 (свежая
+// нейтраль), ПОСЛЕ = Δ клиринга; хедж при |ПОСЛЕ|>θ. numeraire исключён (кэш-нога).
+function ceBatchPositionFromDetail(clearingPrices, hedgeDrafts, cfg) {
+  const { numeraire, mode, theta, quoteRef } = cfg;
+  const marks = {}; const pr = {};
+  for (const cp of (clearingPrices || [])) if (cp.priceReal != null && cp.priceReal > 0) pr[cp.asset] = cp.priceReal;
+  const nRef = pr[numeraire];
+  if (nRef && nRef > 0) for (const a of Object.keys(pr)) marks[a] = nRef / pr[a];
+  marks[numeraire] = 1;
+  const delta = {};
+  for (const d of (hedgeDrafts || [])) {
+    const [base, quote] = String(d.instrument || "").split("/").map((s) => (s || "").trim());
+    if (!base || !quote) continue;
+    const x = (d.side === "BUY" ? 1 : -1) * Number(d.target_qty);
+    if (!Number.isFinite(x)) continue;
+    delta[base] = (delta[base] || 0) + x;
+    const mb = marks[base], mq = marks[quote];
+    if (mb != null && mq != null && mq > 0) delta[quote] = (delta[quote] || 0) - x * (mb / mq);
+  }
+  const assets = Array.from(new Set([...Object.keys(theta), ...Object.keys(delta)]))
+    .filter((a) => a !== numeraire).sort();
+  const rows = []; let armedCount = 0;
+  for (const a of assets) {
+    const before = 0;
+    const dl = delta[a] || 0;
+    const after = before + dl;
+    const t = theta[a] != null ? theta[a] : Infinity;
+    const armed = Number.isFinite(t) && Math.abs(after) > t;
+    let hedge = null;
+    if (armed) {
+      const qty = mode === "TO_BAND" ? Math.max(0, Math.abs(after) - t) : Math.abs(after);
+      if (qty > 1e-12) { hedge = { side: after > 0 ? "SELL" : "BUY", qty, instrument: a + "/" + (quoteRef[a] || numeraire) }; armedCount++; }
+    }
+    rows.push({
+      asset: a, before, delta: dl, after,
+      mark: marks[a] != null ? marks[a] : null,
+      threshold: Number.isFinite(t) ? t : null, hedgeArmed: !!hedge, hedge,
+    });
+  }
+  return { numeraire, mode, armedCount, assets: rows };
+}
+
+// F-18 (ADR-054 §10): позиция по клирингу больше не «проекция x» — позиция = NOP
+// (живая метрика из балансов ledger). Секция «позиция по батчу» на вкладке
+// Clearing снята: возвращаем пусто (UI покажет ссылку на Treasury/NOP).
+async function fetchCeBatchPositionFromPg(_batchId) {
+  return { numeraire: process.env.CE_NUMERAIRE || "USDT", mode: process.env.CE_HEDGE_MODE || "FLATTEN",
+           armedCount: 0, assets: [], engineWired: false, superseded: true };
+}
+
+// F-18 (ADR-054 §10): валютный вектор биржи у ledger (GetExchangeBalances) +
+// NOP/размер хеджа у risk (GetExchangeNOP). Совмещаем по валюте.
+async function fetchCeExchange() {
+  const numeraireEnv = (process.env.CE_NUMERAIRE || "USDT").trim();
+  const modeEnv = (process.env.CE_HEDGE_MODE || "FLATTEN").trim().toUpperCase();
+  const netHedgeEnabled = String(process.env.CE_NET_HEDGE_ENABLED || "0") === "1";
+  const base = { numeraire: numeraireEnv, mode: modeEnv, netHedgeEnabled, engineWired: false, rows: [] };
+
+  const risk = initRiskClient();
+  const led = initLedgerClient();
+  let nop = null, bal = null, error = null;
+  try { if (risk) nop = await grpcCall(risk, "GetExchangeNOP", {}); } catch (e) { error = "risk: " + e.message; }
+  try { if (led) bal = await grpcCall(led, "GetExchangeBalances", {}); } catch (e) { error = (error ? error + "; " : "") + "ledger: " + e.message; }
+
+  const balByCcy = {};
+  for (const b of (bal && bal.balances) || []) balByCcy[b.currency] = b;
+
+  const numeraire = (nop && nop.numeraire) || numeraireEnv;
+  const mode = (nop && nop.numeraire_mode) || modeEnv;
+  const rows = ((nop && nop.items) || []).map((i) => {
+    const b = balByCcy[i.currency] || {};
+    return {
+      currency: i.currency, isNumeraire: !!i.is_numeraire,
+      own: decToNum(b.own_total), venue: decToNum(b.venue_total),
+      client: decToNum(b.client_liability), assets: decToNum(b.assets_total),
+      nop: decToNum(i.nop),
+      threshold: i.is_numeraire ? null : decToNum(i.threshold),
+      hedgeArmed: !!i.hedge_armed,
+      hedgeSide: i.hedge_side || "",
+      hedgeQty: decToNum(i.hedge_qty),
+    };
+  });
+  return { numeraire, mode, netHedgeEnabled, engineWired: rows.length > 0, rows, error };
+}
+
+async function handleCeTreasuryV1(req, res, pathname, query) {
+  if (req.method !== "GET" || pathname !== "/api/v1/ce/treasury") return false;
+  try {
+    const x = await fetchCeExchange();
+    const armed = x.rows.filter((r) => r.hedgeArmed);
+    const intents = armed.map((r) => ({
+      currency: r.currency, instrument: r.currency + "/" + x.numeraire,
+      side: r.hedgeSide, qty: r.hedgeQty, threshold: r.threshold, nop: r.nop, mode: x.mode,
+    }));
+    return writeJson(res, 200, {
+      numeraire: x.numeraire, mode: x.mode, netHedgeEnabled: x.netHedgeEnabled,
+      engineWired: x.engineWired,
+      note: x.engineWired
+        ? "Позиция биржи = NOP (Net Open Position) по валюте: активы (капитал + venue-остатки) − клиентские обязательства. Балансы владеет ledger (GetExchangeBalances), NOP и размер хеджа считает risk (GetExchangeNOP). numeraire (" + x.numeraire + ") исключён. Хедж при |NOP|>θ (флаг CE_NET_HEDGE_ENABLED)."
+        : "Нет данных от ledger/risk (сервисы недоступны или не подняты).",
+      rows: x.rows, armedCount: armed.length, intents,
+      source: "ledger+risk",
+      error: x.error || null,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    return writeJson(res, 500, { error: "ce_treasury_failed", message: e.message });
+  }
+}
+
+// Кривая ликвидности венью для графика (вкладка Clearing). ВСЕ вычисления
+// (raw cumulative, VWAP, α_ext/α_T/β_T, safe-линия) — здесь, на backend (ADR-053).
+// Frontend получает готовые к отрисовке массивы {q, price} и только рисует.
+async function fetchVenueCurve(venue, symbol, ts, opts) {
+  const v = String(venue || "").replace(/'/g, "");
+  const s = String(symbol || "").replace(/'/g, "");
+  const tnum = Number(ts);
+  const tsClause = Number.isFinite(tnum) ? " AND event_time_ms <= " + tnum : "";
+  const rows = await chJsonEachRow(
+    "SELECT mid_price, bid_q_grid, bid_p_of_q, ask_q_grid, ask_p_of_q, event_time_ms"
+    + " FROM " + CLICKHOUSE_DB + ".venue_liquidity_curves"
+    + " WHERE venue_id = '" + v + "' AND symbol = '" + s + "'" + tsClause
+    + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
+  if (!rows.length) return null;
+  const r = rows[0];
+  // q_grid — кумулятивный объём, p_of_q — маргинальная цена на этом объёме.
+  const ladder = (qJson, pJson) => {
+    const q = safeJsonArray(qJson).map(Number);
+    const p = safeJsonArray(pJson).map(Number);
+    const n = Math.min(q.length, p.length);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      if (Number.isFinite(q[i]) && Number.isFinite(p[i])) out.push({ q: q[i], p: p[i] });
+    }
+    return out;
+  };
+
+  // Сырой стакан (venue_snapshots.bid_depth_json/ask_depth_json = [[price,qty],...]).
+  // Отдаём УРОВНИ КАК ЕСТЬ (price, qty per level), не кумулятив — фронт сам строит
+  // накопительную/VWAP-кривую и safe-translator по выбранному числу уровней
+  // (алгоритм из orderbook_liquidity_architecture_separate_charts.py).
+  let rawBid = [], rawAsk = [], bestBid = null, bestAsk = null;
+  try {
+    const snapRows = await chJsonEachRow(
+      // Сырой стакан venues пишет в backtest.venue_snapshots (VENUES_CLICKHOUSE_DB),
+      // с точной Decimal-сериализацией (best_bid/ask distinct, спред сохранён).
+      // default.venue_snapshots — другой (устаревший) писатель с замкнутым BTC.
+      "SELECT bid_depth_json, ask_depth_json, event_time_ms"
+      + " FROM " + VENUE_SNAPSHOTS_DB + ".venue_snapshots"
+      + " WHERE venue_id = '" + v + "' AND symbol = '" + s + "'" + tsClause
+      + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
+    if (snapRows.length) {
+      // Уровни: bid по убыванию цены, ask по возрастанию (как sort_book в исходнике,
+      // перед накоплением). Каждый уровень = {p: цена, v: объём base на уровне}.
+      const rawLevels = (json, isBid) => {
+        const arr = safeJsonArray(json);  // [[price,qty],...]
+        const out = [];
+        for (const lvl of Array.isArray(arr) ? arr : []) {
+          const p = Number(lvl && lvl[0]), vv = Number(lvl && lvl[1]);
+          if (!Number.isFinite(p) || !Number.isFinite(vv) || p <= 0 || vv <= 0) continue;
+          out.push({ p, v: vv });
+        }
+        out.sort((a, b) => (isBid ? (b.p - a.p) : (a.p - b.p)));
+        return out;
+      };
+      rawBid = rawLevels(snapRows[0].bid_depth_json, true);
+      rawAsk = rawLevels(snapRows[0].ask_depth_json, false);
+      bestBid = rawBid.length ? rawBid[0].p : null;
+      bestAsk = rawAsk.length ? rawAsk[0].p : null;
+    }
+  } catch (_) { /* сырой стакан опционален — при ошибке график покажет только FOB-кривую */ }
+
+  // ── ADR-053 safe-translator: backend считает готовые серии ─────────────────
+  const opt = opts || {};
+  const anchorMode = opt.anchorMode === "micro" ? "micro" : "mid";
+  let theta = Number(opt.theta);
+  if (!(theta > 0 && theta <= 1)) theta = 0.60;
+  const midPx = (Number.isFinite(bestBid) && Number.isFinite(bestAsk))
+    ? (bestBid + bestAsk) / 2 : Number(r.mid_price);
+  const bidQ0 = rawBid.length ? rawBid[0].v : 0;
+  const askQ0 = rawAsk.length ? rawAsk[0].v : 0;
+  const micro = (bidQ0 + askQ0) > 0
+    ? (bestAsk * bidQ0 + bestBid * askQ0) / (bidQ0 + askQ0) : midPx;
+  const anchor = anchorMode === "micro" ? micro : midPx;
+
+  const clampN = (val, len) => Math.max(1, Math.min(parseInt(val, 10) || len, len));
+  const nBid = clampN(opt.nSell, rawBid.length || 1);
+  const nAsk = clampN(opt.nBuy, rawAsk.length || 1);
+
+  // Накопление стороны: sign=+1 ask (покупка), −1 bid (продажа). VWAP + D/|δ|.
+  const buildSide = (levels, n, sign) => {
+    const use = levels.slice(0, Math.max(1, Math.min(n, levels.length)));
+    let cumQty = 0, cumNotional = 0; const pts = [];
+    for (let i = 0; i < use.length; i++) {
+      cumQty += use[i].v; cumNotional += use[i].p * use[i].v;
+      if (cumQty <= 0) continue;
+      const vwap = cumNotional / cumQty;
+      const absDeltaBps = (anchor > 0 && vwap > 0) ? Math.abs(10000 * Math.log(vwap / anchor)) : 0;
+      const slopePerBps = absDeltaBps > 1e-9 ? cumNotional / absDeltaBps : Infinity;
+      pts.push({ q: sign * cumQty, priceRaw: use[i].p, priceVwap: vwap, slopePerBps });
+    }
+    return pts;
+  };
+  const bidPts = buildSide(rawBid, nBid, -1);
+  const askPts = buildSide(rawAsk, nAsk, +1);
+
+  // α_ext = min D/|δ| по обеим сторонам; α_T = θ·α_ext; β_T = anchor²/(1e4·α_T).
+  let alphaExt = Infinity, bindSide = "", bindLevel = null;
+  [...bidPts.map((p, i) => ({ p, s: "bid", lvl: i + 1 })),
+   ...askPts.map((p, i) => ({ p, s: "ask", lvl: i + 1 }))].forEach(({ p, s: sd, lvl }) => {
+    if (Number.isFinite(p.slopePerBps) && p.slopePerBps > 0 && p.slopePerBps < alphaExt) {
+      alphaExt = p.slopePerBps; bindSide = sd; bindLevel = lvl;
+    }
+  });
+  const alphaT = Number.isFinite(alphaExt) ? theta * alphaExt : null;
+  const betaT = (alphaT && alphaT > 0) ? (anchor * anchor) / (10000 * alphaT) : null;
+
+  const maxBuy = askPts.length ? Math.abs(askPts[askPts.length - 1].q) : 0;
+  const maxSell = bidPts.length ? Math.abs(bidPts[bidPts.length - 1].q) : 0;
+  const safe = [];
+  if (betaT && betaT > 0 && (maxBuy + maxSell) > 0) {
+    for (let i = 0; i <= 40; i++) {
+      const q = -maxSell + (maxBuy + maxSell) * (i / 40);
+      const price = anchor + betaT * q;
+      if (price > 0) safe.push({ q, price });
+    }
+  }
+
+  // Движок (клиринг): α_T/β_T сегмента из vector_flow_segments_history (single source).
+  let engine = null;
+  try {
+    const segRows = await chJsonEachRow(
+      "SELECT toString(alpha_ext) AS alpha_ext, toString(alpha_t) AS alpha_t,"
+      + " toString(beta_t) AS beta_t, toString(theta) AS theta, translator_model,"
+      + " toString(slope) AS slope, toString(effective_price) AS mid"
+      + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
+      + " WHERE venue_id = '" + v + "' AND pair = '" + s + "'"
+      + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
+    if (segRows.length) {
+      const g = segRows[0];
+      engine = {
+        alphaExt: Number(g.alpha_ext), alphaT: Number(g.alpha_t), betaT: Number(g.beta_t),
+        theta: Number(g.theta), model: g.translator_model, slope: Number(g.slope), mid: Number(g.mid),
+      };
+    }
+  } catch (_) { /* колонки могут отсутствовать до деплоя market_data */ }
+
+  const fobBid = ladder(r.bid_q_grid, r.bid_p_of_q).map((x) => ({ q: -x.q, price: x.p }));
+  const fobAsk = ladder(r.ask_q_grid, r.ask_p_of_q).map((x) => ({ q: x.q, price: x.p }));
+
+  return {
+    venue: v, symbol: s, event_time_ms: r.event_time_ms,
+    anchor, anchorMode, mid: midPx, bestBid, bestAsk,
+    spreadBps: bestBid > 0 ? (bestAsk / bestBid - 1) * 10000 : 0,
+    theta, alphaExt: Number.isFinite(alphaExt) ? alphaExt : null, alphaT, betaT,
+    bindSide, bindLevel,
+    nBidUsed: bidPts.length, nAskUsed: askPts.length,
+    nBidMax: rawBid.length, nAskMax: rawAsk.length, maxBuy, maxSell,
+    // готовые к отрисовке серии (signed q, price):
+    rawBid: bidPts.map((p) => ({ q: p.q, price: p.priceRaw })),
+    rawAsk: askPts.map((p) => ({ q: p.q, price: p.priceRaw })),
+    vwapBid: bidPts.map((p) => ({ q: p.q, price: p.priceVwap })),
+    vwapAsk: askPts.map((p) => ({ q: p.q, price: p.priceVwap })),
+    safe, fobBid, fobAsk,
+    engine,   // { alphaExt, alphaT, betaT, theta, model, slope, mid } — то, что клирится
+  };
 }
 
 const VECTOR_CLEARING_VIEW_HTML = [
@@ -6510,17 +7072,93 @@ const VECTOR_CLEARING_VIEW_HTML = [
 ].join("");
 
 async function handleVectorClearing(req, res, pathname, query) {
+  // Runtime-конфиг цикла батч-клиринга (окно/staleness) — GET читает, POST пишет
+  // в PG (f05a_clearing_config); market_data полит эту строку. Больше окно =
+  // больше кривых накапливается перед клирингом.
+  if (pathname === "/api/vector-clearing/config") {
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    if (req.method === "GET") {
+      try {
+        const r = await pool.query(
+          "SELECT batch_window_ms, stale_level_ms, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000 });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    if (req.method === "POST") {
+      let body;
+      try { body = await parseBody(req); } catch (e) { return writeJson(res, 400, { error: "bad_body" }); }
+      const win = Math.max(100, Math.min(600000, parseInt(body.batch_window_ms, 10) || 1000));
+      const stale = Math.max(100, Math.min(3600000, parseInt(body.stale_level_ms, 10) || 60000));
+      try {
+        await pool.query(
+          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, updated_at)"
+          + " VALUES (1,$1,$2,now()) ON CONFLICT (id) DO UPDATE SET"
+          + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms, updated_at=now()",
+          [win, stale]);
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, applied: true });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    return writeJson(res, 405, { error: "method_not_allowed" });
+  }
+
   if (req.method !== "GET") return false;
   if (pathname === "/api/vector-clearing/live") {
-    const items = await fetchVectorClearingRows(query && query.limit);
+    const raw = await fetchVectorClearingRows(query && query.limit);
+    const items = raw.map((it) => ({
+      event_time_ms: it.event_time_ms,
+      batch_id: it.batch_id,
+      solver_status: it.solver_status,
+      residual_norm: it.residual_norm,
+      leg_count: it.leg_count,
+      executed: xExecuted(it.x_json)
+    }));
     const summary = items.reduce((acc, it) => {
       const k = it.solver_status || "unknown";
       acc[k] = (acc[k] || 0) + 1;
+      if (it.executed) acc.executed = (acc.executed || 0) + 1;
       return acc;
     }, {});
     return writeJson(res, 200, {
       items, summary, total: items.length, generatedAt: new Date().toISOString()
     });
+  }
+  if (pathname === "/api/vector-clearing/detail") {
+    const batchId = query && query.batch_id;
+    if (!batchId) return writeJson(res, 400, { error: "batch_id_required" });
+    try {
+      const detail = await fetchVectorClearingDetail(batchId, query && query.ts);
+      if (!detail) return writeJson(res, 404, { error: "not_found" });
+      return writeJson(res, 200, detail);
+    } catch (err) {
+      console.error("[vector-clearing] detail failed:", err.message || err);
+      return writeJson(res, 502, { error: "clickhouse_error", message: String(err.message || err) });
+    }
+  }
+  if (pathname === "/api/vector-clearing/curve") {
+    const venue = query && query.venue;
+    const symbol = query && query.symbol;
+    if (!venue || !symbol) return writeJson(res, 400, { error: "venue_symbol_required" });
+    try {
+      // ADR-053: ВСЕ вычисления кривой (raw cumulative, VWAP, α_ext/α_T/β_T, safe-линия)
+      // на backend. Frontend только запрашивает готовые массивы и рисует.
+      const opts = {
+        anchorMode: (query && query.anchor === "micro") ? "micro" : "mid",
+        theta: query && query.theta,
+        nBuy: query && query.nBuy,
+        nSell: query && query.nSell,
+      };
+      const curve = await fetchVenueCurve(venue, symbol, query && query.ts, opts);
+      if (!curve) return writeJson(res, 404, { error: "not_found" });
+      return writeJson(res, 200, curve);
+    } catch (err) {
+      console.error("[vector-clearing] curve failed:", err.message || err);
+      return writeJson(res, 502, { error: "clickhouse_error", message: String(err.message || err) });
+    }
   }
   if (pathname === "/api/vector-clearing/view") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -6686,6 +7324,79 @@ function handleExecutionLiveUpgrade(req, socket) {
 
 async function handleVenues(req, res, pathname, query) {
   const nowMs = Date.now();
+
+  // Вкладка Площадки: реальные периоды обновления стаканов + список пар с
+  // доступными стаканами (bid/ask), считаем из CH venue_liquidity_curves.
+  if (req.method === "GET" && pathname === "/api/venues/stats") {
+    const windowSec = Math.max(60, Math.min(3600, parseInt((query && query.window_s), 10) || 600));
+    try {
+      const rows = await clickhouseQueryJson(
+        "SELECT venue_id, symbol, count() AS n, max(event_time_ms) AS last_ms,"
+        + " intDiv(max(event_time_ms)-min(event_time_ms), greatest(count()-1,1)) AS period_ms"
+        + " FROM venue_liquidity_curves"
+        + " WHERE event_time_ms > (toUnixTimestamp(now())-" + windowSec + ")*1000"
+        + " GROUP BY venue_id, symbol ORDER BY venue_id, symbol FORMAT JSONEachRow");
+      const byVenue = new Map();
+      for (const r of rows) {
+        const vid = r.venue_id;
+        const lastMs = Number(r.last_ms), periodMs = Number(r.period_ms), n = Number(r.n);
+        if (!byVenue.has(vid)) byVenue.set(vid, { venue_id: vid, pairs: [], last_ms: 0, samples: 0 });
+        const v = byVenue.get(vid);
+        v.pairs.push({ symbol: r.symbol, period_ms: periodMs, last_ms: lastMs, samples: n, age_ms: nowMs - lastMs });
+        v.last_ms = Math.max(v.last_ms, lastMs);
+        v.samples += n;
+      }
+      const venues = Array.from(byVenue.values()).map((v) => {
+        const withPeriod = v.pairs.filter((p) => p.samples > 1);
+        const avgPeriod = withPeriod.length
+          ? Math.round(withPeriod.reduce((s, p) => s + p.period_ms, 0) / withPeriod.length)
+          : null;
+        return {
+          venue_id: v.venue_id,
+          avg_period_ms: avgPeriod,
+          last_ms: v.last_ms,
+          age_ms: v.last_ms ? nowMs - v.last_ms : null,
+          pair_count: v.pairs.length,
+          pairs: v.pairs.sort((a, b) => a.symbol.localeCompare(b.symbol))
+        };
+      }).sort((a, b) => a.venue_id.localeCompare(b.venue_id));
+      return writeJson(res, 200, { window_s: windowSec, venues, generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
+    }
+  }
+
+  // Вкладка Площадки: настраиваемый порог устаревания venue-снапшота.
+  // venues-сервис поллит f05a_clearing_config.venue_stale_ms (TTL 3с).
+  if (pathname === "/api/venues/config") {
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    if (req.method === "GET") {
+      try {
+        const r = await pool.query(
+          "SELECT venue_stale_ms, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { venue_stale_ms: 180000 });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    if (req.method === "POST") {
+      let body;
+      try { body = await parseBody(req); } catch (e) { return writeJson(res, 400, { error: "bad_body" }); }
+      const stale = Math.max(1000, Math.min(3600000, parseInt(body.venue_stale_ms, 10) || 180000));
+      try {
+        await pool.query(
+          "INSERT INTO f05a_clearing_config (id, venue_stale_ms, updated_at)"
+          + " VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET"
+          + " venue_stale_ms=EXCLUDED.venue_stale_ms, updated_at=now()",
+          [stale]);
+        return writeJson(res, 200, { venue_stale_ms: stale, applied: true });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    return writeJson(res, 405, { error: "method_not_allowed" });
+  }
 
   if (req.method === "GET" && pathname === "/api/venues") {
     const response = await buildVenuesResponse(nowMs, { allowMockFallback: false });
@@ -7127,8 +7838,16 @@ const server = createServer(async (req, res) => {
       if (handled !== false) return;
     }
 
-    if (pathname === "/api/vector-clearing/live" || pathname === "/api/vector-clearing/view") {
+    if (pathname === "/api/vector-clearing/live" || pathname === "/api/vector-clearing/view"
+        || pathname === "/api/vector-clearing/detail"
+        || pathname === "/api/vector-clearing/config"
+        || pathname === "/api/vector-clearing/curve") {
       const handled = await handleVectorClearing(req, res, pathname, query);
+      if (handled !== false) return;
+    }
+
+    if (pathname === "/api/v1/ce/treasury") {
+      const handled = await handleCeTreasuryV1(req, res, pathname, query);
       if (handled !== false) return;
     }
 

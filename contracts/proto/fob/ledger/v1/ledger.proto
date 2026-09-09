@@ -250,6 +250,26 @@ message GetHedgePnLResponse {
   repeated HedgePnL results = 2;
 }
 
+// F-18 (ADR-054 §10): валютный вектор биржи. Собственные активы биржи по каждой
+// валюте (house-аккаунт + внешние venue) и суммарные клиентские обязательства —
+// достаточно, чтобы risk посчитал NOP_a = активы_a − обязательства_a.
+message ExchangeCurrencyBalance {
+  string currency = 1;
+  fob.common.v1.Decimal own_total = 2;         // house-аккаунт (accounts['__ce_house__'])
+  fob.common.v1.Decimal venue_total = 3;       // Σ по внешним venue (собственные средства)
+  fob.common.v1.Decimal client_liability = 4;  // Σ клиентских балансов (обязательства)
+  fob.common.v1.Decimal assets_total = 5;      // own_total + venue_total (активы биржи в валюте)
+}
+message GetExchangeBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string currencies = 2;              // пусто = все валюты
+}
+message GetExchangeBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated ExchangeCurrencyBalance balances = 2;
+  string house_account_id = 3;                 // '__ce_house__'
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -286,4 +306,8 @@ service LedgerService {
 
   // F-06: get user's open positions (symbol, side, qty, avg entry, mark, PnL)
   rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
+
+  // F-18 (ADR-054 §10): валютный вектор биржи (house-аккаунт + venue + client
+  // liabilities) — вход для расчёта NOP в risk и для UI.
+  rpc GetExchangeBalances(GetExchangeBalancesRequest) returns (GetExchangeBalancesResponse);
 }

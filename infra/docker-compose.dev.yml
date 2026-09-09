@@ -192,6 +192,8 @@ services:
     env_file: [ ./env/.env-example ]
     environment:
       MATCHING_DISABLE_EXTERNAL_VENUES: "0"
+      # F-05A ADR-052: academic двусторонний клиринг (P=diag(m), q=a, знаковый box).
+      F05A_TWO_SIDED_ENABLED: "true"
     depends_on:
       topics-init:
         condition: service_completed_successfully
@@ -210,6 +212,15 @@ services:
       # Coinbase доступен → будет основным источником реальных данных
       VENUES_ADAPTER_MODE: "multi_real"
       CURVE_LEVEL: "L3"
+      # Все пары среди BTC/ETH/SOL/USDT (включая кросс ETH/BTC, SOL/BTC) → треугольный
+      # арбитраж. Одна кривая на (venue, instrument); неподдержанные символы биржей
+      # просто не дают кривую. DEX (uniswap) обслуживает только свой пул.
+      VENUES_SIM_INSTRUMENTS: "BTC/USDT,ETH/USDT,SOL/USDT,ETH/BTC,SOL/BTC"
+      # Реальный фид лагает, а с 5 венью (binance/coinbase/kraken/okx/uniswap)
+      # цикл опроса md_publish_loop ~70с (последовательные HTTP + OKX rate-limit),
+      # поэтому snapshot age доходит до ~70с. Порог должен превышать цикл, иначе
+      # кривые пропускаются как stale и венью «не работают».
+      STALE_THRESHOLD_MS: "180000"
       BINANCE_VENUE_ID: "binance"
       BINANCE_VENUE_SYMBOL: "BTCUSDT"
       # F-09 T-F09-068: симуляция reject дискретного hedge-ордера (для демо
@@ -255,6 +266,17 @@ services:
     environment:
       MARKET_DATA_TRACE_EACH_MESSAGE: "1"
       POSTGRES_CONN: "host=postgres port=5432 dbname=cex user=cex password=cex"
+      # F-05A ADR-050: оконный агрегатор клиринга (cross-venue / triangular).
+      F05A_BATCH_WINDOW_ENABLED: "true"
+      # F-05A ADR-051: один линейный сегмент на сторону венью (наклон из кривой).
+      # ADR-052 заменяет это одним двусторонним сегментом/венью (academic) → linear off.
+      F05A_LINEAR_SEGMENTS_ENABLED: "false"
+      # F-05A ADR-052: один двусторонний знаковый сегмент на венью (academic).
+      F05A_TWO_SIDED_ENABLED: "true"
+      F05A_BATCH_WINDOW_MS: "1000"
+      # Порог staleness должен превышать частоту обновления кривых venue
+      # (sim шлёт ~раз в 3–10с). Вес свежести всё равно убывает линейно с возрастом.
+      F05A_STALE_LEVEL_MS: "15000"
     depends_on:
       clickhouse:
         condition: service_healthy

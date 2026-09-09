@@ -10,6 +10,7 @@
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
 #include "cex/common/decimal.hpp"
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // F-18: клиент к ledger (валютный вектор)
 
 namespace cex::risk::app {
 
@@ -23,6 +24,15 @@ public:
   void SetSnapshotRepository(infra::RiskSnapshotRepository* repo) {
     snapshot_repo_ = repo;
   }
+
+  // F-18 (ADR-054 §10): stub к ledger для чтения валютного вектора биржи.
+  void SetLedgerStub(fob::ledger::v1::LedgerService::StubInterface* stub) {
+    ledger_stub_ = stub;
+  }
+
+  // F-18: NOP биржи по валюте + размер хеджа (читает ledger.GetExchangeBalances).
+  fob::risk::v1::GetExchangeNOPResponse
+  GetExchangeNOP(const fob::risk::v1::GetExchangeNOPRequest &req);
 
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
@@ -92,6 +102,7 @@ private:
 
   infra::RiskAlertsPublisher publisher_;
   infra::RiskSnapshotRepository *snapshot_repo_{nullptr};  // optional, not owned
+  fob::ledger::v1::LedgerService::StubInterface *ledger_stub_{nullptr};  // F-18, not owned
 };
 
 } // namespace cex::risk::app

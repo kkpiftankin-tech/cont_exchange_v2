@@ -669,10 +669,20 @@ R-CLR (ниже). Политики — [ADR-047](../03-architecture/adr/ADR-047-
 
 ### R-F05A-002 No synthetic pair book
 
-Синтетическая книга по парам **не** строится. Каждый внешний level остаётся отдельным
-flow-сегментом и отдельным столбцом `W = [w_1 … w_I]`; `venue_id` / `source_order_id`
-сохранены (provenance / source-trace). Matching multi-asset возникает из `Wx=0`, а не
-из per-pair книг.
+Синтетическая книга по парам **не** строится. Matching multi-asset возникает из `Wx=0`,
+а не из per-pair книг.
+
+**Гранулярность сегмента (модель, [ADR-051](../03-architecture/adr/ADR-051-f05a-linear-venue-segment.md)):**
+
+- **Модель B (per-level, legacy/сравнение):** каждый внешний level — отдельный
+  flow-сегмент и столбец `W`; provenance до `source_order_id`.
+- **Модель A (линейная, по умолчанию при `F05A_LINEAR_SEGMENTS_ENABLED`):** ликвидность
+  стороны венью = ОДНА линейная функция → **один** сегмент на `(venue, pair, side)` с
+  реальным наклоном (`d_hl=|worst−best price|`, `D=|b|`); provenance до
+  `(venue, pair, side)`. Синтетическая пара-книга по-прежнему не создаётся (сегмент
+  привязан к реальной стороне венью).
+
+В обеих моделях `venue_id`/`pair`/`side` сохранены (source-trace).
 
 ### R-F05A-003 Flow segment & demand curve
 
@@ -685,6 +695,24 @@ D_i(w_i^\top\pi) = q_i \cdot \mathrm{trunc}\!\left(\frac{d_i^{HL} - w_i^\top\pi}
 
 квадратичная матрица `D = diag(d^{HL}/q)` (SPD). Согласуется с R-CLR-005 (quadratic
 closed-form) и R-CLR-001 (curve forms equivalence).
+
+### R-F05A-008 Safe-translator наклон (ADR-053)
+
+Наклон двустороннего сегмента венью считается по **VWAP-глубине с safe-haircut**
+(модель «безопасного переводчика на CE»), а не по крайним точкам кривой:
+
+\[
+\alpha_{ext}=\min_k \frac{D_k}{|\delta_k|},\quad
+D_k=\sum_{i\le k}p_i v_i,\quad
+\delta_k=10^4\Bigl|\ln\tfrac{D_k/Q_k}{\text{mid}}\Bigr|,\quad
+\alpha_T=\theta\,\alpha_{ext},\ \theta=0.60,
+\]
+
+наклон (клиринг в log-ценах, ADR-052/053): `m = mid/(10^4·α_T)`, якорь `a=ln(mid)`;
+линейный эквивалент `β_T = mid²/(10^4·α_T) = mid·m` (для отображения). `α_ext` берётся
+по **обеим** сторонам (тончайшая ликвидность связывает наклон). Флаг
+`F05A_TRANSLATOR_MODEL=log_endpoint` возвращает прежнюю формулу `Δlog(p)/Δq`.
+UI показывает `α_ext/α_T/β_T` из сегмента движка (единый источник истины).
 
 ### R-F05A-004 Clearing condition (asset balance)
 
@@ -716,6 +744,64 @@ no phantom inventory, §17).
 
 Внешние ноги без native atomic support на venue **не** маркируются `strict_atomic`
 (согласуется с F-09 AC-F09-006 / ADR-031).
+
+## F-18 — CE Capital, Net Position & Position-Based Hedge
+
+Источник: [ADR-054](../03-architecture/adr/ADR-054-ce-capital-net-position-hedging.md).
+
+### R-F18-001 Projection of clearing vector onto assets
+
+После **converged** батча вектор клиринга `x` проецируется на чистую позицию по
+каждому активу. Для двустороннего сегмента `(venue, BASE/QUOTE)` с знаковым потоком
+`x_i` (`x_i>0` — покупка base, `x_i<0` — продажа base) и эффективной ценой
+`P_eff = exp(w[quote] − w[base])` (log-price clearing, ADR-052/053):
+
+$$
+\Delta pos_{\text{BASE}} \mathrel{+}= x_i,\qquad
+\Delta pos_{\text{QUOTE}} \mathrel{-}= x_i\cdot P_{\text{eff}}.
+$$
+
+Δposition агрегируется по всем сегментам батча — встречные ноги неттятся. Для
+**degraded** батча проекция не применяется (клиринг ненадёжен). Применение
+идемпотентно по `batch_id`. Money — только Decimal (§9).
+
+### R-F18-002 Position-based (net) hedge
+
+Хедж эмиттится по **чистой** позиции актива, а не per-segment gross (ADR-049).
+При `|pos_a| > θ_a` формируется один хедж на актив с целью flatten к нулю:
+
+$$
+\text{side} = \begin{cases}\text{SELL}, & pos_a>0\\ \text{BUY}, & pos_a<0\end{cases},\qquad
+\text{qty} = |pos_a|.
+$$
+
+Realized PnL/fees исполненного хеджа возвращаются в капитал `ce_capital`
+(идемпотентно по `report_id`) и уменьшают `pos_a` на `filled_qty`. Realized PnL
+считается против cost-basis по формуле F-12 `calculate_hedge_pnl`
+(`(P_fill − b_a)·q·sgn(pos) − fee`). Активируется `CE_NET_HEDGE_ENABLED`; при
+выключенном флаге — legacy per-segment путь (ADR-049).
+
+### R-F18-003 Mark-to-market, equity и учётное тождество (канон)
+
+Единая книга — вектор остатков `h_a` (`ce_capital.balance`); позиция выводится
+`pos_a = h_a − target_a`. Marks берутся из клиринговых log-цен (ADR-052):
+`mark_a = exp(w[a] − w[N])`, где `N` — numeraire (`CE_NUMERAIRE`, default USDT,
+`mark_N = 1`, `θ_N = ∞`, **не хеджируется**).
+
+$$
+E = \sum_a h_a\cdot mark_a,\qquad uPnL_a = pos_a\cdot(mark_a - b_a).
+$$
+
+Инвариант казначейского учёта (с точностью до marks):
+
+$$
+E \approx E_{\text{seed}} + \sum_a rPnL_a + \sum_a uPnL_a - \sum fee.
+$$
+
+Снапшот `CeTreasurySnapshot.identity_ok` и UI-панель `/ce-capital-live` сверяют
+это тождество. `cost_basis` ведётся по WAC (пересчёт при наборе по клиринговой
+цене; при сокращении — реализация PnL против него). Это устраняет отсутствие MTM
+и неопределённость cost-basis исходной редакции ADR-054.
 
 ## Source Fragments
 

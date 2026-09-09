@@ -29,6 +29,14 @@ grpc::Status GrpcLedgerService::GetBalances(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::GetExchangeBalances(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetExchangeBalancesRequest* request,
+    fob::ledger::v1::GetExchangeBalancesResponse* response) {
+  *response = uc_->GetExchangeBalances(*request);
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcLedgerService::ReserveFunds(
     grpc::ServerContext*,
     const fob::ledger::v1::ReserveFundsRequest* request,

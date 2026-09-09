@@ -226,6 +226,28 @@ message GetRiskSnapshotRequest {
 }
 
 // F-06: response with the entity's risk snapshot.
+// F-18 (ADR-054 §10): Net Open Position биржи по валюте + решение о хедже.
+// risk читает валютный вектор у ledger (GetExchangeBalances), считает
+// NOP_a = активы_a − обязательства_a (numeraire исключён) и определяет размер хеджа.
+message ExchangeNOP {
+  string currency = 1;
+  fob.common.v1.Decimal nop = 2;               // активы − обязательства
+  fob.common.v1.Decimal assets_total = 3;
+  fob.common.v1.Decimal client_liability = 4;
+  fob.common.v1.Decimal threshold = 5;         // θ (0 = не задан)
+  bool hedge_armed = 6;                          // |nop| > θ (и не numeraire)
+  fob.common.v1.Decimal hedge_qty = 7;          // размер хеджа (FLATTEN/TO_BAND)
+  string hedge_side = 8;                          // SELL (излишек) | BUY (дефицит) | ""
+  bool is_numeraire = 9;
+}
+message GetExchangeNOPRequest { fob.common.v1.EventMeta meta = 1; }
+message GetExchangeNOPResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated ExchangeNOP items = 2;
+  string numeraire = 3;                          // CE_NUMERAIRE
+  string mode = 4;                               // CE_HEDGE_MODE: FLATTEN | TO_BAND
+}
+
 message GetRiskSnapshotResponse {
   RiskSnapshot snapshot = 1;
 }
@@ -250,4 +272,7 @@ service RiskService {
 
   // F-06: get aggregated risk/margin snapshot for an entity (user/account)
   rpc GetRiskSnapshot(GetRiskSnapshotRequest) returns (GetRiskSnapshotResponse);
+
+  // F-18 (ADR-054 §10): NOP биржи по валюте + размер хеджа (читает ledger).
+  rpc GetExchangeNOP(GetExchangeNOPRequest) returns (GetExchangeNOPResponse);
 }

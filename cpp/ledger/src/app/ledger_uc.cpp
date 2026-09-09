@@ -41,7 +41,9 @@
 
 #include <cmath>          // std::pow, std::llround для PnL вычислений
 #include <exception>      // std::exception::what() в catch
+#include <map>            // std::map — агрегат валют в GetExchangeBalances (F-18)
 #include <sstream>        // std::ostringstream для composite key
+#include <unordered_set>  // std::unordered_set — фильтр валют (F-18)
 #include <utility>
 
 #include "cex/common/log.hpp"
@@ -584,6 +586,73 @@ fob::ledger::v1::GetBalancesResponse LedgerUseCases::GetBalances(
     *out->mutable_available() = bal.available.to_proto();
     *out->mutable_reserved() = bal.reserved.to_proto();
     *out->mutable_total() = Decimal::add(bal.available, bal.reserved).to_proto();
+  }
+  return resp;
+}
+
+// ============================================================================
+// F-18 (ADR-054 §10): SeedHouseBalance / GetExchangeBalances.
+//
+// Валютный вектор биржи = собственные активы (house-аккаунт '__ce_house__' +
+// Σ venue_balances) и суммарные клиентские обязательства (Σ по остальным
+// пользователям). risk считает NOP_a = активы_a − обязательства_a.
+// ============================================================================
+void LedgerUseCases::SeedHouseBalance(const std::string& currency,
+                                      const cex::common::Decimal& amount) {
+  std::lock_guard<std::mutex> lg(mu_);
+  Balance& b = ensure_balance_locked(kHouseAccountId, currency);
+  // Idempotent: сидим только пустой остаток (не перетираем накопленное).
+  const auto cur = Decimal::add(b.available, b.reserved);
+  if (Decimal::cmp(cur, Decimal::zero()) == 0) {
+    b.available = amount;
+  }
+}
+
+fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances(
+    const fob::ledger::v1::GetExchangeBalancesRequest& req) {
+  fob::ledger::v1::GetExchangeBalancesResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+  resp.set_house_account_id(kHouseAccountId);
+
+  // Опциональный фильтр по валютам.
+  std::unordered_set<std::string> want;
+  for (const auto& c : req.currencies()) want.insert(c);
+  const auto keep = [&](const std::string& c) { return want.empty() || want.count(c) > 0; };
+
+  struct Agg { Decimal own{0, 0}; Decimal venue{0, 0}; Decimal client{0, 0}; };
+  std::map<std::string, Agg> acc;  // отсортировано по валюте
+
+  std::lock_guard<std::mutex> lg(mu_);
+
+  // Собственные средства house-аккаунта.
+  auto house_it = balances_.find(kHouseAccountId);
+  if (house_it != balances_.end()) {
+    for (const auto& [ccy, bal] : house_it->second) {
+      if (keep(ccy)) acc[ccy].own = Decimal::add(acc[ccy].own, Decimal::add(bal.available, bal.reserved));
+    }
+  }
+  // Средства биржи на внешних venue.
+  for (const auto& [venue, vb] : venue_balances_) {
+    for (const auto& [ccy, entry] : vb) {
+      if (keep(ccy)) acc[ccy].venue = Decimal::add(acc[ccy].venue, entry.total);
+    }
+  }
+  // Клиентские обязательства (все пользователи, кроме house).
+  for (const auto& [user, ub] : balances_) {
+    if (user == kHouseAccountId) continue;
+    for (const auto& [ccy, bal] : ub) {
+      if (keep(ccy)) acc[ccy].client = Decimal::add(acc[ccy].client, Decimal::add(bal.available, bal.reserved));
+    }
+  }
+
+  for (const auto& [ccy, a] : acc) {
+    auto* out = resp.add_balances();
+    out->set_currency(ccy);
+    *out->mutable_own_total() = a.own.to_proto();
+    *out->mutable_venue_total() = a.venue.to_proto();
+    *out->mutable_client_liability() = a.client.to_proto();
+    *out->mutable_assets_total() = Decimal::add(a.own, a.venue).to_proto();
   }
   return resp;
 }

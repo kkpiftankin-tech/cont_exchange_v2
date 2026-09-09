@@ -31,6 +31,7 @@
 | F-15 | Backtest / Replay | UC-F15-01 Create Replay Session; UC-F15-01 Replay Historical Batch; UC-F15-02 Cancel Replay Session; UC-F15-03 A/B Compare Sessions; UC-F15-04 Audit Mode Replay; UC-F15-05 Retry Failed Session; UC-F15-06 Replay Determinism Check |
 | F-16 | Operator Console | UC-F16-01 Trigger Kill Switch |
 | F-17 | Monitoring & Alerts | UC-F17-01 Fire Alert |
+| F-18 | CE Capital, Net Position & Position-Based Hedge | UC-F18-01 Form CE Capital; UC-F18-02 Derive CE Position; UC-F18-03 Hedge Net Position |
 | F-20 | Live Venue Simulator | (UC TBD — `02-system/use-cases/UC-F20-*` пока planned) |
 
 ## Notes

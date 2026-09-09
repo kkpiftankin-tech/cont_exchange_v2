@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+// F-18 — CE Capital, Net Position & Position-Based Hedge (ADR-054).
+//
+// CE Treasury держит собственный мультивалютный капитал биржи как ЕДИНУЮ книгу
+// holdings (h = {asset → qty}, seed + realized PnL/fees). Чистая позиция —
+// производная: pos_a = h_a − target_a. После каждого converged батча вектор
+// клиринга x проецируется на holdings двойной записью (Δh), marks берутся из
+// клиринговых log-цен (ADR-052), считаются cost-basis (WAC), unrealized PnL и
+// equity. Хедж эмиттится по net-позиции (CeNetHedgeIntent), а не per-segment
+// (ADR-049).
+//
+// Money — только fob.common.v1.Decimal (CLAUDE.md §9). double запрещён.
+//
+// Все «отображаемые» поля (ADR-054 §8) присутствуют в снапшотах, чтобы UI
+// /ce-capital-live визуально сверял учётное тождество Equity = Σ h·mark.
+
+package fob.treasury.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// Капитал/holdings CE (одна запись на актив). PG: ce_capital. Книга истины.
+// ---------------------------------------------------------------------------
+message CeCapital {
+  string asset = 1;                          // BTC, ETH, SOL, USDT, ...
+  fob.common.v1.Decimal seed_amount = 2;     // начальный seed
+  fob.common.v1.Decimal target_amount = 3;   // целевой инвентарь (default = seed)
+  fob.common.v1.Decimal balance = 4;         // h_a — фактический остаток (книга истины)
+  fob.common.v1.Decimal cost_basis = 5;      // WAC-цена текущей позиции (в numeraire)
+  fob.common.v1.Decimal realized_pnl = 6;    // накопленный realized PnL (numeraire)
+  fob.common.v1.Decimal mark = 7;            // цена актива в numeraire (exp(w[a]-w[N]))
+  bool is_numeraire = 8;                      // true для расчётной валюты (mark=1, не хеджируется)
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Чистая позиция CE — производная от holdings (одна запись на актив).
+// PG: ce_position (вью над книгой). pos_a = h_a − target_a.
+// ---------------------------------------------------------------------------
+message CePosition {
+  string asset = 1;
+  fob.common.v1.Decimal net_qty = 2;         // pos_a = h_a − target_a (знаковая)
+  fob.common.v1.Decimal cost_basis = 3;      // WAC-цена входа (в numeraire)
+  fob.common.v1.Decimal mark = 4;            // текущая mark-цена (в numeraire)
+  fob.common.v1.Decimal unrealized_pnl = 5;  // pos·(mark − cost_basis)
+  fob.common.v1.Decimal threshold = 6;       // θ_a — порог хеджа
+  bool hedge_armed = 7;                       // |pos_a| > θ_a
+  string last_batch_id = 8;                   // идемпотентность Δposition
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Δпозиции из одного converged батча (проекция x на holdings).
+// Audit: ClickHouse ce_position_history.
+// ---------------------------------------------------------------------------
+message CePositionDelta {
+  string batch_id = 1;
+  string asset = 2;
+  fob.common.v1.Decimal delta = 3;           // Δh_a = Σ_i x_i·c_a(seg_i)
+  fob.common.v1.Decimal net_after = 4;       // pos_a после применения
+  fob.common.v1.Decimal mark = 5;            // mark на момент батча
+  fob.common.v1.Decimal cost_basis_after = 6;
+  google.protobuf.Timestamp batch_time = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Одна строка истории по клирингу: позиция ДО → Δ → ПОСЛЕ + θ + хедж (ADR-054 §8).
+// ---------------------------------------------------------------------------
+message CePositionStep {
+  string asset = 1;
+  fob.common.v1.Decimal net_before = 2;   // позиция ДО клиринга
+  fob.common.v1.Decimal delta = 3;        // Δ клиринга (проекция x)
+  fob.common.v1.Decimal net_after = 4;    // ПОСЛЕ = ДО + Δ
+  fob.common.v1.Decimal threshold = 5;    // θ_a (см. has_threshold)
+  fob.common.v1.Decimal hedge_qty = 6;    // объём хеджа (0 если |after|≤θ)
+  string hedge_side = 7;                    // BUY | SELL | ""
+  fob.common.v1.Decimal mark = 8;         // mark на момент батча
+  bool hedge_armed = 9;                     // |pos| > θ
+  bool has_threshold = 10;                  // false ⇒ θ=∞ (не хеджируется)
+}
+
+// Позиция биржи по одному клирингу (ДО→Δ→ПОСЛЕ для набора активов).
+message CeClearingPosition {
+  string batch_id = 1;
+  int64 event_time_ms = 2;
+  int32 armed_count = 3;
+  repeated CePositionStep assets = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Net-хедж намерение (flatten/to-band позиции актива). Транслируется в
+// fob.execution.v1.ExecutionIntent при публикации в execution.intents.
+// ---------------------------------------------------------------------------
+message CeNetHedgeIntent {
+  string asset = 1;
+  fob.common.v1.Instrument instrument = 2;   // a/QUOTE_ref (CE_HEDGE_QUOTE_REF_<ASSET>)
+  fob.common.v1.Side side = 3;               // SELL если pos>0, BUY если pos<0 (flatten)
+  fob.common.v1.Decimal qty = 4;             // FLATTEN: |pos_a|; TO_BAND: |pos_a|−θ_a
+  fob.common.v1.Decimal threshold = 5;       // θ_a
+  fob.common.v1.Decimal pos_before = 6;      // pos_a до хеджа (аудит)
+  string mode = 7;                            // "FLATTEN" | "TO_BAND"
+  string source_batch_id = 8;
+  fob.common.v1.EventMeta meta = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Агрегированный снапшот казначейства для UI (ADR-054 §8).
+// equity = Σ balance·mark; identity_ok сверяет тождество §6.
+// ---------------------------------------------------------------------------
+message CeTreasurySnapshot {
+  repeated CeCapital capital = 1;
+  repeated CePosition position = 2;
+  string numeraire = 3;                      // напр. "USDT"
+  fob.common.v1.Decimal equity = 4;          // Σ h·mark (в numeraire)
+  fob.common.v1.Decimal unrealized_pnl_total = 5;
+  fob.common.v1.Decimal realized_pnl_total = 6;
+  fob.common.v1.Decimal seed_equity = 7;     // Σ seed·mark (базовый equity)
+  bool identity_ok = 8;                      // |E − (seed_equity+rPnL+uPnL−fees)| < eps
+  string last_batch_id = 9;
+  google.protobuf.Timestamp generated_at = 10;
+  repeated CeClearingPosition clearings = 11;  // последние N клирингов ДО→Δ→ПОСЛЕ (свежие сверху)
+  string numeraire_mode = 12;                // CE_HEDGE_MODE: FLATTEN | TO_BAND
+  bool engine_wired = 13;                    // движок записал данные (есть строки)
+}
+
+// ---------------------------------------------------------------------------
+// Read API для UI (frontend-api / observability-reporting).
+// ---------------------------------------------------------------------------
+message GetCeCapitalRequest {
+  repeated string assets = 1;                // пусто = все активы
+}
+message GetCeCapitalResponse {
+  repeated CeCapital capital = 1;
+}
+
+message GetCePositionRequest {
+  repeated string assets = 1;
+}
+message GetCePositionResponse {
+  repeated CePosition position = 1;
+}
+
+message GetCeTreasurySnapshotRequest {
+  int32 clearings_limit = 1;                 // сколько последних клирингов вернуть (0 = дефолт)
+}
+message GetCeTreasurySnapshotResponse {
+  CeTreasurySnapshot snapshot = 1;
+}
+
+// Позиция биржи для ОДНОГО клиринга (вкладка Clearing → деталь батча).
+message GetCeBatchPositionRequest {
+  string batch_id = 1;
+}
+message GetCeBatchPositionResponse {
+  CeClearingPosition position = 1;
+}
+
+service TreasuryService {
+  rpc GetCeCapital(GetCeCapitalRequest) returns (GetCeCapitalResponse);
+  rpc GetCePosition(GetCePositionRequest) returns (GetCePositionResponse);
+  rpc GetCeTreasurySnapshot(GetCeTreasurySnapshotRequest) returns (GetCeTreasurySnapshotResponse);
+  rpc GetCeBatchPosition(GetCeBatchPositionRequest) returns (GetCeBatchPositionResponse);
+}
