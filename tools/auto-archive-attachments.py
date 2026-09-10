@@ -213,13 +213,12 @@ def main() -> int:
             seen.add(s)
             parts.append(s)
 
-    # Fallback (главный путь этой версии Claude Code): вложения НЕ в payload —
-    # payload несёт только `transcript_path`. Диагностика T-CEA-004 показала
-    # has_document_marker=False при наличии transcript_path. Сканируем JSONL-транскрипт:
-    # каждая строка — JSON-запись, из неё берём строковые листья (json декодирует
-    # escapes в реальный текст). Дедуп по содержимому + hash в archive_documents делают
-    # повторное сканирование транскрипта идемпотентным.
-    if not parts:
+    # Fallback (OPT-IN, AUTO_ARCHIVE_SCAN_TRANSCRIPT=1): вложения этой версии Claude Code
+    # НЕ в payload — payload несёт только `transcript_path` (диагностика T-CEA-004:
+    # has_document_marker=False). Но весь транскрипт содержит и tool-call/обсуждения с
+    # `<document>`-подобным текстом → без разбора это засоряет incoming-docs/. Поэтому по
+    # умолчанию ВЫКЛ; включать осознанно для восстановления пропущенных вложений.
+    if not parts and os.environ.get("AUTO_ARCHIVE_SCAN_TRANSCRIPT"):
         tpath = payload.get("transcript_path") if isinstance(payload, dict) else None
         if isinstance(tpath, str) and os.path.isfile(tpath):
             try:
