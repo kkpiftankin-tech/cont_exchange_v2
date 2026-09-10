@@ -28,6 +28,7 @@ decomposedInto:
   - UC-F05A-03  # Display Vector Liquidity in UI
   - UC-F05A-04  # Validate Algorithm on Real Exchange Order Books
   - UC-F05A-05  # Replay Vector Clearing Scenario
+  - UC-F05A-06  # Run CE Tact with Virtual Counterparties (agents, nodes, 3-level position) — ADR-055..059
 
 relatedFeatures:
   - F-04   # общий batch cycle, BatchResult, FillEvent
@@ -162,6 +163,26 @@ architectureDecisions:
     title: QP solver backend (OSQP) — активирует/расширяет ADR-034
     status: accepted   # принято 2026-08-25 (решение владельца)
     file: docs/03-architecture/adr/ADR-048-qp-solver-backend.md
+  - id: ADR-055
+    title: CE виртуальные контрагенты как агенты (переводчик + связка, единая кривая с мёртвой зоной)
+    status: accepted   # принято 2026-09-10 (решение владельца; UC-F05A-06)
+    file: docs/03-architecture/adr/ADR-055-ce-virtual-counterparties-agents.md
+  - id: ADR-056
+    title: CE граф узлов «валюта@площадка», снятие Wx=0
+    status: accepted   # принято 2026-09-10 (решение владельца; UC-F05A-06)
+    file: docs/03-architecture/adr/ADR-056-ce-node-graph-clearing.md
+  - id: ADR-057
+    title: CE трёхуровневая позиция (агент/узел/актив); Z_a ⊇ NOP
+    status: accepted   # принято 2026-09-10 (решение владельца; UC-F05A-06)
+    file: docs/03-architecture/adr/ADR-057-ce-three-level-position.md
+  - id: ADR-058
+    title: CE committed/in-flight вместо cooldown
+    status: accepted   # принято 2026-09-10 (решение владельца; UC-F05A-06)
+    file: docs/03-architecture/adr/ADR-058-ce-committed-inflight-state.md
+  - id: ADR-059
+    title: CE clearing_trace — аудит-артефакт такта
+    status: accepted   # принято 2026-09-10 (решение владельца; UC-F05A-06)
+    file: docs/03-architecture/adr/ADR-059-ce-clearing-trace-audit.md
 
 knownIssues:
   - id: surplus-policy-open

@@ -63,5 +63,10 @@
 | ADR-048 | F-05A QP solver backend (OSQP) для vector clearing `Wx=0` | [accepted](ADR-048-qp-solver-backend.md) |
 | ADR-049 | F-05A vector clearing execution → F-12 hedge (converged-only, flag) | [accepted](ADR-049-f05a-vector-clearing-execution-hedge.md) |
 | ADR-054 | F-18 CE капитал, чистая позиция и position-based хедж (net вместо per-segment; ledger владеет книгой, matching эмиттит Δpos) | [accepted](ADR-054-ce-capital-net-position-hedging.md) |
+| ADR-055 | CE виртуальные контрагенты как агенты (переводчик + связка-арбитражёр, единая кривая с мёртвой зоной) | [accepted](ADR-055-ce-virtual-counterparties-agents.md) |
+| ADR-056 | CE граф узлов «валюта@площадка» и снятие Wx=0 (баланс по узлам площадок + свободные узлы книги) | [accepted](ADR-056-ce-node-graph-clearing.md) |
+| ADR-057 | CE трёхуровневая позиция (агент → узел → актив); Z_a ⊇ NOP | [accepted](ADR-057-ce-three-level-position.md) |
+| ADR-058 | CE committed/in-flight состояние агентов вместо cooldown-таймера хеджа | [accepted](ADR-058-ce-committed-inflight-state.md) |
+| ADR-059 | CE clearing_trace — единый аудит-артефакт такта (агенты/узлы/инварианты/PnL/заявки) | [accepted](ADR-059-ce-clearing-trace-audit.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

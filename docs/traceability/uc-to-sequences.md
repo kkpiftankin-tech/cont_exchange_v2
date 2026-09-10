@@ -33,6 +33,7 @@
 | UC-F05A-03 | `…/UC-F05A-03-display-vector-liquidity/sequences/SEQ-UC-F05A-03-system.md` | `SEQ-F05A-UC-F05A-03-services.md` | (planned) |
 | UC-F05A-04 | `…/UC-F05A-04-validate-real-orderbooks/sequences/SEQ-UC-F05A-04-system.md` | `SEQ-F05A-UC-F05A-04-services.md` | (planned) |
 | UC-F05A-05 | `…/UC-F05A-05-replay-vector-clearing/sequences/SEQ-UC-F05A-05-system.md` | `SEQ-F05A-UC-F05A-05-services.md` | (planned) |
+| UC-F05A-06 | `…/UC-F05A-06-ce-agent-tact-clearing/sequences/SEQ-UC-F05A-06-system.md` | `SEQ-F05A-UC-F05A-06-services.md` | (planned) |
 | UC-F06-01 | `…/UC-F06-01-show-positions/sequences/` | `SEQ-F06-UC-F06-01-services.md` | (none yet) |
 | UC-F07-01 | `…/UC-F07-01-pretrade-risk-check/sequences/` | `SEQ-F07-UC-F07-01-services.md` | (none yet) |
 | UC-F08-01 | `…/UC-F08-01-liquidate-position/sequences/` | `SEQ-F08-UC-F08-01-services.md` | (none yet) |
