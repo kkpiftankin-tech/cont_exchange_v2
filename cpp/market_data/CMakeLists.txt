@@ -18,10 +18,13 @@ find_package(Boost REQUIRED COMPONENTS thread)
 include(FetchContent)
 
 set(WITH_OPENSSL YES CACHE BOOL "Enable OpenSSL in clickhouse-cpp" FORCE)
+# clickhouse-cpp через codeload tar.gz archive, а НЕ git clone: анонимный git-клон
+# github в Docker-build падает ("could not read Username", rate-limit), тогда как
+# https archive отдаёт 200. v2.6.0 самодостаточен (contrib вендорится, сабмодулей нет).
+# Тот же приём, что уже применён к json ниже и к osqp (matching).
 FetchContent_Declare(
         clickhouse-cpp
-        GIT_REPOSITORY https://github.com/ClickHouse/clickhouse-cpp.git
-        GIT_TAG v2.6.0
+        URL https://github.com/ClickHouse/clickhouse-cpp/archive/refs/tags/v2.6.0.tar.gz
 )
 FetchContent_MakeAvailable(clickhouse-cpp)
 
@@ -141,6 +144,20 @@ if (BUILD_TESTING)
     )
     target_compile_options(market_data_vectorize_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME market_data_vectorize_test COMMAND market_data_vectorize_test)
+
+    # F-05A CE — book-derived quote-агент (Срез 3, T-CEA-104, ADR-055 §A1).
+    # domain/agent_builder.hpp header-only; тест линкует cex_common (Decimal).
+    add_executable(market_data_agent_builder_test
+            tests/agent_builder_test.cpp
+    )
+    target_include_directories(market_data_agent_builder_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(market_data_agent_builder_test PRIVATE
+            cex_common
+    )
+    target_compile_options(market_data_agent_builder_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME market_data_agent_builder_test COMMAND market_data_agent_builder_test)
 
     # F-05A (T-F05A-205): curve→levels + proto mapping (needs contracts_proto).
     add_executable(market_data_vectorize_wiring_test

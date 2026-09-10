@@ -50,8 +50,15 @@ sources: [CE_algorithm_spec.md, CE_virtual_counterparties.md]  # IN-0XX (ingest-
   [VectorClearingResult.pi](../../../cpp/matching/src/domain/vector_qp_solver.hpp#L117)
   (вопреки анализу источника — см. Conflict Note).
 
-**Реализация:** `market_data` (`BuildNodeBasis`, сегменты по рёбрам узлов) + `matching`
-(`AssembleProblem` по узлам, box запаса вместо жёсткого равенства). За тем же флагом-веткой.
+**Реализация:** `market_data` (`BuildNodeBasis`, сегменты по рёбрам узлов) + `matching`.
+
+**Поправка (2026-09-10, Срез 1):** CE-клиринг реализован как **отдельный выпуклый
+Newton-движок** [`domain/ce_agent_clearing.hpp`](../../../cpp/matching/src/domain/ce_agent_clearing.hpp)
+(минимизация `Φ(x)=Σ½α((|d|−c)₊)²` active-set Newton'ом; узлы книги свободны, узлы площадок
+балансируются), а не через OSQP-ветку `AssembleProblem`. Причина: движок доказанно
+воспроизводит Python-эталон до 1e-6 без внешних зависимостей и без риска рассинхрона с
+academic-формой ADR-052. **OSQP (`vector_qp_solver`) остаётся для F1/two-sided путей** (ADR-048/052)
+без изменений. Математически эквивалентно box-формулировке; отличается лишь движок.
 
 ## Conflict Note (источник vs код)
 
