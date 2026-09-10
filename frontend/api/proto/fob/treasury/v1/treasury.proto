@@ -73,7 +73,11 @@ message CePositionDelta {
 // ---------------------------------------------------------------------------
 message AssetDelta {
   string asset = 1;
-  fob.common.v1.Decimal delta = 2;    // Δ по активу (base += x, quote −= x·P_clr)
+  fob.common.v1.Decimal delta = 2;          // АВТОРИТЕТНО: Δ количества (ADR-057 §money-path).
+  // ADR-057 §money-path (2026-09-10): конвертация value→quantity по НОГАМ, по цене узла.
+  string venue = 3;                          // узел «asset@venue» (разрез; "" = агрегат/legacy)
+  fob.common.v1.Decimal price_used = 4;      // цена узла P_node, по которой делили value
+  fob.common.v1.Decimal delta_value = 5;     // диагностика: delta·price_used (тыс. USDT)
 }
 message CePositionDeltaBatch {
   fob.common.v1.EventMeta meta = 1;

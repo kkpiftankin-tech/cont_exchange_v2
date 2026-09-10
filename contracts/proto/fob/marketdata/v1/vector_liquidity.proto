@@ -96,7 +96,9 @@ message CeQuoteAgent {
 }
 message CeAssetMark {
   string asset = 1;
-  fob.common.v1.Decimal mark = 2;       // μ_a, ‰ (numeraire ⇒ 0)
+  fob.common.v1.Decimal mark = 2;            // μ_a, ‰ (numeraire ⇒ 0)
+  fob.common.v1.Decimal reference_price = 3; // P0_a, абсолют (USDT/актив): база для цены
+                                             // узла P_node = P0·exp(x/1000). ADR-057 §money-path.
 }
 message CeClearingInput {
   fob.common.v1.EventMeta meta = 1;
