@@ -984,11 +984,12 @@ void MatchingLoop::on_vectorized_liquidity(
                             {{"batch_id", batch_id}});
     }
 
-    // F-18 §11 (variant A): Δpos биржи от этого вектор-клиринга → ce.position.delta.
-    // matching только СЧИТАЕТ проекцию x на активы; ledger накапливает в позицию и
-    // снимает снапшот старая→Δ→новая по batch_id. Гейт: любой решённый x (converged
-    // ИЛИ degraded — в two-sided знаковый x легитимен при residual→surplus); НЕ failed.
-    if (outcome.solve.status != domain::VectorSolveStatus::kFailed) {
+    // F-18 §11: старый asset-level путь Δpos → ce.position.delta. ОТКЛЮЧЁН при
+    // CE_AGENTS_ENABLED — тогда единственный источник ce.position.delta это
+    // on_ce_clearing_input (вариант A, per-leg по цене узла), иначе двойной счёт.
+    const char* ce_on = std::getenv("CE_AGENTS_ENABLED");
+    const bool ce_agents_mode = ce_on && std::atoi(ce_on) != 0;
+    if (!ce_agents_mode && outcome.solve.status != domain::VectorSolveStatus::kFailed) {
       const std::map<std::string, double> deltas = ProjectXToDeltas(input, outcome);
       fob::treasury::v1::CePositionDeltaBatch dpb;
       dpb.set_batch_id(batch_id);
