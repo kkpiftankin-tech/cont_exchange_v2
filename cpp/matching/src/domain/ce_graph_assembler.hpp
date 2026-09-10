@@ -70,9 +70,14 @@ inline CeClearInput AssembleCeGraph(const CeAssembleConfig& cfg,
   in.num_nodes = num_nodes;
   in.num_free = num_free;
   in.book_potential.assign(num_nodes, 0.0);
+  in.node_meta.assign(num_nodes, CeNodeMeta{});
+  for (const auto& a : all_assets)
+    for (const auto& v : cfg.venues)
+      in.node_meta[node_index.at(a + "@" + v)] = CeNodeMeta{a, v, false};
   for (const auto& a : all_assets) {
     auto it = cfg.mark.find(a);
     in.book_potential[book_index[a]] = (it != cfg.mark.end()) ? it->second : 0.0;
+    in.node_meta[book_index[a]] = CeNodeMeta{a, "__book__", true};
   }
 
   auto add = [&](const std::string& nm, CeLeg leg, int u, int v, double anc, double dep,

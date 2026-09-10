@@ -168,6 +168,16 @@ if(BUILD_TESTING)
   target_compile_options(matching_ce_assembler_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_ce_assembler_test COMMAND matching_ce_assembler_test)
 
+  # F-05A CE money-path — проекция value→quantity по узлам (ADR-057). Header-only.
+  add_executable(matching_ce_projection_test
+    tests/domain/ce_position_projection_test.cpp
+  )
+  target_include_directories(matching_ce_projection_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(matching_ce_projection_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_ce_projection_test COMMAND matching_ce_projection_test)
+
   add_executable(matching_br_to_fe_test
     tests/domain/br_to_fe_test.cpp
     src/domain/batch_result_to_fill_events.cpp

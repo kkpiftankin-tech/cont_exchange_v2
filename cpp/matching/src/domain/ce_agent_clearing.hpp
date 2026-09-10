@@ -32,11 +32,20 @@ struct CeEdge {
   double dead_zone{0.0};  // c_e, ‰
 };
 
+// Метаданные узла (для money-path проекции по узлам, ADR-057). Опциональны:
+// заполняются AssembleCeGraph; при ручной сборке могут быть пусты.
+struct CeNodeMeta {
+  std::string asset;
+  std::string venue;      // "__book__" для узла книги
+  bool is_book{false};
+};
+
 struct CeClearInput {
   int num_nodes{0};
   int num_free{0};                    // узлы [num_free..num_nodes) — книга (фиксированы)
   std::vector<CeEdge> edges;
   std::vector<double> book_potential; // размер num_nodes; используются [num_free..) = μ
+  std::vector<CeNodeMeta> node_meta;   // размер num_nodes (опционально; для проекции)
 };
 
 struct CeClearResult {
