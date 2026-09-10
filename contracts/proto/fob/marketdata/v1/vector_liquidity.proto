@@ -83,6 +83,32 @@ message NodeBasis {
   google.protobuf.Timestamp created_at = 4;
 }
 
+// ADR-055/056 (вариант A) — CE clearing input: market_data строит book-derived
+// переводчиков (agent_builder §A1) и эмитит их + марки в topic ce.clearing.input.
+// matching добавляет плечи перевода/запаса из капитал/риск-конфига (AssembleCeGraph)
+// и решает клиринг (ce_agent_clearing). Значения ‰/α — Decimal (единый стиль proto).
+message CeQuoteAgent {
+  string asset = 1;                     // tradeable, "BTC"
+  string venue = 2;                     // "Binance"
+  fob.common.v1.Decimal anchor = 3;     // σ* = mid_pm, ‰
+  fob.common.v1.Decimal depth = 4;      // α (глубина минорант×θ)
+  fob.common.v1.Decimal dead_zone = 5;  // c, ‰
+}
+message CeAssetMark {
+  string asset = 1;
+  fob.common.v1.Decimal mark = 2;       // μ_a, ‰ (numeraire ⇒ 0)
+}
+message CeClearingInput {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;                  // окно такта ("w|<ts>")
+  int64 event_time_ms = 3;
+  string numeraire = 4;                 // "USDT"
+  repeated string assets = 5;           // tradeable (без numeraire), стабильный порядок
+  repeated string venues = 6;           // стабильный порядок
+  repeated CeQuoteAgent quotes = 7;     // по одному на (asset,venue) с двусторонней книгой
+  repeated CeAssetMark marks = 8;       // марки узлов книги μ_a
+}
+
 // Flow-сегмент: один столбец W (вектор активов) + границы/поток.
 message VectorFlowSegment {
   string segment_id = 1;
