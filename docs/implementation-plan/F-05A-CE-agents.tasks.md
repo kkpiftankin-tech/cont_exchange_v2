@@ -22,9 +22,10 @@
 - [x] UC-F05A-06 + L0 system sequence + L1 service sequence (contract + data binding)
 - [x] Feature.yaml: UC-F05A-06 + ADR-055…059 в `architectureDecisions`
 - [ ] Регистрация IN-0XX (ingest-docs) — ⧗ ждёт пере-отправки исходников
-- [ ] Contracts: `agent.proto`, `vector_liquidity.proto` (`NodeBasis`), `ledger.proto` (`GetNodeBalances`), `risk.proto` (`Z_a`) + `docs/06-api/*`
-- [ ] Data schemas: PG `agent_state`, `node_balances`, `f05a_clearing_config` (+5 cols); CH `clearing_trace`, `node_balances_history`, `agent_state_history`, `vector_flow_segments_history` (+9 cols)
-- [ ] Test plan (golden vs Python `agents_vc.py`/`agents_sim.py` — ⧗ эталон не приложен)
+- [x] Contracts: `agent.proto`, `vector_liquidity.proto` (`NodeBasis`), `ledger.proto` (`GetNodeBalances`/`ApplyNodeTransfer`), `risk.proto` (`Z_a`) + `docs/06-api/*` — protoc 29.3 OK (commit a7216691)
+- [x] Data schemas (docs): [ce-agent-nodes.md](../07-data/ce-agent-nodes.md) — PG `agent_state`/`node_balances`/`f05a_clearing_config`(+5); CH `clearing_trace`/`node_balances_history`/`agent_state_history`/`vector_flow_segments_history`(+9). DDL — при реализации.
+- [x] Test plan (docs): [F-05A-CE-agents-test-plan.md](../10-testing/features/F-05A-CE-agents-test-plan.md) — U/G/V/E + инварианты И-Т1…И-Т6
+- [ ] Python-эталон `agents_vc.py`/`agents_sim.py` — ⧗ не приложен (нужен для G-CEA golden)
 
 ## Conflict Notes (источник vs фактический код 1e8bf6f)
 
