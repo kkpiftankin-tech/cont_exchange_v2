@@ -134,6 +134,46 @@ int main() {
     close(rep3.turn_quote, 0.0, 1e-6, "G-CEA-004: без связок и запаса оборот котировок 0");
   }
 
+  // ---- Срез 2: детерминированные развёртки agents_sim (B полоса, C марка) ----
+  const double m2[3] = {0.0, 0.60, -0.60};
+
+  // B: полоса запаса c_S — ручка «арбитраж vs позиция» (ADR-057 §9.1).
+  // при широкой полосе (0.60) позиция ≡ 0 (чистый арбитраж); при узкой (0.02) — растёт.
+  struct BExp { double cs, turn_q, turn_s, dbtc, pnl; };
+  const BExp bexp[] = {
+    {0.02, 9.782141514474233, 9.60496145622811, 0.17588864307086505, 1.8171774055420906},
+    {0.15, 9.039749531842173, 7.377430289848719, 0.20785767679432743, 1.4557550568200557},
+    {0.30, 8.318766957632404, 5.154604340234336, 0.018411204671755055, 1.3306199393153157},
+    {0.60, 8.313360158481245, 5.133347454882951, 0.0, 1.330592737666736},
+  };
+  for (const auto& b : bexp) {
+    Params q = p; q.cS_btc = b.cs;
+    CeClearInput ib = Build(m2, q);
+    CeClearResult rb = ClearCe(ib);
+    CeReport rpb = ReportCe(ib, rb);
+    const double dbtc = rb.f[9] + rb.f[10] + rb.f[11];
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "B[c_S=%.2f].turn_q", b.cs); close(rpb.turn_quote, b.turn_q, 1e-6, tag);
+    std::snprintf(tag, sizeof(tag), "B[c_S=%.2f].turn_s", b.cs); close(rpb.turn_stock, b.turn_s, 1e-6, tag);
+    std::snprintf(tag, sizeof(tag), "B[c_S=%.2f].dBTC", b.cs);   close(dbtc, b.dbtc, 1e-6, tag);
+    std::snprintf(tag, sizeof(tag), "B[c_S=%.2f].pnl", b.cs);    close(rpb.pnl, b.pnl, 1e-6, tag);
+  }
+
+  // C: смещение марки μ±δ → линейный дрейф позиции (ADR-056 §9.2, V-CEA-005).
+  struct CExp { double bias, dbtc; };
+  const CExp cexp[] = {
+    {-0.30, -2.9812425336313524}, {0.0, 0.20785767679432743}, {0.30, 3.4750517214495202},
+  };
+  for (const auto& cc : cexp) {
+    CeClearInput ic = Build(m2, p);
+    ic.book_potential[6] += cc.bias;  // μ := mark + bias
+    CeClearResult rc = ClearCe(ic);
+    const double dbtc = rc.f[9] + rc.f[10] + rc.f[11];
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "C[bias=%+.2f].dBTC", cc.bias);
+    close(dbtc, cc.dbtc, 1e-6, tag);
+  }
+
   if (g_fail == 0) {
     std::printf("ce_agent_clearing_test: OK (все сверки с эталоном пройдены)\n");
     return 0;
