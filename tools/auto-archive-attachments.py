@@ -213,6 +213,31 @@ def main() -> int:
             seen.add(s)
             parts.append(s)
 
+    # Fallback (главный путь этой версии Claude Code): вложения НЕ в payload —
+    # payload несёт только `transcript_path`. Диагностика T-CEA-004 показала
+    # has_document_marker=False при наличии transcript_path. Сканируем JSONL-транскрипт:
+    # каждая строка — JSON-запись, из неё берём строковые листья (json декодирует
+    # escapes в реальный текст). Дедуп по содержимому + hash в archive_documents делают
+    # повторное сканирование транскрипта идемпотентным.
+    if not parts:
+        tpath = payload.get("transcript_path") if isinstance(payload, dict) else None
+        if isinstance(tpath, str) and os.path.isfile(tpath):
+            try:
+                with open(tpath, "r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if "<document" not in line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        for s in iter_strings(rec):
+                            if "<document" in s and s not in seen:
+                                seen.add(s)
+                                parts.append(s)
+            except Exception:
+                pass
+
     # Диагностика (AUTO_ARCHIVE_DEBUG=1): фиксируем, какие поля payload реально
     # пришли и содержали ли блоки — чтобы в следующий раз не гадать о причине пропуска.
     if os.environ.get("AUTO_ARCHIVE_DEBUG"):
