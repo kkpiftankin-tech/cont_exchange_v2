@@ -36,3 +36,52 @@ message AgentLog {
 
   google.protobuf.Timestamp timestamp = 30;
 }
+
+// ---------------------------------------------------------------------------
+// ADR-055/057/058 — виртуальный контрагент CE как агент (ребро графа узлов).
+// Аддитивно к F-05A/F-18; заполняется только в режиме CE-агентов (за флагом).
+// ---------------------------------------------------------------------------
+enum AgentType {
+  AGENT_TYPE_UNSPECIFIED = 0;
+  AGENT_TYPE_TRANSLATOR = 1;  // переводчик книги площадки (плечи QUOTE + STOCK)
+  AGENT_TYPE_LINK = 2;        // связка-арбитражёр (плечо TRANSFER)
+}
+
+enum AgentLeg {
+  AGENT_LEG_UNSPECIFIED = 0;
+  AGENT_LEG_QUOTE = 1;      // BTC@j ↔ USDT@j (сделка в книге площадки j)
+  AGENT_LEG_TRANSFER = 2;   // X@j ↔ X@k (физический перевод валюты)
+  AGENT_LEG_STOCK = 3;      // X@j ↔ X@__book__ (собственный остаток на площадке)
+}
+
+// Ребро графа: единая кривая f(σ)=α·sign(σ*−σ)·max(0,|σ*−σ|−c) (ADR-055).
+message Agent {
+  string agent_id = 1;
+  AgentType type = 2;
+  AgentLeg leg = 3;
+  string node_from = 4;                 // "BTC@Binance" | "USDT@OKX" | "BTC@__book__"
+  string node_to = 5;
+  fob.common.v1.Decimal anchor = 6;     // σ*, ‰
+  fob.common.v1.Decimal depth = 7;      // α, тыс. USDT на ‰
+  fob.common.v1.Decimal dead_zone = 8;  // c, ‰
+  fob.common.v1.Decimal capacity = 9;   // потолок по объёму
+  int64 snapshot_age_ms = 10;           // возраст исходного стакана
+}
+
+// ADR-058 — состояние агента (committed/in-flight) вместо cooldown-таймера.
+message AgentState {
+  string agent_id = 1;
+  fob.common.v1.Decimal committed = 2;      // отправлено, не подтверждено
+  fob.common.v1.Decimal assigned_last = 3;  // назначено последним тактом
+  fob.common.v1.Decimal filled_cum = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// Назначение потока агенту по такту (для аудита clearing_trace, ADR-059).
+message AgentAssignment {
+  string agent_id = 1;
+  string batch_id = 2;
+  fob.common.v1.Decimal flow = 3;   // f = x_sell − x_buy (собственный знак биржи)
+  fob.common.v1.Decimal x_buy = 4;
+  fob.common.v1.Decimal x_sell = 5;
+}

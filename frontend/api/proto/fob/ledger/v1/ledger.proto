@@ -270,6 +270,58 @@ message GetExchangeBalancesResponse {
   string house_account_id = 3;                 // '__ce_house__'
 }
 
+// F-18 §11: снапшот позиции биржи по одному клирингу (старая → Δ → новая).
+// NOP_a = активы_a − обязательства_a; snapshot берётся ДО и ПОСЛЕ применения
+// fills батча в ledger (attribution по batch_id).
+message BatchNopItem {
+  string currency = 1;
+  fob.common.v1.Decimal nop_before = 2;
+  fob.common.v1.Decimal delta = 3;
+  fob.common.v1.Decimal nop_after = 4;
+}
+message BatchNopSnapshot {
+  string batch_id = 1;
+  int64 event_time_ms = 2;
+  repeated BatchNopItem items = 3;
+}
+message GetExchangeNopHistoryRequest {
+  fob.common.v1.EventMeta meta = 1;
+  int32 limit = 2;                             // сколько последних клирингов (0 = дефолт)
+  string batch_id = 3;                         // если задан — вернуть только этот клиринг
+}
+message GetExchangeNopHistoryResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated BatchNopSnapshot snapshots = 2;     // свежие сверху
+}
+
+// ADR-057 — узловой остаток «валюта@площадка». Уровень узла позиции: qty (факт),
+// target (цель Q*), in_transit (в пути на приход). Меняется только подтверждениями.
+message NodeBalance {
+  string asset = 1;
+  string venue = 2;                            // "Binance" | "__book__"
+  fob.common.v1.Decimal qty = 3;
+  fob.common.v1.Decimal target = 4;
+  fob.common.v1.Decimal in_transit = 5;
+}
+message GetNodeBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string assets = 2;                  // пусто = все активы
+}
+message GetNodeBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated NodeBalance nodes = 2;
+}
+// ADR-057 — перевод валюты между узлами (связка-арбитражёр): списание с from_venue,
+// приход в in_transit to_venue. Идемпотентно по transfer_id.
+message ApplyNodeTransferRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string transfer_id = 2;                      // idempotency key
+  string asset = 3;
+  string from_venue = 4;
+  string to_venue = 5;
+  fob.common.v1.Decimal qty = 6;
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -310,4 +362,15 @@ service LedgerService {
   // F-18 (ADR-054 §10): валютный вектор биржи (house-аккаунт + venue + client
   // liabilities) — вход для расчёта NOP в risk и для UI.
   rpc GetExchangeBalances(GetExchangeBalancesRequest) returns (GetExchangeBalancesResponse);
+
+  // F-18 (§11): история позиции биржи по клирингам (старая → Δ → новая), для
+  // привязки к результату клиринга на вкладке Clearing.
+  rpc GetExchangeNopHistory(GetExchangeNopHistoryRequest) returns (GetExchangeNopHistoryResponse);
+
+  // ADR-057 (CE-агенты): узловые остатки «валюта@площадка» (уровень узла позиции) —
+  // вход для клиринга (исполнимость ноги) и для risk (Z_a).
+  rpc GetNodeBalances(GetNodeBalancesRequest) returns (GetNodeBalancesResponse);
+
+  // ADR-057: применить перевод валюты между узлами (связка-арбитражёр), идемпотентно.
+  rpc ApplyNodeTransfer(ApplyNodeTransferRequest) returns (google.protobuf.Empty);
 }

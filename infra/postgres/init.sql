@@ -934,3 +934,29 @@ BEGIN
       ADD CONSTRAINT risk_limits_entity_id_nonempty CHECK (entity_id <> '');
   END IF;
 END $$;
+
+-- F-05A ADR-050/052: runtime-настраиваемый параметр цикла батч-клиринга.
+-- Единственная строка (id=1). market_data полит эту таблицу в таймере окна;
+-- frontend-api (вкладка Clearing) читает/пишет. Больше окно = больше кривых
+-- накапливается перед клирингом.
+CREATE TABLE IF NOT EXISTS f05a_clearing_config (
+    id               INT PRIMARY KEY DEFAULT 1,
+    batch_window_ms  INT NOT NULL DEFAULT 1000,
+    stale_level_ms   INT NOT NULL DEFAULT 60000,
+    -- Порог устаревания venue-снапшота (venues polls this): снапшот старше
+    -- порога → venue.liquidity.fob пропускается как stale. Настраивается из UI
+    -- (вкладка Площадки). Должен превышать цикл md_publish_loop при N венью.
+    venue_stale_ms   INT NOT NULL DEFAULT 180000,
+    -- ADR-055/056/057 (CE-агенты, Этап 1): параметры такта. Не используются до
+    -- включения режима агентов; для существующих БД добавить ALTER-миграцией.
+    theta            NUMERIC(38,18) NOT NULL DEFAULT 0.5,   -- haircut глубины (0.3..0.7)
+    dhl_fraction     NUMERIC(38,18) NOT NULL DEFAULT 0.01,  -- квадратичная цена запаса
+    rho              NUMERIC(38,18) NOT NULL DEFAULT 0.004, -- сдвиг якоря на остаток/committed
+    z_limit          NUMERIC(38,18) NOT NULL DEFAULT 0,     -- агрегатный лимит Z_a (0 = выкл)
+    gamma            NUMERIC(38,18) NOT NULL DEFAULT 1,     -- неприятие риска (α=W/(γσ²τ))
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1)
+);
+INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
+VALUES (1, 1000, 60000, 180000)
+ON CONFLICT (id) DO NOTHING;

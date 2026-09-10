@@ -229,6 +229,13 @@ message GetRiskSnapshotRequest {
 // F-18 (ADR-054 §10): Net Open Position биржи по валюте + решение о хедже.
 // risk читает валютный вектор у ledger (GetExchangeBalances), считает
 // NOP_a = активы_a − обязательства_a (numeraire исключён) и определяет размер хеджа.
+// ADR-057 — разрез позиции актива по площадкам (узловой уровень).
+message VenueLeg {
+  string venue = 1;
+  fob.common.v1.Decimal qty = 2;
+  fob.common.v1.Decimal target = 3;
+  fob.common.v1.Decimal in_transit = 4;
+}
 message ExchangeNOP {
   string currency = 1;
   fob.common.v1.Decimal nop = 2;               // активы − обязательства
@@ -239,6 +246,14 @@ message ExchangeNOP {
   fob.common.v1.Decimal hedge_qty = 7;          // размер хеджа (FLATTEN/TO_BAND)
   string hedge_side = 8;                          // SELL (излишек) | BUY (дефицит) | ""
   bool is_numeraire = 9;
+  // ADR-057 — уровень актива Z_a = Σ_venue qty + in_transit + committed − target.
+  // nop(2) остаётся частным случаем: без клиентов и плеча запаса Z_a ≡ nop.
+  fob.common.v1.Decimal z = 10;                // Z_a (агрегатный ценовой риск актива)
+  fob.common.v1.Decimal target = 11;           // цель Q*
+  fob.common.v1.Decimal in_flight = 12;        // committed по активу (ADR-058)
+  fob.common.v1.Decimal in_transit = 13;       // переводы в пути
+  fob.common.v1.Decimal z_limit = 14;          // агрегатный лимит
+  repeated VenueLeg venues = 15;               // разрез по площадкам
 }
 message GetExchangeNOPRequest { fob.common.v1.EventMeta meta = 1; }
 message GetExchangeNOPResponse {

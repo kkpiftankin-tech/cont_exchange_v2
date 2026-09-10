@@ -505,12 +505,21 @@ CREATE TABLE IF NOT EXISTS vector_flow_segments_history (
     source_order_id     String,
     pair                LowCardinality(String),
     side                LowCardinality(String),  -- bid|ask
+    seg_index           UInt32,     -- F-05A ADR-050: позиция сегмента в x (x[i]↔segment)
     w_json              String,     -- JSON: вектор коэффициентов
     p_high              Decimal128(18),
     d_hl                Decimal128(18),
     q_rate              Decimal128(18),
     q_max               Decimal128(18),
     effective_price     Decimal128(18),
+    anchor              Decimal128(18),  -- ADR-052: mid (двусторонний сегмент)
+    slope               Decimal128(18),  -- ADR-052: наклон кривой m
+    q_min               Decimal128(18),  -- ADR-052: x_min = −Q_bid
+    alpha_ext           Decimal128(18),  -- ADR-053 safe-translator: min_k D_k/|δ_k|
+    alpha_t             Decimal128(18),  -- ADR-053: θ·ψ·α_ext (после haircut)
+    beta_t              Decimal128(18),  -- ADR-053: линейный наклон mid·slope
+    theta               Decimal128(18),  -- ADR-053: safe-share (0..1)
+    translator_model    LowCardinality(String),  -- "safe_vwap" | "log_endpoint"
     event_time_ms       Int64,
     ingested_at         DateTime DEFAULT now()
 )

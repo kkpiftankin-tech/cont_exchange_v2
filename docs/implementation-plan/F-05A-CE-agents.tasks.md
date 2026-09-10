@@ -45,12 +45,16 @@
 
 ## Этап 0 — реальный остаток (не блокирует ничего, ~1–2 дня)
 
-| ID | Задача | Файлы | П | Acceptance |
-| --- | --- | --- | --- | --- |
-| T-CEA-001 | +9 колонок в `vector_flow_segments_history` + синхронный писатель | [clickhouse/init.sql](../../infra/clickhouse/init.sql), [clickhouse_vector_segment_storage.cpp](../../cpp/market_data/src/infra/clickhouse/clickhouse_vector_segment_storage.cpp) | П-15 | `/api/vector-clearing/detail` секция 1 отдаёт сегменты без 502 |
-| T-CEA-002 | +5 колонок в `f05a_clearing_config` (`theta, dhl_fraction, rho, z_limit, gamma`) ALTER | [postgres/init.sql:942](../../infra/postgres/init.sql) | П-12 | форма конфига Clearing читается без ошибки |
-| T-CEA-003 | Автогенерация proto-копии BFF (убрать ручной `COPY proto`) | [frontend/api/Dockerfile](../../frontend/api/Dockerfile) | §4 | копия proto собирается из `contracts/`, дрейф невозможен |
-| T-CEA-004 | Починка хука авто-архивации (немое падение на `<document>`) | [tools/auto-archive-attachments.py](../../tools/auto-archive-attachments.py) | — | self-test + реальное вложение архивируется в `incoming-docs/` |
+**Итог аудита (2026-09-10):** премисы T-CEA-001/002 про «502» оказались устаревшими
+(паттерн CN) — на живой БД всё уже есть, `/detail` = HTTP 200. Работа свелась к
+completeness/подготовке. T-CEA-003/004 — реальные фиксы.
+
+| ID | Задача | Статус | Файлы |
+| --- | --- | --- | --- |
+| T-CEA-001 | ✅ **уже жило**: writer добавляет 9 колонок рантаймом, `/detail` 200 (17 сегментов). Фикс: полный fresh-DB CREATE (+5 колонок в статическом DDL) | done | [clickhouse/init.sql:501](../../infra/clickhouse/init.sql) |
+| T-CEA-002 | ✅ **не баг**: BFF читает из конфига только window/stale (существуют). +5 колонок добавлены в CREATE как подготовка к Этапу 1 (для живой БД — ALTER) | done (prep) | [postgres/init.sql:942](../../infra/postgres/init.sql) |
+| T-CEA-003 | ✅ реальный дрейф: `sync-proto.sh` (import-closed) регенерирует копию из `contracts/`; исправил 11 файлов + подтянул `marketdata_service.proto`; 19/19 protoc OK | done | [sync-proto.sh](../../frontend/api/sync-proto.sh), [Dockerfile](../../frontend/api/Dockerfile) |
+| T-CEA-004 | ✅ хук сканирует весь payload (не только `prompt`) + debug-лог; self-test + интеграция зелёные | done | [auto-archive-attachments.py](../../tools/auto-archive-attachments.py) |
 
 ## Этап 1 — узлы и двусторонние агенты (~2–3 нед) — ADR-055/056
 

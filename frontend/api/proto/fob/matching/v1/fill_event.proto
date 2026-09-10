@@ -4,6 +4,7 @@ package fob.matching.v1;
 
 import "google/protobuf/timestamp.proto";
 import "fob/common/v1/common.proto";
+import "fob/matching/v1/batch.proto";
 
 // FillEvent for external use
 // also see FlowFill
@@ -23,4 +24,6 @@ message FillEvent {
   repeated fob.common.v1.Fee fees = 8;
 
   google.protobuf.Timestamp timestamp = 9;
+
+  LiquidityProvenance provenance = 10;
 }
