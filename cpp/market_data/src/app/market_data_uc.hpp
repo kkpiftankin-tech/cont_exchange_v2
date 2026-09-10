@@ -38,6 +38,7 @@ namespace cex::market_data::app {
 
 // F-05A (T-F05A-205/206/305): порты публикации + персиста векторной ликвидности.
 struct IVectorizedPublisher;
+struct ICeClearingPublisher;  // F-05A CE (вариант A)
 struct IVectorSegmentStorage;
 struct IVectorClearingResultStorage;
 
@@ -81,7 +82,8 @@ class MarketDataUseCases {
       infra::MarketDataStreamHub* stream_hub = nullptr,
       infra::PgMarketDataConfig* pg_config = nullptr,
       IVectorizedPublisher* vectorized_publisher = nullptr,  // F-05A (T-F05A-205)
-      MarketDataConfig md_config = {});
+      MarketDataConfig md_config = {},
+      ICeClearingPublisher* ce_publisher = nullptr);          // F-05A CE (вариант A)
 
   // --- существующие обработчики ---
   void OnMarketDataRaw(const fob::marketdata::v1::MarketDataRaw& evt);
@@ -138,6 +140,19 @@ class MarketDataUseCases {
   void StartStaleSweeper();
   void StopStaleSweeper();
 
+  // F-05A ADR-050: оконный агрегатор клиринга. Таймер-поток по F05A_BATCH_WINDOW_MS
+  // собирает буфер свежих кривых (все venue×pair) в ОДИН marketdata.vectorized
+  // над общим asset-basis. No-op, если F05A_BATCH_WINDOW_ENABLED выключен.
+  void StartVectorWindow();
+  void StopVectorWindow();
+  // Собрать окно и опубликовать один агрегированный снапшот (public для тестов).
+  void FlushVectorWindow(std::int64_t window_close_ms);
+  // F-05A CE (вариант A): собрать book-derived агентов из свежих кривых окна и
+  // опубликовать CeClearingInput в ce.clearing.input (agent_builder §A1).
+  void BuildAndPublishCeClearingInput(
+      const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
+      const std::string& batch_id, std::int64_t window_close_ms);
+
  private:
   static std::string key(const std::string& venue, const std::string& symbol);
   static std::string curve_key(const std::string& venue, const std::string& symbol,
@@ -157,6 +172,8 @@ class MarketDataUseCases {
   domain::ISnapshotPublisher*      snapshot_publisher_{nullptr};
   domain::IRiskAlertPublisher*     risk_publisher_{nullptr};
   IVectorizedPublisher*            vectorized_publisher_{nullptr};  // F-05A
+  ICeClearingPublisher*            ce_publisher_{nullptr};          // F-05A CE (вариант A)
+  bool                             ce_agents_enabled_{false};       // env CE_AGENTS_ENABLED
   IVectorSegmentStorage*           vector_segment_storage_{nullptr};// F-05A (T-F05A-206)
   IVectorClearingResultStorage*    vector_clearing_result_storage_{nullptr}; // F-05A
   domain::VectorizeConfig          vectorize_cfg_{};                // F-05A
@@ -166,6 +183,26 @@ class MarketDataUseCases {
 
   std::atomic<bool> sweeper_running_{false};
   std::thread       sweeper_thread_;
+
+  // F-05A ADR-050: batch-window aggregation state.
+  bool               vector_window_enabled_{false};
+  bool               vector_linear_segments_{false};  ///< ADR-051: 1 линейный сегм./сторону
+  bool               vector_two_sided_{false};         ///< ADR-052: 1 двусторонний сегм./венью
+  std::int64_t       vector_window_ms_{1000};   ///< F05A_BATCH_WINDOW_MS (runtime PG override)
+  std::int64_t       vector_stale_ms_{2000};    ///< F05A_STALE_LEVEL_MS (runtime PG override)
+  // ADR-050/052: runtime-конфиг окна из PG (таблица f05a_clearing_config), с TTL-кэшем.
+  std::string        clearing_cfg_pg_conn_{};
+  std::int64_t       clearing_cfg_last_read_ms_{0};  ///< monotonic ms последнего чтения PG
+  void RefreshClearingConfigFromPg();                ///< обновляет window/stale из PG (TTL)
+  std::atomic<bool>  vector_window_running_{false};
+  std::thread        vector_window_thread_;
+  std::mutex         vector_window_mu_;
+  struct BufferedCurve {
+    fob::venue::v1::VenueLiquidityCurve curve;
+    std::int64_t event_ts_ms{0};   ///< время события кривой (для веса свежести)
+  };
+  // key = venue|pair; новая кривая вытесняет старую (ADR-050 §Решение).
+  std::unordered_map<std::string, BufferedCurve> vector_window_buffer_;
 
   mutable std::mutex mu_;
 

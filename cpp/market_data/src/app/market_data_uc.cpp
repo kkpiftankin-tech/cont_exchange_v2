@@ -2,13 +2,23 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <thread>
 
+#include <pqxx/pqxx>  // ADR-050/052: runtime-конфиг окна клиринга из Postgres
+
+#include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
 // F-05A (T-F05A-205): векторизация внешней ликвидности → marketdata.vectorized.
+#include <cstdlib>  // std::getenv/atof — F-05A CE θ/params
+#include <map>
+#include <set>
+
 #include "app/curve_to_levels.hpp"
+#include "app/ports/i_ce_clearing_publisher.hpp"  // F-05A CE (вариант A)
 #include "app/ports/i_vectorized_publisher.hpp"
+#include "domain/agent_builder.hpp"  // F-05A CE §A1
 #include "app/ports/i_vector_segment_storage.hpp"
 #include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
@@ -22,6 +32,14 @@ namespace {
 std::string NormalizeAsset(std::string s) {
   s.erase(std::remove(s.begin(), s.end(), '/'), s.end());
   return s;
+}
+
+// F-05A ADR-050: масштаб Decimal на вес свежести f∈[0,1] (для q_max сегмента).
+cex::common::Decimal ScaleDecimal(const cex::common::Decimal& d, double f) {
+  cex::common::Decimal out = d;
+  out.units = static_cast<std::int64_t>(
+      std::llround(static_cast<double>(d.units) * f));
+  return out;
 }
 }  // namespace
 
@@ -37,7 +55,8 @@ MarketDataUseCases::MarketDataUseCases(
     infra::MarketDataStreamHub* stream_hub,
     infra::PgMarketDataConfig* pg_config,
     IVectorizedPublisher* vectorized_publisher,
-    MarketDataConfig md_config)
+    MarketDataConfig md_config,
+    ICeClearingPublisher* ce_publisher)
     : batch_storage_(batch_storage),
       execution_storage_(execution_storage),
       memory_curve_storage_(memory_curve_storage),
@@ -47,10 +66,24 @@ MarketDataUseCases::MarketDataUseCases(
       snapshot_publisher_(snapshot_publisher),
       risk_publisher_(risk_publisher),
       vectorized_publisher_(vectorized_publisher),
+      ce_publisher_(ce_publisher),
       stream_hub_(stream_hub),
       pg_config_(pg_config),
       md_config_(md_config),
-      update_uc_(ob_storage, publisher) {}
+      update_uc_(ob_storage, publisher) {
+  // F-05A ADR-050: batch-window aggregation config (env, dev-defaults).
+  vector_window_enabled_ = cex::common::Env::get_bool("F05A_BATCH_WINDOW_ENABLED", false);
+  vector_linear_segments_ = cex::common::Env::get_bool("F05A_LINEAR_SEGMENTS_ENABLED", false);
+  vector_two_sided_ = cex::common::Env::get_bool("F05A_TWO_SIDED_ENABLED", false);
+  ce_agents_enabled_ = cex::common::Env::get_bool("CE_AGENTS_ENABLED", false);
+  vector_window_ms_ = static_cast<std::int64_t>(
+      cex::common::Env::get_int("F05A_BATCH_WINDOW_MS", 1000));
+  vector_stale_ms_ = static_cast<std::int64_t>(
+      cex::common::Env::get_int("F05A_STALE_LEVEL_MS", 2000));
+  clearing_cfg_pg_conn_ = cex::common::Env::get_string(
+      "POSTGRES_CONN",
+      "host=postgres port=5432 dbname=exchange user=exchange password=exchange");
+}
 
 std::string MarketDataUseCases::key(const std::string& venue, const std::string& symbol) {
   return venue + "|" + symbol;
@@ -242,9 +275,23 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                           ch_curve_storage_ != nullptr ? "true" : "false"},
                          {"source_file", "cpp/market_data/src/app/market_data_uc.cpp"}});
 
+  // F-05A ADR-050: в оконном режиме кривая НЕ векторизуется поканально — кладётся
+  // в буфер (новая вытесняет старую на ключ venue|pair); агрегированный клиринг
+  // над общим asset-basis собирает таймер FlushVectorWindow.
+  if (vector_window_enabled_) {
+    const std::int64_t ts_ms = curve.timestamp().seconds() * 1000 +
+                               curve.timestamp().nanos() / 1000000;
+    std::lock_guard<std::mutex> lk(vector_window_mu_);
+    vector_window_buffer_[key(curve.venue_id(), curve.instrument().symbol())] =
+        BufferedCurve{curve, ts_ms};
+    return;
+  }
+
   // F-05A (T-F05A-205/206): векторизация кривой → сегменты W → publish + persist.
   if (vectorized_publisher_ != nullptr || vector_segment_storage_ != nullptr) {
-    auto levels = LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
+    auto levels = vector_linear_segments_  // ADR-051: 1 линейный сегмент/сторону
+                      ? LinearSegmentsFromCurve(curve, vectorize_cfg_.decimal_scale)
+                      : LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
     domain::VectorizeResult vr = domain::Vectorize(levels, vectorize_cfg_);
     if (!vr.segments.empty()) {
       const std::string batch_id =
@@ -456,6 +503,229 @@ void MarketDataUseCases::StartStaleSweeper() {
 void MarketDataUseCases::StopStaleSweeper() {
   sweeper_running_.store(false);
   if (sweeper_thread_.joinable()) sweeper_thread_.join();
+}
+
+// ADR-050/052: runtime-конфиг окна из PG (таблица f05a_clearing_config). TTL 2с,
+// чтобы UI-изменения применялись быстро, но без нагрузки на PG. Ошибки PG молча
+// игнорируются (остаются текущие значения). Вызывается только из таймер-потока.
+void MarketDataUseCases::RefreshClearingConfigFromPg() {
+  const std::int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  if (now_ms - clearing_cfg_last_read_ms_ < 2000) return;  // TTL
+  clearing_cfg_last_read_ms_ = now_ms;
+  try {
+    pqxx::connection c(clearing_cfg_pg_conn_);
+    pqxx::work tx(c);
+    const pqxx::row r = tx.exec1(
+        "SELECT batch_window_ms, stale_level_ms FROM f05a_clearing_config WHERE id=1");
+    const std::int64_t w = r[0].as<std::int64_t>();
+    const std::int64_t s = r[1].as<std::int64_t>();
+    if (w >= 100 && w <= 600000) vector_window_ms_ = w;   // [100мс, 10мин]
+    if (s >= 100 && s <= 3600000) vector_stale_ms_ = s;   // [100мс, 60мин]
+  } catch (const std::exception&) {
+    // PG недоступен/нет строки — оставляем текущие значения.
+  }
+}
+
+// F-05A ADR-050: таймер-поток окна. No-op, если флаг выключен.
+void MarketDataUseCases::StartVectorWindow() {
+  if (!vector_window_enabled_) return;
+  vector_window_running_.store(true);
+  vector_window_thread_ = std::thread([this] {
+    while (vector_window_running_.load()) {
+      RefreshClearingConfigFromPg();  // подхватываем runtime-настройки окна
+      std::this_thread::sleep_for(std::chrono::milliseconds(vector_window_ms_));
+      if (!vector_window_running_.load()) break;
+      const std::int64_t now_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+      FlushVectorWindow(now_ms);
+    }
+  });
+  cex::common::log_json("INFO", "F-05A batch-window aggregator started",
+                        {{"service", "market_data"},
+                         {"window_ms", std::to_string(vector_window_ms_)},
+                         {"stale_ms", std::to_string(vector_stale_ms_)}});
+}
+
+void MarketDataUseCases::StopVectorWindow() {
+  vector_window_running_.store(false);
+  if (vector_window_thread_.joinable()) vector_window_thread_.join();
+}
+
+// Собрать окно: свежие кривые всех venue×pair → общий asset-basis → один
+// marketdata.vectorized. Вес свежести f убывает с возрастом и масштабирует q_max;
+// за жёстким порогом уровень отбрасывается (ADR-050).
+void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
+  std::vector<BufferedCurve> fresh;
+  {
+    std::lock_guard<std::mutex> lk(vector_window_mu_);
+    fresh.reserve(vector_window_buffer_.size());
+    for (const auto& [k, bc] : vector_window_buffer_) fresh.push_back(bc);
+  }
+  if (fresh.empty()) return;
+
+  // Детерминированный порядок (ADR-050 §7, AC-F05A-010): unordered_map даёт
+  // непредсказуемый порядок → seg_index/x «плавали» бы, ломая replay F-15.
+  std::sort(fresh.begin(), fresh.end(), [](const BufferedCurve& a, const BufferedCurve& b) {
+    if (a.curve.venue_id() != b.curve.venue_id())
+      return a.curve.venue_id() < b.curve.venue_id();
+    return a.curve.instrument().symbol() < b.curve.instrument().symbol();
+  });
+
+  std::vector<domain::ExternalOrderLevel> levels;   // per-level / linear путь
+  std::vector<fob::venue::v1::VenueLiquidityCurve> fresh_curves;  // two-sided путь
+  int stale_dropped = 0;
+  for (const auto& bc : fresh) {
+    const std::int64_t age = window_close_ms - bc.event_ts_ms;
+    if (vector_stale_ms_ > 0 && age >= vector_stale_ms_) {
+      ++stale_dropped;
+      continue;
+    }
+    if (vector_two_sided_) {                 // ADR-052: собираем свежие кривые
+      fresh_curves.push_back(bc.curve);
+      continue;
+    }
+    double f = 1.0;
+    if (vector_stale_ms_ > 0) {
+      f = 1.0 - static_cast<double>(age) / static_cast<double>(vector_stale_ms_);
+      if (f < 0.0) f = 0.0;
+      if (f > 1.0) f = 1.0;
+    }
+    auto lv = vector_linear_segments_  // ADR-051: 1 линейный сегмент/сторону
+                  ? LinearSegmentsFromCurve(bc.curve, vectorize_cfg_.decimal_scale)
+                  : LevelsFromCurve(bc.curve, vectorize_cfg_.decimal_scale);
+    for (auto& l : lv) {
+      l.quantity = ScaleDecimal(l.quantity, f);
+      l.remaining_quantity = ScaleDecimal(l.remaining_quantity, f);
+      // ADR-051: для линейного сегмента масштабируем и d_hl, чтобы наклон
+      // D=d_hl/q_max сохранялся (свежесть режет ёмкость и surplus, не наклон).
+      l.d_hl_override = ScaleDecimal(l.d_hl_override, f);
+      levels.push_back(std::move(l));
+    }
+  }
+
+  // ADR-052/053: один двусторонний сегмент на венью над общим basis; safe-translator
+  // берётся из curve.safe_translator() (venues посчитал из стакана). Иначе per-level/linear.
+  domain::VectorizeResult vr =
+      vector_two_sided_
+          ? TwoSidedSegmentsFromCurves(fresh_curves, vectorize_cfg_.decimal_scale)
+          : domain::Vectorize(levels, vectorize_cfg_);
+  if (vr.segments.empty()) return;
+
+  const std::string batch_id = "w|" + std::to_string(window_close_ms);
+  if (vectorized_publisher_ != nullptr) {
+    auto snap = transport::ToVectorizedSnapshot(vr, batch_id, window_close_ms,
+                                                vectorize_cfg_.decimal_scale);
+    vectorized_publisher_->Publish(snap);
+  }
+  if (vector_segment_storage_ != nullptr) {
+    vector_segment_storage_->SaveSegments(batch_id, vr, window_close_ms);
+  }
+  // F-05A CE (вариант A): те же свежие кривые окна → book-derived агенты → ce.clearing.input.
+  if (ce_agents_enabled_ && ce_publisher_ != nullptr && !fresh_curves.empty()) {
+    BuildAndPublishCeClearingInput(fresh_curves, batch_id, window_close_ms);
+  }
+  cex::common::log_json("INFO", "F-05A vector window flushed",
+                        {{"service", "market_data"},
+                         {"stage", "vector_window"},
+                         {"topic", "marketdata.vectorized"},
+                         {"batch_id", batch_id},
+                         {"venues_pairs", std::to_string(fresh.size())},
+                         {"num_segments", std::to_string(vr.segments.size())},
+                         {"num_assets", std::to_string(vr.basis.num_assets)},
+                         {"stale_dropped", std::to_string(stale_dropped)}});
+}
+
+// F-05A CE (вариант A): свежие кривые окна → book-derived quote-агенты (agent_builder §A1)
+// → CeClearingInput (agents + марки μ + P0) → ce.clearing.input. matching добавит плечи
+// перевода/запаса из env и решит клиринг. Только пары base/numeraire.
+void MarketDataUseCases::BuildAndPublishCeClearingInput(
+    const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
+    const std::string& batch_id, std::int64_t window_close_ms) {
+  const char* num_env = std::getenv("CE_NUMERAIRE");
+  const std::string numeraire = num_env ? std::string(num_env) : std::string("USDT");
+  const char* theta_env = std::getenv("CE_AGENT_THETA");
+  const double theta = theta_env ? std::atof(theta_env) : 0.5;
+  auto to_dec = [](double x) {
+    return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
+  };
+
+  struct Book {
+    std::string base, venue;
+    std::vector<domain::ExternalOrderLevel> levels;
+  };
+  std::vector<Book> books;
+  std::map<std::string, std::pair<double, int>> p0acc;  // base → (Σ mid, count)
+  std::set<std::string> venues_set;
+  std::vector<std::string> assets_order;
+  std::set<std::string> assets_seen;
+  for (const auto& c : curves) {
+    const std::string base = c.instrument().base();
+    const std::string quote = c.instrument().quote();
+    const std::string venue = c.venue_id();
+    if (base.empty() || venue.empty() || quote != numeraire) continue;  // только base/numeraire
+    auto levels = LevelsFromCurve(c, vectorize_cfg_.decimal_scale);
+    double bb = -1.0, ba = -1.0;
+    for (const auto& l : levels) {
+      const double p = static_cast<double>(l.price);
+      if (p <= 0.0) continue;
+      if (l.side == domain::LevelSide::kBid) bb = std::max(bb, p);
+      else ba = (ba < 0.0) ? p : std::min(ba, p);
+    }
+    if (bb <= 0.0 || ba <= 0.0) continue;
+    p0acc[base].first += 0.5 * (bb + ba);
+    p0acc[base].second += 1;
+    venues_set.insert(venue);
+    if (assets_seen.insert(base).second) assets_order.push_back(base);
+    books.push_back({base, venue, std::move(levels)});
+  }
+  if (books.empty()) return;
+  std::map<std::string, double> p0;
+  for (const auto& [a, sc] : p0acc) p0[a] = sc.second > 0 ? sc.first / sc.second : 0.0;
+
+  fob::marketdata::v1::CeClearingInput out;
+  out.set_batch_id(batch_id);
+  out.set_event_time_ms(window_close_ms);
+  out.set_numeraire(numeraire);
+  std::map<std::string, std::pair<double, double>> markacc;  // base → (Σ α·anchor, Σ α)
+  for (const auto& b : books) {
+    domain::AgentBuilderConfig acfg;
+    acfg.theta = theta;
+    acfg.reference_price = p0[b.base];
+    const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
+    if (!a.valid) continue;
+    auto* q = out.add_quotes();
+    q->set_asset(b.base);
+    q->set_venue(b.venue);
+    *q->mutable_anchor() = to_dec(a.anchor_pm);
+    *q->mutable_depth() = to_dec(a.depth);
+    *q->mutable_dead_zone() = to_dec(a.dead_zone_pm);
+    markacc[b.base].first += a.depth * a.anchor_pm;
+    markacc[b.base].second += a.depth;
+  }
+  if (out.quotes_size() == 0) return;
+  for (const auto& a : assets_order) {
+    out.add_assets(a);
+    auto* m = out.add_marks();
+    m->set_asset(a);
+    const double mu = markacc[a].second > 0.0 ? markacc[a].first / markacc[a].second : 0.0;
+    *m->mutable_mark() = to_dec(mu);
+    *m->mutable_reference_price() = to_dec(p0[a]);
+  }
+  for (const auto& v : venues_set) out.add_venues(v);
+
+  ce_publisher_->Publish(out);
+  cex::common::log_json("INFO", "F-05A CE ce.clearing.input",
+                        {{"service", "market_data"},
+                         {"topic", "ce.clearing.input"},
+                         {"batch_id", batch_id},
+                         {"quotes", std::to_string(out.quotes_size())},
+                         {"assets", std::to_string(out.assets_size())},
+                         {"venues", std::to_string(out.venues_size())}});
 }
 
 std::optional<common::Decimal> MarketDataUseCases::GetCurrentMid(

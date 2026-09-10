@@ -26,6 +26,7 @@
 #include "infra/kafka_consumer.hpp"
 #include "infra/kafka_snapshots_producer.hpp"
 #include "infra/kafka_vectorized_producer.hpp"  // F-05A (T-F05A-205)
+#include "infra/kafka_ce_clearing_producer.hpp"  // F-05A CE (вариант A)
 #include "infra/liquidity_curve_memory_storage.hpp"
 #include "infra/market_data_stream_hub.hpp"
 #include "infra/order_book_channel.hpp"
@@ -82,6 +83,7 @@ int main() {
   // ── Kafka producers (F-05) ───────────────────────────────────────────────
   cex::market_data::infra::KafkaSnapshotsProducer snapshots_producer(brokers);
   cex::market_data::infra::KafkaVectorizedProducer vectorized_producer(brokers);  // F-05A
+  cex::market_data::infra::KafkaCeClearingProducer ce_producer(brokers);  // F-05A CE (вариант A)
   cex::market_data::infra::KafkaRiskAlertPublisher risk_publisher(brokers);
 
   // ── In-memory channels ───────────────────────────────────────────────────
@@ -113,7 +115,9 @@ int main() {
       &risk_publisher,      // IRiskAlertPublisher  (F-05)
       &stream_hub,          // MarketDataStreamHub  (F-05)
       &pg_config,           // kill-switch via marketdata_config (F-05)
-      &vectorized_producer  // IVectorizedPublisher (F-05A, T-F05A-205)
+      &vectorized_producer,  // IVectorizedPublisher (F-05A, T-F05A-205)
+      {},                    // MarketDataConfig (default)
+      &ce_producer           // ICeClearingPublisher (F-05A CE, вариант A)
   );
 
   // ── F-05A (T-F05A-206): CH persist векторных сегментов ───────────────────
@@ -129,6 +133,7 @@ int main() {
 
   // ── F-05: стартуем stale sweeper ─────────────────────────────────────────
   uc.StartStaleSweeper();
+  uc.StartVectorWindow();  // F-05A ADR-050: batch-window aggregator (no-op если флаг off)
 
   // ── Kafka consumer ────────────────────────────────────────────────────────
   cex::market_data::infra::MarketDataKafkaConsumer consumer(&uc, brokers);
@@ -150,6 +155,7 @@ int main() {
   server->Wait();
 
   consumer.stop();
+  uc.StopVectorWindow();
   uc.StopStaleSweeper();
   return 0;
 }

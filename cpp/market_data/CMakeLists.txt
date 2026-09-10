@@ -73,6 +73,7 @@ add_executable(market_data
         src/infra/kafka_consumer.cpp
         src/infra/kafka_snapshots_producer.cpp
         src/infra/kafka_vectorized_producer.cpp
+        src/infra/kafka_ce_clearing_producer.cpp
         src/infra/clickhouse_storage.cpp
         src/infra/clickhouse/order_book_storage.cpp
         src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
