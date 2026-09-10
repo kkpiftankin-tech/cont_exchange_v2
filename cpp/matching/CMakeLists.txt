@@ -21,11 +21,30 @@ find_package(Eigen3 REQUIRED)
 # OSQP решает QP. Статическая линковка → бинарь самодостаточен для runtime-стадии.
 include(FetchContent)
 set(OSQP_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(osqp
-  GIT_REPOSITORY https://github.com/osqp/osqp.git
-  GIT_TAG        v0.6.3
+# ADR-048 / build-resilience: тянем OSQP и его submodule qdldl через codeload
+# tar.gz archive, а НЕ git clone. Git-клон сабмодуля qdldl в Docker-build падал
+# (`could not read Username for github.com`, битый ref-listing), тогда как plain
+# https codeload отдаёт 200 (тот же приём уже применён к nlohmann/json). Архив
+# osqp не содержит submodule, поэтому qdldl докачиваем отдельно (pinned на commit,
+# который osqp v0.6.3 ссылает в .gitmodules) и кладём в его submodule-путь.
+FetchContent_Declare(qdldl_src
+  URL https://codeload.github.com/osqp/qdldl/tar.gz/7d16b70a10a152682204d745d814b6eb63dc5cd2
 )
-FetchContent_MakeAvailable(osqp)
+FetchContent_Declare(osqp
+  URL https://codeload.github.com/osqp/osqp/tar.gz/refs/tags/v0.6.3
+)
+FetchContent_GetProperties(osqp)
+if(NOT osqp_POPULATED)
+  FetchContent_Populate(osqp)
+  FetchContent_GetProperties(qdldl_src)
+  if(NOT qdldl_src_POPULATED)
+    FetchContent_Populate(qdldl_src)
+  endif()
+  # Кладём исходники qdldl в submodule-путь, который ждёт CMake osqp.
+  file(COPY ${qdldl_src_SOURCE_DIR}/
+       DESTINATION ${osqp_SOURCE_DIR}/lin_sys/direct/qdldl/qdldl_sources)
+  add_subdirectory(${osqp_SOURCE_DIR} ${osqp_BINARY_DIR})
+endif()
 # 0.6.x экспортирует статическую цель osqpstatic (namespaced или нет — берём что есть).
 if(TARGET osqp::osqpstatic)
   set(MATCHING_OSQP_TARGET osqp::osqpstatic)
@@ -127,6 +146,17 @@ if(BUILD_TESTING)
 
   target_compile_options(matching_domain_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_domain_tests COMMAND matching_domain_tests)
+
+  # F-05A CE — клиринговое ядро агентов vs Python-эталон (Срез 1, T-CEA-107/501).
+  # Header-only (domain/ce_agent_clearing.hpp), без внешних зависимостей.
+  add_executable(matching_ce_clearing_test
+    tests/domain/ce_agent_clearing_test.cpp
+  )
+  target_include_directories(matching_ce_clearing_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(matching_ce_clearing_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_ce_clearing_test COMMAND matching_ce_clearing_test)
 
   add_executable(matching_br_to_fe_test
     tests/domain/br_to_fe_test.cpp

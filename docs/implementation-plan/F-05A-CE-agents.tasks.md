@@ -58,6 +58,14 @@ completeness/подготовке. T-CEA-003/004 — реальные фиксы
 
 ## Этап 1 — узлы и двусторонние агенты (~2–3 нед) — ADR-055/056
 
+**Срез 1 (готов, 2026-09-10):** чистое клиринговое ядро
+[`ce_agent_clearing.hpp`](../../cpp/matching/src/domain/ce_agent_clearing.hpp) (граф узлов,
+единая кривая с мёртвой зоной, active-set Newton, снятие Wx=0 через свободные узлы книги) +
+[GTest](../../cpp/matching/tests/domain/ce_agent_clearing_test.cpp) `matching_ce_clearing_test`
+— сверка с Python-эталоном **до 1e-6** (потоки/позиция/PnL, инварианты V-CEA-002/003,
+абляции G-CEA-004/005). Локально зелёный. Осталось: обвязать в market_data (агенты/базис) и
+matching money-path (T-CEA-103/104/105/107).
+
 | ID | Задача | Файлы | П | Acceptance |
 | --- | --- | --- | --- | --- |
 | T-CEA-101 | `agent.proto`: `Agent/AgentType/AgentLeg/AgentState/AgentAssignment` | [agent.proto](../../contracts/proto/fob/agent/v1/agent.proto) | §4 | компилируется; docs/06-api обновлён |
