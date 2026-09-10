@@ -74,6 +74,9 @@ class MatchingLoop {
   // F-05A (T-F05A-305 1a): consume marketdata.vectorized → solve → publish
   // matching.vector_clearing (диагностика; БЕЗ эмиссии денег/ledger).
   void on_vectorized_liquidity(const fob::marketdata::v1::VectorClearingInput& input);
+  // F-05A CE (ADR-055/056/057, вариант A): consume ce.clearing.input → AssembleCeGraph →
+  // ClearCe → ProjectPositionQuantity (per-leg по цене узла) → эмит ce.position.delta (ПЛАН).
+  void on_ce_clearing_input(const fob::marketdata::v1::CeClearingInput& input);
   void on_venue_health(const fob::venue::v1::VenueHealth& health);
   // MVP-5 (ADR-037): провал внешней combo-ноги → combo_compensations(pending).
   void on_external_execution_report(const fob::execution::v1::ExecutionReport& report);

@@ -45,6 +45,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <iterator>
 #include <map>
@@ -67,6 +68,10 @@
 #include "app/vector_clearing_use_case.hpp"
 #include "domain/vector_qp_solver.hpp"
 #include "fob/treasury/v1/treasury.pb.h"   // F-18 §11: CePositionDeltaBatch
+// F-05A CE (вариант A): agent-clearing на графе узлов + money-path проекция.
+#include "domain/ce_agent_clearing.hpp"
+#include "domain/ce_graph_assembler.hpp"
+#include "domain/ce_position_projection.hpp"
 #include "infra/osqp_backend.hpp"
 #include "transport/mappers/vector_clearing_result.hpp"
 // F-05A money-path (ADR-049): hedge intents за флагом F05A_MONEY_ENABLED.
@@ -445,7 +450,7 @@ void MatchingLoop::start() {
   running_.store(true);
   consumer_.subscribe(
       {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue",
-       "marketdata.vectorized"});
+       "marketdata.vectorized", "ce.clearing.input"});
   t_consume_ = std::thread([this] { consume_orders_loop(); });
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
@@ -511,6 +516,16 @@ void MatchingLoop::consume_orders_loop() {
               return;
             }
             on_vectorized_liquidity(snap.input());
+            return;
+          }
+
+          if (topic == "ce.clearing.input") {
+            fob::marketdata::v1::CeClearingInput ce_in;
+            if (!cex::common::from_bytes(payload, ce_in)) {
+              cex::common::log_json("ERROR", "Failed to parse CeClearingInput");
+              return;
+            }
+            on_ce_clearing_input(ce_in);
             return;
           }
 
@@ -871,6 +886,79 @@ std::map<std::string, double> ProjectXToDeltas(
   return delta;
 }
 }  // namespace
+
+// F-05A CE (вариант A, ADR-055/056/057): ce.clearing.input → граф узлов (AssembleCeGraph) →
+// клиринг (ClearCe) → money-path проекция по узлам (ProjectPositionQuantity) → эмит
+// ce.position.delta как ПЛАН (на стороне ledger ложится в committed, не в house-факт).
+// Плечи перевода/запаса — из env (капитал/риск); quote-агенты и марки/P0 — из сообщения.
+void MatchingLoop::on_ce_clearing_input(
+    const fob::marketdata::v1::CeClearingInput& input) {
+  using cex::common::Decimal;
+  auto d2 = [](const fob::common::v1::Decimal& d) {
+    return static_cast<double>(Decimal::from_proto(d));
+  };
+  auto env_d = [](const std::string& name, double def) {
+    const char* v = std::getenv(name.c_str());
+    return v ? std::atof(v) : def;
+  };
+  auto to_dec = [](double x) {
+    return Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
+  };
+
+  domain::CeAssembleConfig cfg;
+  cfg.numeraire = input.numeraire().empty() ? std::string("USDT") : input.numeraire();
+  for (const auto& a : input.assets()) cfg.assets.push_back(a);
+  for (const auto& v : input.venues()) cfg.venues.push_back(v);
+
+  std::map<std::string, double> ref_price;
+  for (const auto& m : input.marks()) {
+    cfg.mark[m.asset()] = d2(m.mark());
+    if (m.has_reference_price()) ref_price[m.asset()] = d2(m.reference_price());
+  }
+  std::vector<std::string> all_assets = cfg.assets;
+  all_assets.push_back(cfg.numeraire);
+  for (const auto& a : all_assets) {
+    domain::CeLegParams lp;
+    lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
+    lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
+    lp.stock_depth = env_d("CE_STOCK_ALPHA_" + a, 0.0);
+    lp.stock_dead_zone = env_d("CE_STOCK_C_" + a, 0.0);
+    cfg.leg[a] = lp;
+  }
+
+  std::vector<domain::CeQuoteParams> quotes;
+  for (const auto& q : input.quotes())
+    quotes.push_back({q.asset(), q.venue(), d2(q.anchor()), d2(q.depth()), d2(q.dead_zone())});
+
+  const domain::CeClearInput graph = domain::AssembleCeGraph(cfg, quotes);
+  const domain::CeClearResult res = domain::ClearCe(graph);
+  const std::vector<domain::CeAssetVenueDelta> deltas =
+      domain::ProjectPositionQuantity(graph, res, ref_price);
+
+  fob::treasury::v1::CePositionDeltaBatch batch;
+  batch.set_batch_id(input.batch_id());
+  batch.set_event_time_ms(input.event_time_ms());
+  int emitted = 0;
+  for (const auto& d : deltas) {
+    if (std::fabs(d.delta_qty) < 1e-12) continue;
+    auto* ad = batch.add_deltas();
+    ad->set_asset(d.asset);
+    ad->set_venue(d.venue);
+    *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
+    *ad->mutable_price_used() = to_dec(d.price_used);
+    *ad->mutable_delta_value() = to_dec(d.delta_value);
+    ++emitted;
+  }
+  cex::common::log_json(
+      "INFO", "F-05A CE ce.position.delta (plan)",
+      {{"batch_id", input.batch_id()},
+       {"quotes", std::to_string(input.quotes_size())},
+       {"deltas", std::to_string(emitted)},
+       {"converged", res.converged ? "1" : "0"},
+       {"imbalance", std::to_string(res.max_imbalance)}});
+  if (emitted > 0)
+    producer_.produce("ce.position.delta", input.batch_id(), cex::common::to_bytes(batch));
+}
 
 // F-05A (T-F05A-305 1a): решить векторный клиринг для входа и опубликовать
 // диагностику в matching.vector_clearing. НИКАКИХ денег: не эмитит
