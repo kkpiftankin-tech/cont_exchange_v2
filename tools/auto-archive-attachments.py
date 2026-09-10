@@ -63,6 +63,27 @@ def slugify(name: str, max_len: int = 60) -> str:
     return slug[:max_len] or "untitled"
 
 
+def iter_strings(obj) -> "list[str]":
+    """Recursively yield every string leaf in a JSON-like payload.
+
+    Claude Code versions differ in WHERE attachment text lands: some inline it
+    into `prompt`, others carry it in a nested field (content blocks, messages,
+    attachments[]). Scanning every string leaf makes the hook robust to that
+    variation instead of silently no-op'ing when `prompt` alone lacks the blocks.
+    """
+    out: list[str] = []
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, str):
+            out.append(cur)
+        elif isinstance(cur, dict):
+            stack.extend(cur.values())
+        elif isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+    return out
+
+
 def archive_documents(prompt: str, repo_root: pathlib.Path) -> list[str]:
     """Extract <document> blocks from prompt and persist each. Returns report lines."""
     archive_dir = repo_root / "incoming-docs"
@@ -150,6 +171,20 @@ def run_self_test() -> int:
             f"[auto-archive-attachments] self-test FAIL: digest={digest!r}\n"
         )
         return 1
+
+    # Recursive collection: block carried in a NON-prompt nested field must still
+    # be found (robustness against Claude Code payload-shape variation).
+    nested_payload = {
+        "prompt": "no attachments here",
+        "messages": [{"role": "user", "content": [{"text": SELF_TEST_PROMPT}]}],
+    }
+    collected = [s for s in iter_strings(nested_payload) if "<document" in s]
+    if not collected or not DOCUMENT_PATTERN.search("\n\n".join(collected)):
+        sys.stderr.write(
+            "[auto-archive-attachments] self-test FAIL: nested-field document not collected\n"
+        )
+        return 1
+
     print("[auto-archive-attachments] self-test OK")
     return 0
 
@@ -163,16 +198,39 @@ def main() -> int:
     except Exception:
         return 0
 
-    prompt = payload.get("prompt") or ""
-    if not isinstance(prompt, str) or "<document" not in prompt:
-        return 0
-
     repo_root = pathlib.Path(
         os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     ).resolve()
 
+    # Собираем текст из ВСЕХ строковых полей payload (не только `prompt`): разные
+    # версии Claude Code кладут вложения в разные места. Берём только строки,
+    # содержащие маркер `<document`, дедупим — иначе один блок в двух полях
+    # заархивировался бы дважды.
+    seen: set[str] = set()
+    parts: list[str] = []
+    for s in iter_strings(payload):
+        if "<document" in s and s not in seen:
+            seen.add(s)
+            parts.append(s)
+
+    # Диагностика (AUTO_ARCHIVE_DEBUG=1): фиксируем, какие поля payload реально
+    # пришли и содержали ли блоки — чтобы в следующий раз не гадать о причине пропуска.
+    if os.environ.get("AUTO_ARCHIVE_DEBUG"):
+        try:
+            top_keys = sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
+            (repo_root / ".auto-archive-debug.log").open("a", encoding="utf-8").write(
+                f"{datetime.datetime.now().isoformat()} keys={top_keys} "
+                f"doc_fields={len(parts)} has_document_marker={any('<document' in s for s in iter_strings(payload))}\n"
+            )
+        except Exception:
+            pass
+
+    if not parts:
+        return 0
+    combined = "\n\n".join(parts)
+
     try:
-        saved = archive_documents(prompt, repo_root)
+        saved = archive_documents(combined, repo_root)
     except Exception as exc:
         # Don't block prompt on any internal error.
         sys.stderr.write(f"[auto-archive-attachments] error: {exc}\n")
