@@ -32,6 +32,8 @@ related:
 | `execution.venue` | venues | ledger, observability, risk | `fob.execution.v1.ExecutionReport` | 7 d | hedge_flow_id |
 | `execution.reports` | venues (legacy mirror of `execution.venue`) | ledger | same as `execution.venue` | 7 d | intent_id |
 | `execution.groups` | matching | ledger, risk, order-flow, observability, market_data (CH `grouped_*` sink), backtest | `fob.matching.v1.ExecutionGroup` (F-09, ADR-033) | 7 d | parentOrderId |
+| `matching.clearing_trace` | matching | frontend-api (BFF), observability, ClickHouse (`clearing_trace` sink) | `ClearingTrace` (CE-такт: агенты/узлы/инварианты/PnL/заявки, ADR-059) | 30 d | batch_id |
+| `agents.state` | matching | analytics, observability | `fob.agent.v1.AgentState` (committed/in-flight, ADR-058) | 7 d | agent_id |
 
 ## External venues (F-11)
 

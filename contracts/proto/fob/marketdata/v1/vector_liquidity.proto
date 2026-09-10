@@ -66,6 +66,23 @@ message AssetBasis {
   google.protobuf.Timestamp created_at = 4;
 }
 
+// ADR-056 — базис узлов «валюта@площадка» (+ узлы собственной книги asset@__book__).
+// Заменяет AssetBasis в режиме CE-агентов. Ключ узла — "ASSET@VENUE" (формат
+// зафиксирован в ADR-056, чтобы BFF мог парсить); "__book__" = собственная книга.
+message NodeBasis {
+  message Node {
+    int32 index = 1;
+    string key = 2;       // "BTC@Binance" | "USDT@OKX" | "BTC@__book__"
+    string asset = 3;     // "BTC"
+    string venue = 4;     // "Binance" | "__book__"
+    bool is_book = 5;     // true ⇒ узел собственной книги (свободный, несёт марку μ)
+  }
+  string basis_id = 1;
+  repeated Node nodes = 2;
+  int32 num_nodes = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
 // Flow-сегмент: один столбец W (вектор активов) + границы/поток.
 message VectorFlowSegment {
   string segment_id = 1;
@@ -81,6 +98,25 @@ message VectorFlowSegment {
   fob.common.v1.Decimal q_max = 11;
   fob.common.v1.Decimal remaining_quantity = 12;
   google.protobuf.Timestamp source_timestamp = 13;
+  // ADR-052: нижняя граница знакового потока (x_min = −Q_bid) для двустороннего
+  // сегмента венью (academic). 0 ⇒ односторонний (0≤x≤q_max, F1/ADR-051).
+  fob.common.v1.Decimal q_min = 14;
+  // ADR-052 (academic двусторонний): anchor a = mid венью (линейный член цели),
+  // slope m = наклон кривой (P=diag(m)). Заполняются только в two-sided режиме.
+  fob.common.v1.Decimal anchor = 15;
+  fob.common.v1.Decimal slope = 16;
+  // ADR-053 safe-translator (диагностика; наклон уже свёрнут в slope). Additive,
+  // consumers могут игнорировать. Чтобы UI показывал ровно то, что клирится.
+  fob.common.v1.Decimal alpha_ext = 17;   // min_k D_k/|δ_k| (quote за bps, обе стороны)
+  fob.common.v1.Decimal alpha_t = 18;     // θ·ψ·α_ext (после haircut)
+  fob.common.v1.Decimal beta_t = 19;      // линейный наклон mid²/(10⁴·α_T) = mid·slope
+  fob.common.v1.Decimal theta = 20;       // safe-share (F05A_SAFE_SHARE, 0..1)
+  string translator_model = 21;           // "safe_vwap" | "log_endpoint"
+  // ADR-055 — привязка сегмента к агенту (ребру графа узлов). Заполняются только в
+  // режиме CE-агентов. anchor(15)=σ*, slope(16)=m уже используются.
+  string agent_id = 22;
+  fob.common.v1.Decimal dead_zone = 23;   // c, ‰ (мёртвая зона внутри кривой)
+  fob.common.v1.Decimal alpha = 24;       // α, глубина агента (тыс. USDT на ‰)
 }
 
 // Вход vector clearing: W/pH/dHL/q/D и source_map выводятся из segments.
