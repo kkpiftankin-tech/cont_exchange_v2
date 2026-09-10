@@ -158,6 +158,16 @@ if(BUILD_TESTING)
   target_compile_options(matching_ce_clearing_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_ce_clearing_test COMMAND matching_ce_clearing_test)
 
+  # F-05A CE — сборщик графа узлов из агентов (Срез 3, T-CEA-105). Header-only.
+  add_executable(matching_ce_assembler_test
+    tests/domain/ce_graph_assembler_test.cpp
+  )
+  target_include_directories(matching_ce_assembler_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(matching_ce_assembler_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_ce_assembler_test COMMAND matching_ce_assembler_test)
+
   add_executable(matching_br_to_fe_test
     tests/domain/br_to_fe_test.cpp
     src/domain/batch_result_to_fill_events.cpp
