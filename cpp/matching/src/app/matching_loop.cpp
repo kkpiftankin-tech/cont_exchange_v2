@@ -958,6 +958,35 @@ void MatchingLoop::on_ce_clearing_input(
        {"imbalance", std::to_string(res.max_imbalance)}});
   if (emitted > 0)
     producer_.produce("ce.position.delta", input.batch_id(), cex::common::to_bytes(batch));
+
+  // §A7: внешние заявки = потоки клиринга (QUOTE-ноги) → execution.intents.
+  // Сторона/объём/цена целиком из клиринга (НЕ отдельный NOP-хедж). intent_id
+  // детерминирован (batch|ce|asset@venue) → идемпотентно у venues/ledger.
+  const domain::CeOrders orders = domain::ProjectOrders(graph, res, ref_price);
+  int intents_emitted = 0;
+  for (const auto& o : orders.venue_orders) {
+    fob::execution::v1::ExecutionIntent it;
+    it.set_intent_id(input.batch_id() + "|ce|" + o.asset + "@" + o.venue);
+    it.set_batch_id(input.batch_id());
+    it.set_reason("ce_agent_clearing");
+    it.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+    it.set_venue(o.venue);
+    auto* inst = it.mutable_instrument();
+    inst->set_symbol(o.asset + "/" + cfg.numeraire);
+    inst->set_base(o.asset);
+    inst->set_quote(cfg.numeraire);
+    it.set_venue_symbol(o.asset + "/" + cfg.numeraire);
+    it.set_side(o.side == "SELL" ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+    *it.mutable_target_qty() = to_dec(o.qty);
+    *it.mutable_limit_price() = to_dec(o.price);
+    if (producer_.produce("execution.intents", it.intent_id(), cex::common::to_bytes(it)))
+      ++intents_emitted;
+  }
+  if (intents_emitted > 0)
+    cex::common::log_json("INFO", "F-05A CE execution.intents (заявки из клиринга)",
+                          {{"batch_id", input.batch_id()},
+                           {"venue_orders", std::to_string(intents_emitted)},
+                           {"transfers", std::to_string(orders.transfers.size())}});
 }
 
 // F-05A (T-F05A-305 1a): решить векторный клиринг для входа и опубликовать
@@ -1027,7 +1056,8 @@ void MatchingLoop::on_vectorized_liquidity(
     // F-05A MONEY-PATH (ADR-049): за флагом F05A_MONEY_ENABLED (default off),
     // ТОЛЬКО converged (kProceedNoSurplus). Эмитим ExecutionIntent (F-12 hedge)
     // против исходных external-уровней — не user-проводки, не ledger напрямую.
-    if (outcome.surplus.action == domain::SurplusAction::kProceedNoSurplus &&
+    if (!ce_agents_mode &&
+        outcome.surplus.action == domain::SurplusAction::kProceedNoSurplus &&
         cex::common::Env::get_bool("F05A_MONEY_ENABLED", false)) {
       auto intents = BuildHedgeIntents(input, outcome);
       if (!intents.empty()) {
