@@ -48,6 +48,7 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showRaw, setShowRaw] = useState(true);
   const [showVwap, setShowVwap] = useState(true);
   const [showSafe, setShowSafe] = useState(true);
+  const [showCe, setShowCe] = useState(true);   // CE-кривая: зона комиссии/бездействия
   const [showFob, setShowFob] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -77,13 +78,16 @@ function LiquidityChart({ venue, symbol, ts }) {
   const vwapBid = showVwap ? (data.vwapBid || []) : [];
   const vwapAsk = showVwap ? (data.vwapAsk || []) : [];
   const safe = showSafe ? (data.safe || []) : [];   // safe-кривая в ОБЕИХ ориентациях
+  const ceCurve = showCe ? (data.ceCurve || []) : []; // CE f(σ): плоская зона |σ−σ*|≤c
+  const deadLow = Number(data.deadLow), deadHigh = Number(data.deadHigh);
+  const deadZonePm = Number(data.deadZonePm);
   const fobBid = showFob ? (data.fobBid || []) : [];
   const fobAsk = showFob ? (data.fobAsk || []) : [];
   const anchor = Number(data.anchor);
   const bestBid = Number(data.bestBid), bestAsk = Number(data.bestAsk);
   const eng = data.engine || null;
 
-  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...fobBid, ...fobAsk];
+  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceCurve, ...fobBid, ...fobAsk];
   if (!all.length) return <div className="vc-note">нет точек для графика</div>;
 
   // Масштабирование осей — это ОТРИСОВКА (не вычисление кривой).
@@ -141,6 +145,7 @@ function LiquidityChart({ venue, symbol, ts }) {
         <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} /> raw</label>
         <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)} /> VWAP</label>
         <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showSafe} onChange={(e) => setShowSafe(e.target.checked)} /> safe</label>
+        <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showCe} onChange={(e) => setShowCe(e.target.checked)} /> CE зона</label>
         <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showFob}
           disabled={!(data.fobBid || []).length && !(data.fobAsk || []).length}
           onChange={(e) => setShowFob(e.target.checked)} /> FOB</label>
@@ -150,12 +155,17 @@ function LiquidityChart({ venue, symbol, ts }) {
         <line x1={ml} y1={mt} x2={ml} y2={mt + ph} stroke="#2a3a49" />
         <line x1={ml} y1={mt + ph} x2={ml + pw} y2={mt + ph} stroke="#2a3a49" />
         {volGuide(0, '#3a4a5a', '2 4', 'z')}
+        {/* CE зона комиссии/бездействия: полоса |цена−anchor|≤c, где поток f=0 */}
+        {showCe && Number.isFinite(deadLow) && Number.isFinite(deadHigh) && (vp
+          ? <rect x={ml} y={Y(deadHigh)} width={pw} height={Math.abs(Y(deadLow) - Y(deadHigh))} fill="#e8c14a" opacity="0.12" />
+          : <rect x={X(deadLow)} y={mt} width={Math.abs(X(deadHigh) - X(deadLow))} height={ph} fill="#e8c14a" opacity="0.12" />)}
         {Number.isFinite(anchor) && priceGuide(anchor, '#3a6a8a', '3 3', 'anc')}
         {bestBid > 0 && priceGuide(bestBid, '#3f6b52', '1 4', 'bb')}
         {bestAsk > 0 && priceGuide(bestAsk, '#7a5a3a', '1 4', 'ba')}
         {fobBid.length > 0 && <polyline points={line(fobBid)} fill="none" stroke="#4fb0d8" strokeWidth="1.1" strokeDasharray="5 3" />}
         {fobAsk.length > 0 && <polyline points={line(fobAsk)} fill="none" stroke="#d88fb0" strokeWidth="1.1" strokeDasharray="5 3" />}
         {safe.length > 0 && <polyline points={line(safe)} fill="none" stroke="#c9a0ff" strokeWidth="2.4" />}
+        {ceCurve.length > 0 && <polyline points={line(ceCurve)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {vwapBid.length > 0 && <polyline points={line(vwapBid)} fill="none" stroke="#2f8f66" strokeWidth="2" />}
         {vwapAsk.length > 0 && <polyline points={line(vwapAsk)} fill="none" stroke="#c07a2f" strokeWidth="2" />}
         {rawBid.length > 0 && <polyline points={line(rawBid)} fill="none" stroke="#5fd08a" strokeWidth="1.2" strokeDasharray="4 3" />}
@@ -175,6 +185,7 @@ function LiquidityChart({ venue, symbol, ts }) {
         {vwapBid.length > 0 && <span className="vc-lg vc-lg-vwapsell">— VWAP продажа</span>}
         {vwapAsk.length > 0 && <span className="vc-lg vc-lg-vwapbuy">— VWAP покупка</span>}
         {safe.length > 0 && <span className="vc-lg vc-lg-safe">— safe translator P(q)=anchor+β_T·q</span>}
+        {ceCurve.length > 0 && <span className="vc-lg" style={{ color: '#e8c14a' }}>▨ CE зона комиссии/бездействия (|σ−σ*|≤c, c={fmtSig(deadZonePm)}‰)</span>}
         {(fobBid.length > 0 || fobAsk.length > 0) && <span className="vc-lg vc-lg-fob">- - FOB-кривая venue</span>}
         <span className="vc-lg vc-lg-anchor">- - anchor ({anchorMode}) {fmt(anchor)} · спред {Number(data.spreadBps).toFixed(2)} bps</span>
         {eng && <span className="vc-lg vc-lg-safe" title="то, что реально клирится (движок market_data)">движок: β_T={fmtSig(eng.betaT)} α_T={fmtSig(eng.alphaT)} [{eng.model}]</span>}

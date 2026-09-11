@@ -7041,6 +7041,40 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
   const fobBid = ladder(r.bid_q_grid, r.bid_p_of_q).map((x) => ({ q: -x.q, price: x.p }));
   const fobAsk = ladder(r.ask_q_grid, r.ask_p_of_q).map((x) => ({ q: x.q, price: x.p }));
 
+  // ── Новый CE-алгоритм (ADR-055/056): зона комиссии / бездействия ────────────
+  // Единая кривая агента f(σ)=α·sign(σ*−σ)·max(0,|σ*−σ|−c): в полосе |σ−σ*|≤c поток
+  // f=0 — агент не торгует («зона комиссии / бездействия»), вне полосы — линейный
+  // наклон β_T. c = taker_fee_pm + ½·spread_pm — та же формула, что в market_data
+  // BuildQuoteAgent (agent_builder.hpp), поэтому UI показывает ровно то, что клирится.
+  // taker_fee — из env CE_TAKER_FEE_BPS (по умолчанию 5 bps); half_spread — из книги.
+  const takerFeeBps = Number(process.env.CE_TAKER_FEE_BPS);
+  const takerFeePm = (Number.isFinite(takerFeeBps) ? takerFeeBps : 5) / 10;   // bps→‰
+  const halfSpreadPm = (bestBid > 0 && bestAsk > 0)
+    ? 0.5 * Math.abs(1000 * Math.log(bestAsk / bestBid)) : 0;                  // ‰
+  const deadZonePm = takerFeePm + halfSpreadPm;                               // c, ‰
+  const deadLow = anchor > 0 ? anchor * Math.exp(-deadZonePm / 1000) : null;  // нижняя граница, цена
+  const deadHigh = anchor > 0 ? anchor * Math.exp(+deadZonePm / 1000) : null; // верхняя граница, цена
+  // CE-кривая в тех же осях (signed q, price): продажа (q<0) идёт вниз от нижней
+  // границы полосы, покупка (q>0) — вверх от верхней; между ними при q=0 —
+  // вертикальный отрезок [deadLow, deadHigh] (зона бездействия, f=0).
+  const ceCurve = [];
+  if (betaT && betaT > 0 && anchor > 0 && (maxBuy + maxSell) > 0) {
+    const deadBandAbs = anchor * (Math.exp(deadZonePm / 1000) - 1);  // ½-ширина полосы, цена
+    const NS = 30, NB = 30;
+    for (let i = NS; i >= 1; i--) {                 // сторона продажи q<0 (дальняя→ближняя)
+      const q = -maxSell * (i / NS);
+      const price = anchor - deadBandAbs + betaT * q;
+      if (price > 0) ceCurve.push({ q, price });
+    }
+    ceCurve.push({ q: 0, price: deadLow });         // вертикаль зоны бездействия
+    ceCurve.push({ q: 0, price: deadHigh });
+    for (let i = 1; i <= NB; i++) {                 // сторона покупки q>0
+      const q = maxBuy * (i / NB);
+      const price = anchor + deadBandAbs + betaT * q;
+      if (price > 0) ceCurve.push({ q, price });
+    }
+  }
+
   return {
     venue: v, symbol: s, event_time_ms: r.event_time_ms,
     anchor, anchorMode, mid: midPx, bestBid, bestAsk,
@@ -7055,6 +7089,8 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     vwapBid: bidPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     vwapAsk: askPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     safe, fobBid, fobAsk,
+    // CE-алгоритм: зона комиссии/бездействия (ADR-055/056)
+    deadZonePm, takerFeePm, halfSpreadPm, deadLow, deadHigh, ceCurve,
     engine,   // { alphaExt, alphaT, betaT, theta, model, slope, mid } — то, что клирится
   };
 }
