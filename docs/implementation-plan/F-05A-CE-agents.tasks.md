@@ -43,6 +43,42 @@
 
 ---
 
+## Прогресс реализации (2026-09-11) — живьём на dev, `CE_AGENTS_ENABLED=1`
+
+Три претензии владельца («позиция не видна / заявки не ограничены новым алгоритмом /
+кривая без зоны комиссии») закрыты и проверены на dev; поправка 3 (план≠факт) закоммичена.
+
+**Сделано и проверено:**
+
+- **Поправка 3 (план≠факт, ADR-057) — коммит `8ecc6f49`.** `ce.position.delta` (ПЛАН) копится
+  в `ledger` `ce_committed_` (in-flight), НЕ в house. house/venue двигают только
+  `execution.reports` (ФАКТ). Стоячая позиция (`GetExchangeBalances`/`ComputeExchangeNopLocked`) =
+  только ФАКТ → двойной счёт устранён. Снапшот Clearing (`GetExchangeNopHistory`) = факт + committed,
+  шаг = Δ плана. Декремент committed на филле (BUY −qty / SELL +qty) — обнуляется в такте.
+  Проверка: BTC `own=10` (сид, без плана), `venue`=факт от филлов, `committed=0` стабильно,
+  `snapshot_after == treasury_nop`. Файлы: [ledger_uc.hpp](../../cpp/ledger/src/app/ledger_uc.hpp),
+  [ledger_uc.cpp](../../cpp/ledger/src/app/ledger_uc.cpp). Расширяет T-CEA-201 (без встречной ноги
+  house; committed вместо house-факта).
+- **Позиция видна (претензия 1).** treasury показывает `venue`=исполненная CE-позиция.
+- **Заявки только из нового алгоритма (претензия 2).** Старый F-18/net-hedge путь заявок погашен
+  (`CE_AGENTS_ENABLED`), все venue-заявки — из §A7 `ProjectOrders` (intent_id `…|ce|asset@venue`).
+  Мёртвая зона `c` ограничивает эмиссию: при `|σ−σ*|≤c` поток `f=0` (тихие такты `deltas:0`).
+  Позиция ограничена/осциллирует (BTC ~29…60), не растёт безгранично.
+- **Зона комиссии/бездействия на кривой (претензия 3) — коммит `a8fc8b57`.** BFF
+  `/vector-clearing/curve` считает `c=taker_fee_pm+½·spread_pm` (та же формула, что
+  `market_data` BuildQuoteAgent) → `deadZonePm/deadLow/deadHigh + ceCurve`; страница
+  рисует полосу зоны + CE-полилинию. Соответствует T-CEA-403 (панель кривой агента, частично).
+
+**Демо-рычаг:** `SIM_VENUE_BIAS_PM_okx=20` (env, только dev, коммит `b152a150`) держит
+дивергенцию > c, чтобы заявки шли и была видимая позиция. Убрать после демо.
+
+**Отложено (не закрыто):** T-CEA-202 (PG `node_balances`/`agent_state`), T-CEA-203/204
+(risk `Z_a`/committed в PG вместо cooldown), T-CEA-302 (три зоны точности заявки),
+Этап 4 (clearing_trace CH+топик), полная сверка committed↔`execution.venue` (A8),
+исполнение transfer-ног.
+
+---
+
 ## Этап 0 — реальный остаток (не блокирует ничего, ~1–2 дня)
 
 **Итог аудита (2026-09-10):** премисы T-CEA-001/002 про «502» оказались устаревшими
