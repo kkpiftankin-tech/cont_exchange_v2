@@ -75,6 +75,22 @@ int main() {
   std::printf("info: per-leg Σqty=%.10g, aggregate/marka=%.10g, разница=%.3g BTC\n",
               sum_qty, q_aggregate, sum_qty - q_aggregate);
 
+  // §A7: заявки = потоки клиринга. Ожидаем SELL BTC@O, BUY BTC@K, перевод BTC K→O.
+  CeOrders ord = ProjectOrders(in, r, ref);
+  close(static_cast<double>(ord.venue_orders.size()), 2, 0, "venue_orders (T_O sell, T_K buy)");
+  close(static_cast<double>(ord.transfers.size()), 1, 0, "transfers (A_BTC_OK)");
+  for (const auto& o : ord.venue_orders) {
+    if (o.venue == "O") { close(o.qty, 0.00211339, 1e-6, "SELL BTC@O qty"); if (o.side != "SELL") { std::printf("FAIL: BTC@O должна быть SELL\n"); ++g_fail; } }
+    if (o.venue == "K") { close(o.qty, 0.00175189, 1e-6, "BUY BTC@K qty");  if (o.side != "BUY")  { std::printf("FAIL: BTC@K должна быть BUY\n"); ++g_fail; } }
+  }
+  if (!ord.transfers.empty()) {
+    const auto& t = ord.transfers[0];
+    if (!(t.asset == "BTC" && t.from_venue == "K" && t.to_venue == "O")) {
+      std::printf("FAIL: перевод должен быть BTC K→O (got %s %s→%s)\n", t.asset.c_str(), t.from_venue.c_str(), t.to_venue.c_str()); ++g_fail;
+    }
+    close(t.qty, 0.00175136, 1e-6, "transfer BTC qty");
+  }
+
   if (g_fail == 0) { std::printf("ce_position_projection_test: OK\n"); return 0; }
   std::printf("ce_position_projection_test: %d FAIL\n", g_fail);
   return 1;

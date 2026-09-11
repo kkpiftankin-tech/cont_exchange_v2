@@ -59,4 +59,71 @@ inline std::vector<CeAssetVenueDelta> ProjectPositionQuantity(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// §A7: внешние заявки = потоки агентов клиринга (НЕ отдельный NOP-хедж).
+//   QUOTE (a@v→num@v): f>0 ⇒ биржа ПРОДАЛА a на v ⇒ SELL |f|/P_node; f<0 ⇒ BUY.
+//   TRANSFER (a@vi→a@vj): f>0 ⇒ перевод a с vi на vj, объём |f|/P_node(a@vi).
+//   STOCK: внешней заявки нет (внутренняя проводка).
+// Объём/сторона целиком из клиринга; тип заявки (пассив/IOC/маркет) — по зоне при эмиссии.
+// ---------------------------------------------------------------------------
+struct CeVenueOrder {
+  std::string asset;
+  std::string venue;
+  std::string side;      // "SELL" | "BUY"
+  double qty{0.0};       // единиц актива = |f|/P_node
+  double price{0.0};     // P_node (цена узла из клиринга)
+};
+struct CeTransfer {
+  std::string asset;
+  std::string from_venue;
+  std::string to_venue;
+  double qty{0.0};       // единиц актива = |f|/P_node(источник)
+};
+struct CeOrders {
+  std::vector<CeVenueOrder> venue_orders;  // QUOTE-ноги
+  std::vector<CeTransfer> transfers;       // TRANSFER-ноги
+};
+
+inline CeOrders ProjectOrders(const CeClearInput& in, const CeClearResult& r,
+                              const std::map<std::string, double>& ref_price,
+                              double eps = 1e-12) {
+  CeOrders out;
+  if (static_cast<int>(in.node_meta.size()) != in.num_nodes) return out;
+  auto node_price = [&](int node) -> double {
+    const CeNodeMeta& m = in.node_meta[node];
+    auto rp = ref_price.find(m.asset);
+    if (rp == ref_price.end() || rp->second <= 0.0) return 0.0;
+    return rp->second * std::exp(r.x[node] / 1000.0);
+  };
+  for (std::size_t i = 0; i < in.edges.size(); ++i) {
+    const CeEdge& e = in.edges[i];
+    const double f = r.f[i];
+    if (std::fabs(f) < eps) continue;
+    if (e.leg == CeLeg::kQuote) {
+      const CeNodeMeta& m = in.node_meta[e.u];   // a@v (базовый узел quote-ребра)
+      const double p = node_price(e.u);
+      if (!(p > 0.0)) continue;
+      CeVenueOrder o;
+      o.asset = m.asset; o.venue = m.venue;
+      o.side = (f > 0.0) ? "SELL" : "BUY";       // f>0 ⇒ продали a на v
+      o.qty = std::fabs(f) * 1000.0 / p;
+      o.price = p;
+      out.venue_orders.push_back(o);
+    } else if (e.leg == CeLeg::kTransfer) {
+      const CeNodeMeta& mu = in.node_meta[e.u];  // a@vi
+      const CeNodeMeta& mv = in.node_meta[e.v];  // a@vj
+      const double p = node_price(e.u);
+      if (!(p > 0.0)) continue;
+      CeTransfer t;
+      t.asset = mu.asset;
+      // f>0: из первого узла во второй (vi→vj); f<0: наоборот
+      t.from_venue = (f > 0.0) ? mu.venue : mv.venue;
+      t.to_venue = (f > 0.0) ? mv.venue : mu.venue;
+      t.qty = std::fabs(f) * 1000.0 / p;
+      out.transfers.push_back(t);
+    }
+  }
+  return out;
+}
+
 }  // namespace cex::matching::domain
