@@ -232,6 +232,10 @@ class LedgerUseCases {
   VenueMap venue_balances_; // venue -> currency -> balance
   std::deque<BatchNopSnap> nop_history_; // F-18 §11: последние N клирингов (old/Δ/new)
   std::unordered_set<std::string> pos_delta_applied_; // F-18 §11: idempotency по batch_id
+  // ADR-057 §money-path (поправка 3): ce.position.delta — это ПЛАН, копится в committed
+  // (in-flight), НЕ в house-факт. house двигают только подтверждения (execution.venue).
+  // Стоячая позиция (GetExchangeBalances) = факт; снапшот Clearing = факт + committed (план).
+  std::map<std::string, cex::common::Decimal> ce_committed_;
   HedgePnlMap hedge_pnl_records_; // venue -> list of hedge records
   std::unordered_map<std::string, cex::common::Decimal> hedge_pnl_summary_; // venue:currency -> total PnL
   std::unordered_map<std::string, fob::execution::v1::ExecutionIntent> execution_intents_; // intent_id -> plan

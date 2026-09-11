@@ -712,23 +712,29 @@ void LedgerUseCases::ApplyPositionDelta(
   if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id
   pos_delta_applied_.insert(batch_id);
 
-  const auto nop_old = ComputeExchangeNopLocked();
-  // Δpos от вектор-клиринга применяется к house-остаткам (currency vector биржи).
-  for (const auto& [asset, d] : deltas) {
-    auto& bal = ensure_balance_locked(kHouseAccountId, asset);
-    bal.available = Decimal::add(bal.available, d);
-  }
-  const auto nop_new = ComputeExchangeNopLocked();
+  // ADR-057 поправка 3: ce.position.delta — ПЛАН. Копится в ce_committed_ (in-flight),
+  // НЕ в house-факт. house двигают только подтверждения (execution.venue). Стоячая позиция
+  // (GetExchangeBalances/NOP) = факт (без плана) → нет двойного счёта. Снапшот Clearing
+  // показывает позицию = факт + committed(план): before(старый committed) → after(новый).
+  const auto nop_fact = ComputeExchangeNopLocked();  // house+venue−client (без плана)
+  const std::map<std::string, Decimal> committed_before = ce_committed_;
+  for (const auto& [asset, d] : deltas)
+    ce_committed_[asset] = Decimal::add(ce_committed_[asset], d);
 
+  const auto committed_of = [](const std::map<std::string, Decimal>& m,
+                               const std::string& c) {
+    auto it = m.find(c);
+    return it != m.end() ? it->second : Decimal::zero();
+  };
   BatchNopSnap snap;
   snap.batch_id = batch_id;
   snap.ts_ms = ts_ms;
-  for (const auto& [ccy, v] : nop_old) {
-    auto it = nop_new.find(ccy);
-    snap.nop[ccy] = {v, it != nop_new.end() ? it->second : Decimal::zero()};
-  }
-  for (const auto& [ccy, v] : nop_new)
-    if (snap.nop.find(ccy) == snap.nop.end()) snap.nop[ccy] = {Decimal::zero(), v};
+  for (const auto& [ccy, fact] : nop_fact)
+    snap.nop[ccy] = {Decimal::add(fact, committed_of(committed_before, ccy)),
+                     Decimal::add(fact, committed_of(ce_committed_, ccy))};
+  for (const auto& [ccy, cv] : ce_committed_)
+    if (snap.nop.find(ccy) == snap.nop.end())
+      snap.nop[ccy] = {committed_of(committed_before, ccy), cv};
   nop_history_.push_back(std::move(snap));
   while (nop_history_.size() > 50) nop_history_.pop_front();
   if (pos_delta_applied_.size() > 1000) pos_delta_applied_.clear();
@@ -1741,6 +1747,16 @@ bool LedgerUseCases::apply_execution_report_locked(
       }
       quote.available = Decimal::sub(quote.total, quote.reserved);
       quote.updated_at = std::chrono::system_clock::now();
+    }
+
+    // ADR-057 поправка 3: план реализован в факт (venue) → снимаем из committed.
+    // Позиция по base изменилась на +delta (BUY) / −delta (SELL); committed имел эту же
+    // величину (план) → committed -= signed_pos, чтобы факт+committed не двоился.
+    if (!base_ccy.empty()) {
+      const Decimal signed_pos = (intent.side() == fob::common::v1::SIDE_BUY)
+                                     ? delta_qty
+                                     : Decimal::sub(Decimal::zero(), delta_qty);
+      ce_committed_[base_ccy] = Decimal::sub(ce_committed_[base_ccy], signed_pos);
     }
 
     // Fee processing: only delta fee (если total fee выросла с last report).
