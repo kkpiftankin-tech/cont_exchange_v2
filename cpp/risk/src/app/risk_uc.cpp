@@ -1112,6 +1112,13 @@ fob::risk::v1::GetExchangeNOPResponse RiskUseCases::GetExchangeNOP(
     const auto assets = cex::common::Decimal::from_proto(b.assets_total());
     const auto client = cex::common::Decimal::from_proto(b.client_liability());
     const auto nop = cex::common::Decimal::sub(assets, client);
+    // ADR-057: Z_a = Σqty + in_transit + committed − target. target ≡ client_liability
+    // (обязательства = целевой запас), поэтому Z_a = (assets−client) + in_flight + in_transit
+    // = nop + committed (+ переводы). committed=0 ⇒ Z_a ≡ nop (частный случай NOP, §решение).
+    const auto committed = cex::common::Decimal::from_proto(b.in_flight());
+    const auto in_transit = cex::common::Decimal::zero();  // TODO: transfer-ноги (Этап 3)
+    const auto z = cex::common::Decimal::add(
+        cex::common::Decimal::add(nop, committed), in_transit);
 
     auto* it = resp.add_items();
     it->set_currency(ccy);
@@ -1119,21 +1126,32 @@ fob::risk::v1::GetExchangeNOPResponse RiskUseCases::GetExchangeNOP(
     *it->mutable_nop() = nop.to_proto();
     *it->mutable_assets_total() = assets.to_proto();
     *it->mutable_client_liability() = client.to_proto();
+    // ADR-057 уровень актива: Z_a и его слагаемые (target=client, in_flight=committed).
+    *it->mutable_z() = z.to_proto();
+    *it->mutable_target() = client.to_proto();
+    *it->mutable_in_flight() = committed.to_proto();
+    *it->mutable_in_transit() = in_transit.to_proto();
     if (is_num) { it->set_hedge_armed(false); continue; }
 
-    // θ из env; numeraire исключён (выше). Размер хеджа по режиму.
+    // Лимит: Z_limit из env (ADR-057 агрегатный лимит), fallback на θ (ADR-054, обратная
+    // совместимость). Хедж вооружается по |Z_a|, размер по режиму FLATTEN/TO_BAND.
+    const auto z_limit_env = ParseDecimalString(
+        cex::common::Env::get_string("CE_Z_LIMIT_" + ccy, ""));
     const auto theta = ParseDecimalString(
         cex::common::Env::get_string("CE_HEDGE_THRESHOLD_" + ccy, ""));
+    const bool has_zlim = cex::common::Decimal::cmp(z_limit_env, zero) > 0;
+    const auto limit = has_zlim ? z_limit_env : theta;
     *it->mutable_threshold() = theta.to_proto();
-    const bool has_theta = cex::common::Decimal::cmp(theta, zero) > 0;
-    const auto anop = absd(nop);
-    const bool armed = has_theta && cex::common::Decimal::cmp(anop, theta) > 0;
+    *it->mutable_z_limit() = limit.to_proto();
+    const bool has_limit = cex::common::Decimal::cmp(limit, zero) > 0;
+    const auto az = absd(z);
+    const bool armed = has_limit && cex::common::Decimal::cmp(az, limit) > 0;
     it->set_hedge_armed(armed);
     if (armed) {
       cex::common::Decimal qty = (mode == "TO_BAND")
-          ? cex::common::Decimal::sub(anop, theta) : anop;
+          ? cex::common::Decimal::sub(az, limit) : az;
       *it->mutable_hedge_qty() = qty.to_proto();
-      it->set_hedge_side(cex::common::Decimal::cmp(nop, zero) > 0 ? "SELL" : "BUY");
+      it->set_hedge_side(cex::common::Decimal::cmp(z, zero) > 0 ? "SELL" : "BUY");
     }
   }
   return resp;

@@ -647,6 +647,16 @@ fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances
     }
   }
 
+  // ADR-057/058: committed (in-flight план) по активу — чтобы risk посчитал
+  // Z_a = (assets − client) + in_flight. Добавляем валюты, которые есть только в
+  // committed (иначе строка не появилась бы). committed=0 ⇒ Z_a ≡ nop (частный случай).
+  const auto committed_of = [this](const std::string& c) {
+    auto it = ce_committed_.find(c);
+    return it != ce_committed_.end() ? it->second : Decimal::zero();
+  };
+  for (const auto& [ccy, cv] : ce_committed_)
+    if (keep(ccy) && acc.find(ccy) == acc.end()) acc[ccy];  // строка с нулевыми активами
+
   for (const auto& [ccy, a] : acc) {
     auto* out = resp.add_balances();
     out->set_currency(ccy);
@@ -654,6 +664,7 @@ fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances
     *out->mutable_venue_total() = a.venue.to_proto();
     *out->mutable_client_liability() = a.client.to_proto();
     *out->mutable_assets_total() = Decimal::add(a.own, a.venue).to_proto();
+    *out->mutable_in_flight() = committed_of(ccy).to_proto();
   }
   return resp;
 }

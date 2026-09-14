@@ -6867,6 +6867,10 @@ async function fetchCeExchange() {
       own: decToNum(b.own_total), venue: decToNum(b.venue_total),
       client: decToNum(b.client_liability), assets: decToNum(b.assets_total),
       nop: decToNum(i.nop),
+      // ADR-057 уровень актива: Z_a = nop + committed(in_flight) + in_transit − 0 (target=client уже в nop).
+      z: decToNum(i.z), target: decToNum(i.target),
+      inFlight: decToNum(i.in_flight), inTransit: decToNum(i.in_transit),
+      zLimit: i.is_numeraire ? null : decToNum(i.z_limit),
       threshold: i.is_numeraire ? null : decToNum(i.threshold),
       hedgeArmed: !!i.hedge_armed,
       hedgeSide: i.hedge_side || "",
@@ -6889,7 +6893,7 @@ async function handleCeTreasuryV1(req, res, pathname, query) {
       numeraire: x.numeraire, mode: x.mode, netHedgeEnabled: x.netHedgeEnabled,
       engineWired: x.engineWired,
       note: x.engineWired
-        ? "Позиция биржи = NOP (Net Open Position) по валюте: активы (капитал + venue-остатки) − клиентские обязательства. Балансы владеет ledger (GetExchangeBalances), NOP и размер хеджа считает risk (GetExchangeNOP). numeraire (" + x.numeraire + ") исключён. Хедж при |NOP|>θ (флаг CE_NET_HEDGE_ENABLED)."
+        ? "Позиция биржи по валюте (ADR-057, три уровня): Z_a = Σqty(активы) + in_transit + committed(in_flight) − target. target ≡ клиентские обязательства, поэтому Z_a = nop + committed + in_transit; при committed=0 Z_a ≡ nop (частный случай ADR-054). Балансы у ledger (GetExchangeBalances += in_flight), Z_a и размер хеджа считает risk (GetExchangeNOP). numeraire (" + x.numeraire + ") исключён. Хедж при |Z_a|>Z_limit (env CE_Z_LIMIT_<ccy>, fallback θ; флаг CE_NET_HEDGE_ENABLED)."
         : "Нет данных от ledger/risk (сервисы недоступны или не подняты).",
       rows: x.rows, armedCount: armed.length, intents,
       source: "ledger+risk",

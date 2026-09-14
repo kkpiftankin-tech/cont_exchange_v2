@@ -71,7 +71,7 @@ const CeTreasuryLive = () => {
             <div className="ct-desc">
               F-18 · ADR-054 §10. «Позиция биржи» = <code>NOP</code> (Net Open Position) по валюте
               = <code>активы − обязательства</code>. Балансы владеет <b>ledger</b>, NOP и размер хеджа считает <b>risk</b>.
-              numeraire (<code>{N}</code>) исключён. Хедж при <code>|NOP| &gt; θ</code>: излишек→SELL, дефицит→BUY.
+              numeraire (<code>{N}</code>) исключён. Хедж при <code>|Z_a| &gt; Z_limit</code>: излишек→SELL, дефицит→BUY.
             </div>
           </div>
           <div className="ct-summary">
@@ -96,7 +96,7 @@ const CeTreasuryLive = () => {
             <span className="ct-meta">balance vector (ledger)</span>
           </div>
           <div className="ct-tile">
-            <span className="ct-lab">Хедж-сигналов · |NOP| &gt; θ</span>
+            <span className="ct-lab">Хедж-сигналов · |Z_a| &gt; Z_limit</span>
             <span className={`ct-val ${armedCount ? 'ct-neg' : ''}`}>{armedCount}</span>
             <span className="ct-meta">решение risk</span>
           </div>
@@ -119,12 +119,15 @@ const CeTreasuryLive = () => {
                 <th className="r">Обязательства</th>
                 <th className="r">Активы</th>
                 <th className="r ct-after">NOP</th>
-                <th className="r">θ порог</th>
+                <th className="r" title="committed: in-flight план (ADR-058), ещё не подтверждён execution.reports">committed</th>
+                <th className="r" title="in_transit: переводы актива между venue в пути">в пути</th>
+                <th className="r ct-after" title="Z_a = Σqty + in_transit + committed − target (ADR-057)">Z_a</th>
+                <th className="r" title="Z_limit (env CE_Z_LIMIT_<ccy>), fallback θ">лимит</th>
                 <th className="r">Хедж → внешняя биржа</th>
               </tr>
             </thead>
             <tbody>
-              {rows.length === 0 && <tr><td colSpan={8} className="ct-empty">нет данных от ledger/risk</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={11} className="ct-empty">нет данных от ledger/risk</td></tr>}
               {rows.map((r) => (
                 <tr key={r.currency} className={`${r.hedgeArmed ? 'ct-armed' : ''} ${r.isNumeraire ? 'ct-num' : ''}`}>
                   <td className="ct-asset-cell">
@@ -136,7 +139,10 @@ const CeTreasuryLive = () => {
                   <td className="r ct-mono">{fmtNum(r.client)}</td>
                   <td className="r ct-mono">{fmtNum(r.assets)}</td>
                   <td className={`r ct-mono ct-after ${r.isNumeraire ? '' : signCls(r.nop)}`}><b>{fmtNum(r.nop)}</b></td>
-                  <td className="r ct-mono">{r.isNumeraire ? '∞' : (r.threshold == null ? '∞' : fmtNum(r.threshold))}</td>
+                  <td className={`r ct-mono ${r.isNumeraire ? '' : signCls(r.inFlight)}`}>{fmtNum(r.inFlight)}</td>
+                  <td className="r ct-mono">{fmtNum(r.inTransit)}</td>
+                  <td className={`r ct-mono ct-after ${r.isNumeraire ? '' : signCls(r.z)}`}><b>{fmtNum(r.z)}</b></td>
+                  <td className="r ct-mono">{r.isNumeraire ? '∞' : (r.zLimit == null ? '∞' : fmtNum(r.zLimit))}</td>
                   <td className="r">
                     {r.hedgeArmed
                       ? <span className="ct-hedgecell"><span className={`ct-side ct-${r.hedgeSide}`}>{r.hedgeSide}</span> {fmtNum(r.hedgeQty)} <span className="ct-hinstr">{r.currency}/{N}</span></span>
@@ -149,16 +155,16 @@ const CeTreasuryLive = () => {
         </div>
 
         <div className="ct-legend">
-          <span><b>NOP</b> = активы (капитал + venue) − обязательства перед клиентами</span>
-          <span><b className="ct-pos">излишек</b> (NOP&gt;0) → хедж <b>SELL</b>; <b className="ct-neg">дефицит</b> (NOP&lt;0) → <b>BUY</b></span>
-          <span>хедж срабатывает при <b>|NOP| &gt; θ</b>; numeraire не хеджируется</span>
+          <span><b>NOP</b> = активы (капитал + venue) − обязательства; <b>Z_a</b> = NOP + committed + in_transit (ADR-057; при committed=0 Z_a≡NOP)</span>
+          <span><b className="ct-pos">излишек</b> (Z_a&gt;0) → хедж <b>SELL</b>; <b className="ct-neg">дефицит</b> (Z_a&lt;0) → <b>BUY</b></span>
+          <span>хедж срабатывает при <b>|Z_a| &gt; Z_limit</b> (env CE_Z_LIMIT_&lt;ccy&gt;, fallback θ); numeraire не хеджируется</span>
         </div>
 
         {/* Хедж-интенты */}
         <div className="ct-section-h">Хедж-интенты <span className="ct-k">risk → execution router (при CE_NET_HEDGE_ENABLED)</span></div>
         <div className="ct-intents">
           {intents.length === 0
-            ? <div className="ct-intents-empty">нет валют с |NOP| &gt; θ — хедж не требуется</div>
+            ? <div className="ct-intents-empty">нет валют с |Z_a| &gt; Z_limit — хедж не требуется</div>
             : intents.map((it, i) => (
               <div className="ct-intent" key={i}>
                 <span className={`ct-side ct-${it.side}`}>{it.side}</span>
