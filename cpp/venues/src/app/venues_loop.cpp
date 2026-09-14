@@ -52,6 +52,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <future>
 #include <thread>
 #include <cctype>
 #include <chrono>
@@ -75,6 +76,10 @@
 #include "infra/dex_amm_rpc_adapter.hpp"
 #include "infra/simulated_venue_adapter.hpp"
 #include "infra/venue_sim_adapter.hpp"
+
+#if defined(CEX_VENUES_HAS_LIBPQXX)
+#include <pqxx/pqxx>  // runtime-порог устаревания из f05a_clearing_config (вкладка Площадки)
+#endif
 
 namespace cex::venues::app {
 
@@ -424,6 +429,41 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
 
   default_subscription_ = make_default_subscription();
   default_snapshot_request_ = make_default_snapshot_request();
+
+  // Список инструментов sim: одна кривая на (venue, instrument). Дефолт —
+  // мульти-пары (убирает единственный захардкоженный BTC/USDT). Env override.
+  {
+    const std::string csv = cex::common::Env::get_string(
+        "VENUES_SIM_INSTRUMENTS", "BTC/USDT,ETH/USDT,SOL/USDT");
+    std::string cur;
+    std::vector<std::string> syms;
+    for (const char c : csv) {
+      if (c == ',') {
+        if (!cur.empty()) syms.push_back(cur);
+        cur.clear();
+      } else if (!std::isspace(static_cast<unsigned char>(c))) {
+        cur += c;
+      }
+    }
+    if (!cur.empty()) syms.push_back(cur);
+    for (const auto& s : syms) {
+      fob::common::v1::Instrument inst;
+      inst.set_symbol(s);
+      const auto slash = s.find('/');
+      if (slash != std::string::npos) {
+        inst.set_base(s.substr(0, slash));
+        inst.set_quote(s.substr(slash + 1));
+      }
+      sim_instruments_.push_back(inst);
+    }
+    if (sim_instruments_.empty()) {
+      sim_instruments_.push_back(make_default_instrument());
+    }
+    cex::common::log_json("INFO", "Venues sim instruments configured",
+                          {{"count", std::to_string(sim_instruments_.size())},
+                           {"instruments", csv}});
+  }
+
   history_capacity_ = static_cast<std::size_t>(std::max(
       1, cex::common::Env::get_int("VENUES_API_HISTORY_CAPACITY", 200)));
 
@@ -706,6 +746,11 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       cfg->simulate_orders = env_bool(
           "CEX_SIMULATE_ORDERS",
           env_bool("VENUES_SIMULATE_ORDERS", true));
+      // Реалистичная симуляция исполнения по ленте реальных публичных сделок.
+      cfg->sim_match_real_trades =
+          env_bool("VENUES_SIM_MATCH_REAL_TRADES", false);
+      cfg->sim_trade_window_ms = static_cast<uint32_t>(
+          std::max(500, cex::common::Env::get_int("VENUES_SIM_TRADE_WINDOW_MS", 10000)));
       cfg->circuit_breaker_enabled = env_bool(
           "CIRCUIT_BREAKER_ENABLED", cfg->circuit_breaker_enabled);
       cfg->circuit_breaker_errors = static_cast<uint32_t>(
@@ -745,6 +790,25 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "COINBASE_REST_BASE_URL", "https://api.exchange.coinbase.com");
     apply_real_cex_defaults(&coinbase_cfg);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(coinbase_cfg));
+
+    // Kraken (REST /0/public/Depth; символ XBT для BTC).
+    infra::CexWsRestAdapterConfig kraken_cfg;
+    kraken_cfg.venue_id = cex::common::Env::get_string("KRAKEN_VENUE_ID", "kraken");
+    kraken_cfg.ws_url = cex::common::Env::get_string("KRAKEN_WS_URL", "wss://ws.kraken.com");
+    kraken_cfg.rest_base_url =
+        cex::common::Env::get_string("KRAKEN_REST_BASE_URL", "https://api.kraken.com");
+    apply_real_cex_defaults(&kraken_cfg);
+    adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(kraken_cfg));
+
+    // OKX (REST /api/v5/market/books; instId BASE-QUOTE).
+    infra::CexWsRestAdapterConfig okx_cfg;
+    okx_cfg.venue_id = cex::common::Env::get_string("OKX_VENUE_ID", "okx");
+    okx_cfg.ws_url =
+        cex::common::Env::get_string("OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public");
+    okx_cfg.rest_base_url =
+        cex::common::Env::get_string("OKX_REST_BASE_URL", "https://www.okx.com");
+    apply_real_cex_defaults(&okx_cfg);
+    adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(okx_cfg));
 
     infra::DexAmmRpcAdapterConfig uniswap_cfg;
     uniswap_cfg.venue_id = cex::common::Env::get_string("UNISWAP_VENUE_ID", "uniswap_v3");
@@ -1255,6 +1319,11 @@ std::vector<fob::orders::v1::SyntheticFlowOrder> VenuesLoop::GetVenueSynthetics(
 void VenuesLoop::start() {
   running_.store(true);
   connect_and_subscribe_defaults();
+  // Per-venue мьютексы для параллельного REST-опроса. adapters_ финализирован
+  // выше; заполняем один раз до старта потоков (дальше — только чтение).
+  for (const auto& adapter : adapters_) {
+    if (adapter) snapshot_mu_by_venue_[adapter->VenueId()] = std::make_unique<std::mutex>();
+  }
   t_md_ = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
@@ -1386,7 +1455,7 @@ void VenuesLoop::extra_ticker_loop() {
         try {
           std::optional<domain::VenueRawSnapshot> snap;
           {
-            std::lock_guard<std::mutex> lk(snapshot_mu_);
+            std::lock_guard<std::mutex> lk(snapshot_mutex_for(venue));
             snap = adapter->RequestSnapshot(req);
           }
           if (snap.has_value()) publish_raw_ticker(&producer_, *snap);
@@ -1633,6 +1702,37 @@ domain::VenueAdapter* VenuesLoop::find_adapter(const std::string& venue_id) {
 // Throttling: STALE_THRESHOLD_MS (default 15000) — если snapshot старее,
 // venue помечается STALE и удаляется из health-allow list.
 // ============================================================================
+
+// Runtime-порог устаревания venue-снапшота из PG (вкладка Площадки). TTL 3с,
+// чтобы не долбить PG на каждом адаптере. При ошибке/отсутствии DSN оставляем
+// прежнее значение (env STALE_THRESHOLD_MS остаётся дефолтом).
+void VenuesLoop::RefreshVenueStaleFromPg() {
+#if defined(CEX_VENUES_HAS_LIBPQXX)
+  const auto now = std::chrono::steady_clock::now();
+  if (last_stale_poll_.time_since_epoch().count() != 0 &&
+      now - last_stale_poll_ < std::chrono::milliseconds(3000)) {
+    return;  // TTL ещё не истёк
+  }
+  last_stale_poll_ = now;
+  if (venue_stale_pg_dsn_.empty()) {
+    const auto dsn = cex::common::Env::try_get_string("VENUES_POSTGRES_DSN");
+    if (!dsn.has_value() || dsn->empty()) return;
+    venue_stale_pg_dsn_ = *dsn;
+  }
+  try {
+    pqxx::connection c(venue_stale_pg_dsn_);
+    pqxx::work tx(c);
+    const pqxx::row r =
+        tx.exec1("SELECT venue_stale_ms FROM f05a_clearing_config WHERE id=1");
+    tx.commit();
+    const int64_t v = r[0].as<int64_t>();
+    if (v > 0) runtime_stale_ms_.store(v, std::memory_order_relaxed);
+  } catch (const std::exception&) {
+    // молча оставляем прежнее значение
+  }
+#endif
+}
+
 void VenuesLoop::md_publish_loop() {
   using namespace std::chrono;
 
@@ -1645,7 +1745,37 @@ void VenuesLoop::md_publish_loop() {
   }
 
   while (running_.load()) {
+    RefreshVenueStaleFromPg();  // runtime-порог из PG (вкладка Площадки), TTL 3с
+    // Параллельный REST-опрос: по задаче на биржу, ждём все перед сном.
+    // Раньше опрос был последовательным (5 венью × ~4 пары ≈ 70с/цикл);
+    // теперь цикл ≈ длительности самой медленной биржи.
+    std::vector<std::future<void>> tasks;
+    tasks.reserve(adapters_.size());
     for (auto& adapter : adapters_) {
+      domain::VenueAdapter* ad = adapter.get();
+      tasks.push_back(std::async(std::launch::async, [this, ad] { poll_adapter(ad); }));
+    }
+    for (auto& f : tasks) {
+      try { f.get(); } catch (...) { /* poll_adapter логирует свои ошибки сам */ }
+    }
+    std::this_thread::sleep_for(milliseconds(poll_interval_ms));
+  }
+}
+
+// Per-venue мьютекс вокруг RequestSnapshot. Заполнено в start() до старта потоков,
+// далее только чтение — блокировки не нужно. Fallback на общий snapshot_mu_.
+std::mutex& VenuesLoop::snapshot_mutex_for(const std::string& venue_id) {
+  const auto it = snapshot_mu_by_venue_.find(venue_id);
+  if (it != snapshot_mu_by_venue_.end() && it->second) return *it->second;
+  return snapshot_mu_;
+}
+
+// Опрос одной биржи: resolve config → heartbeat → REST-снапшоты по инструментам
+// → publish snapshot/curve. Выполняется конкурентно между биржами (см.
+// md_publish_loop). Общие мапы под data_mu_/config_mu_, издатели потокобезопасны
+// (SnapshotProducer/LiquidityCurveProducer лочат свои мьютексы, librdkafka
+// produce thread-safe), RequestSnapshot — под per-venue snapshot_mutex_for.
+void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
       try {
         bool venue_active = true;
         std::string routing_mode = "auto";
@@ -1673,6 +1803,13 @@ void VenuesLoop::md_publish_loop() {
           }
         }
 
+        // Runtime-override из UI (вкладка Площадки) имеет приоритет над env и
+        // per-venue конфигом — это глобальный порог устаревания для всех венью.
+        {
+          const int64_t rt = runtime_stale_ms_.load(std::memory_order_relaxed);
+          if (rt > 0) stale_threshold_ms = static_cast<uint32_t>(rt);
+        }
+
         const auto heartbeat = adapter->Heartbeat();
         if (!venue_active) {
           auto muted_hb = heartbeat;
@@ -1684,7 +1821,7 @@ void VenuesLoop::md_publish_loop() {
             last_heartbeats_[muted_hb.venue_id] = muted_hb;
           }
           (void)observability_.PublishStatus(muted_hb, "disabled", "disable");
-          continue;
+          return;  // биржа отключена оператором — пропускаем весь адаптер
         }
 
         {
@@ -1700,12 +1837,27 @@ void VenuesLoop::md_publish_loop() {
               adapter->VenueId(),
               "Venue adapter reconnect failed",
               {{"stage", "heartbeat_reconnect"}});
-          continue;
+          return;  // reconnect не удался — пропускаем весь адаптер
+        }
+
+        // Одна кривая на (venue, instrument). CEX/sim обслуживают ВСЕ инструменты;
+        // DEX/AMM — один пул = одна пара, поэтому только первый (сконфигурированный).
+        const std::size_t inst_n =
+            (adapter->Type() == domain::VenueType::kCex)
+                ? sim_instruments_.size()
+                : std::min<std::size_t>(1, sim_instruments_.size());
+        for (std::size_t inst_i = 0; inst_i < inst_n; ++inst_i) {
+        const auto& sim_inst = sim_instruments_[inst_i];
+        request.instrument = sim_inst;
+        {  // venue_symbol под инструмент (напр. "ETH/USDT" → "ETHUSDT").
+          std::string vs = sim_inst.symbol();
+          vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
+          request.venue_symbol = vs;
         }
 
         std::optional<domain::VenueRawSnapshot> snapshot;
         {
-          std::lock_guard<std::mutex> lk(snapshot_mu_);
+          std::lock_guard<std::mutex> lk(snapshot_mutex_for(adapter->VenueId()));
           snapshot = adapter->RequestSnapshot(request);
         }
         if (!snapshot.has_value()) {
@@ -1852,6 +2004,7 @@ void VenuesLoop::md_publish_loop() {
             }
           }
         }
+        }  // for (sim_inst : sim_instruments_)
       } catch (const std::exception& ex) {
         cex::common::log_json("ERROR", "Venue adapter poll iteration failed",
                               {{"venue", adapter->VenueId()},
@@ -1861,10 +2014,6 @@ void VenuesLoop::md_publish_loop() {
             "Venue adapter poll iteration failed",
             {{"error", ex.what()}});
       }
-    }
-
-    std::this_thread::sleep_for(milliseconds(poll_interval_ms));
-  }
 }
 
 // ============================================================================

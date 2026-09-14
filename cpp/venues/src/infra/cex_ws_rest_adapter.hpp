@@ -40,6 +40,15 @@ struct CexWsRestAdapterConfig {
   // (например "ETH/USDT,SOL/USDT"), которые simulate-путь возвращает как REJECTED
   // (status на execution.venue → matching пишет combo_compensations(pending)).
   std::string simulate_reject_symbols;
+  // Реалистичная симуляция исполнения по ленте РЕАЛЬНЫХ публичных сделок
+  // (VENUES_SIM_MATCH_REAL_TRADES). При true sim-заявка исполняется не мгновенно по
+  // limit_price, а матчится против недавних реальных сделок символа: SELL@P против
+  // сделок price>=P, BUY@P против price<=P; filled=min(target, Σ пересёкшего объёма),
+  // avg=VWAP реальных сделок; объём сделок потребляется (частичные филлы). Окно —
+  // sim_trade_window_ms. Нет пересечения ⇒ filled=0 (заявка «висит», переэмитится).
+  bool sim_match_real_trades{false};
+  uint32_t sim_trade_window_ms{10000};
+  uint32_t sim_trade_buf_cap{512};
 
   double rest_requests_per_sec{10.0};
   double rest_burst{10.0};
@@ -160,6 +169,13 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
                                      int64_t* out_units);
 
  private:
+  // Один реальный публичный трейд (лента time-and-sales) для матчинга sim-заявок.
+  struct TradePrint {
+    cex::common::Decimal price{0, 0};
+    cex::common::Decimal qty{0, 0};  // остаток объёма (потребляется при филлах)
+    SteadyClock::time_point ts{};
+  };
+
   struct SymbolBookState {
     uint64_t sequence{0};
     std::vector<domain::VenueBookLevel> bids;
@@ -171,6 +187,11 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     cex::common::Decimal volume_24h{0, 0};
     bool volume_24h_authoritative{false};
     SteadyClock::time_point last_market_event{};
+    // Лента недавних реальных публичных сделок для реалистичной симуляции исполнения
+    // (price+qty+время). qty потребляется по мере матчинга sim-заявок (дефицит объёма).
+    std::deque<TradePrint> recent_trades;
+    // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.
+    int64_t last_trade_key{0};
   };
 
   struct TokenBucket {
@@ -229,6 +250,11 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   bool apply_rest_ticker_volume_locked(const std::string& body,
                                        const domain::VenueSnapshotRequest& request,
                                        SteadyClock::time_point now);
+  // ADR-060: парс REST recent-trades (per-venue формат) → recent_trades символа.
+  // Дедуп по last_trade_key (id/время), чтобы повторный поллинг не дублировал сделки.
+  void parse_rest_trades_locked(const std::string& body,
+                                const std::string& venue_symbol,
+                                SteadyClock::time_point now);
 
   void sync_state_from_lob_locked(SymbolBookState* state);
   void push_pending_diff_locked(SymbolBookState* state,
@@ -237,10 +263,17 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   bool apply_ws_depth_event_locked(const std::string& payload, SteadyClock::time_point now);
   bool apply_ws_ticker_event_locked(const std::string& payload, SteadyClock::time_point now);
   bool apply_ws_trade_event_locked(const std::string& payload, SteadyClock::time_point now);
+  // Реалистичное исполнение sim-заявки по ленте реальных сделок (mu_ удержан).
+  // Перезаписывает filled_qty/remaining_qty/average_price/status в out по факту
+  // матчинга против books_[symbol].recent_trades (VENUES_SIM_MATCH_REAL_TRADES).
+  void ApplyRealTradeFillLocked(const fob::execution::v1::ExecutionIntent& intent,
+                                domain::VenueOrderResult* out,
+                                SteadyClock::time_point now);
 
   std::vector<std::string> auth_headers() const;
   std::string rest_depth_url(const domain::VenueSnapshotRequest& request) const;
   std::string rest_ticker_url(const domain::VenueSnapshotRequest& request) const;
+  std::string rest_trades_url(const domain::VenueSnapshotRequest& request) const;
   std::string rest_order_url() const;
 
   mutable std::mutex mu_;

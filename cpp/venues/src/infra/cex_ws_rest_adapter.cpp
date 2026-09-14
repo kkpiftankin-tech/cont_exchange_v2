@@ -62,6 +62,19 @@ std::string BoolText(const bool value) {
   return value ? "true" : "false";
 }
 
+// ADR-060: канонический ключ символа для ленты сделок — без разделителей (/ - _ пробел),
+// верхний регистр. Гарантирует совпадение ключа хранения (parse_rest_trades) и матчинга
+// (ApplyRealTradeFillLocked) независимо от формата символа венью (BTC/USDT, BTC-USDT, ...).
+std::string canon_trade_key(std::string s) {
+  s.erase(std::remove_if(s.begin(), s.end(), [](const unsigned char c) {
+            return c == '/' || c == '-' || c == '_' || std::isspace(c) != 0;
+          }),
+          s.end());
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](const unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return s;
+}
+
 std::string DecimalText(const cex::common::Decimal& value) {
   return value.to_string();
 }
@@ -315,6 +328,57 @@ std::string coinbase_side_text(const fob::common::v1::Side side) {
   if (side == fob::common::v1::SIDE_BUY) return "buy";
   if (side == fob::common::v1::SIDE_SELL) return "sell";
   return "buy";
+}
+
+// --- Kraken / OKX профили и форматирование символов -------------------------
+bool venue_matches(const std::string& venue_id, const std::string& rest_base_url,
+                   const std::string& ws_url, const char* needle) {
+  auto lower = [](std::string v) {
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return v;
+  };
+  return lower(venue_id).find(needle) != std::string::npos ||
+         lower(rest_base_url).find(needle) != std::string::npos ||
+         lower(ws_url).find(needle) != std::string::npos;
+}
+bool is_kraken_profile(const std::string& v, const std::string& r, const std::string& w) {
+  return venue_matches(v, r, w, "kraken");
+}
+bool is_okx_profile(const std::string& v, const std::string& r, const std::string& w) {
+  return venue_matches(v, r, w, "okx");
+}
+
+// "BTCUSDT"/"BTC/USDT" → {base, quote} по известным котировкам.
+std::pair<std::string, std::string> split_base_quote(std::string symbol) {
+  symbol.erase(std::remove(symbol.begin(), symbol.end(), '/'), symbol.end());
+  symbol.erase(std::remove_if(symbol.begin(), symbol.end(),
+                              [](unsigned char c) { return std::isspace(c) != 0; }),
+               symbol.end());
+  static constexpr std::array<const char*, 8> kQuotes = {
+      "USDT", "USDC", "BUSD", "DAI", "USD", "BTC", "ETH", "EUR"};
+  for (const auto* q : kQuotes) {
+    const std::string qs = q;
+    if (symbol.size() > qs.size() &&
+        symbol.compare(symbol.size() - qs.size(), qs.size(), qs) == 0) {
+      return {symbol.substr(0, symbol.size() - qs.size()), qs};
+    }
+  }
+  return {symbol, std::string()};
+}
+
+// Kraken: BTC→XBT, слитно (XBTUSDT). OKX: BASE-QUOTE (BTC-USDT).
+std::string kraken_pair_from_symbol(const std::string& symbol) {
+  auto bq = split_base_quote(symbol);
+  if (bq.second.empty()) return symbol;
+  if (bq.first == "BTC") bq.first = "XBT";
+  if (bq.second == "BTC") bq.second = "XBT";
+  return bq.first + bq.second;
+}
+std::string okx_inst_from_symbol(const std::string& symbol) {
+  auto bq = split_base_quote(symbol);
+  if (bq.second.empty()) return symbol;
+  return bq.first + "-" + bq.second;
 }
 
 fob::execution::v1::ExecutionReportStatus ParseOrderStatus(const std::string& status) {
@@ -837,37 +901,40 @@ domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
   domain::VenueConnectionStatus status = domain::VenueConnectionStatus::kDisconnected;
   uint32_t latency_ms = 0;
   uint32_t stale_ms = 0;
+
+  // WS pong-timeout роняет WS-флаг, но НЕ фиксирует статус: реальный статус
+  // определяем ниже по свежести стаканов.
   if (connected_) {
     const auto since_pong = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - last_pong_at_).count();
-
     if (since_pong > static_cast<int64_t>(cfg_.heartbeat_pong_timeout_ms)) {
       connected_ = false;
       record_external_error_locked(now, "heartbeat_pong_timeout");
-      status = domain::VenueConnectionStatus::kDisconnected;
-    } else {
-      bool stale = true;
-      int64_t freshest_age_ms = std::numeric_limits<int64_t>::max();
-      for (const auto& [symbol, state] : books_) {
-        (void)symbol;
-        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - state.last_market_event).count();
-        freshest_age_ms = std::min(freshest_age_ms, age_ms);
-        if (age_ms <= static_cast<int64_t>(cfg_.stale_threshold_ms)) {
-          stale = false;
-          break;
-        }
-      }
-      if (freshest_age_ms != std::numeric_limits<int64_t>::max()) {
-        latency_ms = static_cast<uint32_t>(std::max<int64_t>(0, freshest_age_ms));
-        stale_ms = latency_ms;
-      }
-      status = stale ? domain::VenueConnectionStatus::kStale
-                     : domain::VenueConnectionStatus::kConnected;
-      if (books_.empty()) {
-        status = domain::VenueConnectionStatus::kConnected;
-      }
     }
+  }
+
+  // Статус по свежести данных, а не только по WS. books_ наполняются и
+  // WS market-событиями, и REST-снапшотами (parse_rest_snapshot_locked
+  // выставляет last_market_event). Это чинит REST-polling венью без WS
+  // (coinbase/kraken/okx): пока REST-стаканы свежие — venue connected, а не
+  // disconnected. WS-only режим сохраняет прежнее поведение (свежий WS-фид).
+  int64_t freshest_age_ms = std::numeric_limits<int64_t>::max();
+  for (const auto& [symbol, state] : books_) {
+    (void)symbol;
+    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - state.last_market_event).count();
+    freshest_age_ms = std::min(freshest_age_ms, age_ms);
+  }
+  const bool have_book = freshest_age_ms != std::numeric_limits<int64_t>::max();
+  if (have_book) {
+    latency_ms = static_cast<uint32_t>(std::max<int64_t>(0, freshest_age_ms));
+    stale_ms = latency_ms;
+    status = (freshest_age_ms <= static_cast<int64_t>(cfg_.stale_threshold_ms))
+                 ? domain::VenueConnectionStatus::kConnected
+                 : domain::VenueConnectionStatus::kStale;
+  } else if (connected_) {
+    // WS поднят, но событий/снапшотов ещё не было — считаем connected.
+    status = domain::VenueConnectionStatus::kConnected;
   }
 
   uint64_t max_sequence = 0;
@@ -950,6 +1017,23 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
       }
     }
 
+    // ADR-060: реальная лента исполненных публичных сделок (REST recent-trades) —
+    // для реалистичной симуляции исполнения. Тот же рабочий REST-канал, что и стакан.
+    std::string trades_body;
+    long trades_http_code = 0;
+    bool trades_ok = false;
+    if (cfg_.sim_match_real_trades) {
+      bool can_fetch_trades = false;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        can_fetch_trades = consume_rest_token_locked(now);
+      }
+      if (can_fetch_trades) {
+        trades_ok = rest_client_->Get(rest_trades_url(normalized), auth_headers(),
+                                      cfg_.rest_timeout_ms, &trades_body, &trades_http_code);
+      }
+    }
+
     std::lock_guard<std::mutex> lock(mu_);
     auto parsed = parse_rest_snapshot_locked(body, normalized, now);
     if (parsed.has_value()) {
@@ -959,6 +1043,9 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
             state_it != books_.end()) {
           parsed->volume_24h = state_it->second.volume_24h;
         }
+      }
+      if (trades_ok && trades_http_code >= 200 && trades_http_code < 300) {
+        parse_rest_trades_locked(trades_body, parsed->venue_symbol, now);
       }
       last_pong_at_ = now;
       record_external_success_locked();
@@ -1026,6 +1113,11 @@ domain::VenueOrderResult CexWsRestAdapter::SendOrder(
     }
     if (cfg_.simulate_orders) {
       out = MakeSimulatedOrderResult(cfg_, intent);
+      // Реалистичное исполнение: перезаписываем наивный филл (по limit_price)
+      // матчингом против ленты реальных публичных сделок символа.
+      if (cfg_.sim_match_real_trades) {
+        ApplyRealTradeFillLocked(intent, &out, now);
+      }
       record_external_success_locked();
       cex::common::log_json("INFO", "Sent CEX venue order command",
                             {{"service", "venues"},
@@ -1575,8 +1667,27 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded()) return std::nullopt;
 
-  const json bids_json = root.value("bids", json::array());
-  const json asks_json = root.value("asks", json::array());
+  // Извлечение bids/asks: Binance/Coinbase — top-level; Kraken — result.{pair};
+  // OKX — data[0]. Формат уровня [price, qty, ...] у всех совместим с ParseLevelArray.
+  json bids_json = json::array();
+  json asks_json = json::array();
+  if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    const json result = root.value("result", json::object());
+    if (result.is_object() && !result.empty()) {
+      const json& pair = result.begin().value();  // первый (единственный) ключ пары
+      bids_json = pair.value("bids", json::array());
+      asks_json = pair.value("asks", json::array());
+    }
+  } else if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    const json data = root.value("data", json::array());
+    if (data.is_array() && !data.empty()) {
+      bids_json = data[0].value("bids", json::array());
+      asks_json = data[0].value("asks", json::array());
+    }
+  } else {
+    bids_json = root.value("bids", json::array());
+    asks_json = root.value("asks", json::array());
+  }
   if (!bids_json.is_array() || !asks_json.is_array()) return std::nullopt;
 
   std::vector<domain::VenueBookLevel> bids;
@@ -1861,6 +1972,29 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
         cex::common::Decimal{qty_units, cfg_.market_qty_scale});
   }
   state.last_market_event = now;
+
+  // Реалистичная симуляция исполнения: кладём реальный трейд (price+qty) в ленту,
+  // против которой матчатся sim-заявки. Цена — "p" (binance) / "price" (coinbase/okx).
+  if (cfg_.sim_match_real_trades && qty_units > 0) {
+    const std::string price_text = JsonToString(
+        data.value("p", data.value("price", json("0"))));
+    int64_t price_units = 0;
+    if (parse_decimal_to_scale(price_text, cfg_.market_price_scale, &price_units) &&
+        price_units > 0) {
+      state.recent_trades.push_back(
+          TradePrint{cex::common::Decimal{price_units, cfg_.market_price_scale},
+                     cex::common::Decimal{qty_units, cfg_.market_qty_scale}, now});
+      // Эвикт по окну и по ёмкости (лента — недавнее time-and-sales).
+      const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+      while (!state.recent_trades.empty() &&
+             (now - state.recent_trades.front().ts) > window) {
+        state.recent_trades.pop_front();
+      }
+      while (state.recent_trades.size() > cfg_.sim_trade_buf_cap) {
+        state.recent_trades.pop_front();
+      }
+    }
+  }
   cex::common::log_json("INFO", "Consumed raw CEX trade",
                         {{"service", "venues"},
                          {"component", "external_venues_connector"},
@@ -1876,6 +2010,87 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
                          {"source_file",
                           "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
   return true;
+}
+
+void CexWsRestAdapter::ApplyRealTradeFillLocked(
+    const fob::execution::v1::ExecutionIntent& intent,
+    domain::VenueOrderResult* out,
+    const SteadyClock::time_point now) {
+  using cex::common::Decimal;
+  // Уже отклонённые venue-reject заявки не трогаем.
+  if (out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED) return;
+
+  const Decimal target = intent.has_target_qty()
+      ? Decimal::from_proto(intent.target_qty()) : Decimal{0, cfg_.market_qty_scale};
+  const Decimal limit = intent.has_limit_price()
+      ? Decimal::from_proto(intent.limit_price()) : Decimal{0, cfg_.market_price_scale};
+  const bool is_sell = intent.side() == fob::common::v1::SIDE_SELL;
+  const Decimal zero_q{0, cfg_.market_qty_scale};
+
+  // Ключ ленты сделок: канонизируем (без /-_ пробелов, верхний регистр), чтобы совпал
+  // с ключом из parse_rest_trades_locked независимо от формата символа венью.
+  std::string key = intent.venue_symbol();
+  if (key.empty()) {
+    const auto& inst = intent.instrument();
+    key = (!inst.base().empty() && !inst.quote().empty())
+              ? inst.base() + inst.quote() : inst.symbol();
+  }
+  key = canon_trade_key(key);
+
+  Decimal filled{0, cfg_.market_qty_scale};
+  Decimal notional{0, cfg_.market_price_scale + cfg_.market_qty_scale};
+  auto it = books_.find(key);
+  std::size_t window_trades = 0;
+  if (it != books_.end() && limit.units != 0 && target.units > 0) {
+    const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+    while (!it->second.recent_trades.empty() &&
+           (now - it->second.recent_trades.front().ts) > window) {
+      it->second.recent_trades.pop_front();
+    }
+    window_trades = it->second.recent_trades.size();
+    // Матчим против пересёкших реальных сделок (FIFO ленты), потребляя объём.
+    // SELL@P исполняется сделками price>=P; BUY@P — сделками price<=P.
+    for (auto& tr : it->second.recent_trades) {
+      if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
+      const bool cross = is_sell ? Decimal::cmp(tr.price, limit) >= 0
+                                 : Decimal::cmp(tr.price, limit) <= 0;
+      if (!cross) continue;
+      const Decimal want = Decimal::sub(target, filled);
+      if (Decimal::cmp(want, zero_q) <= 0) break;
+      const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
+      filled = Decimal::add(filled, take);
+      notional = Decimal::add(notional, Decimal::mul(take, tr.price));
+      tr.qty = Decimal::sub(tr.qty, take);  // потребляем реальный объём (дефицит → partial)
+    }
+  }
+
+  out->accepted = true;
+  out->filled_qty = filled;
+  out->remaining_qty = Decimal::sub(target, filled);
+  if (Decimal::cmp(filled, zero_q) <= 0) {
+    // Нет пересечения с реальной лентой ⇒ заявка «висит» (не исполнена этим тактом).
+    out->status = fob::execution::v1::EXECUTION_REPORT_STATUS_NEW;
+    out->average_price = Decimal{0, cfg_.market_price_scale};
+  } else {
+    out->average_price = Decimal::div(notional, filled, cfg_.market_price_scale);
+    out->status = (Decimal::cmp(out->remaining_qty, zero_q) <= 0)
+                      ? fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED
+                      : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED;
+  }
+  cex::common::log_json("INFO", "Sim fill vs real trades",
+                        {{"service", "venues"},
+                         {"venue", cfg_.venue_id},
+                         {"symbol", key},
+                         {"intent_id", intent.intent_id()},
+                         {"side", is_sell ? "SELL" : "BUY"},
+                         {"limit", DecimalText(limit)},
+                         {"target", DecimalText(target)},
+                         {"filled", DecimalText(filled)},
+                         {"avg_price", DecimalText(out->average_price)},
+                         {"status", std::to_string(static_cast<int>(out->status))},
+                         {"trades_in_window", std::to_string(window_trades)},
+                         {"source_file",
+                          "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
 }
 
 bool CexWsRestAdapter::apply_ws_ticker_event_locked(
@@ -1933,11 +2148,27 @@ std::vector<std::string> CexWsRestAdapter::auth_headers() const {
 
 std::string CexWsRestAdapter::rest_depth_url(
     const domain::VenueSnapshotRequest& request) const {
+  const std::string sym = symbol_key_from_request(request);
+  const std::size_t levels = std::max<std::size_t>(
+      request.depth_levels,
+      static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
   if (is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     std::ostringstream oss;
     oss << cfg_.rest_base_url
-        << "/products/" << coinbase_product_id_from_symbol(symbol_key_from_request(request))
+        << "/products/" << coinbase_product_id_from_symbol(sym)
         << "/book?level=2";
+    return oss.str();
+  }
+  if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    std::ostringstream oss;
+    oss << cfg_.rest_base_url << "/0/public/Depth?pair=" << kraken_pair_from_symbol(sym)
+        << "&count=" << levels;
+    return oss.str();
+  }
+  if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    std::ostringstream oss;
+    oss << cfg_.rest_base_url << "/api/v5/market/books?instId=" << okx_inst_from_symbol(sym)
+        << "&sz=" << levels;
     return oss.str();
   }
 
@@ -1972,6 +2203,104 @@ std::string CexWsRestAdapter::rest_order_url() const {
     return cfg_.rest_base_url + "/orders";
   }
   return cfg_.rest_base_url + "/api/v3/order";
+}
+
+// ADR-060: URL REST recent-trades (лента реально исполненных публичных сделок).
+std::string CexWsRestAdapter::rest_trades_url(
+    const domain::VenueSnapshotRequest& request) const {
+  const std::string sym = symbol_key_from_request(request);
+  std::ostringstream oss;
+  if (is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/products/"
+        << coinbase_product_id_from_symbol(sym) << "/trades?limit=100";
+  } else if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/0/public/Trades?pair="
+        << kraken_pair_from_symbol(sym) << "&count=100";
+  } else if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/api/v5/market/trades?instId="
+        << okx_inst_from_symbol(sym) << "&limit=100";
+  } else {
+    oss << cfg_.rest_base_url << "/api/v3/trades?symbol=" << sym << "&limit=100";
+  }
+  return oss.str();
+}
+
+// ADR-060: разбор REST recent-trades (per-venue формат) → recent_trades символа.
+// Дедуп по last_trade_key; пуш только новее уже принятого; эвикт по окну/ёмкости.
+void CexWsRestAdapter::parse_rest_trades_locked(
+    const std::string& body,
+    const std::string& venue_symbol,
+    const SteadyClock::time_point now) {
+  const json root = json::parse(body, nullptr, false);
+  if (root.is_discarded()) return;
+
+  // Собираем нормализованные (key, price_text, qty_text) по формату биржи.
+  struct Row { int64_t key; std::string price; std::string qty; };
+  std::vector<Row> rows;
+  const auto num_str = [](const json& v) -> std::string {
+    if (v.is_string()) return v.get<std::string>();
+    if (v.is_number()) { std::ostringstream o; o << std::fixed << v.get<double>(); return o.str(); }
+    return "";
+  };
+  const auto to_key = [](const json& v) -> int64_t {
+    if (v.is_number_integer()) return v.get<int64_t>();
+    if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+    if (v.is_string()) { try { return std::stoll(v.get<std::string>()); } catch (...) { return 0; } }
+    return 0;
+  };
+
+  if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    if (root.contains("data") && root["data"].is_array())
+      for (const auto& t : root["data"])
+        rows.push_back({to_key(t.value("tradeId", t.value("ts", json(0)))),
+                        num_str(t.value("px", json())), num_str(t.value("sz", json()))});
+  } else if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    if (root.contains("result") && root["result"].is_object())
+      for (auto it = root["result"].begin(); it != root["result"].end(); ++it) {
+        if (it.key() == "last" || !it.value().is_array()) continue;
+        for (const auto& t : it.value())
+          if (t.is_array() && t.size() >= 3)
+            rows.push_back({static_cast<int64_t>(t[2].is_number() ? t[2].get<double>() * 1000.0 : 0),
+                            num_str(t[0]), num_str(t[1])});
+      }
+  } else if (root.is_array()) {  // binance / coinbase — массив объектов
+    for (const auto& t : root) {
+      const bool coinbase = t.contains("trade_id") || t.contains("size");
+      rows.push_back({to_key(t.value(coinbase ? "trade_id" : "id", json(0))),
+                      num_str(t.value("price", json())),
+                      num_str(t.value(coinbase ? "size" : "qty", json()))});
+    }
+  }
+
+  // Ключ канонизируем идентично матчеру ApplyRealTradeFillLocked (совпадение ключей).
+  SymbolBookState& state = books_[canon_trade_key(venue_symbol)];
+  int64_t max_key = state.last_trade_key;
+  int accepted = 0;
+  for (const auto& r : rows) {
+    if (r.key != 0 && r.key <= state.last_trade_key) continue;  // уже видели
+    int64_t price_u = 0, qty_u = 0;
+    if (!parse_decimal_to_scale(r.price, cfg_.market_price_scale, &price_u) || price_u <= 0) continue;
+    if (!parse_decimal_to_scale(r.qty, cfg_.market_qty_scale, &qty_u) || qty_u <= 0) continue;
+    state.recent_trades.push_back(
+        TradePrint{cex::common::Decimal{price_u, cfg_.market_price_scale},
+                   cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now});
+    if (r.key > max_key) max_key = r.key;
+    ++accepted;
+  }
+  state.last_trade_key = max_key;
+  // Эвикт по окну и ёмкости.
+  const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+  while (!state.recent_trades.empty() && (now - state.recent_trades.front().ts) > window)
+    state.recent_trades.pop_front();
+  while (state.recent_trades.size() > cfg_.sim_trade_buf_cap)
+    state.recent_trades.pop_front();
+  if (accepted > 0)
+    cex::common::log_json("INFO", "Fetched real recent trades",
+                          {{"service", "venues"}, {"venue", cfg_.venue_id},
+                           {"symbol", venue_symbol},
+                           {"new_trades", std::to_string(accepted)},
+                           {"buf", std::to_string(state.recent_trades.size())},
+                           {"source_file", "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
 }
 
 }  // namespace cex::venues::infra
