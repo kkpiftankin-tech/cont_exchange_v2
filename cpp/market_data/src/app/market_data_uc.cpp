@@ -692,20 +692,37 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   out.set_event_time_ms(window_close_ms);
   out.set_numeraire(numeraire);
   std::map<std::string, std::pair<double, double>> markacc;  // base → (Σ α·anchor, Σ α)
+  // 1-й проход: строим валидных агентов, копим max глубину по активу.
+  struct Ag { std::string base, venue; double anchor, depth, dead_zone; };
+  std::vector<Ag> agents;
+  std::map<std::string, double> max_depth;
   for (const auto& b : books) {
     domain::AgentBuilderConfig acfg;
     acfg.theta = theta;
     acfg.reference_price = p0[b.base];
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
+    agents.push_back({b.base, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});
+    if (a.depth > max_depth[b.base]) max_depth[b.base] = a.depth;
+  }
+  // Фильтр тонких/ненадёжных venue: глубина < ratio·max по активу (env CE_MIN_DEPTH_RATIO,
+  // деф 0.05). Тонкие venue дают выбросные/устаревшие цены → fake-арбитраж → раздувание
+  // позиции биржи (см. bug 2026-09-14: coinbase выброс −2.5‰ гнал BTC/SOL). ADR-057.
+  const char* mdr = std::getenv("CE_MIN_DEPTH_RATIO");
+  const double min_ratio = mdr ? std::atof(mdr) : 0.05;
+  std::set<std::string> kept_venues;
+  int dropped = 0;
+  for (const auto& ag : agents) {
+    if (ag.depth < min_ratio * max_depth[ag.base]) { ++dropped; continue; }  // тонкий → искл.
     auto* q = out.add_quotes();
-    q->set_asset(b.base);
-    q->set_venue(b.venue);
-    *q->mutable_anchor() = to_dec(a.anchor_pm);
-    *q->mutable_depth() = to_dec(a.depth);
-    *q->mutable_dead_zone() = to_dec(a.dead_zone_pm);
-    markacc[b.base].first += a.depth * a.anchor_pm;
-    markacc[b.base].second += a.depth;
+    q->set_asset(ag.base);
+    q->set_venue(ag.venue);
+    *q->mutable_anchor() = to_dec(ag.anchor);
+    *q->mutable_depth() = to_dec(ag.depth);
+    *q->mutable_dead_zone() = to_dec(ag.dead_zone);
+    markacc[ag.base].first += ag.depth * ag.anchor;
+    markacc[ag.base].second += ag.depth;
+    kept_venues.insert(ag.venue);
   }
   if (out.quotes_size() == 0) return;
   for (const auto& a : assets_order) {
@@ -716,7 +733,13 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     *m->mutable_mark() = to_dec(mu);
     *m->mutable_reference_price() = to_dec(p0[a]);
   }
-  for (const auto& v : venues_set) out.add_venues(v);
+  for (const auto& v : venues_set)
+    if (kept_venues.count(v)) out.add_venues(v);  // только venue, пережившие фильтр
+  if (dropped > 0)
+    cex::common::log_json("INFO", "CE clearing: тонкие venue отфильтрованы",
+                          {{"batch_id", batch_id}, {"dropped_agents", std::to_string(dropped)},
+                           {"kept_quotes", std::to_string(out.quotes_size())},
+                           {"min_depth_ratio", std::to_string(min_ratio)}});
 
   ce_publisher_->Publish(out);
   cex::common::log_json("INFO", "F-05A CE ce.clearing.input",
