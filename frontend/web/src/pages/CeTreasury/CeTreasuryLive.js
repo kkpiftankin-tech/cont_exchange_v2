@@ -60,6 +60,11 @@ const CeTreasuryLive = () => {
   const rows = (data && data.rows) || [];
   const intents = (data && data.intents) || [];
   const armedCount = (data && data.armedCount) || 0;
+  // ADR-057: разрез позиции по узлам (asset × venue) + CE-house.
+  const breakdown = (data && data.breakdown) || { venues: [], byAsset: {}, house: '__ce_house__' };
+  const bdVenues = breakdown.venues || [];
+  const bdAssets = Object.keys(breakdown.byAsset || {}).sort();
+  const venueLabel = (v) => (v === breakdown.house ? 'CE-биржа (house)' : v);
 
   return (
     <div className="ct-page">
@@ -158,6 +163,43 @@ const CeTreasuryLive = () => {
           <span><b>NOP</b> = активы (капитал + venue) − обязательства; <b>Z_a</b> = NOP + committed + in_transit (ADR-057; при committed=0 Z_a≡NOP)</span>
           <span><b className="ct-pos">излишек</b> (Z_a&gt;0) → хедж <b>SELL</b>; <b className="ct-neg">дефицит</b> (Z_a&lt;0) → <b>BUY</b></span>
           <span>хедж срабатывает при <b>|Z_a| &gt; Z_limit</b> (env CE_Z_LIMIT_&lt;ccy&gt;, fallback θ); numeraire не хеджируется</span>
+        </div>
+
+        {/* Разрез позиции по узлам: сколько актива на каждой внешней бирже + CE-house */}
+        <div className="ct-section-h">Разрез позиции по узлам <span className="ct-k">ledger.GetNodeBalances — сколько на каждой бирже + CE-house (ADR-057)</span></div>
+        <div className="ct-tablecard">
+          {bdAssets.length === 0
+            ? <div className="ct-empty" style={{ padding: '10px' }}>нет данных по узлам</div>
+            : <table className="ct-table">
+                <thead>
+                  <tr>
+                    <th>Актив</th>
+                    {bdVenues.map((v) => <th key={v} className="r">{venueLabel(v)}</th>)}
+                    <th className="r ct-after">Σ (активы)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bdAssets.map((a) => {
+                    const cells = breakdown.byAsset[a] || {};
+                    const sum = bdVenues.reduce((s, v) => s + (Number(cells[v]) || 0), 0);
+                    return (
+                      <tr key={a}>
+                        <td className="ct-asset-cell"><span className="ct-tk">{a.slice(0, 3)}</span>{a}</td>
+                        {bdVenues.map((v) => (
+                          <td key={v} className={`r ct-mono ${cells[v] == null ? '' : signCls(cells[v])}`}>
+                            {cells[v] == null ? '—' : fmtNum(cells[v])}
+                          </td>
+                        ))}
+                        <td className="r ct-mono ct-after"><b>{fmtNum(sum)}</b></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>}
+        </div>
+        <div className="ct-legend">
+          <span><b>CE-биржа (house)</b> — собственный капитал биржи (сид); столбцы venue — средства биржи на внешних биржах</span>
+          <span>Σ по строке = активы биржи по активу (капитал + Σ venue) — совпадает с колонкой «Активы» выше</span>
         </div>
 
         {/* Хедж-интенты */}

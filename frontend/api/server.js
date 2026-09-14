@@ -6851,9 +6851,11 @@ async function fetchCeExchange() {
 
   const risk = initRiskClient();
   const led = initLedgerClient();
-  let nop = null, bal = null, error = null;
+  let nop = null, bal = null, nodes = null, error = null;
   try { if (risk) nop = await grpcCall(risk, "GetExchangeNOP", {}); } catch (e) { error = "risk: " + e.message; }
   try { if (led) bal = await grpcCall(led, "GetExchangeBalances", {}); } catch (e) { error = (error ? error + "; " : "") + "ledger: " + e.message; }
+  // ADR-057 уровень узла: разрез позиции по (asset, venue) + узел CE-house.
+  try { if (led) nodes = await grpcCall(led, "GetNodeBalances", {}); } catch (e) { error = (error ? error + "; " : "") + "nodes: " + e.message; }
 
   const balByCcy = {};
   for (const b of (bal && bal.balances) || []) balByCcy[b.currency] = b;
@@ -6877,7 +6879,24 @@ async function fetchCeExchange() {
       hedgeQty: decToNum(i.hedge_qty),
     };
   });
-  return { numeraire, mode, netHedgeEnabled, engineWired: rows.length > 0, rows, error };
+  // ADR-057 уровень узла: разрез позиции по (asset, venue) — сколько на каждой внешней
+  // бирже + узел CE-house. byAsset[asset] = {venue: qty}; venueCols — стабильный порядок
+  // (house первым). Нулевые узлы скрыты. Для визуальной сверки: Σvenue+house ≈ assets.
+  const nodeList = (nodes && nodes.nodes) || [];
+  const venuesSet = new Set();
+  const byAsset = {};
+  for (const n of nodeList) {
+    const a = n.asset, v = n.venue, q = decToNum(n.qty);
+    if (!a || !v || Math.abs(q) < 1e-9) continue;
+    venuesSet.add(v);
+    (byAsset[a] = byAsset[a] || {})[v] = q;
+  }
+  const HOUSE = "__ce_house__";
+  const venueCols = [...venuesSet].sort((x, y) =>
+    x === HOUSE ? -1 : y === HOUSE ? 1 : String(x).localeCompare(String(y)));
+  const breakdown = { house: HOUSE, venues: venueCols, byAsset };
+
+  return { numeraire, mode, netHedgeEnabled, engineWired: rows.length > 0, rows, breakdown, error };
 }
 
 async function handleCeTreasuryV1(req, res, pathname, query) {
@@ -6896,6 +6915,7 @@ async function handleCeTreasuryV1(req, res, pathname, query) {
         ? "Позиция биржи по валюте (ADR-057, три уровня): Z_a = Σqty(активы) + in_transit + committed(in_flight) − target. target ≡ клиентские обязательства, поэтому Z_a = nop + committed + in_transit; при committed=0 Z_a ≡ nop (частный случай ADR-054). Балансы у ledger (GetExchangeBalances += in_flight), Z_a и размер хеджа считает risk (GetExchangeNOP). numeraire (" + x.numeraire + ") исключён. Хедж при |Z_a|>Z_limit (env CE_Z_LIMIT_<ccy>, fallback θ; флаг CE_NET_HEDGE_ENABLED)."
         : "Нет данных от ledger/risk (сервисы недоступны или не подняты).",
       rows: x.rows, armedCount: armed.length, intents,
+      breakdown: x.breakdown || null,
       source: "ledger+risk",
       error: x.error || null,
       generatedAt: new Date().toISOString(),

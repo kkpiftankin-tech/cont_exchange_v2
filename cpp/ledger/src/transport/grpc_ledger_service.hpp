@@ -67,6 +67,10 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                                      const fob::ledger::v1::GetExchangeNopHistoryRequest* request,
                                      fob::ledger::v1::GetExchangeNopHistoryResponse* response) override;
 
+  grpc::Status GetNodeBalances(grpc::ServerContext* context,
+                               const fob::ledger::v1::GetNodeBalancesRequest* request,
+                               fob::ledger::v1::GetNodeBalancesResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

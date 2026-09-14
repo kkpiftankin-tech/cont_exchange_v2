@@ -669,6 +669,42 @@ fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances
   return resp;
 }
 
+// ADR-057 уровень узла: разрез позиции по (asset, venue). Внешние venue из
+// venue_balances_ (qty=total), узел CE-house (__ce_house__) — собственный капитал биржи
+// (available+reserved). Для визуальной сверки: Σ_venue qty(a) + house(a) = assets_a.
+fob::ledger::v1::GetNodeBalancesResponse LedgerUseCases::GetNodeBalances(
+    const fob::ledger::v1::GetNodeBalancesRequest& req) {
+  fob::ledger::v1::GetNodeBalancesResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+  std::unordered_set<std::string> want(req.assets().begin(), req.assets().end());
+  const auto keep = [&](const std::string& a) { return want.empty() || want.count(a) > 0; };
+
+  std::lock_guard<std::mutex> lg(mu_);
+  // Внешние venue: qty = total по (venue, asset).
+  for (const auto& [venue, vb] : venue_balances_) {
+    for (const auto& [ccy, e] : vb) {
+      if (!keep(ccy)) continue;
+      auto* n = resp.add_nodes();
+      n->set_asset(ccy);
+      n->set_venue(venue);
+      *n->mutable_qty() = e.total.to_proto();
+    }
+  }
+  // Узел CE-house: собственный капитал биржи (accounts['__ce_house__']).
+  auto hit = balances_.find(kHouseAccountId);
+  if (hit != balances_.end()) {
+    for (const auto& [ccy, b] : hit->second) {
+      if (!keep(ccy)) continue;
+      auto* n = resp.add_nodes();
+      n->set_asset(ccy);
+      n->set_venue(kHouseAccountId);
+      *n->mutable_qty() = Decimal::add(b.available, b.reserved).to_proto();
+    }
+  }
+  return resp;
+}
+
 // F-18 §11: NOP биржи по валюте (assets − client). Под удержанным mu_.
 std::map<std::string, Decimal> LedgerUseCases::ComputeExchangeNopLocked() const {
   std::map<std::string, Decimal> nop;  // ccy -> assets−client

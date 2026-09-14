@@ -174,6 +174,12 @@ class LedgerUseCases {
   static constexpr const char* kHouseAccountId = "__ce_house__";
   fob::ledger::v1::GetExchangeBalancesResponse GetExchangeBalances(
       const fob::ledger::v1::GetExchangeBalancesRequest& req);
+
+  // ADR-057 уровень узла: разрез позиции по (asset, venue) — сколько актива лежит на
+  // каждой внешней бирже + узел CE-house (__ce_house__, собственный капитал). Для
+  // визуальной проверки корректности позиции. qty из venue_balances_/house.
+  fob::ledger::v1::GetNodeBalancesResponse GetNodeBalances(
+      const fob::ledger::v1::GetNodeBalancesRequest& req);
   // Seed остатка house-аккаунта при старте (idempotent — только если пусто).
   void SeedHouseBalance(const std::string& currency, const cex::common::Decimal& amount);
 
