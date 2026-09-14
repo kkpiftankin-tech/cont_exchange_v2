@@ -259,6 +259,9 @@ message ExchangeCurrencyBalance {
   fob.common.v1.Decimal venue_total = 3;       // Σ по внешним venue (собственные средства)
   fob.common.v1.Decimal client_liability = 4;  // Σ клиентских балансов (обязательства)
   fob.common.v1.Decimal assets_total = 5;      // own_total + venue_total (активы биржи в валюте)
+  // ADR-057/058: committed по активу (in-flight план, ещё не подтверждён execution.reports).
+  // risk считает Z_a = (assets − client) + in_flight + in_transit. Аддитивно, старые consumers целы.
+  fob.common.v1.Decimal in_flight = 6;
 }
 message GetExchangeBalancesRequest {
   fob.common.v1.EventMeta meta = 1;
