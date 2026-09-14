@@ -69,6 +69,23 @@
   `market_data` BuildQuoteAgent) → `deadZonePm/deadLow/deadHigh + ceCurve`; страница
   рисует полосу зоны + CE-полилинию. Соответствует T-CEA-403 (панель кривой агента, частично).
 
+**T-CEA-203 (Z_a в risk) — сделано и проверено 2026-09-14, коммиты `a9dc379f`/`3f8793a8`.**
+`risk.GetExchangeNOP` считает `Z_a = Σqty + in_transit + committed − target` (target ≡
+client_liability ⇒ `Z_a = nop + committed(in_flight) + in_transit`; committed=0 ⇒ Z_a≡nop).
+Хедж по `|Z_a| > Z_limit` (env `CE_Z_LIMIT_<ccy>`, fallback θ). `ledger.proto`
+`ExchangeCurrencyBalance += in_flight`; `GetExchangeBalances` отдаёт committed из
+`ce_committed_`. BFF+CeTreasuryLive: колонки committed/в пути/Z_a/лимит. Проверено на dev:
+steady-state Z_a≡nop; in-flight BTC committed=0.1825 → z=nop+committed=19.469 (точно).
+**T-CEA-204 (частично):** committed несёт знак → z демпфирует переэмиссию без cooldown-таймера;
+`EmitNetHedges` cooldown оставлен как fallback гейтнутого пути (committed в PG — отложено).
+Осталось по этому треку: venues[] (VenueLeg разрез по площадкам) в `GetExchangeNOP`,
+`CE_Z_LIMIT_<ccy>` в env, PG-персист committed (сейчас in-memory `ce_committed_`).
+
+**Деплой-урок:** BFF (frontend-api) печёт proto из `frontend/api/proto/` (копия
+`contracts/proto`, sync-proto.sh) — при изменении контракта нужно И sync-proto+rebuild
+frontend-api, иначе decode роняет новые поля (z=0). `docker cp` proto/server.js теряется
+при ребуте хоста → только rebuild образа надёжен.
+
 **Демо-рычаг:** `SIM_VENUE_BIAS_PM_okx=20` (env, только dev, коммит `b152a150`) держит
 дивергенцию > c, чтобы заявки шли и была видимая позиция. Убрать после демо.
 
