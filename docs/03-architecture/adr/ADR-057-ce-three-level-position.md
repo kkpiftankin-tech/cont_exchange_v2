@@ -8,8 +8,14 @@ level: sea
 feature: F-18
 related: [ADR-054, ADR-055, ADR-056, ADR-058]
 supersedes_rule: расширяет ADR-054 §10/§11 (NOP → частный случай Z_a при отсутствии клиентов и запаса)
+superseded_by: ADR-061  # F-18 v2, пока status=proposed — статус ADR-057 сменится на superseded после accepted ADR-061
 sources: [CE_algorithm_spec.md, CE_virtual_counterparties.md]  # IN-0XX (ingest-docs)
 ---
+
+> **⚠️ Пересматривается F-18 v2 ([ADR-061](ADR-061-ce-v2-agent-position-band-hedge.md), `proposed`).**
+> В v2 отменены `target` и `committed` как отдельные величины: позиция агента `c_j` знаковая,
+> стартует с нуля, `c←c+f`; `Z_a = владение(t) − владение(0)`. Этот ADR остаётся `accepted`
+> до перевода ADR-061 в `accepted`, после чего получает статус `superseded`.
 
 # ADR-057 — Трёхуровневая позиция CE
 

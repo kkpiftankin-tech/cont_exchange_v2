@@ -304,3 +304,46 @@ features:
     codePaths:
       # AUDIT-001 follow-up (2026-06-08): was obs_loop.cpp — renamed to service.cpp.
       - cpp/observability/src/app/service.cpp
+
+  F-18:
+    name: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge"
+    docsPath: docs/02-system/features/F-18-ce-capital-position-hedge
+    # v2 (UC-F18-04) заменяет v1 (UC-F18-01..03, ADR-054/057 superseded). Модель:
+    # знаковая позиция агента с нуля, без target, house-невязка, полоса ±q, party_type AGENT.
+    # Код НЕ открыт — no-code-before-docs (CLAUDE.md §0a): гейт на accepted ADR-061.
+    # Сводка 12 агентов: docs/implementation-plan/F-18-v2-agents-review-summary.md (§13 гейт владельца).
+    status: docs-complete-code-gated   # docs ✅ (feature/UC/SEQ/AC-F18v2-01..18); код planned под ADR-061
+    primaryComponents:
+      - matching       # A2–A6: σ*=m+ρ·c, граф W + house-столбец, клиринг, c_j+=f_j (matching-fob-core)
+      - risk           # A7: полоса ±q, sizing (walk qty), PreHedgeCheck reuse F-12 (risk-manager)
+      - ledger         # владелец ce_agent_position (signed), party_type AGENT, узловые остатки
+      - venues         # A8: исполнение хедж/перевозочных ордеров, ExecutionReport (external-venues)
+      - market-data    # A0–A1: снимок обоих стаканов + кривые агентов (m, α, полка c)
+    protoContracts:
+      - contracts/proto/fob/agent/v1/agent.proto           # [planned] agent_kind {TRANSLATOR, ARBITRAGEUR}; убрать STOCK
+      - contracts/proto/fob/ledger/v1/ledger.proto         # [planned] RPC GetAgentPositions; ExchangeNOP без target
+      - contracts/proto/fob/risk/v1/risk.proto             # [planned] Z_a=владение(t)−владение(0); PreHedgeCheck
+      - contracts/proto/fob/execution/v1/execution.proto   # ExecutionIntent/Report (reuse F-12 router)
+      - contracts/proto/fob/common/v1/common.proto         # Decimal, EventMeta, Instrument, Side
+    storageDependencies:
+      postgresql:
+        - ce_agent_position    # [planned] (agent_id, asset, venue) → position(signed), last_batch_id
+        - f05a_clearing_config # [planned +cols] ρ_Q, ρ_T, q_translator, q_arbitrageur, transfer_eta
+        - ce_transfer          # [planned] арбитражёр: {asset, src, dst, qty, eta, tariff, status}
+    kafkaTopics:
+      produces:
+        - ce.position.delta    # matching → ledger: знаковая Δc_j агента по узлу (asset@venue)
+        - execution.intents    # risk → venues: заявка сверх полосы (hedge/transfer)
+      consumes:
+        - marketdata.raw       # market-data: снимок стаканов (A0)
+        - execution.venue      # ledger: исполнение двигает qty[asset@venue] + realized (A8 confirm)
+        - batch.outputs        # ledger: клиентские fills двигают владение (точка входа №1)
+    grpcServices:
+      exposes:
+        - fob.ledger.v1.LedgerService.GetAgentPositions    # [planned] (agent_id, asset, venue) → signed position
+        - fob.risk.v1.RiskService.GetRiskSnapshot          # позиции агентов + band + Z_a (UI)
+      calls:
+        - fob.risk.v1.RiskService.PreHedgeCheck            # pre-hedge gate перед эмиссией сверх полосы (reuse F-12)
+    # Код открывается только после ADR-061 accepted (гейт владельца §13 review-summary).
+    # Планы задач: T-F18-001..014 (docs) + T-F18-101..505 (Э1..Э5, флаги OFF по умолчанию).
+    codePaths: []

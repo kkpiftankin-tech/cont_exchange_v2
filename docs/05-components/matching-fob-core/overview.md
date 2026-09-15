@@ -137,6 +137,7 @@ classDiagram
 - F-09 (Batch and Combo Orders) — multi-leg, не реализовано
 - F-11 (External Venues LOB → FOB) — не реализовано
 - F-12 (Execution Hedge) — не реализовано
+- [F-18 v2](../../02-system/features/F-18-ce-capital-position-hedge/) (CE Virtual Counterparties) — A2 `σ*=m+ρ·c`, граф venue-only + house-столбец, клиринг + накопление `c←c+f`, расчёт полосы `±q`; код planned (гейт ADR-061)
 
 ## Известные несоответствия F-04
 

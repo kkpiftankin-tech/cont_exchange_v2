@@ -36,6 +36,7 @@ In-memory кэш последних тикеров по парам (venue, symbo
 
 - F-05 (Live Market Data)
 - F-11 (External Venues LOB → FOB) — потребитель данных от venues
+- [F-18 v2](../../02-system/features/F-18-ce-capital-position-hedge/) (CE Virtual Counterparties) — A1: `m, α, c` из стакана, настраиваемая комиссия тейкера — без изменений в v2; код planned (гейт ADR-061)
 
 ## Participates In Features
 

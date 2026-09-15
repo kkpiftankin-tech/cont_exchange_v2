@@ -139,3 +139,39 @@ BFF уже селектит 9 колонок ([`server.js:6576`](../../frontend/
 - Use case: [UC-F05A-06](../02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/use-case.md)
 - Sequence: [SEQ-F05A-UC-F05A-06-services](../05-components/sequences/SEQ-F05A-UC-F05A-06-services.md)
 - Tasks: [F-05A-CE-agents.tasks.md](../implementation-plan/F-05A-CE-agents.tasks.md) (T-CEA-001/002/202/401)
+
+## Conflict Notes (F-18 v2, 2026-09-15)
+
+Источник конфликта — новая постановка алгоритма
+[`incoming-docs/2026-09-15-CE_algorithm_v2.md`](../../incoming-docs/2026-09-15-CE_algorithm_v2.md)
+(A0–A8). Она **пересматривает** модель, зафиксированную в этом файле (ADR-055…059). Ниже —
+что именно superseded; каноническая v2-схема позиции — в
+[`ce-agent-position.md`](ce-agent-position.md), решение — под ADR-061 (TODO, supersedes
+ADR-057/058). Старые описания НЕ удаляются (правило истории ADR, CLAUDE.md §3.3) — помечаются.
+
+- **CN-A. `target` / STOCK-агенты (плечи запаса) / `__book__`-узел — SUPERSEDED.**
+  В v2 нет ни цели `target` (казначейство), ни агентов-плеч запаса, ни book-узла. Узлы — только
+  «актив@площадка». Позиция агента = накопленный неисполненный поток `c_j` (стартует с нуля,
+  знаковая), а не `владение − цель`. Поэтому:
+  - `agent_state.committed` (ADR-058) → это **и есть** позиция `c_j`; отдельного `committed`
+    больше нет. Заменяется таблицей `ce_agent_position` (см. `ce-agent-position.md`).
+  - `node_balances.target` (ADR-057) → в v2 всегда `0` (цели нет). `NodeBalance.target` в proto
+    помечается `[deprecated = true]`, физическое удаление номера — после стабилизации v2.
+  - `venue = '__book__'` — в v2 не эмитится (граф = только venue-узлы + один «счёт дома»,
+    невязка-столбец узла-нумерария, не агент).
+
+- **CN-B. `clearing_trace` должен стать `ReplacingMergeTree` — MergeTree ломает идемпотентность
+  replay.** Текущий движок `MergeTree ORDER BY (ts_window, batch_id)` при replay того же такта
+  (F-15 backtest re-run того же `batch_id`) **продублирует** строку, нарушая правило idempotent
+  ingestion. v2: `ReplacingMergeTree(ingested_at) ORDER BY (batch_id, ts_window)` — дедупликация
+  по такту (`batch_id` — естественный business-key повторного прогона). JSON-поля также
+  пересматриваются под v2 (`agents[]`: `+sigma_star, c_before, c_after, q_band, emitted_qty`,
+  `−type/leg/target`; `nodes[]`: `−target/delta`; `+house`; инварианты `+I-BAND/I-OWNERSHIP/
+  I-KERNEL`; `pnl`: `+plan_fact_gap`). Детали — при реализации кода.
+
+- **CN-C. `agent_state` / `node_balances` НИКОГДА не создавались в `init.sql` — миграция
+  документационная.** Таблицы ADR-057/058 существуют только в этом документе и ADR, реальной DDL
+  для сноса нет. Поэтому «миграция» на v2 не разрушает живую БД: `ce_agent_position` — **новая**
+  таблица (не `ALTER` существующей), а superseded-описания выше остаются как история.
+
+См. также каноническую v2-схему: [`ce-agent-position.md`](ce-agent-position.md); ADR-061 (TODO).

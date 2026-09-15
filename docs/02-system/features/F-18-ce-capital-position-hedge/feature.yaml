@@ -1,142 +1,177 @@
 feature:
   id: F-18
-  name: CE Capital, Net Position & Position-Based Hedge
+  name: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge"
   status: draft            # draft | in-progress | shipped | deprecated
   owner: core-team
   level: kite              # IN-013: Feature всегда kite ☁️
 
 # IN-013. Декомпозиция Feature вниз по Use Cases.
+# ВНИМАНИЕ: v2 (виртуальные контрагенты, знаковая позиция агента с нуля, полоса ±q)
+# заменяет модель v1 (капитал → target → net-хедж). UC-F18-01..03 — SUPERSEDED (v1),
+# сохранены для истории и Conflict Notes; активный поток v2 — UC-F18-04.
 decomposedInto:
-  - UC-F18-01            # form CE capital (seed + PnL/fees)
-  - UC-F18-02            # derive CE net position from clearing Δposition
-  - UC-F18-03            # hedge net position beyond per-asset threshold
+  - UC-F18-01            # [SUPERSEDED v1] form CE capital (seed + PnL/fees) — модель заменена house-невязкой
+  - UC-F18-02            # [SUPERSEDED v1] derive CE net position (проекция x) — заменена per-agent signed c_j
+  - UC-F18-03            # [SUPERSEDED v1] hedge net position beyond θ_a — заменён per-agent полосой ±q_j
+  - UC-F18-04            # [v2] хедж по полосе ±q: такт клиринга агентов + эмиссия сверх полосы
 
 parentRequirements:
-  - ADR-054             # capital → net position → position-based hedge
-  - ADR-049             # money-path (дополняется: net вместо per-segment gross)
-  - ADR-052             # log-price clearing (anchor a=ln mid)
-  - ADR-053             # safe-translator liquidity model (β_T, P_eff)
+  - ADR-061             # [planned] смена модели позиции CE: с нуля, знаковая, без target, house-невязка, полоса ±q, party_type AGENT (supersede ADR-057)
+  - ADR-055             # revised — убрать STOCK-агентов (плечи запаса)
+  - ADR-056             # revised — убрать book-узел/склад; добавить house-столбец
+  - ADR-058             # revised — committed = позиция; полоса ±q вместо cooldown/target
 
 description: >
-  Биржа CE (Continuous Exchange) держит собственный мультивалютный капитал
-  K = {asset → amount}, сформированный из seed-конфига и пополняемый realized
-  PnL/fees клиринга и хеджа. Из капитала/клиринга ведётся чистая позиция по
-  каждому активу pos = {asset → net_qty}. После каждого converged батча
-  вычисляется Δпозиции — проекция вектора клиринга x на активы, — которая
-  накапливается в pos. Хедж на внешних площадках эмиттится по НЕТТО-позиции
-  актива (|pos_a| > θ_a), а не по каждому потоку сегмента отдельно (как в
-  текущем per-segment BuildHedgeIntents, ADR-049). Цель хеджа — вернуть pos_a
-  к нулю (flatten). Встречные ноги неттятся и не порождают лишний хедж.
+  Биржа CE (Continuous Exchange) выступает дилером через двух виртуальных контрагентов:
+  ПЕРЕВОДЧИКОВ (Q_BIN, Q_KRK — маркет-мейкер, меняет на ОДНОЙ площадке актив на деньги)
+  и АРБИТРАЖЁРОВ (T_BTC, T_USD — перевозят ОДИН актив между площадками, тариф+срок, без
+  цены). Позиция агента c_j — накопленный по клирингу неисполненный поток: стартует с
+  НУЛЯ, знаковая, может быть отрицательной. Пока |c_j| ≤ q_j (полоса), наружу не уходит
+  ни одной заявки — такт меняет только внутреннюю позицию агента, а не владение биржи.
+  При выходе за полосу излишек (|c_j|−q_j)·sign(c_j) эмиттится наружу и синхронно
+  вычитается из c_j; по таймауту неисполненный остаток возвращается в c_j по плановой
+  цене. Прибыль/невязка оседает на СЧЁТЕ ДОМА (house) — это НЕ агент: без якоря/наклона/
+  полки/полосы, заявок не порождает (переменная-невязка, восстанавливает ядро W). Понятия
+  target и отдельного committed в v2 НЕТ — позиция И ЕСТЬ неисполненное обещание.
 
-  Источник истины: ADR-054 (2026-09-08), решения владельца:
-  капитал = seed + PnL/fees; база хеджа = net-позиция per-asset.
+  Инвариант владения: владение биржи по каждому активу меняют РОВНО две вещи — сделка с
+  клиентом и исполнение на площадке. Клиринг, накопление позиций, перевозы и таймауты
+  владение НЕ меняют никогда. Z_a = владение_a(t) − владение_a(0); при отсутствии
+  встречного клиентского потока Z_a ≡ 0.
 
-# ADR-054 §10 (2026-09-09): позиция = NOP; ledger=балансы, risk=NOP+размер хеджа,
-# execution router=исполнение, frontend читает у сервисов. (Интерим-реализация в
-# matching — `ce_*` — снята.)
+  Полоса — механизм ИНТЕРНАЛИЗАЦИИ встречного клиентского потока: при q=18/30 против q=0
+  издержки хеджа падают на −63% (182,73 vs 495,06 USD за 30 тактов, итог +203,18 против
+  −246,03). Оговорка: без встречного клиентского потока полоса УХУДШАЕТ результат
+  (гасить нечего) — это не универсальный выигрыш, а внутренняя компенсация потоков.
+
+  Источник истины: incoming-docs/2026-09-15-CE_algorithm_v2.md (алгоритм такта A0–A8),
+  сводка docs/implementation-plan/F-18-v2-agents-review-summary.md, ADR-061 (planned).
+
+# Размещение по сервисам (проект. под ADR-061). Владелец книги позиции — ledger (§17).
 primaryComponents:
-  - ledger                # ВЛАДЕЛЕЦ балансов: house-аккаунт (капитал+venue_balances), seed, GetExchangeBalances
-  - risk-manager          # считает NOP = активы−обязательства, θ/лимиты, РАЗМЕР хеджа
-  - execution-planning    # router: выбор venue + split (matching execution_planner) — есть (F-12)
-  - external-venues       # child orders + execution.venue — есть (F-12)
-  - matching-fob-core     # источник fills/клиринга (двигают балансы ledger); НЕ владеет книгой
-  - observability-reporting # frontend read-side (NOP у risk, балансы у ledger)
+  - market-data           # A0–A1: снимок обоих стаканов + кривые агентов (m, α, полка c)
+  - matching-fob-core     # A2–A6: сдвиг якоря σ*=m+ρ·c, граф W + house-столбец, клиринг, c_j+=f_j
+  - risk-manager          # A7: проверка полосы, sizing (walk qty), формат заявки, PreHedgeCheck
+  - ledger                # владелец ce_agent_position (signed), party_type AGENT, узловые остатки
+  - external-venues       # исполнение хедж/перевозочных ордеров, ExecutionReport
+  - observability-reporting # ClearingTrace, панель агентов/house/Z_a (read-side)
 
+# Контракты — planned под ADR-061; реальное изменение .proto вне scope этого doc-шага.
 protoContracts:
-  - contracts/proto/fob/ledger/v1/ledger.proto       # РАСШИР: GetExchangeBalances (валютный вектор house)
-  - contracts/proto/fob/risk/v1/risk.proto           # РАСШИР: NOP + hedge decision (размер); PreHedgeCheck (есть)
-  - contracts/proto/fob/execution/v1/execution.proto # ExecutionIntent/Report (router)
-  - contracts/proto/fob/common/v1/common.proto       # Decimal, EventMeta, Instrument, Side
+  - contracts/proto/fob/agent/v1/agent.proto          # [planned] agent_id, agent_kind {TRANSLATOR, ARBITRAGEUR}; убрать STOCK
+  - contracts/proto/fob/ledger/v1/ledger.proto        # [planned] RPC GetAgentPositions; ExchangeNOP без target
+  - contracts/proto/fob/risk/v1/risk.proto            # [planned] ExchangeNOP без target; Z_a=владение(t)−владение(0)
+  - contracts/proto/fob/execution/v1/execution.proto  # ExecutionIntent/Report (reuse F-12 router)
+  - contracts/proto/fob/common/v1/common.proto        # Decimal, EventMeta, Instrument, Side
 
 storageDependencies:
   postgresql:
-    - accounts            # house-аккаунт '__ce_house__': валютные остатки биржи (reuse F-06)
-    - ledger_positions    # legacy per-currency ledger (reuse)
-    # venue_balances — сейчас in-memory; персистить таблицей ИЛИ rebuild из Kafka-replay (решение на шаге кода)
-  # НЕТ новых ce_* таблиц (интерим-книга в matching снята, ADR-054 §10)
+    - ce_agent_position   # [planned] (agent_id, asset, venue) → position(signed), updated_at, last_batch_id
+    - accounts            # house-аккаунт '__ce_house__' (party_type HOUSE); reuse F-06
+    - f05a_clearing_config # [planned +cols] ρ_Q, ρ_T, q_translator, q_arbitrageur, transfer_eta
+  # НЕТ понятия target/net-позиции v1; позиция агента знаковая, ключ (agent_id, asset@venue)
 
 codePaths:
-  # ledger — владелец балансов house-аккаунта
-  - cpp/ledger/src/app/ledger_uc.cpp                  # house-аккаунт, seed, GetExchangeBalances, venue_balances
-  - cpp/ledger/src/infra/postgres_repositories.cpp
-  - cpp/ledger/src/transport/grpc_ledger_service.cpp  # GetExchangeBalances RPC
-  # risk — NOP + размер хеджа
-  - cpp/risk/src/app/risk_uc.cpp                       # ComputeNOP + hedge sizing + θ/лимиты
-  # execution router (есть, F-12)
-  - cpp/matching/src/app/execution_planner.cpp
+  # market-data — A0/A1 (кривые агентов)
+  - cpp/market_data/src/app/curve_to_levels.cpp
+  # matching — A2..A6 (якорь σ*, граф W+house, клиринг, накопление c_j)
+  - cpp/matching/src/app/vector_clearing_use_case.cpp
+  - cpp/matching/src/domain/vector_qp_solver.cpp
+  # ledger — владелец позиции агента (party_type AGENT)
+  - cpp/ledger/src/app/ledger_uc.cpp
+  # risk — A7 полоса + sizing + PreHedgeCheck
+  - cpp/risk/src/app/risk_uc.cpp
+  # venues — исполнение (A8 confirm)
   - cpp/venues/src/app/execute_on_venue.cpp
-  # legacy per-segment путь (остаётся за флагом)
-  - cpp/matching/src/app/vector_clearing_hedge_builder.cpp
 
 kafkaTopics:
   produces:
-    - execution.intents   # hedge intent от risk (размер по NOP) → execution router
+    - ce.position.delta   # matching → ledger: знаковая Δc_j агента по узлу (asset@venue)
+    - execution.intents   # risk → venues: заявка сверх полосы (hedge/transfer)
   consumes:
-    - batch.outputs       # ledger: клиентские fills двигают балансы (обязательства)
-    - execution.venue     # ledger: хедж-исполнение двигает venue_balances (активы биржи)
+    - marketdata.raw      # market-data: снимок стаканов (A0)
+    - execution.venue     # ledger: исполнение двигает qty[asset@venue] + realized (A8 confirm)
+    - batch.outputs       # ledger: клиентские fills двигают владение (точка входа №1)
 
 grpcServices:
   exposes:
-    - fob.ledger.v1.LedgerService.GetExchangeBalances  # валютный вектор биржи (house), для risk+UI
-    - fob.risk.v1.RiskService.GetRiskSnapshot          # NOP/exposure по валюте (расширение)
+    - fob.ledger.v1.LedgerService.GetAgentPositions   # [planned] (agent_id, asset, venue) → signed position
+    - fob.risk.v1.RiskService.GetRiskSnapshot          # позиции агентов + band state + Z_a (для UI)
   calls:
-    - fob.risk.v1.RiskService.PreHedgeCheck            # pre-hedge gate (accept/reject, F-12)
+    - fob.risk.v1.RiskService.PreHedgeCheck            # pre-hedge gate перед эмиссией сверх полосы (reuse F-12)
 
-# AC переписаны под ADR-054 §10 (NOP; ledger=балансы, risk=NOP+размер, router=исполнение).
+# AC v2 — покрывают такт A0–A8, полосу ±q, house, party_type AGENT, инвариант владения,
+# Z_a = владение(t) − владение(0). Источник: system-analyst (AC-F18v2-01..18).
 acceptanceCriteria:
-  - "F18-1: ledger при старте заводит house-аккаунт '__ce_house__' с валютными остатками из env CE_CAPITAL_SEED_<CCY> (idempotent — только пустой аккаунт)."
-  - "F18-2: остатки house-аккаунта двигаются теми же fills/исполнениями, что ledger уже потребляет (batch.outputs двигает обязательства; execution.venue двигает venue_balances) — двойной записью; без отдельной проекции x."
-  - "F18-3: venue_balances устойчивы к рестарту (персист таблицей ИЛИ rebuild из Kafka-replay); GetExchangeBalances возвращает корректный валютный вектор после рестарта."
-  - "F18-4: risk вычисляет NOP_a = (капитал_a + Σ_v venue_bal_a) − Σ_u client_bal_a; при нуле клиентов NOP = собственный инвентарь (универсальность A⊇B); покрыто unit-тестом."
-  - "F18-5: numeraire (CE_NUMERAIRE, default USDT) исключён из NOP (θ=∞, не хеджируется); mark_a = цена в numeraire; сбалансированная клиентская кастодия не создаёт NOP."
-  - "F18-6: risk определяет размер хеджа: |NOP_a|>θ_a ⇒ qty=|NOP| (FLATTEN) / |NOP|−θ (TO_BAND), side=излишек→SELL/дефицит→BUY (CE_HEDGE_THRESHOLD_<CCY>, CE_HEDGE_MODE)."
-  - "F18-7: хедж-намерение от risk идёт в execution router (matching execution_planner → venues), проходит PreHedgeCheck (accept/reject, F-12); исполнение уменьшает NOP через venue_balances."
-  - "F18-8: LedgerService.GetExchangeBalances (валютный вектор house) + RiskService NOP/exposure доступны по gRPC; UI /ce-capital-live рендерит балансы (ledger) + NOP/хедж (risk)."
-  - "F18-9: всё за флагом CE_NET_HEDGE_ENABLED (default off); при 0 поведение идентично до-F18 (no regression); legacy per-segment путь ADR-049 сохранён."
-  - "F18-10: встречные ноги неттятся в NOP (агрегат по валюте) — противоположные потоки не порождают лишний хедж (net, не gross)."
+  - "AC-F18v2-01: A0 — снимок обоих стаканов на единый момент такта; площадка со снапшотом старше stale-порога исключается, такт продолжается по оставшимся узлам."
+  - "AC-F18v2-02: A1 — кривая агента строится из трёх чисел: якорь m=1000·ln(mid/P0), консервативный наклон α=θ·min V/d, полка c=комиссия+½·|ln(ask/bid)|·1000 (эталон Binance: α=0,50·71,971=35,986)."
+  - "AC-F18v2-03: A2 — сдвиг якоря ровно ОДНО слагаемое σ*_j=m_j+ρ_j·c_j от СОБСТВЕННОЙ позиции агента (ρ_Q=0,004 переводчик, ρ_T=0,002 маршрут); отдельного target/committed-слагаемого нет."
+  - "AC-F18v2-04: A3 — матрица W: ранг V·A−1, независимых кругов (V−1)(A−1), левое ядро (1,…,1); столбец house — единственная ненулевая клетка в узле нумерария, восстанавливает ядро."
+  - "AC-F18v2-05: A4 — клиринг максимизирует Σ[−σ*_j·f_j − c_j·|f_j| − f_j²/(2α_j)] при Wf=0; закрытая форма (λ*) совпадает с OSQP в пределах 1e-9 на квадратном случае (2 площадки × 2 актива)."
+  - "AC-F18v2-06: A5 — такт активирует эмиссию только если |Wf|<1e-6 И закрытая форма == OSQP И объём заявки ≤95% остатка узла-источника; иначе такт FAILED, заявки не эмитятся, risk.alerts."
+  - "AC-F18v2-07: A6 — накопление c_j+=f_j не порождает ни одной внешней заявки; позиция может уйти в отрицательную зону (эталонный минимум −18000 тыс.); владение узлов этим шагом не меняется (property-тест)."
+  - "AC-F18v2-08: A7 — заявка эмиттится СТРОГО когда |c_j|>q_j; размер=(|c_j|−q_j)·sign(c_j) по стоимости, переведён в qty итеративным walk по книге (2–3 итерации); после эмиссии |c_j_new|≤q_j."
+  - "AC-F18v2-09: A7 — у переводчика и арбитражёра РАЗНЫЕ полосы (q_translator=18, q_arbitrageur=30, конфигурируемые per-agent-kind), не общая константа."
+  - "AC-F18v2-10: A7 — эмитированная заявка помечена in_flight; c_j уменьшается В МОМЕНТ ЭМИССИИ (не по confirm) — повторная отправка того же излишка невозможна."
+  - "AC-F18v2-11: A8/timeout — неисполненный к дедлайну остаток in_flight возвращается в c_j по ПЛАНОВОЙ цене (цене эмиссии), не по марке на момент таймаута."
+  - "AC-F18v2-12: A8/confirm — исполнение меняет ТОЛЬКО qty[asset@venue] узла и realized=fq·(марка−px_факт)/1000·sgn; позицию агента confirm не трогает (уменьшена в A7)."
+  - "AC-F18v2-13: Инвариант владения — владение_a(t)=Σqty[a@venue]+Σin_transit[a] меняется РОВНО двумя событиями: сделка с клиентом и исполнение на площадке; клиринг/накопление/перевоз/таймаут владение не мутируют (property-тест: N тактов без клиентского потока ⇒ Z_a≡0)."
+  - "AC-F18v2-14: Z_a=владение_a(t)−владение_a(0); понятия target в модели v2 нет (ExchangeNOP.target удалён — breaking, за флагом до миграции клиентов контракта)."
+  - "AC-F18v2-15: Счёт дома (house) — не агент: без якоря/наклона/полки/полосы, заявок не эмиттит; остаток по нумерарию сметается в house; в стоимостных единицах баланс такта сходится ровно (double-entry)."
+  - "AC-F18v2-16: party_type=AGENT — отдельный от CLIENT/HOUSE тип участника в ledger; позиция агента знаковая; резерв-чек (неотрицательность, как у CLIENT) к AGENT НЕ применяется."
+  - "AC-F18v2-17: Перевоз (арбитражёр) — сущность {asset,src,dst,qty,eta,tariff,status}; приход учитывается на узле назначения при eta≤t; qty≤95% остатка узла-источника перед отправкой, иначе перевоз урезается/откладывается."
+  - "AC-F18v2-18: Эффект полосы измерим — при q=18/30 число внешних заявок и издержки хеджа за фиксированный 30-тактовый прогон строго меньше, чем при q=0 (ориентир −63% издержек); НО без встречного клиентского потока полоса результат ухудшает (гасить нечего)."
 
-# UX Screens — панель наблюдаемости ключевых параметров (ADR-054 §8).
+# UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
 uxScreens:
-  - id: ce_treasury_dashboard
-    title: CE Treasury / Capital & Position
-    route: /ce-capital-live
+  - id: ce_agents_dashboard
+    title: CE Virtual Counterparties / Agents & Band
+    route: /ce-agents-live
     purpose: >
-      Единая панель казначейства CE: per-asset таблица (balance h, target, pos,
-      mark, cost_basis, unrealized_pnl, realized_pnl, θ, hedge_armed, last Δpos)
-      + агрегат (Equity=Σh·mark, Σ uPnL, Σ rPnL, seed_equity) + индикатор
-      сверки учётного тождества (identity_ok ✔/❗). Подсветка активов с
-      hedge_armed=true. Цель — визуально доказать корректность (equity сходится,
-      неттинг работает, хедж эмиттится только при |pos|>θ).
-    primary_data_source: ledger (GetExchangeBalances — валютный вектор) + risk (NOP/exposure), via frontend-api
+      Панель виртуальных контрагентов: per-agent таблица (agent_id, agent_kind
+      TRANSLATOR/ARBITRAGEUR, c_j signed, q_j, |c_j|/q_j как %-полоса, in_flight qty,
+      статус эмиссии); строка house (house_residual, без якоря/полки/полосы);
+      индикатор Z_a=владение(t)−владение(0) per asset; лог перевозов (ce_transfer)
+      для арбитражёров. Подсветка агента при выходе за полосу (|c_j|>q_j) и
+      in_flight-заявок, ожидающих таймаута; alert-баннер при FAILED-такте.
+      Фронт только рендерит уже посчитанные c_j, q_j, Z_a, house_residual
+      (памятка "Frontend no domain compute") — полосу/клиринг/якорь не пересчитывает.
+    primary_data_source: risk (GetRiskSnapshot — позиции+band+Z_a) + ledger (GetAgentPositions), via frontend-api
     api_endpoints:
-      - GET /api/v1/ce/treasury (frontend-api агрегирует ledger-балансы + risk-NOP)
+      - GET /api/v1/ce/agents (frontend-api агрегирует ledger-позиции + risk-band/Z_a)
     refresh_mode: polling-3s
 
 knownIssues:
-  - id: placement-resolved-ledger-risk
-    severity: resolved
+  - id: v1-v2-model-conflict
+    severity: architectural
     description: >
-      RESOLVED ADR-054 §10 (2026-09-09): позиция = NOP; владелец балансов — ledger
-      (house-аккаунт), расчёт NOP + размер хеджа — risk, исполнение — execution
-      router. Интерим-реализация в matching (ce_position_projector/
-      postgres_ce_treasury_repository/grpc_treasury_service + проекция x) СНЯТА
-      как ошибочная (дубль балансовой книги + неверная модель «позиция =
-      проекция клиринга»).
-    location: cpp/ledger/ + cpp/risk/ (реализация), ADR-054 §10
-  - id: quote-ref-per-asset
+      v2 содержательно ПРОТИВОРЕЧИТ v1 (UC-F18-01..03, ADR-054/057): модель
+      «капитал → target → net-хедж» заменяется на «знаковая позиция агента с нуля,
+      без target, house-невязка, полоса ±q». Per CLAUDE.md §0a (Conflict rule):
+      требуется ADR-061 (supersede ADR-057; ревизии ADR-055/056/058) и Conflict Notes
+      в UC-F18-01..03 ДО кода. UC-F18-01..03 помечены superseded, не удалены.
+    location: docs/03-architecture/adr/ (ADR-061 planned), UC-F18-01..03
+  - id: engine-consolidation-open
+    severity: open-question
+    description: >
+      Пути клиринга не сведены: ce_agent_clearing (наш), vector_qp_solver/OSQP (F-05A),
+      ContinuousClearingSolver (Engine A). Нужен отдельный ADR (кандидат ADR-062).
+  - id: agent-position-persist
     severity: feature-gap
     description: >
-      Net-позиция ведётся per-asset (BTC, ETH, SOL, USDT). Для хеджа нужен
-      reference-инструмент a/QUOTE_ref (напр. BTC/USDT). Маппинг asset→quote_ref
-      берётся из env (CE_HEDGE_QUOTE_REF_<ASSET>, default USDT). Мульти-quote
-      неттинг (BTC/ETH cross) — вне scope MVP.
-    location: cpp/matching/src/app/ce_net_hedge_builder.cpp
+      Позиция агента должна переживать рестарт (PG ce_agent_position, не in-memory):
+      устраняет известный разрыв v1, где ce_committed_ терялся при рестарте.
+      Декремент c_j — при эмиссии (A7), не при исполнении (A8).
+    location: cpp/ledger/src/app/ledger_uc.cpp (planned AgentPositionRepositoryPort)
 
 tests:
   unit:
-    - cpp/matching/tests/app/ce_position_projector_test.cpp   # проекция x→Δpos, неттинг
-    - cpp/matching/tests/app/ce_net_hedge_builder_test.cpp     # порог, flatten side, qty
+    - cpp/matching/tests/domain/ce_agent_clearing_closed_form_vs_osqp_test.cpp  # AC-F18v2-05
+    - cpp/matching/tests/domain/ce_band_emission_test.cpp                        # AC-F18v2-08/09/10
+    - cpp/ledger/tests/app/ce_agent_position_apply_test.cpp                      # AC-F18v2-07/12/16
+    - cpp/risk/tests/app/ownership_invariant_test.cpp                            # AC-F18v2-13/14
   integration:
-    - Testing/f18_ce_capital_e2e.sh    # seed → clearing → Δpos → net-hedge → PnL→capital
+    - Testing/f18v2_ce_tact_e2e.sh                 # A0..A8, без клиентского потока ⇒ Z_a≡0
+    - Testing/f18v2_band_vs_no_band_30_ticks.sh    # AC-F18v2-18, эффект полосы −63%
   contract:
-    - cpp/matching/tests/transport/ce_treasury_mapper_test.cpp
+    - cpp/matching/tests/transport/agent_delta_mapper_test.cpp

@@ -1,0 +1,293 @@
+featureId: F-18
+featureName: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge (v2)"
+level: kite
+status: draft   # реализация под гейтом владельца (ADR-061 accepted); все codePath — planned
+
+# Бизнес-требования v2 (business-analyst, review §1). Модель v2 supersede v1 (BR v1 → target/net-хедж).
+businessRequirements:
+  - id: BR-F18v2-01
+    text: "Виртуальные контрагенты CE — только переводчики (маркет-мейкер на одной площадке) и арбитражёры (перевоз одного актива между площадками); STOCK/плечи запаса удалены."
+    acceptanceCriteria: [AC-F18v2-02, AC-F18v2-15]
+  - id: BR-F18v2-02
+    text: "Позиция агента c_j стартует с НУЛЯ, знаковая, может быть отрицательной; это и есть накопленный неисполненный поток (нет отдельного committed)."
+    acceptanceCriteria: [AC-F18v2-07, AC-F18v2-16]
+  - id: BR-F18v2-03
+    text: "Интернализация встречного клиентского потока через полосу ±q: пока |c_j|≤q_j наружу не уходит ни одной заявки."
+    acceptanceCriteria: [AC-F18v2-08, AC-F18v2-09, AC-F18v2-10, AC-F18v2-18]
+  - id: BR-F18v2-04
+    text: "Прибыль/невязка оседает на счёте дома (house) — не агент, заявок не порождает; house восстанавливает ядро W."
+    acceptanceCriteria: [AC-F18v2-04, AC-F18v2-15]
+  - id: BR-F18v2-05
+    text: "Отказ от понятия target: ExchangeNOP.target удалён (breaking); хедж — только при выходе за полосу, не по нетто каждый такт."
+    acceptanceCriteria: [AC-F18v2-14]
+  - id: BR-F18v2-06
+    text: "Инвариант владения: владение меняют РОВНО две вещи (клиент + исполнение); Z_a = владение_a(t) − владение_a(0); без клиентского потока Z_a≡0."
+    acceptanceCriteria: [AC-F18v2-01, AC-F18v2-11, AC-F18v2-12, AC-F18v2-13]
+
+useCases:
+  - id: UC-F18-04-ce-v2-agent-band-hedge
+    role: primary            # v2 активный поток
+    level: sea
+    path: docs/02-system/use-cases/UC-F18-04-ce-v2-agent-band-hedge/
+  - id: UC-F18-01-form-ce-capital
+    role: superseded-v1      # Conflict Note: заменён house-невязкой
+    path: docs/02-system/use-cases/UC-F18-01-form-ce-capital/
+  - id: UC-F18-02-derive-ce-position
+    role: superseded-v1      # заменён per-agent signed c_j
+    path: docs/02-system/use-cases/UC-F18-02-derive-ce-position/
+  - id: UC-F18-03-hedge-net-position
+    role: superseded-v1      # заменён per-agent полосой ±q
+    path: docs/02-system/use-cases/UC-F18-03-hedge-net-position/
+
+sequenceDiagrams:
+  system:
+    - id: SEQ-UC-F18-04-system
+      level: kite
+      path: docs/02-system/use-cases/UC-F18-04-ce-v2-agent-band-hedge/sequences/SEQ-UC-F18-04-system.md
+  service:
+    - id: SEQ-F18-UC-F18-04-services
+      level: sea
+      path: docs/05-components/sequences/SEQ-F18-UC-F18-04-services.md
+
+components:
+  - id: market-data
+    role: agent-curves-builder    # A0–A1 снимок + кривые (m,α,c)
+    codePath: cpp/market_data/src/app/curve_to_levels.cpp
+    status: planned               # под флагом CE_V2_GRAPH
+  - id: matching-fob-core
+    role: clearing-and-accumulation  # A2–A6 σ*=m+ρ·c, W+house, клиринг, c_j+=f_j
+    codePath: cpp/matching/src/app/vector_clearing_use_case.cpp
+    status: planned               # A2 anchor shift ОТСУТСТВУЕТ в коде (review §10)
+  - id: matching-domain
+    role: sigma-shift-and-solver
+    codePath: cpp/matching/src/domain/vector_qp_solver.cpp   # + planned ce_sigma_shift.hpp
+    status: planned
+  - id: risk-manager
+    role: band-check-and-emission    # A7 полоса + sizing walk + PreHedgeCheck
+    codePath: cpp/risk/src/app/risk_uc.cpp
+    status: planned               # A7-полоса отсутствует; reuse F-12 PreHedgeCheck
+  - id: ledger
+    role: agent-position-owner       # владелец ce_agent_position (party_type AGENT); декремент при эмиссии A7
+    codePath: cpp/ledger/src/app/ledger_uc.cpp    # + planned AgentPositionRepositoryPort
+    status: planned               # первая реальная PG-таблица ledger
+  - id: external-venues
+    role: executor                   # A8 исполнение хедж/перевоз, ExecutionReport
+    codePath: cpp/venues/src/app/execute_on_venue.cpp
+    status: planned               # reuse F-12 router
+  - id: observability-reporting
+    role: clearing-trace-and-panel   # read-side: панель агентов/house/Z_a
+    codePath: cpp/observability
+    status: planned
+
+protoContracts:
+  - file: contracts/proto/fob/agent/v1/agent.proto
+    role: AgentKind-enum-TRANSLATOR-ARBITRAGEUR    # убрать STOCK
+    status: planned               # ADR-061
+  - file: contracts/proto/fob/ledger/v1/ledger.proto
+    role: GetAgentPositions-RPC + ExchangeNOP-without-target
+    status: planned
+    docStub: docs/06-api/grpc/ledger-get-agent-positions.md   # TODO contract (ledger-agent-positions)
+  - file: contracts/proto/fob/risk/v1/risk.proto
+    role: PreHedgeCheck-reuse-F12 + Z_a-without-target
+    status: planned
+  - file: contracts/proto/fob/execution/v1/execution.proto
+    role: ExecutionIntent-ExecutionReport-reuse-F12-router
+    status: existing
+  - file: contracts/proto/fob/common/v1/common.proto
+    role: Decimal-EventMeta-Instrument-Side
+    status: existing
+
+kafkaTopics:
+  - name: ce.position.delta
+    direction: out
+    producer: matching
+    consumer: ledger
+    message: "AgentDelta{agent_id, agent_kind, asset, venue, delta, price_used, delta_value}"   # замена AssetDelta
+    partitionKey: agent_id
+    status: planned               # TODO contract (ce-position-delta); заменяет AssetDelta (breaking, IT-CE-V2-08)
+  - name: execution.intents
+    direction: out
+    producer: risk
+    consumer: external-venues
+    message: fob.execution.v1.ExecutionIntent
+    partitionKey: intent_id
+    status: existing              # reuse F-12
+  - name: marketdata.raw
+    direction: in
+    producer: external-venues
+    consumer: market-data
+    status: existing              # A0 снимок стаканов
+  - name: execution.venue
+    direction: in
+    producer: external-venues
+    consumer: ledger              # A8 confirm: qty[asset@venue] + realized
+    message: fob.execution.v1.ExecutionReport
+    status: existing              # + legacy execution.reports (dual-publish, CLAUDE.md §7.3)
+  - name: batch.outputs
+    direction: in
+    producer: matching
+    consumer: ledger              # клиентские fills двигают владение (точка входа №1)
+    status: existing
+  - name: ce.transfers
+    direction: out
+    producer: matching            # арбитражёр
+    consumer: ledger
+    message: "Transfer{asset, src, dst, qty, eta, tariff, status}"
+    status: planned               # Э5 (CE_TRANSFER_AGENT)
+
+grpcServices:
+  - service: fob.ledger.v1.LedgerService
+    method: GetAgentPositions
+    role: signed-position-by-node    # (agent_id, asset, venue) → signed position
+    status: planned
+  - service: fob.ledger.v1.LedgerService
+    method: ApplyAgentPositionReduction
+    role: decrement-c_j-at-emission-A7
+    status: planned               # idempotency по intent_id (RememberExecutionIntent)
+  - service: fob.risk.v1.RiskService
+    method: PreHedgeCheck
+    role: pre-hedge-gate-before-band-emission
+    status: reuse-F12             # CRITICAL-2: не в живом пути (OQ-F18v2-08)
+  - service: fob.risk.v1.RiskService
+    method: GetRiskSnapshot
+    role: agent-positions + band-state + Z_a (UI)
+    status: planned
+
+storage:
+  postgresql:
+    - name: ce_agent_position
+      role: signed-agent-position-per-node    # (agent_id, asset, venue) → position(signed), updated_at, last_batch_id
+      schemaSource: docs/07-data/ce-agent-position.md    # TODO schema
+      ddlStatus: spec-only          # upsert с guard по last_batch_id; переживает рестарт
+    - name: f05a_clearing_config
+      role: tact-config             # +ρ_Q, ρ_T, q_translator, q_arbitrageur, transfer_eta (+5 колонок)
+      ddlStatus: spec-only
+    - name: ce_transfer
+      role: arbitrageur-transfer-state-machine   # in_transit → delivered/timed_out → returned
+      ddlStatus: spec-only          # Э5
+    - name: accounts
+      role: house-account '__ce_house__' (party_type HOUSE); CLIENT/HOUSE — generated column
+      ddlStatus: reuse-F06          # AGENT — отдельная таблица (несовместимые инварианты, ADR-063)
+  clickhouse:
+    - name: clearing_trace
+      role: tact-trace              # +agent_id, c_j до/после, house-невязка
+      ddlStatus: spec-only          # ReplacingMergeTree (идемпотентность replay)
+
+tests:
+  planSource: docs/10-testing/features/F-18-v2-test-plan.md   # 66 CHK + 8 IT + 2 E2E + 3 replay
+  invariants:
+    - INV-1  # владение меняют ровно две вещи; Z_a≡0 без клиента
+    - INV-2  # x₊·x₋=0 комплементарность
+    - INV-3  # W·c=0; отрицательная позиция обязательна
+    - INV-4  # rank W = V·A−1; ядра
+    - INV-5  # det W_нат=(p₂−p₁)/1000; house восстанавливает ядро
+    - INV-6  # после эмиссии |c_j|=q_j точно
+    - INV-7  # σ*=m+ρ·c — одно слагаемое
+    - INV-8  # возврат по таймауту по плановой цене
+    - INV-9  # прибыль на house по факту; позиция при исполнении не трогается
+  unit:
+    expected:
+      - CHK-01..08   # three_numbers_test (A1/A2)
+      - CHK-09..15   # vector_qp_pi_test (A4/A5)
+      - CHK-16..27   # w_structure_test (A3/house)
+      - CHK-28..66   # agent_band_test (A6/A7/A8 + числовые прогоны)
+    files:
+      - cpp/matching/tests/domain/ce_agent_clearing_closed_form_vs_osqp_test.cpp   # AC-F18v2-05
+      - cpp/matching/tests/domain/ce_band_emission_test.cpp                        # AC-F18v2-08/09/10
+      - cpp/ledger/tests/app/ce_agent_position_apply_test.cpp                      # AC-F18v2-07/12/16
+      - cpp/risk/tests/app/ownership_invariant_test.cpp                            # AC-F18v2-13/14
+      - cpp/matching/tests/domain/three_numbers_test.cpp                           # planned
+      - cpp/matching/tests/domain/vector_qp_pi_test.cpp                            # planned
+      - cpp/matching/tests/domain/w_structure_test.cpp                             # planned
+      - cpp/matching/tests/domain/agent_band_test.cpp                              # planned
+    status: planned                 # golden ce_tick_v2.py/square_bands.py отсутствуют (OQ-F18v2-09)
+  contract:
+    - cpp/matching/tests/transport/agent_delta_mapper_test.cpp   # AgentDelta маппинг
+  integration:
+    expected:
+      - IT-CE-V2-01   # ce.position.delta без target (breaking)
+      - IT-CE-V2-02   # GetAgentPositions + идемпотентный реплей
+      - IT-CE-V2-03   # эмиссия по полосе → execution.intents
+      - IT-CE-V2-04   # execution.intents → venues → execution.venue
+      - IT-CE-V2-05   # возврат остатка по плановой цене
+      - IT-CE-V2-06   # таймаут in_flight, нет повторной отправки
+      - IT-CE-V2-07   # перевоз арбитражёра ce.transfers
+      - IT-CE-V2-08   # backward-compat AgentDelta vs AssetDelta (фиксирует несовместимость)
+  e2e:
+    - Testing/f18v2_ce_tact_e2e.sh                 # A0..A8, без клиента ⇒ Z_a≡0
+    - Testing/f18v2_band_vs_no_band_30_ticks.sh    # AC-F18v2-18, эффект полосы −63%
+    - Testing/f18v2_no_client_flow_e2e.sh          # контрольный: Z≡0, полоса УХУДШАЕТ (CHK-48)
+  replay:
+    - agent_band_test::ReplayDeterminism
+    - IT-CE-V2-REPLAY
+    - w_structure_test::GaugeReplayStable
+
+acceptanceCriteria:
+  source: docs/02-system/features/F-18-ce-capital-position-hedge/acceptance-criteria.md
+  count: 18                          # AC-F18v2-01..18
+
+openQuestions:
+  source: docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md
+  blocking: [OQ-F18v2-05, OQ-F18v2-06, OQ-F18v2-07, OQ-F18v2-08, OQ-F18v2-09]
+  open: [OQ-F18v2-01, OQ-F18v2-02, OQ-F18v2-03, OQ-F18v2-04]
+
+adr:
+  decisions:
+    - id: ADR-061
+      role: ce-v2-agent-position-band-hedge   # supersede ADR-054/057; ревизии ADR-055/056/058
+      status: planned-must-be-accepted-before-code
+    - id: ADR-062
+      role: clearing-engine-consolidation      # OQ-F18v2-05
+      status: planned-open
+    - id: ADR-063
+      role: party_type-AGENT-third-type        # OQ-F18v2-06
+      status: planned-open
+    - id: ADR-057
+      role: superseded-by-ADR-061              # three-level position v1
+      status: superseded
+  revises: [ADR-055, ADR-056, ADR-058]
+
+implementationTasks:
+  source: docs/implementation-plan/F-18-v2.tasks.md
+  gate: docs/implementation-plan/F-18-v2-agents-review-summary.md   # §13 блокирующий гейт владельца
+  docsGroup: T-F18-001..014         # ADR-061 + ревизии, feature/UC/SEQ, proto, DDL, test-plan, env
+  codeStages:
+    - stage: E1
+      flag: CE_V2_GRAPH
+      tasks: T-F18-101..103
+    - stage: E2
+      flag: CE_AGENT_POS
+      tasks: T-F18-201..205
+    - stage: E3
+      flag: CE_AGENT_BAND
+      tasks: T-F18-301..305         # требует CE_AGENT_A8 как пререквизит (security MEDIUM-7)
+    - stage: E4
+      flag: CE_AGENT_A8
+      tasks: T-F18-401..403
+    - stage: E5
+      flag: CE_TRANSFER_AGENT
+      tasks: T-F18-501..505
+
+dependentFeatures:
+  - id: F-05A
+    role: vectorized-external-liquidity-base   # переиспользует кривые/клиринг-ядро, OSQP
+  - id: F-12
+    role: execution-hedge-router-and-prehedgecheck
+    note: reuse ExecutionIntent/Report + PreHedgeCheck (CRITICAL-2 наследуется)
+  - id: F-06
+    role: accounts-and-positions-base          # house-аккаунт, party_type
+  - id: F-18-v1
+    role: superseded-by-v2                      # UC-F18-01..03, ADR-054/057
+
+uxScreens:
+  - id: ce_agents_dashboard
+    route: /ce-agents-live
+    primaryDataSource: risk (GetRiskSnapshot) + ledger (GetAgentPositions) via frontend-api
+    refreshMode: polling-3s
+    status: planned
+
+incomingDocSources:
+  - id: DOC-F18-V2
+    file: incoming-docs/2026-09-15-CE_algorithm_v2.md   # такт A0–A8, «Полоса», «Позиция биржи», «Счёт дома», «Незакрытое»
+  - id: DOC-F18-V2-REVIEW-SUMMARY
+    file: docs/implementation-plan/F-18-v2-agents-review-summary.md   # прогон 12 агентов
