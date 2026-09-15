@@ -1,9 +1,10 @@
 ---
 id: ADR-057
 title: CE — трёхуровневая позиция (агент → узел → актив) и Z_a = Σqty + in_transit + committed − target
-status: accepted
+status: superseded
 date: 2026-09-10
 accepted: 2026-09-10
+superseded: 2026-09-15
 level: sea
 feature: F-18
 related: [ADR-054, ADR-055, ADR-056, ADR-058, ADR-061]
@@ -14,7 +15,7 @@ sources: [CE_algorithm_spec.md, CE_virtual_counterparties.md]
 
 # ADR-057 — Трёхуровневая позиция CE
 
-**⚠️ Пересматривается в F-18 v2** ([ADR-061](ADR-061-ce-v2-agent-position-band-hedge.md), `proposed`). В v2 отменены `target` и `committed` как отдельные величины: позиция агента `c_j` знаковая, стартует с нуля, накапливается клирингом (`c ← c + f`); владение считается как `Z_a = владение(t) − владение(0)`. Этот ADR остаётся `accepted` до перевода ADR-061 в `accepted`, после чего получает статус `superseded`.
+**⚠️ Superseded by [ADR-061](ADR-061-ce-v2-agent-position-band-hedge.md) (accepted, 2026-09-15).** В v2 отменены `target` и `committed` как отдельные величины: позиция агента `c_j` знаковая, стартует с нуля, накапливается клирингом (`c ← c + f`); владение считается как `Z_a = владение(t) − владение(0)`. Этот ADR сохраняется как исторический след; актуальная модель — в ADR-061.
 
 > **Решение владельца (2026-09-10, `CE_algorithm_spec.md` §1.3; `CE_virtual_counterparties.md` §6,11).** Позиция ведётся на **трёх уровнях**: агент (поля `committed`/`filled`), узел (`qty`/`target`/`in_transit` по `asset@venue`), актив (`Z_a = Σ_venue qty + in_transit + committed − target`). Каждое из трёх решений (куда и сколько исполнять, можно ли, насколько допустим риск) читает своё число.
 

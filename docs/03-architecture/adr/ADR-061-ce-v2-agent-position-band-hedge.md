@@ -1,8 +1,9 @@
 ---
 id: ADR-061
 title: "CE v2: позиция агента с нуля, полоса ±q, счёт дома, тип участника AGENT"
-status: proposed
+status: accepted
 date: 2026-09-15
+accepted: 2026-09-15
 level: sea
 feature: F-18
 related:
@@ -20,7 +21,7 @@ sources: [incoming-docs/2026-09-15-CE_algorithm_v2.md]
 
 # ADR-061: Модель позиции CE v2 — агент с нуля, полоса ±q, счёт дома
 
-> **Статус `proposed`.** Это предложенное решение. Перевод в `accepted` — за владельцем, после снятия гейта §13 сводки [F-18-v2-agents-review-summary](../../implementation-plan/F-18-v2-agents-review-summary.md). До `accepted` реализация не открывается (CLAUDE.md §0a, no-code-before-docs). Источник решения — владелец, 2026-09-15, [CE_algorithm_v2.md](../../../incoming-docs/2026-09-15-CE_algorithm_v2.md).
+> **Статус `accepted` (владелец, 2026-09-15).** Развилки §2 плана подтверждены: движок клиринга = Newton (ADR-062), тип участника AGENT = третий `party_type` (ADR-063), номер фичи = F-18. Гейт принятия ADR снят — документарная цепочка открыта для реализации Э1. **Остаются предусловия для стадий кода** (не для документации): два security-CRITICAL (auth на `/v1/flow-orders`; `PreHedgeCheck`/kill-switch в путь venues) и golden-источники `ce_tick_v2.py`/`square_bands.py` для тест-goldens — см. [open-questions](../../02-system/features/F-18-ce-capital-position-hedge/open-questions.md). Источник решения — [CE_algorithm_v2.md](../../../incoming-docs/2026-09-15-CE_algorithm_v2.md).
 
 ## Контекст
 

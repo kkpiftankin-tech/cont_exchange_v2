@@ -1,8 +1,9 @@
 ---
 id: ADR-062
 title: "CE — консолидация движков клиринга (Newton ce_agent_clearing vs OSQP vector_qp_solver)"
-status: proposed
+status: accepted
 date: 2026-09-15
+accepted: 2026-09-15
 level: sea
 feature: F-18
 related:
@@ -16,7 +17,7 @@ sources: [incoming-docs/2026-09-15-CE_algorithm_v2.md]
 
 # ADR-062 — Консолидация движков клиринга CE
 
-> **Статус `proposed`.** Открытый вопрос из гейта §13 сводки [F-18-v2-agents-review-summary](../../implementation-plan/F-18-v2-agents-review-summary.md); решение за владельцем. До `accepted` действует статус-кво (два движка сосуществуют).
+> **Статус `accepted` (владелец, 2026-09-15).** Решение подтверждено: CE-путь консолидируется на Newton-движок `ce_agent_clearing`, OSQP остаётся на не-CE путях до отдельной миграции.
 
 ## Контекст
 
@@ -29,7 +30,7 @@ sources: [incoming-docs/2026-09-15-CE_algorithm_v2.md]
 
 ## Решение
 
-**Предлагается (на подтверждение владельцу): сделать `ce_agent_clearing` (Newton) единственным движком CE-пути, а OSQP оставить только для путей, где он реально нужен, с планом их последующей миграции.**
+**`ce_agent_clearing` (Newton) — единственный движок CE-пути; OSQP остаётся только на путях, где он реально нужен, с планом последующей миграции** (подтверждено владельцем 2026-09-15).
 
 - CE-клиринг v2 (граф v2, полоса `±q`, счёт дома) считается только Newton-движком; OSQP-ветка для CE не собирается и не вызывается.
 - `vector_qp_solver`/OSQP остаётся для F-05A two-sided и F1 (ADR-048/052) без изменений — пока эти пути не мигрированы на Newton отдельной задачей.

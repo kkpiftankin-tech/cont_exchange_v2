@@ -1,8 +1,9 @@
 ---
 id: ADR-063
 title: "CE — тип участника AGENT (третий party_type рядом с CLIENT и HOUSE)"
-status: proposed
+status: accepted
 date: 2026-09-15
+accepted: 2026-09-15
 level: sea
 feature: F-18
 related:
@@ -14,7 +15,7 @@ sources: [incoming-docs/2026-09-15-CE_algorithm_v2.md]
 
 # ADR-063 — Тип участника AGENT
 
-> **Статус `proposed`.** Открытый вопрос из гейта §13 сводки [F-18-v2-agents-review-summary](../../implementation-plan/F-18-v2-agents-review-summary.md); решение за владельцем. Оформляет пункт 6 решения [ADR-061](ADR-061-ce-v2-agent-position-band-hedge.md).
+> **Статус `accepted` (владелец, 2026-09-15).** Подтверждено: AGENT — третий тип участника рядом с CLIENT и HOUSE. Оформляет пункт 6 решения [ADR-061](ADR-061-ce-v2-agent-position-band-hedge.md).
 
 ## Контекст
 

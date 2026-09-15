@@ -110,7 +110,7 @@ House — переменная-невязка, восстанавливающа�
 |---|---|
 | Источник (спека v2) | [`incoming-docs/2026-09-15-CE_algorithm_v2.md`](../../../../incoming-docs/2026-09-15-CE_algorithm_v2.md) |
 | Сводка ревью 12 агентов | [F-18 v2 review summary](../../../implementation-plan/F-18-v2-agents-review-summary.md) |
-| ADR | ADR-061 (planned, supersede ADR-054/057; ревизии ADR-055/056/058) |
+| ADR | ADR-061 (accepted 2026-09-15, supersede ADR-057; ревизии ADR-055/056/058); ADR-062/063 (accepted) |
 | Use Case (v2) | [UC-F18-04](../../use-cases/UC-F18-04-ce-v2-agent-band-hedge/use-case.md) |
 | Use Cases (v1, superseded) | [UC-F18-01](../../use-cases/UC-F18-01-form-ce-capital/), [UC-F18-02](../../use-cases/UC-F18-02-derive-ce-position/), [UC-F18-03](../../use-cases/UC-F18-03-hedge-net-position/) |
 | L0 System seq (v2) | [SEQ-UC-F18-04-system](../../use-cases/UC-F18-04-ce-v2-agent-band-hedge/sequences/SEQ-UC-F18-04-system.md) |

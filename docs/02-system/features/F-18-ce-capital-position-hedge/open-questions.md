@@ -93,10 +93,10 @@
 | OQ-F18v2-02 | задержка перевоза 3 такта | open | data-schema + domain | Э5 |
 | OQ-F18v2-03 | выбор q при V>2 | open | domain + владелец | конфиг |
 | OQ-F18v2-04 | цены при пустом клиринге | open | domain + matching | — |
-| OQ-F18v2-05 | консолидация движков | blocking | solution-architect | ADR-062 |
-| OQ-F18v2-06 | party_type AGENT | blocking | solution-architect + data | ADR-063 |
+| OQ-F18v2-05 | консолидация движков | resolved (2026-09-15) | solution-architect | ADR-062 accepted (Newton) |
+| OQ-F18v2-06 | party_type AGENT | resolved (2026-09-15) | solution-architect + data | ADR-063 accepted |
 | OQ-F18v2-07 | CRITICAL-1 gateway auth | blocking | security | — |
 | OQ-F18v2-08 | CRITICAL-2 PreHedgeCheck/kill-switch | blocking | security | — |
 | OQ-F18v2-09 | golden ce_tick_v2/square_bands | blocking | владелец | T-F18-012 |
 
-> Зонтичный гейт над всеми `blocking`: **ADR-061** переводится в `accepted` только после решений §2 плана и снятия OQ-05..09 (review §13). До этого реализация Э1 закрыта (`CLAUDE.md §0a`, no-code-before-docs).
+> **Обновление 2026-09-15.** ADR-061/062/063 переведены в `accepted` (решение владельца) — OQ-05/06 сняты, гейт принятия ADR снят. Остаются `blocking` для стадий кода: OQ-07/08 (security-CRITICAL) и OQ-09 (golden-источники). Реализация Э1 по документации открыта; включение путей эмиссии — после снятия OQ-07/08.

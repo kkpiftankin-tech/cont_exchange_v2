@@ -1,7 +1,7 @@
 featureId: F-18
 featureName: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge (v2)"
 level: kite
-status: draft   # реализация под гейтом владельца (ADR-061 accepted); все codePath — planned
+status: draft   # ADR-061/062/063 accepted (2026-09-15); все codePath — planned (код ещё не написан)
 
 # Бизнес-требования v2 (business-analyst, review §1). Модель v2 supersede v1 (BR v1 → target/net-хедж).
 businessRequirements:

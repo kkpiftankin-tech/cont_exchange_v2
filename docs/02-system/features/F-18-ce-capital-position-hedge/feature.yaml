@@ -47,7 +47,7 @@ description: >
   (гасить нечего) — это не универсальный выигрыш, а внутренняя компенсация потоков.
 
   Источник истины: incoming-docs/2026-09-15-CE_algorithm_v2.md (алгоритм такта A0–A8),
-  сводка docs/implementation-plan/F-18-v2-agents-review-summary.md, ADR-061 (planned).
+  сводка docs/implementation-plan/F-18-v2-agents-review-summary.md, ADR-061 (accepted 2026-09-15).
 
 # Размещение по сервисам (проект. под ADR-061). Владелец книги позиции — ledger (§17).
 primaryComponents:
