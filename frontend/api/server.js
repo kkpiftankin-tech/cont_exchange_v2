@@ -7070,9 +7070,11 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
   // f=0 — агент не торгует («зона комиссии / бездействия»), вне полосы — линейный
   // наклон β_T. c = taker_fee_pm + ½·spread_pm — та же формула, что в market_data
   // BuildQuoteAgent (agent_builder.hpp), поэтому UI показывает ровно то, что клирится.
-  // taker_fee — из env CE_TAKER_FEE_BPS (по умолчанию 5 bps); half_spread — из книги.
-  const takerFeeBps = Number(process.env.CE_TAKER_FEE_BPS);
-  const takerFeePm = (Number.isFinite(takerFeeBps) ? takerFeeBps : 5) / 10;   // bps→‰
+  // taker_fee: runtime из f05a_clearing_config.ce_taker_fee_bps (opts.takerFeeBps), иначе env
+  // CE_TAKER_FEE_BPS, иначе 5. <0 = «из стакана» (для дисплея берём 0, спред и так есть).
+  const cfgFee = (opts && opts.takerFeeBps != null) ? Number(opts.takerFeeBps) : Number(process.env.CE_TAKER_FEE_BPS);
+  const takerFeeBps = Number.isFinite(cfgFee) ? Math.max(0, cfgFee) : 5;
+  const takerFeePm = takerFeeBps / 10;   // bps→‰
   const halfSpreadPm = (bestBid > 0 && bestAsk > 0)
     ? 0.5 * Math.abs(1000 * Math.log(bestAsk / bestBid)) : 0;                  // ‰
   const deadZonePm = takerFeePm + halfSpreadPm;                               // c, ‰
@@ -7166,8 +7168,8 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (req.method === "GET") {
       try {
         const r = await pool.query(
-          "SELECT batch_window_ms, stale_level_ms, updated_at FROM f05a_clearing_config WHERE id=1");
-        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000 });
+          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1 });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
@@ -7177,13 +7179,18 @@ async function handleVectorClearing(req, res, pathname, query) {
       try { body = await parseBody(req); } catch (e) { return writeJson(res, 400, { error: "bad_body" }); }
       const win = Math.max(100, Math.min(600000, parseInt(body.batch_window_ms, 10) || 1000));
       const stale = Math.max(100, Math.min(3600000, parseInt(body.stale_level_ms, 10) || 60000));
+      // Комиссия тейкера (bps): <0 = из стакана venue; 0 = линейные кривые. Диапазон [-1, 1000].
+      let fee = Number(body.ce_taker_fee_bps);
+      if (!Number.isFinite(fee)) fee = -1;
+      fee = Math.max(-1, Math.min(1000, fee));
       try {
         await pool.query(
-          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, updated_at)"
-          + " VALUES (1,$1,$2,now()) ON CONFLICT (id) DO UPDATE SET"
-          + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms, updated_at=now()",
-          [win, stale]);
-        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, applied: true });
+          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, updated_at)"
+          + " VALUES (1,$1,$2,$3,now()) ON CONFLICT (id) DO UPDATE SET"
+          + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms,"
+          + " ce_taker_fee_bps=EXCLUDED.ce_taker_fee_bps, updated_at=now()",
+          [win, stale, fee]);
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, applied: true });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
@@ -7231,11 +7238,21 @@ async function handleVectorClearing(req, res, pathname, query) {
     try {
       // ADR-053: ВСЕ вычисления кривой (raw cumulative, VWAP, α_ext/α_T/β_T, safe-линия)
       // на backend. Frontend только запрашивает готовые массивы и рисует.
+      // Runtime-комиссия из f05a_clearing_config, чтобы дисплей зоны совпадал с клирингом.
+      let cfgFee = null;
+      try {
+        const pool = getPgPool();
+        if (pool) {
+          const r = await pool.query("SELECT ce_taker_fee_bps FROM f05a_clearing_config WHERE id=1");
+          if (r.rows[0] && r.rows[0].ce_taker_fee_bps != null) cfgFee = Number(r.rows[0].ce_taker_fee_bps);
+        }
+      } catch (_) { /* PG опционален — упадём на env */ }
       const opts = {
         anchorMode: (query && query.anchor === "micro") ? "micro" : "mid",
         theta: query && query.theta,
         nBuy: query && query.nBuy,
         nSell: query && query.nSell,
+        takerFeeBps: cfgFee,
       };
       const curve = await fetchVenueCurve(venue, symbol, query && query.ts, opts);
       if (!curve) return writeJson(res, 404, { error: "not_found" });

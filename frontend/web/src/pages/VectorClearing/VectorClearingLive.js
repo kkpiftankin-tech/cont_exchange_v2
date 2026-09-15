@@ -424,6 +424,7 @@ function VectorClearingLive() {
   // Runtime-конфиг цикла батч-клиринга (окно/staleness).
   const [cfgWindowMs, setCfgWindowMs] = useState('');
   const [cfgStaleMs, setCfgStaleMs] = useState('');
+  const [cfgFeeBps, setCfgFeeBps] = useState('');   // комиссия тейкера, bps (0 = линейно)
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgSaving, setCfgSaving] = useState(false);
 
@@ -432,6 +433,7 @@ function VectorClearingLive() {
       const r = await axios.get(`${API_BASE}/vector-clearing/config`, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms ?? 1000));
       setCfgStaleMs(String(r.data.stale_level_ms ?? 60000));
+      setCfgFeeBps(String(r.data.ce_taker_fee_bps ?? -1));
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
 
@@ -439,15 +441,17 @@ function VectorClearingLive() {
     setCfgSaving(true); setCfgMsg('');
     try {
       const r = await axios.post(`${API_BASE}/vector-clearing/config`, {
-        batch_window_ms: Number(cfgWindowMs), stale_level_ms: Number(cfgStaleMs)
+        batch_window_ms: Number(cfgWindowMs), stale_level_ms: Number(cfgStaleMs),
+        ce_taker_fee_bps: Number(cfgFeeBps)
       }, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms));
       setCfgStaleMs(String(r.data.stale_level_ms));
+      setCfgFeeBps(String(r.data.ce_taker_fee_bps));
       setCfgMsg('применено ✓ (market_data подхватит ≤2с)');
     } catch (e) {
       setCfgMsg('ошибка: ' + (e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
-  }, [cfgWindowMs, cfgStaleMs]);
+  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -558,11 +562,16 @@ function VectorClearingLive() {
             <input type="number" min="100" max="3600000" step="1000" value={cfgStaleMs}
               onChange={(e) => setCfgStaleMs(e.target.value)} />
           </label>
+          <label className="vc-config-field" title="Комиссия тейкера для мёртвой зоны c = комиссия + ½·spread. 0 = линейные кривые без полки-комиссии; −1 = брать из стакана venue.">
+            комиссия (bps)
+            <input type="number" min="-1" max="1000" step="0.5" value={cfgFeeBps}
+              onChange={(e) => setCfgFeeBps(e.target.value)} />
+          </label>
           <button className="vc-config-apply" onClick={saveConfig} disabled={cfgSaving}>
             {cfgSaving ? '…' : 'Применить'}
           </button>
           {cfgMsg && <span className="vc-config-msg">{cfgMsg}</span>}
-          <span className="vc-config-hint">больше окно / staleness → больше кривых с разных бирж накапливается перед клирингом</span>
+          <span className="vc-config-hint">комиссия 0 = линейные кривые (нет зоны бездействия); больше окно / staleness → больше кривых накапливается перед клирингом</span>
         </div>
 
         {error && <div className="vc-error">Ошибка: {error}</div>}

@@ -954,9 +954,16 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     rho              NUMERIC(38,18) NOT NULL DEFAULT 0.004, -- сдвиг якоря на остаток/committed
     z_limit          NUMERIC(38,18) NOT NULL DEFAULT 0,     -- агрегатный лимит Z_a (0 = выкл)
     gamma            NUMERIC(38,18) NOT NULL DEFAULT 1,     -- неприятие риска (α=W/(γσ²τ))
+    -- Настраиваемая с фронта комиссия тейкера (bps) для мёртвой зоны агента
+    -- c = комиссия + ½·spread. <0 = брать комиссию из стакана venue (прежнее поведение);
+    -- =0 = линейные кривые без полки-комиссии. market_data поллит эту строку.
+    ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT -1,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1)
 );
+-- Миграция для существующих БД (таблица уже создана без колонки).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT -1;
 INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;

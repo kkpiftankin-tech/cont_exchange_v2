@@ -29,6 +29,10 @@ namespace cex::market_data::domain {
 struct AgentBuilderConfig {
   double theta = 0.5;            // haircut глубины (0.3..0.7)
   double reference_price = 0.0;  // P0 для mid_pm; ≤0 ⇒ anchor=0 (вырожденный такт)
+  // Настраиваемая с фронта комиссия тейкера, bps. <0 ⇒ брать комиссию из стакана venue
+  // (прежнее поведение). =0 ⇒ мёртвая зона c = ½·spread (при тесном спреде ≈ линейная
+  // кривая без полки). Runtime из f05a_clearing_config.ce_taker_fee_bps.
+  double taker_fee_bps_override = -1.0;
 };
 
 struct QuoteAgent {
@@ -98,7 +102,11 @@ inline QuoteAgent BuildQuoteAgent(const std::vector<ExternalOrderLevel>& levels,
   a.depth = cfg.theta * std::fmin(aext_bid, aext_ask);
 
   const double half_spread_pm = 0.5 * std::fabs(1000.0 * std::log(best_ask / best_bid));
-  const double taker_fee_pm = taker_fee_bps / 10.0;  // bps→‰ (1‰ = 10 bps)
+  // Настраиваемая с фронта комиссия: override≥0 замещает комиссию стакана (0 ⇒ линейная
+  // кривая без полки-комиссии, остаётся только ½·spread).
+  const double eff_fee_bps =
+      cfg.taker_fee_bps_override >= 0.0 ? cfg.taker_fee_bps_override : taker_fee_bps;
+  const double taker_fee_pm = eff_fee_bps / 10.0;  // bps→‰ (1‰ = 10 bps)
   a.dead_zone_pm = taker_fee_pm + half_spread_pm;
 
   a.valid = a.depth > 0.0;

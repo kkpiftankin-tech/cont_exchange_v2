@@ -519,11 +519,15 @@ void MarketDataUseCases::RefreshClearingConfigFromPg() {
     pqxx::connection c(clearing_cfg_pg_conn_);
     pqxx::work tx(c);
     const pqxx::row r = tx.exec1(
-        "SELECT batch_window_ms, stale_level_ms FROM f05a_clearing_config WHERE id=1");
+        "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps"
+        " FROM f05a_clearing_config WHERE id=1");
     const std::int64_t w = r[0].as<std::int64_t>();
     const std::int64_t s = r[1].as<std::int64_t>();
     if (w >= 100 && w <= 600000) vector_window_ms_ = w;   // [100мс, 10мин]
     if (s >= 100 && s <= 3600000) vector_stale_ms_ = s;   // [100мс, 60мин]
+    // Комиссия тейкера, настраиваемая с фронта: <0 = из стакана venue; 0 = линейные кривые.
+    const double fee = r[2].as<double>();
+    if (fee <= 1000.0) ce_taker_fee_bps_ = fee;           // санити: не больше 100%
   } catch (const std::exception&) {
     // PG недоступен/нет строки — оставляем текущие значения.
   }
@@ -700,6 +704,7 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     domain::AgentBuilderConfig acfg;
     acfg.theta = theta;
     acfg.reference_price = p0[b.base];
+    acfg.taker_fee_bps_override = ce_taker_fee_bps_;  // настраиваемая комиссия (0 ⇒ линейно)
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
     agents.push_back({b.base, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});

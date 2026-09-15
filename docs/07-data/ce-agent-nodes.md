@@ -74,6 +74,7 @@ PK `(account, asset, venue)`. Меняется только подтвержде
 | `rho` | `NUMERIC(38,18)` | сдвиг якоря на остаток/committed |
 | `z_limit` | `NUMERIC(38,18)` | агрегатный лимит `Z_a`, ADR-057 |
 | `gamma` | `NUMERIC(38,18)` | неприятие риска (α = W/(γσ²τ)) |
+| `ce_taker_fee_bps` | `NUMERIC(38,18)` | настраиваемая с фронта комиссия тейкера, bps, для мёртвой зоны `c = комиссия + ½·spread`. `<0` = из стакана venue; `0` = линейные кривые (нет полки-комиссии). market_data поллит (TTL 2с) → `BuildQuoteAgent.taker_fee_bps_override`. Задаётся `POST /api/vector-clearing/config` (вкладка Vector Clearing). Дефолт `-1`. |
 
 Миграция — `ALTER TABLE ... ADD COLUMN`, не `CREATE` (Conflict Note CN-3).
 
