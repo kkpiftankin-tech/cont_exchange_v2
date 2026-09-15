@@ -20,6 +20,7 @@
 // STOCK-плеча и узла-склада, с house-столбцом в узле нумерария.
 // ============================================================================
 
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -205,6 +206,20 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
   }
   // STOCK-рёбер в v2 нет (ADR-061 §1: плечо запаса и узел-склад убраны).
   return in;
+}
+
+// T-F18-103 (matching_loop wiring за флагом CE_V2_GRAPH): AssembleCeGraphV2 сама
+// НЕ проверяет, что house_venue ∈ venues — при опечатке/рассинхроне конфига она
+// молча добавит house как ЛИШНИЙ узел вне торгуемых площадок (фантомный
+// num_nodes=V·A+1 без реального venue). Вызывающая сторона (matching_loop) обязана
+// проверить house_venue ДО сборки графа и явно обработать некорректный конфиг
+// (WARN + пропуск такта), а не тихо продолжать. Пустой house_venue — валиден,
+// если venues непусты (AssembleCeGraphV2 берёт venues.front()).
+inline bool IsHouseVenueValid(const std::string& house_venue,
+                               const std::vector<std::string>& venues) {
+  if (venues.empty()) return false;
+  if (house_venue.empty()) return true;
+  return std::find(venues.begin(), venues.end(), house_venue) != venues.end();
 }
 
 }  // namespace cex::matching::domain

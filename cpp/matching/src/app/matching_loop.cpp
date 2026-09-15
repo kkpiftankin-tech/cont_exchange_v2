@@ -891,6 +891,12 @@ std::map<std::string, double> ProjectXToDeltas(
 // клиринг (ClearCe) → money-path проекция по узлам (ProjectPositionQuantity) → эмит
 // ce.position.delta как ПЛАН (на стороне ledger ложится в committed, не в house-факт).
 // Плечи перевода/запаса — из env (капитал/риск); quote-агенты и марки/P0 — из сообщения.
+//
+// T-F18-103 (ADR-061, флаг CE_V2_GRAPH, default OFF): при OFF — путь ниже байт-в-байт
+// как раньше (AssembleCeGraph, v1). При ON — граф собирается AssembleCeGraphV2
+// (T-F18-101): только узлы asset@venue + house-столбец, без STOCK-плеч/узла-склада/марки.
+// Движок ClearCe и весь путь ПОСЛЕ сборки графа (клиринг → проекция → ce.position.delta →
+// execution.intents) общий для v1/v2 — топология подаётся на вход, остальное не дублируется.
 void MatchingLoop::on_ce_clearing_input(
     const fob::marketdata::v1::CeClearingInput& input) {
   using cex::common::Decimal;
@@ -905,32 +911,73 @@ void MatchingLoop::on_ce_clearing_input(
     return Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
   };
 
-  domain::CeAssembleConfig cfg;
-  cfg.numeraire = input.numeraire().empty() ? std::string("USDT") : input.numeraire();
-  for (const auto& a : input.assets()) cfg.assets.push_back(a);
-  for (const auto& v : input.venues()) cfg.venues.push_back(v);
+  const std::string numeraire =
+      input.numeraire().empty() ? std::string("USDT") : input.numeraire();
+  std::vector<std::string> assets(input.assets().begin(), input.assets().end());
+  std::vector<std::string> venues(input.venues().begin(), input.venues().end());
 
   std::map<std::string, double> ref_price;
+  std::map<std::string, double> mark;  // марка μ узла книги — используется только v1
   for (const auto& m : input.marks()) {
-    cfg.mark[m.asset()] = d2(m.mark());
+    mark[m.asset()] = d2(m.mark());
     if (m.has_reference_price()) ref_price[m.asset()] = d2(m.reference_price());
   }
-  std::vector<std::string> all_assets = cfg.assets;
-  all_assets.push_back(cfg.numeraire);
-  for (const auto& a : all_assets) {
-    domain::CeLegParams lp;
-    lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
-    lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
-    lp.stock_depth = env_d("CE_STOCK_ALPHA_" + a, 0.0);
-    lp.stock_dead_zone = env_d("CE_STOCK_C_" + a, 0.0);
-    cfg.leg[a] = lp;
-  }
+  std::vector<std::string> all_assets = assets;
+  all_assets.push_back(numeraire);
 
   std::vector<domain::CeQuoteParams> quotes;
   for (const auto& q : input.quotes())
     quotes.push_back({q.asset(), q.venue(), d2(q.anchor()), d2(q.depth()), d2(q.dead_zone())});
 
-  const domain::CeClearInput graph = domain::AssembleCeGraph(cfg, quotes);
+  // CE_V2_GRAPH (default OFF): выбор сборщика графа. При OFF ветка v1 ниже —
+  // идентичный прежнему коду путь (AssembleCeGraph), регрессия не допускается.
+  const bool ce_v2 = cex::common::Env::get_bool("CE_V2_GRAPH", false);
+
+  domain::CeClearInput graph;
+  bool house_pinned = false;  // v2: узел house реально присутствует и зафиксирован в 0
+  if (ce_v2) {
+    domain::CeAssembleConfigV2 cfg2;
+    cfg2.numeraire = numeraire;
+    cfg2.assets = assets;
+    cfg2.venues = venues;
+    cfg2.house_venue = cex::common::Env::get_string("CE_HOUSE_VENUE", "");
+    for (const auto& a : all_assets) {
+      domain::CeTransferLegParamsV2 lp;
+      lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
+      lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
+      cfg2.leg[a] = lp;
+    }
+    // Guard (T-F18-103): AssembleCeGraphV2 сама не проверяет house_venue ∈ venues —
+    // при рассинхроне конфига она молча добавила бы house как лишний узел вне
+    // торгуемых площадок (фантомный num_nodes=V·A+1). Тихо продолжать нельзя —
+    // такт пропускается целиком (ни ce.position.delta, ни execution.intents).
+    if (!domain::IsHouseVenueValid(cfg2.house_venue, cfg2.venues)) {
+      cex::common::log_json(
+          "WARN", "F-05A CE v2: house_venue misconfigured — такт пропущен",
+          {{"batch_id", input.batch_id()},
+           {"house_venue", cfg2.house_venue},
+           {"venues_count", std::to_string(cfg2.venues.size())}});
+      return;
+    }
+    graph = domain::AssembleCeGraphV2(cfg2, quotes);
+    house_pinned = true;
+  } else {
+    domain::CeAssembleConfig cfg;
+    cfg.numeraire = numeraire;
+    cfg.assets = assets;
+    cfg.venues = venues;
+    cfg.mark = mark;
+    for (const auto& a : all_assets) {
+      domain::CeLegParams lp;
+      lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
+      lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
+      lp.stock_depth = env_d("CE_STOCK_ALPHA_" + a, 0.0);
+      lp.stock_dead_zone = env_d("CE_STOCK_C_" + a, 0.0);
+      cfg.leg[a] = lp;
+    }
+    graph = domain::AssembleCeGraph(cfg, quotes);
+  }
+
   const domain::CeClearResult res = domain::ClearCe(graph);
   const std::vector<domain::CeAssetVenueDelta> deltas =
       domain::ProjectPositionQuantity(graph, res, ref_price);
@@ -949,13 +996,19 @@ void MatchingLoop::on_ce_clearing_input(
     *ad->mutable_delta_value() = to_dec(d.delta_value);
     ++emitted;
   }
-  cex::common::log_json(
-      "INFO", "F-05A CE ce.position.delta (plan)",
-      {{"batch_id", input.batch_id()},
-       {"quotes", std::to_string(input.quotes_size())},
-       {"deltas", std::to_string(emitted)},
-       {"converged", res.converged ? "1" : "0"},
-       {"imbalance", std::to_string(res.max_imbalance)}});
+  std::map<std::string, std::string> ce_log_fields{
+      {"batch_id", input.batch_id()},
+      {"quotes", std::to_string(input.quotes_size())},
+      {"deltas", std::to_string(emitted)},
+      {"converged", res.converged ? "1" : "0"},
+      {"imbalance", std::to_string(res.max_imbalance)},
+      {"ce_v2_graph", ce_v2 ? "1" : "0"}};
+  // Э1 (T-F18-103): house-потенциал уже есть в CeClearResult.x (последний узел
+  // при v2, пин π=0) — наружу пока прокидываем через диагностику лога; полноценная
+  // эмиссия наружу (для признания прибыли) — Э4 (T-F18-402), отдельная таска.
+  if (house_pinned && !res.x.empty())
+    ce_log_fields["house_potential"] = std::to_string(res.x.back());
+  cex::common::log_json("INFO", "F-05A CE ce.position.delta (plan)", ce_log_fields);
   if (emitted > 0)
     producer_.produce("ce.position.delta", input.batch_id(), cex::common::to_bytes(batch));
 
@@ -972,10 +1025,10 @@ void MatchingLoop::on_ce_clearing_input(
     it.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
     it.set_venue(o.venue);
     auto* inst = it.mutable_instrument();
-    inst->set_symbol(o.asset + "/" + cfg.numeraire);
+    inst->set_symbol(o.asset + "/" + numeraire);
     inst->set_base(o.asset);
-    inst->set_quote(cfg.numeraire);
-    it.set_venue_symbol(o.asset + "/" + cfg.numeraire);
+    inst->set_quote(numeraire);
+    it.set_venue_symbol(o.asset + "/" + numeraire);
     it.set_side(o.side == "SELL" ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
     *it.mutable_target_qty() = to_dec(o.qty);
     *it.mutable_limit_price() = to_dec(o.price);

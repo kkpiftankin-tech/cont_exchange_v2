@@ -153,6 +153,31 @@ int main() {
     close(r2.x[in2.num_free], 0.0, 1e-15, "v2.house x fixed at 0");
   }
 
+  // ---- T-F18-103: IsHouseVenueValid (guard в matching_loop перед AssembleCeGraphV2) ----
+  {
+    const std::vector<std::string> venues = {"B", "O", "K"};
+    if (!IsHouseVenueValid("", venues)) {
+      std::printf("FAIL v2.house_venue: пустой при непустых venues должен быть валиден\n");
+      ++g_fail;
+    }
+    if (!IsHouseVenueValid("O", venues)) {
+      std::printf("FAIL v2.house_venue: 'O' должен быть валиден (входит в venues)\n");
+      ++g_fail;
+    }
+    if (IsHouseVenueValid("X", venues)) {
+      std::printf("FAIL v2.house_venue: 'X' не входит в venues, должен быть невалиден\n");
+      ++g_fail;
+    }
+    if (IsHouseVenueValid("", {})) {
+      std::printf("FAIL v2.house_venue: пустые venues → невалиден даже при пустом house_venue\n");
+      ++g_fail;
+    }
+    if (IsHouseVenueValid("B", {})) {
+      std::printf("FAIL v2.house_venue: пустые venues → невалиден\n");
+      ++g_fail;
+    }
+  }
+
   if (g_fail == 0) { std::printf("ce_graph_assembler_test: OK\n"); return 0; }
   std::printf("ce_graph_assembler_test: %d FAIL\n", g_fail);
   return 1;
