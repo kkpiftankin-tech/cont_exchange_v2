@@ -1,21 +1,8 @@
 # Acceptance Criteria — F-18 (v2) CE Virtual Counterparties (Band Hedge)
 
-Источник: [`feature.yaml`](feature.yaml) (AC-F18v2-01..18) + [`incoming-docs/2026-09-15-CE_algorithm_v2.md`](../../../../incoming-docs/2026-09-15-CE_algorithm_v2.md)
-(такт A0–A8, «Полоса», «Позиция биржи», «Счёт дома», «Эффект полосы») +
-[UC-F18-04](../../use-cases/UC-F18-04-ce-v2-agent-band-hedge/use-case.md) +
-[SEQ-F18-UC-F18-04-services](../../../05-components/sequences/SEQ-F18-UC-F18-04-services.md).
+Источник: [`feature.yaml`](feature.yaml) (AC-F18v2-01..18) + [`incoming-docs/2026-09-15-CE_algorithm_v2.md`](../../../../incoming-docs/2026-09-15-CE_algorithm_v2.md) (такт A0–A8, «Полоса», «Позиция биржи», «Счёт дома», «Эффект полосы») + [UC-F18-04](../../use-cases/UC-F18-04-ce-v2-agent-band-hedge/use-case.md) + [SEQ-F18-UC-F18-04-services](../../../05-components/sequences/SEQ-F18-UC-F18-04-services.md).
 
-> **Статус.** Все AC ниже — ❌ **planned**: реализация Э1 не открыта (гейт владельца §13 сводки
-> [F-18 v2 review summary](../../../implementation-plan/F-18-v2-agents-review-summary.md); ADR-061 не
-> переведён в `accepted`; golden-источники `ce_tick_v2.py`/`square_bands.py` отсутствуют — см.
-> [open-questions.md](open-questions.md)). Все флаги `CE_V2_GRAPH`/`CE_AGENT_POS`/`CE_AGENT_BAND`/
-> `CE_AGENT_A8`/`CE_TRANSFER_AGENT` — default OFF; при OFF поведение идентично до-v2 (no regression).
->
-> Каждый AC ссылается на кейс(ы) плана тестов
-> [`docs/10-testing/features/F-18-v2-test-plan.md`](../../../10-testing/features/F-18-v2-test-plan.md)
-> (`CHK-NN` = доменные проверки, `IT-CE-V2-NN` = интеграционные, `INV-N` = инварианты, `E2E` = сценарии).
->
-> Легенда: ✅ выполнено, ⚠ частично, ❌ не выполнено / planned.
+> **Статус.** Все AC ниже — ❌ **planned**: реализация Э1 не открыта (гейт владельца §13 сводки [F-18 v2 review summary](../../../implementation-plan/F-18-v2-agents-review-summary.md); ADR-061 не переведён в `accepted`; golden-источники `ce_tick_v2.py`/`square_bands.py` отсутствуют — см. [open-questions.md](open-questions.md)). Все флаги `CE_V2_GRAPH`/`CE_AGENT_POS`/`CE_AGENT_BAND`/ `CE_AGENT_A8`/`CE_TRANSFER_AGENT` — default OFF; при OFF поведение идентично до-v2 (no regression). Каждый AC ссылается на кейс(ы) плана тестов [`docs/10-testing/features/F-18-v2-test-plan.md`](../../../10-testing/features/F-18-v2-test-plan.md) (`CHK-NN` = доменные проверки, `IT-CE-V2-NN` = интеграционные, `INV-N` = инварианты, `E2E` = сценарии). Легенда: ✅ выполнено, ⚠ частично, ❌ не выполнено / planned.
 
 ---
 

@@ -1,7 +1,6 @@
 <!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: SEQ-F18-UC-F18-04-services
-level: sea
+id: SEQ-F18-UC-F18-04-services level: sea
 ---
 -->
 
@@ -21,13 +20,7 @@ Service-level Sequence (cross-component)
 
 ## Purpose
 
-Размещение по сервисам (проект. под ADR-061): **market_data** строит кривые агентов из
-снимка (A0–A1); **matching** сдвигает якорь `σ*=m+ρ·c`, собирает `W`+house, клирит и
-накапливает `c_j` (A2–A6); **ledger** — владелец знаковой позиции агента
-(`ce_agent_position`, party_type AGENT) и узловых остатков; **risk** проверяет полосу
-`±q`, считает размер (walk) и эмиттит заявку сверх полосы через `PreHedgeCheck` (A7);
-**venues** исполняет, ledger подтверждает `qty[asset@venue]` + realized (A8). Декремент
-`c_j` — при эмиссии (A7), не при исполнении. Владение меняют только клиент + исполнение.
+Размещение по сервисам (проект. под ADR-061): **market_data** строит кривые агентов из снимка (A0–A1); **matching** сдвигает якорь `σ*=m+ρ·c`, собирает `W`+house, клирит и накапливает `c_j` (A2–A6); **ledger** — владелец знаковой позиции агента (`ce_agent_position`, party_type AGENT) и узловых остатков; **risk** проверяет полосу `±q`, считает размер (walk) и эмиттит заявку сверх полосы через `PreHedgeCheck` (A7); **venues** исполняет, ledger подтверждает `qty[asset@venue]` + realized (A8). Декремент `c_j` — при эмиссии (A7), не при исполнении. Владение меняют только клиент + исполнение.
 
 ## Diagram
 
@@ -106,9 +99,7 @@ sequenceDiagram
 
 ## Related Components
 
-- [matching-fob-core](../matching-fob-core/overview.md), [ledger](../ledger/overview.md),
-  [risk-manager](../risk-manager/overview.md), [external-venues](../external-venues/overview.md),
-  [market-data](../market-data/overview.md)
+- [matching-fob-core](../matching-fob-core/overview.md), [ledger](../ledger/overview.md), [risk-manager](../risk-manager/overview.md), [external-venues](../external-venues/overview.md), [market-data](../market-data/overview.md)
 
 ## Related ADR
 

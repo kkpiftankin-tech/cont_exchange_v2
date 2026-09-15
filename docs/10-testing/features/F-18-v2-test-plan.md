@@ -17,47 +17,26 @@ related:
 
 # F-18 v2 — план тестирования: CE-агенты (переводчики + арбитражёры), позиция с нуля, полоса ±q
 
-> Легенда: ✅ выполнено, ⚠ частично, ❌ не выполнено, 🔒 заблокировано входом владельца.
-> Всё ниже — ❌ (реализация Э1 не начата, гейт владельца не снят — см. `F-18-v2.tasks.md §Блокирующий гейт`).
+> Легенда: ✅ выполнено, ⚠ частично, ❌ не выполнено, 🔒 заблокировано входом владельца. Всё ниже — ❌ (реализация Э1 не начата, гейт владельца не снят — см. `F-18-v2.tasks.md §Блокирующий гейт`).
 
 ## 0. Предпосылки и блокеры (читать до переноса тестов)
 
 ### 0.1. 🚩 Golden-источники ОТСУТСТВУЮТ в репозитории
 
-**`ce_tick_v2.py` (27 проверок) и `square_bands.py` (39 проверок) физически отсутствуют**
-в `incoming-docs/`, в `docs/10-testing/reference/ce-agents/` и где-либо ещё в репо. Сейчас
-в `docs/10-testing/reference/ce-agents/` лежат только `agents_vc.py`/`agents_sim.py` +
-`golden-vc.txt`/`golden-sim.txt` от F-05A v1 — это **не** те источники.
+**`ce_tick_v2.py` (27 проверок) и `square_bands.py` (39 проверок) физически отсутствуют** в `incoming-docs/`, в `docs/10-testing/reference/ce-agents/` и где-либо ещё в репо. Сейчас в `docs/10-testing/reference/ce-agents/` лежат только `agents_vc.py`/`agents_sim.py` + `golden-vc.txt`/`golden-sim.txt` от F-05A v1 — это **не** те источники.
 
 - Оба файла **нужны от владельца**.
-- Регистрация — **отдельным вызовом skill `ingest-docs`** (не частью этой таски и не частью
-  T-F18-012), по тому же паттерну, что уже применён для F-05A:
-  `agents_vc.py → golden-vc.txt`, `agents_sim.py → golden-sim.txt`
-  (см. `docs/10-testing/reference/ce-agents/README.md`).
-- До регистрации golden оригиналы `incoming-docs/` **immutable**; числовые допуски
-  калибруются **по факту ingestion**.
+- Регистрация — **отдельным вызовом skill `ingest-docs`** (не частью этой таски и не частью T-F18-012), по тому же паттерну, что уже применён для F-05A: `agents_vc.py → golden-vc.txt`, `agents_sim.py → golden-sim.txt` (см. `docs/10-testing/reference/ce-agents/README.md`).
+- До регистрации golden оригиналы `incoming-docs/` **immutable**; числовые допуски калибруются **по факту ingestion**.
 
-**Следствие для распределения 27+39 → 66.** Разбивка по конкретным `def test_*` ниже —
-**оценочная**, восстановлена по структуре алгоритма A0–A8 и по числам, уже зафиксированным
-в записке (пример Binance `α=35,986`; матрица `W` 2×2; таблица «эффект полосы за 30 тактов»).
-При фактической регистрации возможна перебалансировка внутри 4 файлов; **набор из 4 файлов
-и сумма 66 не меняются**.
+**Следствие для распределения 27+39 → 66.** Разбивка по конкретным `def test_*` ниже — **оценочная**, восстановлена по структуре алгоритма A0–A8 и по числам, уже зафиксированным в записке (пример Binance `α=35,986`; матрица `W` 2×2; таблица «эффект полосы за 30 тактов»). При фактической регистрации возможна перебалансировка внутри 4 файлов; **набор из 4 файлов и сумма 66 не меняются**.
 
 ### 0.2. Прочие блокеры
 
-1. **Формальных AC ещё нет** — `feature.yaml` F-18 v2 не создан (T-F18-005). Тесты замэплены
-   на пункты алгоритма **A0–A8** как суррогат AC-ID (`AC-A1`…`AC-A8`). После появления
-   `feature.yaml`/ADR-061 таблицу AC→Test перелинковать на реальные AC-ID (правка docs, не тестов).
-2. **Стиль тестов — НЕ GTest.** Фактический код в `cpp/matching/tests/domain/*` —
-   самодельный `int main()` + локальная `bool close(a,b,tol,what)` с `++g_fail`,
-   `printf("FAIL ...")`, возврат `0`/`1`. Задача просит «GTest-имена» — ниже они даны в форме
-   `Suite::Case` как **логические идентификаторы кейсов**; при реализации это самодельные
-   `main()`-тесты (по образцу `ce_agent_clearing_test.cpp`), а `Suite::Case` — имя блока внутри.
-3. **Движок v2 — новый заголовок под флагом.** v2 убирает `CeLeg::kStock` и book-узел,
-   добавляет house-столбец → сигнатуры v1 переиспользуются не один-в-один. Тест-план написан
-   от алгоритма A0–A8, имена типов сверяются заново при реализации Э1.
-4. **Реальный CI-гейт — `make test-ci`** (изолированный Docker, полный `ctest`).
-   `ctest` в `.github/workflows/cpp-build.yml` сейчас `continue-on-error: true` — **не гейт**.
+1. **Формальных AC ещё нет** — `feature.yaml` F-18 v2 не создан (T-F18-005). Тесты замэплены на пункты алгоритма **A0–A8** как суррогат AC-ID (`AC-A1`…`AC-A8`). После появления `feature.yaml`/ADR-061 таблицу AC→Test перелинковать на реальные AC-ID (правка docs, не тестов).
+2. **Стиль тестов — НЕ GTest.** Фактический код в `cpp/matching/tests/domain/*` — самодельный `int main()` + локальная `bool close(a,b,tol,what)` с `++g_fail`, `printf("FAIL ...")`, возврат `0`/`1`. Задача просит «GTest-имена» — ниже они даны в форме `Suite::Case` как **логические идентификаторы кейсов**; при реализации это самодельные `main()`-тесты (по образцу `ce_agent_clearing_test.cpp`), а `Suite::Case` — имя блока внутри.
+3. **Движок v2 — новый заголовок под флагом.** v2 убирает `CeLeg::kStock` и book-узел, добавляет house-столбец → сигнатуры v1 переиспользуются не один-в-один. Тест-план написан от алгоритма A0–A8, имена типов сверяются заново при реализации Э1.
+4. **Реальный CI-гейт — `make test-ci`** (изолированный Docker, полный `ctest`). `ctest` в `.github/workflows/cpp-build.yml` сейчас `continue-on-error: true` — **не гейт**.
 
 ---
 
@@ -103,8 +82,7 @@ related:
 
 ## 3. Батарея 66 проверок → 4 файла (`cpp/matching/tests/domain/`), по этапам Э1–Э4
 
-Распределение: `ce_tick_v2.py` (27) = `three_numbers`(8) + `vector_qp_pi`(7) + `agent_band`(12);
-`square_bands.py` (39) = `w_structure`(12) + `agent_band`(27). Итого **8+7+12+12+27 = 66**.
+Распределение: `ce_tick_v2.py` (27) = `three_numbers`(8) + `vector_qp_pi`(7) + `agent_band`(12); `square_bands.py` (39) = `w_structure`(12) + `agent_band`(27). Итого **8+7+12+12+27 = 66**.
 
 | Файл | Этап (флаг) | Источник (оценка) | Кол-во |
 |---|---|---|---|
@@ -113,11 +91,7 @@ related:
 | `w_structure_test.cpp` | Э1 (`CE_V2_GRAPH`) | `square_bands.py` (структурная часть) | 12 |
 | `agent_band_test.cpp` | Э3 (`CE_AGENT_BAND`) + Э4 (`CE_AGENT_A8`) | `ce_tick_v2.py` A6/A7/A8 (12) + `square_bands.py` (числовые прогоны, 27) | 39 |
 
-> Регистрация в `cpp/matching/CMakeLists.txt` — по образцу блока `matching_ce_clearing_test` /
-> `matching_ce_assembler_test` / `matching_ce_projection_test` (внутри `if(BUILD_TESTING)`,
-> `add_executable`+`target_include_directories`+`add_test`). Header-only домен без внешних
-> зависимостей, кроме `vector_qp_pi_test` — ему нужен `osqp_backend` (уже линкуется в
-> `matching_osqp_backend_test`) для сравнения closed-form vs OSQP.
+> Регистрация в `cpp/matching/CMakeLists.txt` — по образцу блока `matching_ce_clearing_test` / `matching_ce_assembler_test` / `matching_ce_projection_test` (внутри `if(BUILD_TESTING)`, `add_executable`+`target_include_directories`+`add_test`). Header-only домен без внешних зависимостей, кроме `vector_qp_pi_test` — ему нужен `osqp_backend` (уже линкуется в `matching_osqp_backend_test`) для сравнения closed-form vs OSQP.
 
 ### 3.1. `three_numbers_test.cpp` — Э1 — A1/A2 (CHK-01..08)
 
@@ -144,9 +118,7 @@ related:
 | CHK-14 | `vector_qp_pi_test::ClosedFormVsOsqp` | квадрат (`V=2,A=2`, 4 агента): `λ*_closed == λ*_osqp`, tol 1e-9 | U9 | AC-A5 |
 | CHK-15 | `vector_qp_pi_test::NodeBalance` | `max_u|Wf|_u<1e-6` (v2 закладывает запас до 1e-9) | U9 | AC-A5 |
 
-Дополнительно в этом файле проверяются INV-2/INV-8-соседи (переезжают в U8, помечены в §3.4):
-`ComplementarySlackness` (`x₊·x₋=0`) и `DeadZoneNoFlow` (`|S|≤C` → `f=0`) — учтены в квоте
-7 как часть A4/A5 (при ingestion могут распределиться между CHK-11..15).
+Дополнительно в этом файле проверяются INV-2/INV-8-соседи (переезжают в U8, помечены в §3.4): `ComplementarySlackness` (`x₊·x₋=0`) и `DeadZoneNoFlow` (`|S|≤C` → `f=0`) — учтены в квоте 7 как часть A4/A5 (при ingestion могут распределиться между CHK-11..15).
 
 ### 3.3. `w_structure_test.cpp` — Э1 — A3 / «Счёт дома» (CHK-16..27)
 
@@ -199,16 +171,13 @@ related:
 | CHK-48 | `agent_band_test::BandHurtsWithoutClientFlow` | `Z≡0`: с полосой итог ХУЖЕ — задокументировано как ожидаемое, НЕ FAIL | U14 | «Эффект полосы» |
 | CHK-49..66 | `agent_band_test::TickTrajectory_<k>` (18) | потактовая траектория эталонного прогона: путь позиции `c_j(t)`, тайминг эмиссий, накопление house-прибыли, частичные исполнения/возвраты — **конкретные `def test_*` и допуски подтверждаются при ingestion `square_bands.py`** | U14/U10 | «Эффект полосы»/AC-A6 |
 
-> CHK-49..66 сознательно оставлены блочно: без файла `square_bands.py` их точные имена и
-> golden-числа неизвестны. При регистрации golden блок раскрывается 1:1 в именованные кейсы;
-> сумма 39 для `square_bands.py` фиксирована (12 в `w_structure` + 27 здесь).
+> CHK-49..66 сознательно оставлены блочно: без файла `square_bands.py` их точные имена и golden-числа неизвестны. При регистрации golden блок раскрывается 1:1 в именованные кейсы; сумма 39 для `square_bands.py` фиксирована (12 в `w_structure` + 27 здесь).
 
 ---
 
 ## 4. Интеграционные тесты (Kafka + gRPC)
 
-Стиль — как `Testing/f20_*.sh` (полный docker-compose) + in-process тесты по образцу
-`cpp/matching/tests/infra/*`, `cpp/ledger/tests/*`.
+Стиль — как `Testing/f20_*.sh` (полный docker-compose) + in-process тесты по образцу `cpp/matching/tests/infra/*`, `cpp/ledger/tests/*`.
 
 | # | Сценарий | Транспорт / контракт | Проверка | Этап |
 |---|---|---|---|---|
@@ -249,20 +218,15 @@ related:
 | IT-CE-V2-REPLAY | Kafka replay `ce.clearing.input` (offset reset), тот же `batch_id` | `ledger` не удваивает `ce_agent_position` — идемпотентность обязательна для аудита/бэктеста |
 | `w_structure_test::GaugeReplayStable` | реплей с разным начальным seed `π` до фиксации gauge | после `π[USD@Binance]=0` результат не зависит от порядка/seed решателя |
 
-Config-version-аналог F-15 — версия `(α,c,ρ,q)`-конфигурации: та же версия → тот же результат;
-смена (например `q_Q: 18→20`) детектируется в диагностике/логах (не тихо).
+Config-version-аналог F-15 — версия `(α,c,ρ,q)`-конфигурации: та же версия → тот же результат; смена (например `q_Q: 18→20`) детектируется в диагностике/логах (не тихо).
 
 ---
 
 ## 7. CI-гейт и калибровка допусков
 
-- 4 новых `.cpp` — самодельный `main()` (`int g_fail; bool close(a,b,tol,what)`), возврат `0`/`1`,
-  регистрация в `cpp/matching/CMakeLists.txt` внутри `if(BUILD_TESTING)`.
-- Реальный гейт — `make test-ci` (Docker, полный `ctest`). `continue-on-error: true` в
-  `.github/workflows/cpp-build.yml` — не гейт (снятие — отдельная задача, не блокирует план).
-- Golden-числа U14/CHK-40..66 требуют `ce_tick_v2.py`/`square_bands.py` для калибровки tolerance.
-  До ingestion — грубый sanity-check (направление эффекта, не точные цифры); после — ужесточить
-  до `1e-6`/`1e-9` по прецеденту F-05A (`ce_agent_clearing_test.cpp`).
+- 4 новых `.cpp` — самодельный `main()` (`int g_fail; bool close(a,b,tol,what)`), возврат `0`/`1`, регистрация в `cpp/matching/CMakeLists.txt` внутри `if(BUILD_TESTING)`.
+- Реальный гейт — `make test-ci` (Docker, полный `ctest`). `continue-on-error: true` в `.github/workflows/cpp-build.yml` — не гейт (снятие — отдельная задача, не блокирует план).
+- Golden-числа U14/CHK-40..66 требуют `ce_tick_v2.py`/`square_bands.py` для калибровки tolerance. До ingestion — грубый sanity-check (направление эффекта, не точные цифры); после — ужесточить до `1e-6`/`1e-9` по прецеденту F-05A (`ce_agent_clearing_test.cpp`).
 
 ## 8. Покрытие A0–A8
 
@@ -285,10 +249,7 @@ Config-version-аналог F-15 — версия `(α,c,ρ,q)`-конфигур
 ## Отчёт по изменениям
 
 - **Создан:** этот файл (`docs/10-testing/features/F-18-v2-test-plan.md`).
-- **Тест-кейсов:** 66 доменных (CHK-01..66) + 8 интеграционных (IT-CE-V2-01..08) + 2 E2E +
-  3 replay; 14 сценариев U1–U14; 9 инвариантов INV-1..9.
+- **Тест-кейсов:** 66 доменных (CHK-01..66) + 8 интеграционных (IT-CE-V2-01..08) + 2 E2E + 3 replay; 14 сценариев U1–U14; 9 инвариантов INV-1..9.
 - **Команды сборки/тестов:** не запускались (docs-only; реализация под гейтом владельца).
-- **Отложенные входы (от владельца):** `ce_tick_v2.py` (27) и `square_bands.py` (39) —
-  golden-источники; регистрация через skill `ingest-docs` отдельным вызовом (см. §0.1).
-- **Риски/следующие шаги:** до ingestion golden — sanity-допуски; после — калибровка 1e-6/1e-9.
-  AC→Test перелинковать на реальные AC-ID после `feature.yaml` F-18 v2 (T-F18-005).
+- **Отложенные входы (от владельца):** `ce_tick_v2.py` (27) и `square_bands.py` (39) — golden-источники; регистрация через skill `ingest-docs` отдельным вызовом (см. §0.1).
+- **Риски/следующие шаги:** до ingestion golden — sanity-допуски; после — калибровка 1e-6/1e-9. AC→Test перелинковать на реальные AC-ID после `feature.yaml` F-18 v2 (T-F18-005).
