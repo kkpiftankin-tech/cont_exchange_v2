@@ -18,6 +18,10 @@
 
 namespace cex::matching::domain {
 
+// kStock: deprecated в v2 (ADR-061 §1 — плечо запаса и узел-склад убраны вместе
+// с house-столбцом в узле нумерария); AssembleCeGraphV2 (T-F18-101) его не
+// эмитирует. Enumerator сохранён ради ABI/тестов v1-пути (AssembleCeGraph,
+// ce_agent_clearing_test — флаг CE_V2_GRAPH=0) — не удалять.
 enum class CeLeg { kQuote = 0, kTransfer = 1, kStock = 2 };
 
 // Ребро графа = виртуальный контрагент. u,v — индексы узлов (0..num_nodes-1); узлы
