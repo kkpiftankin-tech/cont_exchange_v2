@@ -6,7 +6,7 @@ date: 2026-09-15
 level: sea
 feature: F-18
 related:
-  - docs/03-architecture/adr/ADR-054-ce-capital-net-position-hedge.md
+  - docs/03-architecture/adr/ADR-054-ce-capital-net-position-hedging.md
   - docs/03-architecture/adr/ADR-055-ce-virtual-counterparties-agents.md
   - docs/03-architecture/adr/ADR-056-ce-node-graph-clearing.md
   - docs/03-architecture/adr/ADR-057-ce-three-level-position.md
@@ -111,15 +111,15 @@ CE (Continuous Exchange) — собственная биржа: держит о�
 
 | ADR | О чём он | Связь с ADR-061 |
 | --- | --- | --- |
-| [ADR-054](ADR-054-ce-capital-net-position-hedge.md) | Капитал CE, нетто-позиция и хедж по нетто-позиции | Предшественник; его семантика `target = seed` уходит. |
+| [ADR-054](ADR-054-ce-capital-net-position-hedging.md) | Капитал CE, нетто-позиция и хедж по нетто-позиции | Предшественник; его семантика `target = seed` уходит. |
 | [ADR-055](ADR-055-ce-virtual-counterparties-agents.md) | Виртуальные контрагенты: переводчик = QUOTE + STOCK, арбитражёр = TRANSFER | **Revises:** STOCK-плечо убрано, переводчик = только QUOTE. |
 | [ADR-056](ADR-056-ce-node-graph-clearing.md) | Граф узлов и клиринг с узлом-складом `@__book__` | **Revises:** узел-склад убран, вместо него счёт дома. |
 | [ADR-057](ADR-057-ce-three-level-position.md) | Трёхуровневая позиция агент/узел/актив с `target` | **Supersedes:** заменяется знаковой позицией + счётом дома. |
 | [ADR-058](ADR-058-ce-committed-inflight-state.md) | Поле `committed` как защита от повторной эмиссии | **Revises:** `committed` сохраняется как `in_flight` (не сливается с позицией). |
 | [ADR-059](ADR-059-ce-clearing-trace-audit.md) | Аудит такта клиринга (`clearing_trace`) | Переиспользуется для аудита вместо теневых копий полей. |
 | [ADR-060](ADR-060-venue-sim-fill-vs-real-trades.md) | Реалистичное исполнение симулятора по ленте сделок | Путь исполнения A8 опирается на него. |
-| ADR-062 *(proposed)* | Сведение движков клиринга к одному | Открытый вопрос, гейт §13. |
-| ADR-063 *(proposed)* | Тип участника AGENT в ledger | Оформляет п. 6 этого решения. |
+| [ADR-062](ADR-062-ce-clearing-engine-consolidation.md) *(proposed)* | Сведение движков клиринга к одному | Открытый вопрос, гейт §13. |
+| [ADR-063](ADR-063-party-type-agent.md) *(proposed)* | Тип участника AGENT в ledger | Оформляет п. 6 этого решения. |
 
 ## Трассировка
 
