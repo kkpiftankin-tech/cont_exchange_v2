@@ -76,6 +76,13 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                                  const fob::ledger::v1::GetAgentPositionsRequest* request,
                                  fob::ledger::v1::GetAgentPositionsResponse* response) override;
 
+  // F-18 v2 (наблюдаемость такта клиринга): per-agent дельты ОДНОГО такта
+  // (batch_id) — ДО → Δ → ПОСЛЕ, для вкладки Clearing.
+  grpc::Status GetAgentPositionDeltas(
+      grpc::ServerContext* context,
+      const fob::ledger::v1::GetAgentPositionDeltasRequest* request,
+      fob::ledger::v1::GetAgentPositionDeltasResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

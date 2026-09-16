@@ -53,6 +53,14 @@ grpc::Status GrpcLedgerService::GetAgentPositions(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::GetAgentPositionDeltas(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetAgentPositionDeltasRequest* request,
+    fob::ledger::v1::GetAgentPositionDeltasResponse* response) {
+  *response = uc_->GetAgentPositionDeltas(*request);
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcLedgerService::GetExchangeNopHistory(
     grpc::ServerContext*,
     const fob::ledger::v1::GetExchangeNopHistoryRequest* request,

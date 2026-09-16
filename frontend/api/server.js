@@ -6711,15 +6711,12 @@ async function fetchVectorClearingDetail(batchId, ts) {
     });
   }
 
-  // F-18: позиция биржи CE для ЭТОГО клиринга (ДО→Δ→ПОСЛЕ + θ + хедж), чтобы
-  // состояние позиций было видно прямо в детали батча на вкладке Clearing.
-  const cePosition = await fetchCeBatchPositionFromPg(clr.batch_id);
-
-  // F-18 v2 (Стадия 1 наблюдаемости, ADR-061/063): позиции CE-агентов
-  // (переводчики/арбитражёры) — ТЕКУЩАЯ накопленная позиция (GetAgentPositions
-  // не фильтрует по batch_id, это не снимок именно этого клиринга — Стадия 3
-  // добавит per-batch привязку через execution.intents/ExecutionReport).
-  const agentPositions = await fetchAgentPositions();
+  // F-18 v2 (наблюдаемость такта клиринга): позиции CE-агентов
+  // (переводчики/арбитражёры) ИМЕННО ДЛЯ ЭТОГО такта (batch_id) —
+  // ДО→Δ→ПОСЛЕ, через ledger.GetAgentPositionDeltas (реальный DTO,
+  // ring-история на стороне ledger, без SQL в обход сервиса-владельца).
+  // Замена секции «Позиция биржи CE» (house) — см. п.1 задачи 2026-09-16.
+  const agentDeltas = await fetchAgentPositionDeltas(clr.batch_id);
 
   return {
     batch_id: clr.batch_id,
@@ -6735,143 +6732,35 @@ async function fetchVectorClearingDetail(batchId, ts) {
     clearingRates,
     clearingPricesAvailable: piArr.length > 0,
     hedgeDrafts: drafts,
-    cePosition,
-    agentPositions,
+    agentDeltas,
     generatedAt: new Date().toISOString()
   };
 }
 
-// F-18 v2 (Стадия 1 наблюдаемости, T-F18-008/203, ADR-061 §7, ADR-063):
-// знаковые накопленные позиции CE-агентов (переводчик/арбитражёр) — ТОЛЬКО
-// через ledger.GetAgentPositions (без SQL в обход сервиса-владельца).
-// Без фильтров = все агенты. Если RPC недоступен/пусто — пустой список
-// (никаких фиктивных значений).
-async function fetchAgentPositions() {
+// F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
+// дельты ИМЕННО ЭТОГО такта клиринга (batch_id) — ДО→Δ→ПОСЛЕ, через
+// ledger.GetAgentPositionDeltas (без SQL в обход сервиса-владельца). Пустой
+// список — честный ответ «такт не менял позиции агентов» (batch_id пуст,
+// RPC недоступен или такт действительно не эмитировал agent_deltas), без
+// фейков.
+async function fetchAgentPositionDeltas(batchId) {
   const led = initLedgerClient();
-  if (!led) return [];
+  if (!led || !batchId) return [];
   try {
-    const resp = await grpcCall(led, "GetAgentPositions", {});
-    const positions = (resp && resp.positions) || [];
-    return positions.map((p) => ({
-      agent_id: p.agent_id,
-      agent_kind: p.agent_kind,          // "translator" | "arbitrageur" | ""
-      asset: p.asset,
-      venue: p.venue,
-      position: decToNum(p.position),    // c_j, ЗНАКОВАЯ (знак = направление)
-      in_flight: decToNum(p.in_flight),  // committed (Э3+), пока всегда 0
-      updated_at_ms: Number(p.updated_at_ms) || 0,
-      last_batch_id: p.last_batch_id || "",
+    const resp = await grpcCall(led, "GetAgentPositionDeltas", { batch_id: batchId });
+    const deltas = (resp && resp.deltas) || [];
+    return deltas.map((d) => ({
+      agent_id: d.agent_id,
+      agent_kind: d.agent_kind,                    // "translator" | "arbitrageur" | ""
+      asset: d.asset,
+      venue: d.venue,
+      position_before: decToNum(d.position_before), // ДО этого такта
+      delta: decToNum(d.delta),                      // Δ клиринга, ЗНАКОВАЯ
+      position_after: decToNum(d.position_after),    // ПОСЛЕ = ДО + Δ
     }));
   } catch (e) {
-    console.error("[ledger] GetAgentPositions failed:", e.message || e);
+    console.error("[ledger] GetAgentPositionDeltas failed:", e.message || e);
     return [];
-  }
-}
-
-// F-18 CE Treasury (ADR-054): read-side снапшот капитала/позиции/equity.
-// Движок ce-treasury (matching, F-18 Phase 2) ещё не подключён → BFF выводит
-// снапшот из УЖЕ посчитанного результата клиринга (не из сырого стакана):
-//   marks   = exp(λ) клиринговых цен, нормированные к numeraire;
-//   позиция = проекция вектора клиринга x на активы двойной записью
-//             Δh_base += x, Δh_quote −= x·P_clr  (ADR-054 §3);
-//   seed/θ/numeraire/mode — из env (единая книга holdings, target = seed).
-// Только converged батч применяется (UC-F18-02 Alt A1: degraded → skip).
-// Все вычисления здесь (OBS read-side); React только рендерит снапшот.
-function ceEnvNum(name) {
-  const v = process.env[name];
-  if (v == null || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// F-18 конфиг из env (numeraire/mode/пороги/reference-quote).
-function ceConfig() {
-  const numeraire = String(process.env.CE_NUMERAIRE || "USDT").trim();
-  const mode = String(process.env.CE_HEDGE_MODE || "FLATTEN").trim().toUpperCase();
-  const netHedgeEnabled = String(process.env.CE_NET_HEDGE_ENABLED || "0") === "1";
-  const seed = {}, theta = {}, quoteRef = {};
-  for (const k of Object.keys(process.env)) {
-    let m;
-    if ((m = k.match(/^CE_CAPITAL_SEED_(.+)$/))) { const n = ceEnvNum(k); if (n != null) seed[m[1]] = n; }
-    else if ((m = k.match(/^CE_HEDGE_THRESHOLD_(.+)$/))) { const n = ceEnvNum(k); if (n != null) theta[m[1]] = n; }
-    else if ((m = k.match(/^CE_HEDGE_QUOTE_REF_(.+)$/))) { quoteRef[m[1]] = String(process.env[k]).trim(); }
-  }
-  return { numeraire, mode, netHedgeEnabled, seed, theta, quoteRef };
-}
-
-// F-18 позиция биржи ДЛЯ ОДНОГО клиринга (ADR-054 §3,§8). Из clearingPrices
-// (marks) + hedgeDrafts (проекция x). Standalone per-batch: ДО = 0 (свежая
-// нейтраль), ПОСЛЕ = Δ клиринга; хедж при |ПОСЛЕ|>θ. numeraire исключён (кэш-нога).
-function ceBatchPositionFromDetail(clearingPrices, hedgeDrafts, cfg) {
-  const { numeraire, mode, theta, quoteRef } = cfg;
-  const marks = {}; const pr = {};
-  for (const cp of (clearingPrices || [])) if (cp.priceReal != null && cp.priceReal > 0) pr[cp.asset] = cp.priceReal;
-  const nRef = pr[numeraire];
-  if (nRef && nRef > 0) for (const a of Object.keys(pr)) marks[a] = nRef / pr[a];
-  marks[numeraire] = 1;
-  const delta = {};
-  for (const d of (hedgeDrafts || [])) {
-    const [base, quote] = String(d.instrument || "").split("/").map((s) => (s || "").trim());
-    if (!base || !quote) continue;
-    const x = (d.side === "BUY" ? 1 : -1) * Number(d.target_qty);
-    if (!Number.isFinite(x)) continue;
-    delta[base] = (delta[base] || 0) + x;
-    const mb = marks[base], mq = marks[quote];
-    if (mb != null && mq != null && mq > 0) delta[quote] = (delta[quote] || 0) - x * (mb / mq);
-  }
-  const assets = Array.from(new Set([...Object.keys(theta), ...Object.keys(delta)]))
-    .filter((a) => a !== numeraire).sort();
-  const rows = []; let armedCount = 0;
-  for (const a of assets) {
-    const before = 0;
-    const dl = delta[a] || 0;
-    const after = before + dl;
-    const t = theta[a] != null ? theta[a] : Infinity;
-    const armed = Number.isFinite(t) && Math.abs(after) > t;
-    let hedge = null;
-    if (armed) {
-      const qty = mode === "TO_BAND" ? Math.max(0, Math.abs(after) - t) : Math.abs(after);
-      if (qty > 1e-12) { hedge = { side: after > 0 ? "SELL" : "BUY", qty, instrument: a + "/" + (quoteRef[a] || numeraire) }; armedCount++; }
-    }
-    rows.push({
-      asset: a, before, delta: dl, after,
-      mark: marks[a] != null ? marks[a] : null,
-      threshold: Number.isFinite(t) ? t : null, hedgeArmed: !!hedge, hedge,
-    });
-  }
-  return { numeraire, mode, armedCount, assets: rows };
-}
-
-// F-18 §11 (variant A): позиция биржи для ОДНОГО вектор-клиринга — старая→Δ→новая
-// из ledger.GetExchangeNopHistory({batch_id}) (matching эмиттил Δpos от x, ledger
-// накопил + снял снапшот по batch_id вектор-клиринга). θ/хедж overlay из env.
-async function fetchCeBatchPositionFromPg(batchId) {
-  const cfg = ceConfig();
-  const base = { numeraire: cfg.numeraire, mode: cfg.mode, armedCount: 0, assets: [], engineWired: false };
-  const led = initLedgerClient();
-  if (!led || !batchId) return base;
-  try {
-    const resp = await grpcCall(led, "GetExchangeNopHistory", { batch_id: batchId, limit: 1 });
-    const snaps = (resp && resp.snapshots) || [];
-    if (!snaps.length) return base;
-    const s = snaps[0];
-    let armed = 0;
-    const assets = (s.items || [])
-      .filter((i) => i.currency !== cfg.numeraire)
-      .map((i) => {
-        const before = decToNum(i.nop_before), delta = decToNum(i.delta), after = decToNum(i.nop_after);
-        const th = cfg.theta[i.currency] != null ? cfg.theta[i.currency] : null;
-        const isArmed = th != null && Math.abs(after) > th;
-        let hedge = null;
-        if (isArmed) {
-          const qty = cfg.mode === "TO_BAND" ? Math.max(0, Math.abs(after) - th) : Math.abs(after);
-          if (qty > 1e-12) { hedge = { side: after > 0 ? "SELL" : "BUY", qty, instrument: i.currency + "/" + cfg.numeraire }; armed++; }
-        }
-        return { asset: i.currency, before, delta, after, mark: null, threshold: th, hedgeArmed: !!hedge, hedge };
-      });
-    return { numeraire: cfg.numeraire, mode: cfg.mode, armedCount: armed, assets, engineWired: assets.length > 0 };
-  } catch (e) {
-    return { ...base, error: e.message };
   }
 }
 

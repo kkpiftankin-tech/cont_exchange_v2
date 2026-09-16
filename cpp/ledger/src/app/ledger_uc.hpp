@@ -232,6 +232,15 @@ class LedgerUseCases {
   fob::ledger::v1::GetAgentPositionsResponse GetAgentPositions(
       const fob::ledger::v1::GetAgentPositionsRequest& req);
 
+  // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): per-agent дельты
+  // ОДНОГО такта клиринга (batch_id) — ДО → Δ → ПОСЛЕ. В отличие от
+  // GetAgentPositions (текущая накопленная позиция без привязки к такту),
+  // проецирует ring-историю agent_delta_history_ по batch_id. Пустой список,
+  // если такт не эмитировал agent_deltas (клиринг без потока) — честно, без
+  // фейков.
+  fob::ledger::v1::GetAgentPositionDeltasResponse GetAgentPositionDeltas(
+      const fob::ledger::v1::GetAgentPositionDeltasRequest& req);
+
  private:
   // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
   std::map<std::string, cex::common::Decimal> ComputeExchangeNopLocked() const;
@@ -296,6 +305,29 @@ class LedgerUseCases {
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): ring-история
+  // per-agent дельт ПО ТАКТАМ клиринга (в отличие от agent_positions_ выше,
+  // которая хранит только ТЕКУЩУЮ накопленную позицию без привязки к такту).
+  // Один элемент = один batch_id, содержит ДО/Δ/ПОСЛЕ по каждой (agent_id,
+  // asset, venue), затронутой этим тактом. Пишется ТОЛЬКО когда agent_deltas
+  // этого вызова непуст (пустые такты не раздувают ring). Идемпотентность —
+  // общий guard pos_delta_applied_ на весь ApplyPositionDelta (см. там же).
+  struct AgentDeltaRecord {
+    std::string agent_id;
+    std::string agent_kind;
+    std::string asset;
+    std::string venue;
+    cex::common::Decimal position_before{0, 0};
+    cex::common::Decimal delta{0, 0};
+    cex::common::Decimal position_after{0, 0};
+  };
+  struct BatchAgentDeltaSnap {
+    std::string batch_id;
+    long long ts_ms{0};
+    std::vector<AgentDeltaRecord> records;
+  };
+  static constexpr size_t kAgentDeltaHistoryCap = 300;  // последние N тактов (FIFO)
+  std::deque<BatchAgentDeltaSnap> agent_delta_history_;
   HedgePnlMap hedge_pnl_records_; // venue -> list of hedge records
   std::unordered_map<std::string, cex::common::Decimal> hedge_pnl_summary_; // venue:currency -> total PnL
   std::unordered_map<std::string, fob::execution::v1::ExecutionIntent> execution_intents_; // intent_id -> plan

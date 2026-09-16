@@ -363,6 +363,29 @@ message GetAgentPositionsResponse {
   repeated AgentPosition positions = 2;
 }
 
+// F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): ОДНА per-agent
+// дельта ОДНОГО такта клиринга (batch_id) — ДО → Δ → ПОСЛЕ. В отличие от
+// AgentPosition (текущая накопленная позиция без привязки к такту),
+// AgentPositionDelta — снимок ИМЕННО этого клиринга, читается из ring-истории
+// ledger (ApplyPositionDelta), а не из write-through кэша agent_positions_.
+message AgentPositionDelta {
+  string agent_id = 1;                          // "T_BTC" | "A_BTC_BO"
+  string agent_kind = 2;                        // "translator" | "arbitrageur" | ""
+  string asset = 3;                             // "BTC" | "USDT" ...
+  string venue = 4;                             // площадка узла; "" = route-level
+  fob.common.v1.Decimal position_before = 5;    // c_j ДО применения этой дельты
+  fob.common.v1.Decimal delta = 6;              // f_j, ЗНАКОВАЯ дельта этого такта
+  fob.common.v1.Decimal position_after = 7;     // c_j ПОСЛЕ = ДО + Δ
+}
+message GetAgentPositionDeltasRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;                          // такт клиринга (обязателен)
+}
+message GetAgentPositionDeltasResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated AgentPositionDelta deltas = 2;        // пусто = такт не менял позиции агентов
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -419,4 +442,8 @@ service LedgerService {
   // (переводчик/арбитражёр) — вход для A2 (сдвиг якоря σ*=m+ρ·c) и A7
   // (полоса ±q) в matching/risk, и для UI/observability.
   rpc GetAgentPositions(GetAgentPositionsRequest) returns (GetAgentPositionsResponse);
+
+  // F-18 v2 (наблюдаемость такта клиринга): per-agent дельты ОДНОГО такта
+  // (batch_id) — ДО → Δ → ПОСЛЕ, для вкладки Clearing (замена house-секции).
+  rpc GetAgentPositionDeltas(GetAgentPositionDeltasRequest) returns (GetAgentPositionDeltasResponse);
 }

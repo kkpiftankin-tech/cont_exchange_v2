@@ -311,6 +311,26 @@ if (BUILD_TESTING)
   target_compile_options(ledger_ce_agent_position_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ledger_ce_agent_position_test COMMAND ledger_ce_agent_position_test)
 
+  # F-18 v2 (наблюдаемость такта клиринга): per-batch ring-история agent
+  # дельт (agent_delta_history_) + GetAgentPositionDeltas(batch_id) проекция
+  # ДО→Δ→ПОСЛЕ. Pure unit — no PG, no Kafka.
+  add_executable(ledger_agent_position_deltas_test
+    tests/agent_position_deltas_test.cpp
+    src/app/ledger_uc.cpp
+  )
+
+  target_include_directories(ledger_agent_position_deltas_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(ledger_agent_position_deltas_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(ledger_agent_position_deltas_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ledger_agent_position_deltas_test COMMAND ledger_agent_position_deltas_test)
+
   # F-18 v2 (T-F18-204/205): PostgresAgentPositionRepository against a REAL
   # PostgreSQL (TEST_PG_DSN / LEDGER_POSTGRES_DSN). Gracefully skips (exit 0)
   # when no DB is configured, matching order_flow's postgres_* test pattern.

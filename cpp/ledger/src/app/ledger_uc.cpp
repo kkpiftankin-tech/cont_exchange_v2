@@ -799,10 +799,18 @@ void LedgerUseCases::ApplyPositionDelta(
   // Ключ (agent_id, asset, venue): LIVE BUG отбрасывания venue (ADR-061
   // §Контекст) здесь закрыт — venue участвует в ключе с первого дня v2-пути
   // (legacy node_deltas выше НЕ трогаем — там баг остаётся, см. комментарий).
+  // Наблюдаемость такта (см. AgentDeltaRecord/BatchAgentDeltaSnap в .hpp):
+  // копим ДО/Δ/ПОСЛЕ по каждой затронутой (agent_id, asset, venue) этого
+  // batch_id, чтобы UI мог показать "ДО→Δ→ПОСЛЕ ДЛЯ ЭТОГО такта", а не только
+  // текущую накопленную позицию (agent_positions_/GetAgentPositions).
+  std::vector<AgentDeltaRecord> batch_records;
+  batch_records.reserve(agent_deltas.size());
+
   for (const auto& ad : agent_deltas) {
     if (ad.agent_id.empty()) continue;  // defensive: вызывающая сторона уже фильтрует
     const AgentPositionKey key{ad.agent_id, ad.asset, ad.venue};
     auto& st = agent_positions_[key];
+    const Decimal position_before = st.position;  // ДО применения дельты ЭТОГО такта
     if (!ad.agent_kind.empty()) st.agent_kind = ad.agent_kind;  // не перетираем известный kind пустым
     st.position = Decimal::add(st.position, ad.delta);
     st.last_batch_id = batch_id;
@@ -826,7 +834,56 @@ void LedgerUseCases::ApplyPositionDelta(
       st.last_batch_id = row.last_batch_id.empty() ? st.last_batch_id : row.last_batch_id;
       st.updated_at_ms = row.updated_at_ms != 0 ? row.updated_at_ms : st.updated_at_ms;
     }
+
+    AgentDeltaRecord rec;
+    rec.agent_id = ad.agent_id;
+    rec.agent_kind = st.agent_kind;  // финальный kind (с учётом PG-подтяжки выше)
+    rec.asset = ad.asset;
+    rec.venue = ad.venue;
+    rec.position_before = position_before;
+    rec.delta = ad.delta;
+    rec.position_after = st.position;  // финальная позиция (с учётом PG-подтяжки выше)
+    batch_records.push_back(std::move(rec));
   }
+
+  // Снимаем снапшот такта, только если он реально затронул позиции агентов —
+  // пустые такты (agent_deltas.empty() или все agent_id пусты) не раздувают
+  // ring историю. idempotency по batch_id гарантирована guard'ом выше на
+  // ВЕСЬ вызов ApplyPositionDelta, поэтому дубликата снапшота быть не может.
+  if (!batch_records.empty()) {
+    BatchAgentDeltaSnap snap;
+    snap.batch_id = batch_id;
+    snap.ts_ms = ts_ms;
+    snap.records = std::move(batch_records);
+    agent_delta_history_.push_back(std::move(snap));
+    while (agent_delta_history_.size() > kAgentDeltaHistoryCap) agent_delta_history_.pop_front();
+  }
+}
+
+fob::ledger::v1::GetAgentPositionDeltasResponse LedgerUseCases::GetAgentPositionDeltas(
+    const fob::ledger::v1::GetAgentPositionDeltasRequest& req) {
+  fob::ledger::v1::GetAgentPositionDeltasResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+
+  std::lock_guard<std::mutex> lg(mu_);
+  // batch_id уникален в истории (idempotency guard в ApplyPositionDelta),
+  // поэтому первое совпадение с конца — единственное.
+  for (auto it = agent_delta_history_.rbegin(); it != agent_delta_history_.rend(); ++it) {
+    if (it->batch_id != req.batch_id()) continue;
+    for (const auto& r : it->records) {
+      auto* d = resp.add_deltas();
+      d->set_agent_id(r.agent_id);
+      d->set_agent_kind(r.agent_kind);
+      d->set_asset(r.asset);
+      d->set_venue(r.venue);
+      *d->mutable_position_before() = r.position_before.to_proto();
+      *d->mutable_delta() = r.delta.to_proto();
+      *d->mutable_position_after() = r.position_after.to_proto();
+    }
+    break;
+  }
+  return resp;
 }
 
 void LedgerUseCases::LoadAgentPositionsFromRepo() {

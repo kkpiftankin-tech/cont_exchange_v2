@@ -201,15 +201,15 @@ function ClearingDetail({ d }) {
   const prices = Array.isArray(d.clearingPrices) ? d.clearingPrices : [];
   const rates = Array.isArray(d.clearingRates) ? d.clearingRates : [];
   const drafts = Array.isArray(d.hedgeDrafts) ? d.hedgeDrafts : [];
-  const ce = d.cePosition && Array.isArray(d.cePosition.assets) ? d.cePosition.assets : [];
-  // F-18 v2 (Стадия 1 наблюдаемости, ADR-061/063): позиции CE-агентов
-  // (переводчики/арбитражёры) — из ledger.GetAgentPositions (реальный DTO,
-  // без фейков). Группировка: сначала переводчики, затем арбитражёры,
-  // затем прочее; внутри группы — по agent_id/активу.
-  const agentPositions = Array.isArray(d.agentPositions) ? d.agentPositions : [];
+  // F-18 v2 (наблюдаемость такта клиринга, ADR-061/063): позиции CE-агентов
+  // (переводчики/арбитражёры) ИМЕННО ДЛЯ ЭТОГО такта (batch_id) — ДО→Δ→ПОСЛЕ,
+  // из ledger.GetAgentPositionDeltas (реальный DTO, ring-история на стороне
+  // ledger, без фейков). Группировка: сначала переводчики, затем
+  // арбитражёры, затем прочее; внутри группы — по agent_id/активу.
+  const agentDeltas = Array.isArray(d.agentDeltas) ? d.agentDeltas : [];
   const agentKindOrder = { translator: 0, arbitrageur: 1 };
   const agentKindLabel = (k) => (k === 'translator' ? 'переводчик' : k === 'arbitrageur' ? 'арбитражёр' : (k || '—'));
-  const sortedAgentPositions = [...agentPositions].sort((a, b) => {
+  const sortedAgentDeltas = [...agentDeltas].sort((a, b) => {
     const ka = agentKindOrder[a.agent_kind] != null ? agentKindOrder[a.agent_kind] : 2;
     const kb = agentKindOrder[b.agent_kind] != null ? agentKindOrder[b.agent_kind] : 2;
     if (ka !== kb) return ka - kb;
@@ -346,54 +346,9 @@ function ClearingDetail({ d }) {
         </div>
       </div>
 
-      {/* (3) Позиция биржи CE по этому клирингу: ДО → Δ → ПОСЛЕ + пороги + хедж (F-18) */}
+      {/* (3) Черновики заявок на хеджирование */}
       <div className="vc-sec">
-        <div className="vc-sec-title">
-          3. Позиция биржи CE — ДО → Δ клиринга → ПОСЛЕ{d.cePosition && d.cePosition.armedCount > 0 ? <> · <b>{d.cePosition.armedCount}</b> хедж</> : ''}
-        </div>
-        <div className="vc-sec-body">
-          {ce.length > 0 ? (
-            <>
-            <table className="vc-sub-table">
-              <thead>
-                <tr><th>актив</th><th>позиция ДО</th><th>Δ клиринга</th><th title="ПОСЛЕ = ДО + Δ">позиция ПОСЛЕ</th><th title="CE_HEDGE_THRESHOLD_&lt;ASSET&gt;">θ порог</th><th>хедж → внешняя биржа</th></tr>
-              </thead>
-              <tbody>
-                {ce.map((r, i) => (
-                  <tr key={r.asset || i} className={r.hedgeArmed ? 'vc-row-armed' : ''}>
-                    <td>{r.asset}</td>
-                    <td className="vc-mono">{sgn(r.before)}</td>
-                    <td className={`vc-mono ${Number(r.delta) > 0 ? 'vc-side-ask' : Number(r.delta) < 0 ? 'vc-side-bid' : ''}`}>{sgn(r.delta)}</td>
-                    <td className={`vc-mono ${Number(r.after) > 0 ? 'vc-side-ask' : Number(r.after) < 0 ? 'vc-side-bid' : ''}`}><b>{sgn(r.after)}</b></td>
-                    <td className="vc-mono">{r.threshold == null ? '∞' : fmtNum(r.threshold)}</td>
-                    <td>
-                      {r.hedge
-                        ? <span className={r.hedge.side === 'SELL' ? 'vc-side-bid' : 'vc-side-ask'}><b>{r.hedge.side}</b> {fmtNum(r.hedge.qty)} {r.hedge.instrument}</span>
-                        : <span className="vc-empty">—</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="vc-note vc-note-tight">
-              F-18 (ADR-054): позиция биржи = проекция вектора клиринга x на активы (двойная запись).
-              ПОСЛЕ = ДО + Δ; хедж на внешнюю биржу эмиттится при <b>|ПОСЛЕ| &gt; θ</b> (short→BUY, long→SELL).
-              Standalone по батчу (ДО=0); накопление и полное состояние — во вкладке <b>Treasury</b> и с движком ce-treasury (Phase 2).
-            </div>
-            </>
-          ) : (
-            <div className="vc-note">
-              Позиция ещё не готова: свежий батч — ledger применяет клиринг (обновится
-              автоматически через 1–3&nbsp;с), либо нет клиринговых цен/x для этого батча
-              (активы без порога θ). Настройка порогов — <span className="vc-mono">CE_HEDGE_THRESHOLD_&lt;ASSET&gt;</span>.
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* (4) Черновики заявок на хеджирование */}
-      <div className="vc-sec">
-        <div className="vc-sec-title">4. Черновики хедж-заявок на внешние биржи — <b>{drafts.length}</b></div>
+        <div className="vc-sec-title">3. Черновики хедж-заявок на внешние биржи — <b>{drafts.length}</b></div>
         <div className="vc-sec-body">
           {drafts.length > 0 ? (
             <table className="vc-sub-table">
@@ -422,12 +377,13 @@ function ClearingDetail({ d }) {
         </div>
       </div>
 
-      {/* (5) Позиции агентов (переводчики/арбитражёры) — F-18 v2 Стадия 1
-          наблюдаемости: реальный DTO ledger.GetAgentPositions, без фейков. */}
+      {/* (4) Позиции агентов (переводчики/арбитражёры) ДЛЯ ЭТОГО такта клиринга —
+          ДО → Δ → ПОСЛЕ, из ledger.GetAgentPositionDeltas (реальный DTO,
+          ring-история по batch_id на стороне ledger, без фейков). */}
       <div className="vc-sec">
-        <div className="vc-sec-title">5. Позиции агентов (переводчики / арбитражёры) — <b>{agentPositions.length}</b></div>
+        <div className="vc-sec-title">4. Позиции агентов — ДО → Δ клиринга → ПОСЛЕ (переводчики / арбитражёры) — <b>{agentDeltas.length}</b></div>
         <div className="vc-sec-body">
-          {sortedAgentPositions.length > 0 ? (
+          {sortedAgentDeltas.length > 0 ? (
             <>
             <table className="vc-sub-table">
               <thead>
@@ -436,34 +392,40 @@ function ClearingDetail({ d }) {
                   <th>тип</th>
                   <th>актив</th>
                   <th>площадка</th>
-                  <th title="c_j, ЗНАКОВАЯ: + = длинная (купил/накопил), − = короткая (продал/должен)">позиция (знак.)</th>
-                  <th title="committed (Э3+, полоса ±q); пока всегда 0">in_flight</th>
+                  <th title="c_j ДО применения дельты этого такта">позиция ДО</th>
+                  <th title="f_j, ЗНАКОВАЯ: + = длинная (купил/накопил), − = короткая (продал/должен)">Δ клиринга</th>
+                  <th title="ПОСЛЕ = ДО + Δ">позиция ПОСЛЕ</th>
                 </tr>
               </thead>
               <tbody>
-                {sortedAgentPositions.map((p, i) => (
+                {sortedAgentDeltas.map((p, i) => (
                   <tr key={(p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '') + '|' + i}>
                     <td className="vc-mono">{p.agent_id}</td>
                     <td>{agentKindLabel(p.agent_kind)}</td>
                     <td>{p.asset}</td>
                     <td>{p.venue || '—'}</td>
-                    <td className={`vc-mono ${Number(p.position) > 0 ? 'vc-side-ask' : Number(p.position) < 0 ? 'vc-side-bid' : ''}`}>
-                      <b>{sgn(p.position)}</b>
+                    <td className="vc-mono">{sgn(p.position_before)}</td>
+                    <td className={`vc-mono ${Number(p.delta) > 0 ? 'vc-side-ask' : Number(p.delta) < 0 ? 'vc-side-bid' : ''}`}>
+                      {sgn(p.delta)}
                     </td>
-                    <td className="vc-mono">{sgn(p.in_flight)}</td>
+                    <td className={`vc-mono ${Number(p.position_after) > 0 ? 'vc-side-ask' : Number(p.position_after) < 0 ? 'vc-side-bid' : ''}`}>
+                      <b>{sgn(p.position_after)}</b>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
             <div className="vc-note vc-note-tight">
-              Знак позиции = направление: <b>+</b> длинная (агент купил/накопил актив), <b>−</b> короткая
-              (агент продал/должен актив). Это <b>ТЕКУЩАЯ накопленная позиция агента</b> (ledger.GetAgentPositions),
-              а НЕ снимок именно этого клиринга — привязку к конкретному batch_id добавит Стадия 3
-              (execution.intents/ExecutionReport с agent_id).
+              Знак Δ = направление такта: <b>+</b> длинная (агент купил/накопил актив), <b>−</b> короткая
+              (агент продал/должен актив). ПОСЛЕ = ДО + Δ — снимок ИМЕННО этого такта клиринга
+              (batch_id), а не только текущая накопленная позиция.
             </div>
             </>
           ) : (
-            <div className="vc-note">нет данных по агентам (включите CE_AGENT_POS)</div>
+            <div className="vc-note">
+              На этом такте позиции агентов не менялись (клиринг без потока, deltas=0),
+              либо агентские дельты выключены (CE_AGENT_POS).
+            </div>
           )}
         </div>
       </div>
