@@ -990,11 +990,35 @@ void MatchingLoop::on_ce_clearing_input(
   batch.set_batch_id(input.batch_id());
   batch.set_event_time_ms(input.event_time_ms());
   int emitted = 0;
+  // T-F18-3xx (Стадия 1 наблюдаемости, ADR-061/063): per-node строки
+  // (agent_id ПУСТОЙ — LEGACY per-asset путь, ce_committed_/house,
+  // GetNodeBalances) эмиттятся ВСЕГДА, независимо от CE_AGENT_POS. Раньше
+  // при ce_agent_pos=1 этот путь полностью заменялся per-agent строками, и
+  // прежние house-позиции переставали обновляться — регрессия. Теперь
+  // house-факт всегда есть; при ON к нему ДОБАВЛЯЮТСЯ per-agent строки ниже.
+  {
+    const std::vector<domain::CeAssetVenueDelta> deltas =
+        domain::ProjectPositionQuantity(graph, res, ref_price);
+    for (const auto& d : deltas) {
+      if (std::fabs(d.delta_qty) < 1e-12) continue;
+      auto* ad = batch.add_deltas();
+      ad->set_asset(d.asset);
+      ad->set_venue(d.venue);
+      *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
+      *ad->mutable_price_used() = to_dec(d.price_used);
+      *ad->mutable_delta_value() = to_dec(d.delta_value);
+      ++emitted;
+    }
+  }
   if (ce_agent_pos) {
-    // T-F18-201: per-agent строки вместо per-node. delta = Δc_j = f_j такта
-    // (ЗНАКОВАЯ — знак = направление агента); agent_id/agent_kind несут
-    // идентичность агента (переводчик/арбитражёр). price_used/delta_value
-    // (поля 4/5) для этого пути не считаются — они per-node диагностика v1.
+    // T-F18-201/3xx: ДОПОЛНИТЕЛЬНО per-agent строки (agent_id НЕПУСТОЙ).
+    // delta = Δc_j = f_j такта (ЗНАКОВАЯ — знак = направление агента);
+    // agent_id/agent_kind несут идентичность агента (переводчик/арбитражёр).
+    // price_used/delta_value (поля 4/5) для этого пути не считаются — они
+    // per-node диагностика v1 (заполнена в блоке выше). Ledger разводит
+    // строки по непустому agent_id (ce_agent_position) — двойного счёта
+    // между per-node (house) и per-agent (ce_agent_position) нет: это разные
+    // книги учёта одного и того же такта клиринга.
     const std::vector<domain::CeAgentDelta> agent_deltas =
         domain::ProjectAgentDeltas(graph, res);
     for (const auto& d : agent_deltas) {
@@ -1006,19 +1030,6 @@ void MatchingLoop::on_ce_clearing_input(
       ad->set_asset(d.asset);
       ad->set_venue(d.venue);
       *ad->mutable_delta() = to_dec(d.delta);
-      ++emitted;
-    }
-  } else {
-    const std::vector<domain::CeAssetVenueDelta> deltas =
-        domain::ProjectPositionQuantity(graph, res, ref_price);
-    for (const auto& d : deltas) {
-      if (std::fabs(d.delta_qty) < 1e-12) continue;
-      auto* ad = batch.add_deltas();
-      ad->set_asset(d.asset);
-      ad->set_venue(d.venue);
-      *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
-      *ad->mutable_price_used() = to_dec(d.price_used);
-      *ad->mutable_delta_value() = to_dec(d.delta_value);
       ++emitted;
     }
   }

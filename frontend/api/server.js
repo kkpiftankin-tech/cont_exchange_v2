@@ -6715,6 +6715,12 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // состояние позиций было видно прямо в детали батча на вкладке Clearing.
   const cePosition = await fetchCeBatchPositionFromPg(clr.batch_id);
 
+  // F-18 v2 (Стадия 1 наблюдаемости, ADR-061/063): позиции CE-агентов
+  // (переводчики/арбитражёры) — ТЕКУЩАЯ накопленная позиция (GetAgentPositions
+  // не фильтрует по batch_id, это не снимок именно этого клиринга — Стадия 3
+  // добавит per-batch привязку через execution.intents/ExecutionReport).
+  const agentPositions = await fetchAgentPositions();
+
   return {
     batch_id: clr.batch_id,
     execution_group_id: clr.execution_group_id,
@@ -6730,8 +6736,36 @@ async function fetchVectorClearingDetail(batchId, ts) {
     clearingPricesAvailable: piArr.length > 0,
     hedgeDrafts: drafts,
     cePosition,
+    agentPositions,
     generatedAt: new Date().toISOString()
   };
+}
+
+// F-18 v2 (Стадия 1 наблюдаемости, T-F18-008/203, ADR-061 §7, ADR-063):
+// знаковые накопленные позиции CE-агентов (переводчик/арбитражёр) — ТОЛЬКО
+// через ledger.GetAgentPositions (без SQL в обход сервиса-владельца).
+// Без фильтров = все агенты. Если RPC недоступен/пусто — пустой список
+// (никаких фиктивных значений).
+async function fetchAgentPositions() {
+  const led = initLedgerClient();
+  if (!led) return [];
+  try {
+    const resp = await grpcCall(led, "GetAgentPositions", {});
+    const positions = (resp && resp.positions) || [];
+    return positions.map((p) => ({
+      agent_id: p.agent_id,
+      agent_kind: p.agent_kind,          // "translator" | "arbitrageur" | ""
+      asset: p.asset,
+      venue: p.venue,
+      position: decToNum(p.position),    // c_j, ЗНАКОВАЯ (знак = направление)
+      in_flight: decToNum(p.in_flight),  // committed (Э3+), пока всегда 0
+      updated_at_ms: Number(p.updated_at_ms) || 0,
+      last_batch_id: p.last_batch_id || "",
+    }));
+  } catch (e) {
+    console.error("[ledger] GetAgentPositions failed:", e.message || e);
+    return [];
+  }
 }
 
 // F-18 CE Treasury (ADR-054): read-side снапшот капитала/позиции/equity.

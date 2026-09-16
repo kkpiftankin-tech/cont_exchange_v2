@@ -63,6 +63,24 @@ enum TimeInForce {
   TIF_FOK = 3;  // Fill Or Kill
 }
 
+// ADR-063 (F-18 v2): три несовместимых по инвариантам вида участника ledger.
+// CLIENT — accounts.free_balance >= 0 (CHECK), резерв/освобождение пары.
+// HOUSE — тот же субстрат accounts (user_id == kHouseAccountId), капитал биржи.
+// AGENT — виртуальный контрагент CE (переводчик/арбитражёр): ЗНАКОВАЯ позиция
+// в отдельной таблице ce_agent_position, БЕЗ резерва и БЕЗ неотрицательности —
+// docs/07-data/ce-agent-position.md. Аддитивно; пустое/UNSPECIFIED поле
+// трактуется вызывающей стороной как CLIENT (обратная совместимость —
+// существующие ReserveFundsRequest без party_type ведут себя как раньше).
+// Префикс PARTY_TYPE_ (а не голые CLIENT/HOUSE/AGENT из черновика ADR-063) —
+// по конвенции этого файла (SIDE_*, ORDER_STATUS_*, TIF_*), чтобы не плодить
+// голые идентификаторы в C++ codegen-неймспейсе пакета fob.common.v1.
+enum PartyType {
+  PARTY_TYPE_UNSPECIFIED = 0;  // трактуется как CLIENT
+  PARTY_TYPE_CLIENT = 1;
+  PARTY_TYPE_HOUSE = 2;
+  PARTY_TYPE_AGENT = 3;
+}
+
 message Fee {
   // maker/taker/etc (free-form, but keep stable in your system)
   string fee_type = 1;

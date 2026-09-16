@@ -202,6 +202,20 @@ function ClearingDetail({ d }) {
   const rates = Array.isArray(d.clearingRates) ? d.clearingRates : [];
   const drafts = Array.isArray(d.hedgeDrafts) ? d.hedgeDrafts : [];
   const ce = d.cePosition && Array.isArray(d.cePosition.assets) ? d.cePosition.assets : [];
+  // F-18 v2 (Стадия 1 наблюдаемости, ADR-061/063): позиции CE-агентов
+  // (переводчики/арбитражёры) — из ledger.GetAgentPositions (реальный DTO,
+  // без фейков). Группировка: сначала переводчики, затем арбитражёры,
+  // затем прочее; внутри группы — по agent_id/активу.
+  const agentPositions = Array.isArray(d.agentPositions) ? d.agentPositions : [];
+  const agentKindOrder = { translator: 0, arbitrageur: 1 };
+  const agentKindLabel = (k) => (k === 'translator' ? 'переводчик' : k === 'arbitrageur' ? 'арбитражёр' : (k || '—'));
+  const sortedAgentPositions = [...agentPositions].sort((a, b) => {
+    const ka = agentKindOrder[a.agent_kind] != null ? agentKindOrder[a.agent_kind] : 2;
+    const kb = agentKindOrder[b.agent_kind] != null ? agentKindOrder[b.agent_kind] : 2;
+    if (ka !== kb) return ka - kb;
+    if (a.agent_id !== b.agent_id) return String(a.agent_id).localeCompare(String(b.agent_id));
+    return String(a.asset).localeCompare(String(b.asset));
+  });
   const twoSided = src.some((s) => s.twoSided);
   const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
   const [chartKey, setChartKey] = useState(null);
@@ -403,6 +417,52 @@ function ClearingDetail({ d }) {
               Нет исполняемого объёма (все x ≈ 0 — нет арбитража), поэтому хедж-черновики не формируются.
               Черновик появится для сегментов с x&gt;0 (bid→SELL, ask→BUY, лимит = effective_price).
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* (5) Позиции агентов (переводчики/арбитражёры) — F-18 v2 Стадия 1
+          наблюдаемости: реальный DTO ledger.GetAgentPositions, без фейков. */}
+      <div className="vc-sec">
+        <div className="vc-sec-title">5. Позиции агентов (переводчики / арбитражёры) — <b>{agentPositions.length}</b></div>
+        <div className="vc-sec-body">
+          {sortedAgentPositions.length > 0 ? (
+            <>
+            <table className="vc-sub-table">
+              <thead>
+                <tr>
+                  <th>agent_id</th>
+                  <th>тип</th>
+                  <th>актив</th>
+                  <th>площадка</th>
+                  <th title="c_j, ЗНАКОВАЯ: + = длинная (купил/накопил), − = короткая (продал/должен)">позиция (знак.)</th>
+                  <th title="committed (Э3+, полоса ±q); пока всегда 0">in_flight</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedAgentPositions.map((p, i) => (
+                  <tr key={(p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '') + '|' + i}>
+                    <td className="vc-mono">{p.agent_id}</td>
+                    <td>{agentKindLabel(p.agent_kind)}</td>
+                    <td>{p.asset}</td>
+                    <td>{p.venue || '—'}</td>
+                    <td className={`vc-mono ${Number(p.position) > 0 ? 'vc-side-ask' : Number(p.position) < 0 ? 'vc-side-bid' : ''}`}>
+                      <b>{sgn(p.position)}</b>
+                    </td>
+                    <td className="vc-mono">{sgn(p.in_flight)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="vc-note vc-note-tight">
+              Знак позиции = направление: <b>+</b> длинная (агент купил/накопил актив), <b>−</b> короткая
+              (агент продал/должен актив). Это <b>ТЕКУЩАЯ накопленная позиция агента</b> (ledger.GetAgentPositions),
+              а НЕ снимок именно этого клиринга — привязку к конкретному batch_id добавит Стадия 3
+              (execution.intents/ExecutionReport с agent_id).
+            </div>
+            </>
+          ) : (
+            <div className="vc-note">нет данных по агентам (включите CE_AGENT_POS)</div>
           )}
         </div>
       </div>

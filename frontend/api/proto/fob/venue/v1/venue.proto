@@ -93,25 +93,6 @@ message VenueLiquidityCurve {
   uint32 schema_version = 40;
   uint32 min_compatible_schema_version = 41;
   string producer_version = 42;
-
-  // ADR-053: safe-translator параметры кривой, посчитанные venues ИЗ СЫРОГО
-  // стакана (raw cumulative → VWAP → α_ext → θ-haircut). Клиринг (market_data →
-  // matching) берёт наклон/anchor ОТСЮДА — конвейер «стакан → кривая → клиринг».
-  SafeTranslator safe_translator = 43;
-}
-
-// ADR-053: safe-translator параметры одной двусторонней кривой венью.
-message SafeTranslator {
-  fob.common.v1.Decimal mid = 1;    // mid сырого стакана (якорь в цене)
-  double anchor_log = 2;            // ln(mid) — якорь клиринга (log-цены)
-  double slope = 3;                 // m = mid/(1e4·α_T)  (log-наклон)
-  double alpha_ext = 4;             // min_k D_k/|δ_k|
-  double alpha_t = 5;               // θ·α_ext (после haircut)
-  double beta_t = 6;                // mid²/(1e4·α_T) = mid·slope (линейный наклон)
-  double theta = 7;                 // safe-share [0..1]
-  fob.common.v1.Decimal q_bid = 8;  // суммарная глубина bid (Q_bid)
-  fob.common.v1.Decimal q_ask = 9;  // суммарная глубина ask (Q_ask)
-  string model = 10;                // "safe_vwap_raw" | "safe_vwap_fob"
 }
 
 // Execution side for liquidity curves
