@@ -6717,6 +6717,10 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // ring-история на стороне ledger, без SQL в обход сервиса-владельца).
   // Замена секции «Позиция биржи CE» (house) — см. п.1 задачи 2026-09-16.
   const agentDeltas = await fetchAgentPositionDeltas(clr.batch_id);
+  // Накопленная (текущая) знаковая позиция агентов — переживает рестарт ledger
+  // (в отличие от per-batch ring). Показываем рядом с ДО→Δ→ПОСЛЕ, чтобы агенты
+  // были видны даже на тактах без потока. Реальный DTO ledger.GetAgentPositions.
+  const agentPositions = await fetchAgentPositions();
 
   return {
     batch_id: clr.batch_id,
@@ -6733,8 +6737,31 @@ async function fetchVectorClearingDetail(batchId, ts) {
     clearingPricesAvailable: piArr.length > 0,
     hedgeDrafts: drafts,
     agentDeltas,
+    agentPositions,
     generatedAt: new Date().toISOString()
   };
+}
+
+// F-18 v2: текущая НАКОПЛЕННАЯ знаковая позиция всех агентов (не per-batch) —
+// через ledger.GetAgentPositions (реальный DTO, без SQL). [] при ошибке/пусто.
+async function fetchAgentPositions() {
+  const led = initLedgerClient();
+  if (!led) return [];
+  try {
+    const resp = await grpcCall(led, "GetAgentPositions", {});
+    const positions = (resp && resp.positions) || [];
+    return positions.map((p) => ({
+      agent_id: p.agent_id,
+      agent_kind: p.agent_kind,
+      asset: p.asset,
+      venue: p.venue,
+      position: decToNum(p.position),
+      in_flight: decToNum(p.in_flight),
+    }));
+  } catch (e) {
+    console.error("[ledger] GetAgentPositions failed:", e.message || e);
+    return [];
+  }
 }
 
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent

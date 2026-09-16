@@ -216,6 +216,18 @@ function ClearingDetail({ d }) {
     if (a.agent_id !== b.agent_id) return String(a.agent_id).localeCompare(String(b.agent_id));
     return String(a.asset).localeCompare(String(b.asset));
   });
+  // Текущая НАКОПЛЕННАЯ позиция агентов (переживает рестарт ledger) — из
+  // ledger.GetAgentPositions. Показываем рядом, чтобы агенты были видны даже
+  // на тактах без потока (per-batch ring пуст).
+  const agentPositions = Array.isArray(d.agentPositions) ? d.agentPositions : [];
+  const sortedAgentPositions = [...agentPositions]
+    .filter((p) => Math.abs(Number(p.position)) > 1e-9)
+    .sort((a, b) => {
+      const ka = agentKindOrder[a.agent_kind] != null ? agentKindOrder[a.agent_kind] : 2;
+      const kb = agentKindOrder[b.agent_kind] != null ? agentKindOrder[b.agent_kind] : 2;
+      if (ka !== kb) return ka - kb;
+      return String(a.agent_id).localeCompare(String(b.agent_id));
+    });
   const twoSided = src.some((s) => s.twoSided);
   const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
   const [chartKey, setChartKey] = useState(null);
@@ -426,6 +438,47 @@ function ClearingDetail({ d }) {
               На этом такте позиции агентов не менялись (клиринг без потока, deltas=0),
               либо агентские дельты выключены (CE_AGENT_POS).
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* (5) Текущая НАКОПЛЕННАЯ позиция агентов — из ledger.GetAgentPositions
+          (реальный DTO). Видна всегда, даже когда на такте не было потока. */}
+      <div className="vc-sec">
+        <div className="vc-sec-title">5. Текущая накопленная позиция агентов (знаковая) — <b>{sortedAgentPositions.length}</b></div>
+        <div className="vc-sec-body">
+          {sortedAgentPositions.length > 0 ? (
+            <>
+            <table className="vc-sub-table">
+              <thead>
+                <tr>
+                  <th>agent_id</th><th>тип</th><th>актив</th><th>площадка</th>
+                  <th title="c_j — накопленная знаковая позиция агента">позиция</th>
+                  <th title="отправлено наружу, ещё не исполнено (Э3)">in_flight</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedAgentPositions.map((p, i) => (
+                  <tr key={(p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '') + '|' + i}>
+                    <td className="vc-mono">{p.agent_id}</td>
+                    <td>{agentKindLabel(p.agent_kind)}</td>
+                    <td>{p.asset}</td>
+                    <td>{p.venue || '—'}</td>
+                    <td className={`vc-mono ${Number(p.position) > 0 ? 'vc-side-ask' : Number(p.position) < 0 ? 'vc-side-bid' : ''}`}>
+                      <b>{sgn(p.position)}</b>
+                    </td>
+                    <td className="vc-mono">{fmtNum(p.in_flight)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="vc-note vc-note-tight">
+              Знак = направление: <b>+</b> длинная, <b>−</b> короткая. Это ТЕКУЩАЯ накопленная
+              позиция (не привязана к этому такту); меняется только когда клиринг даёт поток.
+            </div>
+            </>
+          ) : (
+            <div className="vc-note">Нет накопленных позиций агентов (включите CE_AGENT_POS; либо клиринг без потока).</div>
           )}
         </div>
       </div>
