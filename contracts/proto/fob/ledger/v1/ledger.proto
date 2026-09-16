@@ -45,6 +45,14 @@ message ReserveFundsRequest {
   fob.common.v1.Decimal amount = 11;
 
   ReserveReason reason = 12;
+
+  // ADR-063 (F-18 v2, T-F18-205): кто резервирует. Аддитивно, default =
+  // PARTY_TYPE_UNSPECIFIED → трактуется как CLIENT (обратная совместимость —
+  // существующие вызывающие стороны, order_flow, не заполняют это поле).
+  // PARTY_TYPE_AGENT — ReserveFunds становится no-op success (см. handler):
+  // AGENT не резервирует и легитимно уходит в минус, его учёт ведёт
+  // ce_agent_position (docs/07-data/ce-agent-position.md), а не accounts.
+  fob.common.v1.PartyType party_type = 13;
 }
 
 message ReserveFundsResponse {
@@ -325,6 +333,36 @@ message ApplyNodeTransferRequest {
   fob.common.v1.Decimal qty = 6;
 }
 
+// T-F18-008/203 (ADR-061 §7, ADR-063): знаковая накопленная позиция CE-агента
+// (виртуального контрагента: переводчик | арбитражёр) — c_j такта клиринга.
+// ОТДЕЛЬНО от NodeBalance (уровень узла активов биржи, неотрицательный факт) —
+// AgentPosition агрегирует по (agent_id, asset, venue), позиция может быть
+// отрицательной (ADR-061 A6). agent_kind — строка ("translator" |
+// "arbitrageur"), а не общий enum: ключ и CHECK хранятся так же в PG
+// ce_agent_position (docs/07-data/ce-agent-position.md), лишний enum/пакетная
+// связь ledger↔treasury здесь не нужна. in_flight — зарезервировано для Э3
+// (полоса ±q, T-F18-304); до Э3 всегда 0.
+message AgentPosition {
+  string agent_id = 1;                        // "T_BTC" | "A_BTC_BO" (= имя ребра CeEdge.name)
+  string agent_kind = 2;                       // "translator" | "arbitrageur" | "" (неизвестно)
+  string asset = 3;                            // "BTC" | "USDT" ...
+  string venue = 4;                            // площадка узла; "" = route-level (арбитражёр, V=2)
+  fob.common.v1.Decimal position = 5;          // c_j, ЗНАКОВАЯ, накопленная клирингом
+  fob.common.v1.Decimal in_flight = 6;         // committed (Э3+), ЗНАКОВАЯ, пока всегда 0
+  int64 updated_at_ms = 7;                     // unix ms последнего изменения
+  string last_batch_id = 8;                    // последний такт, менявший позицию
+}
+message GetAgentPositionsRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;               // пусто = все агенты
+  repeated string assets = 3;                  // пусто = все активы
+  repeated string venues = 4;                  // пусто = все площадки
+}
+message GetAgentPositionsResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated AgentPosition positions = 2;
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -376,4 +414,9 @@ service LedgerService {
 
   // ADR-057: применить перевод валюты между узлами (связка-арбитражёр), идемпотентно.
   rpc ApplyNodeTransfer(ApplyNodeTransferRequest) returns (google.protobuf.Empty);
+
+  // T-F18-008/203 (ADR-061 §7): знаковые накопленные позиции CE-агентов
+  // (переводчик/арбитражёр) — вход для A2 (сдвиг якоря σ*=m+ρ·c) и A7
+  // (полоса ±q) в matching/risk, и для UI/observability.
+  rpc GetAgentPositions(GetAgentPositionsRequest) returns (GetAgentPositionsResponse);
 }

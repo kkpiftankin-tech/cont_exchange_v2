@@ -151,4 +151,50 @@ class HedgeflowPnlSinkPort {
                                    const std::string& fee_delta) = 0;
 };
 
+// ---------------------------------------------------------------------------
+// F-18 v2 (T-F18-202/204, ADR-061 §7, ADR-063) — позиция виртуального
+// контрагента CE v2 (AGENT: переводчик/арбитражёр). ОТДЕЛЬНАЯ от `accounts`
+// (docs/07-data/ce-agent-position.md, party_type-раздел): знаковая, БЕЗ
+// CHECK >= 0, ключ (agent_id, asset, venue) — трёхсоставной (прецедент
+// sim_positions, ADR-016). `position` = c_j (накопленная клирингом,
+// c ← c + f). `in_flight` зарезервировано для Э3 (полоса ±q, T-F18-304) —
+// в этой таске всегда 0 (эмиссии ещё нет).
+// ---------------------------------------------------------------------------
+struct AgentPositionRow {
+  std::string agent_id;
+  std::string agent_kind;   // "translator" | "arbitrageur" | "" (неизвестно)
+  std::string asset;
+  std::string venue;
+  cex::common::Decimal position{0, 0};    // c_j, ЗНАКОВАЯ, накопленная клирингом
+  cex::common::Decimal in_flight{0, 0};   // committed (Э3+), ЗНАКОВАЯ
+  std::string last_batch_id;              // последний такт, менявший позицию
+  int64_t updated_at_ms{0};
+};
+
+// Port for the `ce_agent_position` table (T-F18-204). Единственная мутация —
+// накопление c ← c + delta (delta = f_j, сырой поток такта), идемпотентное по
+// batch_id (ADR-061 §7: UPSERT-guard `WHERE last_batch_id IS DISTINCT FROM
+// $batch_id`). GetPositions — read-only проекция для GetAgentPositions RPC /
+// стартовой загрузки write-through кэша LedgerUseCases.
+class AgentPositionRepositoryPort {
+ public:
+  virtual ~AgentPositionRepositoryPort() = default;
+  // Применить f_j к (agent_id, asset, venue), защищено guard'ом по batch_id.
+  // Возвращает накопленную запись ПОСЛЕ применения (или текущую, если guard
+  // отсёк повторную доставку того же batch_id — at-least-once Kafka).
+  virtual AgentPositionRow ApplyDelta(const std::string& agent_id,
+                                      const std::string& agent_kind,
+                                      const std::string& asset,
+                                      const std::string& venue,
+                                      const cex::common::Decimal& delta,
+                                      const std::string& batch_id,
+                                      int64_t updated_at_ms) = 0;
+  // Прочитать текущие позиции. Пустые векторы фильтров = без фильтра
+  // (вернуть все агенты / активы / площадки соответственно).
+  virtual std::vector<AgentPositionRow> GetPositions(
+      const std::vector<std::string>& agent_ids,
+      const std::vector<std::string>& assets,
+      const std::vector<std::string>& venues) = 0;
+};
+
 }  // namespace cex::ledger::app

@@ -292,4 +292,48 @@ if (BUILD_TESTING)
   target_compile_options(ledger_positions_update_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ledger_positions_update_test COMMAND ledger_positions_update_test)
 
+  # F-18 v2 (T-F18-202/203, ADR-061 §1/§7, ADR-063): per-agent знаковая
+  # позиция CE (c<-c+f), GetAgentPositions RPC. Pure unit — no PG, no Kafka.
+  add_executable(ledger_ce_agent_position_test
+    tests/ce_agent_position_test.cpp
+    src/app/ledger_uc.cpp
+  )
+
+  target_include_directories(ledger_ce_agent_position_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(ledger_ce_agent_position_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(ledger_ce_agent_position_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ledger_ce_agent_position_test COMMAND ledger_ce_agent_position_test)
+
+  # F-18 v2 (T-F18-204/205): PostgresAgentPositionRepository against a REAL
+  # PostgreSQL (TEST_PG_DSN / LEDGER_POSTGRES_DSN). Gracefully skips (exit 0)
+  # when no DB is configured, matching order_flow's postgres_* test pattern.
+  # Only built when libpqxx is available (same guard as the ledger binary).
+  if (LIBPQXX_FOUND)
+    add_executable(ledger_ce_agent_position_pg_test
+      tests/ce_agent_position_pg_repository_test.cpp
+      src/infra/postgres_repositories.cpp
+    )
+
+    target_include_directories(ledger_ce_agent_position_pg_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(ledger_ce_agent_position_pg_test PRIVATE
+      cex_common
+      contracts_proto
+      PkgConfig::LIBPQXX
+    )
+
+    target_compile_definitions(ledger_ce_agent_position_pg_test PRIVATE CEX_LEDGER_HAS_LIBPQXX=1)
+    target_compile_options(ledger_ce_agent_position_pg_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME ledger_ce_agent_position_pg_test COMMAND ledger_ce_agent_position_pg_test)
+  endif()
+
 endif()

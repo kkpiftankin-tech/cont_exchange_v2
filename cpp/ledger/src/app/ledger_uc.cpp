@@ -753,19 +753,25 @@ fob::ledger::v1::GetExchangeNopHistoryResponse LedgerUseCases::GetExchangeNopHis
 
 void LedgerUseCases::ApplyPositionDelta(
     const std::string& batch_id, long long ts_ms,
-    const std::vector<std::pair<std::string, Decimal>>& deltas) {
+    const std::vector<std::pair<std::string, Decimal>>& node_deltas,
+    const std::vector<AgentDelta>& agent_deltas) {
   if (batch_id.empty()) return;
   std::lock_guard<std::mutex> lg(mu_);
-  if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id
+  if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id (ОБА пути)
   pos_delta_applied_.insert(batch_id);
 
   // ADR-057 поправка 3: ce.position.delta — ПЛАН. Копится в ce_committed_ (in-flight),
   // НЕ в house-факт. house двигают только подтверждения (execution.venue). Стоячая позиция
   // (GetExchangeBalances/NOP) = факт (без плана) → нет двойного счёта. Снапшот Clearing
   // показывает позицию = факт + committed(план): before(старый committed) → after(новый).
+  //
+  // T-F18-202 (ADR-061 §Контекст, "переиспользовать не переизобретать"): этот
+  // per-asset путь — LEGACY (v1, ce_committed_) и остаётся БЕЗ ИЗМЕНЕНИЙ для
+  // обратной совместимости (регресс не ломаем). node_deltas приходят только
+  // из AssetDelta-записей с пустым agent_id (см. kafka_consumers.cpp).
   const auto nop_fact = ComputeExchangeNopLocked();  // house+venue−client (без плана)
   const std::map<std::string, Decimal> committed_before = ce_committed_;
-  for (const auto& [asset, d] : deltas)
+  for (const auto& [asset, d] : node_deltas)
     ce_committed_[asset] = Decimal::add(ce_committed_[asset], d);
 
   const auto committed_of = [](const std::map<std::string, Decimal>& m,
@@ -785,6 +791,87 @@ void LedgerUseCases::ApplyPositionDelta(
   nop_history_.push_back(std::move(snap));
   while (nop_history_.size() > 50) nop_history_.pop_front();
   if (pos_delta_applied_.size() > 1000) pos_delta_applied_.clear();
+
+  // T-F18-202 (ADR-061 §1/§7, CE_AGENT_POS): per-agent знаковая позиция,
+  // c ← c + f. Активируется data-driven — по факту непустых agent_deltas в
+  // этом вызове (сам факт, что kafka_consumers.cpp выделил agent_id-записи,
+  // уже означает, что matching эмитировал их с CE_AGENT_POS=1 — T-F18-201).
+  // Ключ (agent_id, asset, venue): LIVE BUG отбрасывания venue (ADR-061
+  // §Контекст) здесь закрыт — venue участвует в ключе с первого дня v2-пути
+  // (legacy node_deltas выше НЕ трогаем — там баг остаётся, см. комментарий).
+  for (const auto& ad : agent_deltas) {
+    if (ad.agent_id.empty()) continue;  // defensive: вызывающая сторона уже фильтрует
+    const AgentPositionKey key{ad.agent_id, ad.asset, ad.venue};
+    auto& st = agent_positions_[key];
+    if (!ad.agent_kind.empty()) st.agent_kind = ad.agent_kind;  // не перетираем известный kind пустым
+    st.position = Decimal::add(st.position, ad.delta);
+    st.last_batch_id = batch_id;
+    st.updated_at_ms = ts_ms;
+
+    if (agent_position_repo_) {
+      // PG — источник истины при wired репозитории; кэш выше уже накопил то
+      // же самое значение (write-through), поэтому расхождения при успехе
+      // нет. batch_id-guard живёт и в PG (ADR-061 §7 UPSERT WHERE), поэтому
+      // повторная доставка того же батча (at-least-once Kafka) там тоже
+      // no-op — здесь мы уже не дойдём повторно из-за pos_delta_applied_
+      // выше, но PG-guard остаётся defense-in-depth для конкурентных реплик.
+      const auto row = agent_position_repo_->ApplyDelta(
+          ad.agent_id, ad.agent_kind, ad.asset, ad.venue, ad.delta, batch_id, ts_ms);
+      // PG — источник истины: если репозиторий вернул отличное значение
+      // (например, процесс не видел более раннего успешного апдейта из-за
+      // рестарта между тактами), кэш подтягивается к PG.
+      st.position = row.position;
+      st.in_flight = row.in_flight;
+      if (!row.agent_kind.empty()) st.agent_kind = row.agent_kind;
+      st.last_batch_id = row.last_batch_id.empty() ? st.last_batch_id : row.last_batch_id;
+      st.updated_at_ms = row.updated_at_ms != 0 ? row.updated_at_ms : st.updated_at_ms;
+    }
+  }
+}
+
+void LedgerUseCases::LoadAgentPositionsFromRepo() {
+  if (!agent_position_repo_) return;
+  const auto rows = agent_position_repo_->GetPositions({}, {}, {});
+  std::lock_guard<std::mutex> lg(mu_);
+  agent_positions_.clear();
+  for (const auto& row : rows) {
+    AgentPositionState st;
+    st.agent_kind = row.agent_kind;
+    st.position = row.position;
+    st.in_flight = row.in_flight;
+    st.last_batch_id = row.last_batch_id;
+    st.updated_at_ms = row.updated_at_ms;
+    agent_positions_[AgentPositionKey{row.agent_id, row.asset, row.venue}] = std::move(st);
+  }
+}
+
+fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
+    const fob::ledger::v1::GetAgentPositionsRequest& req) {
+  fob::ledger::v1::GetAgentPositionsResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+
+  const std::unordered_set<std::string> want_agents(req.agent_ids().begin(), req.agent_ids().end());
+  const std::unordered_set<std::string> want_assets(req.assets().begin(), req.assets().end());
+  const std::unordered_set<std::string> want_venues(req.venues().begin(), req.venues().end());
+
+  std::lock_guard<std::mutex> lg(mu_);
+  for (const auto& [key, st] : agent_positions_) {
+    const auto& [agent_id, asset, venue] = key;
+    if (!want_agents.empty() && !want_agents.count(agent_id)) continue;
+    if (!want_assets.empty() && !want_assets.count(asset)) continue;
+    if (!want_venues.empty() && !want_venues.count(venue)) continue;
+    auto* p = resp.add_positions();
+    p->set_agent_id(agent_id);
+    p->set_agent_kind(st.agent_kind);
+    p->set_asset(asset);
+    p->set_venue(venue);
+    *p->mutable_position() = st.position.to_proto();
+    *p->mutable_in_flight() = st.in_flight.to_proto();
+    p->set_updated_at_ms(st.updated_at_ms);
+    p->set_last_batch_id(st.last_batch_id);
+  }
+  return resp;
 }
 
 // ============================================================================
@@ -801,6 +888,24 @@ fob::ledger::v1::ReserveFundsResponse LedgerUseCases::ReserveFunds(
   fob::ledger::v1::ReserveFundsResponse resp;
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
+
+  // ADR-063 (F-18 v2, T-F18-205): AGENT (переводчик/арбитражёр — виртуальный
+  // контрагент CE) НЕ резервирует и легитимно уходит в минус — это дилерский
+  // инвентарь, а не клиентский счёт. Его учёт ведёт ce_agent_position
+  // (agent_positions_ + PG, T-F18-202/204), а НЕ balances_/reservations_.
+  // Поэтому party_type == AGENT — no-op success ДО любого обращения к
+  // balances_/reservations_: нет проверки available>=want, нет
+  // available-=/reserved+=, нет записи в reservations_ (не идемпотентный
+  // ключ, не отслеживается ReleaseFunds — агенту нечего освобождать).
+  // CLIENT/HOUSE (PARTY_TYPE_UNSPECIFIED/CLIENT/HOUSE) — поведение НЕ меняется.
+  if (req.party_type() == fob::common::v1::PARTY_TYPE_AGENT) {
+    resp.set_success(true);
+    *resp.mutable_reserved_amount() = fob::common::v1::Decimal();  // 0 — ничего не резервировано
+    cex::common::log_json("INFO", "ReserveFunds no-op for AGENT (ADR-063)",
+                          {{"user", req.user_id()},
+                           {"reservation_id", req.reservation_id()}});
+    return resp;
+  }
 
   Decimal want = Decimal::from_proto(req.amount());
   bool mirror_needed = false;

@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -42,6 +43,19 @@ class LedgerUseCases {
     cex::common::Decimal reserved{0, 0};   // reserved for open orders
     cex::common::Decimal available{0, 0};  // free balance (total - reserved)
     std::chrono::system_clock::time_point updated_at;
+  };
+
+  // F-18 v2 (T-F18-201/202, ADR-061 §1/§7): один элемент per-agent дельты
+  // такта (f_j), извлечённый консюмером kafka_consumers.cpp из AssetDelta
+  // {agent_id, agent_kind, asset, venue, delta} при непустом agent_id.
+  // agent_kind — строка ("translator" | "arbitrageur"), может быть пустой
+  // (тогда сохранённый ранее kind в позиции не перетирается).
+  struct AgentDelta {
+    std::string agent_id;
+    std::string agent_kind;
+    std::string asset;
+    std::string venue;
+    cex::common::Decimal delta{0, 0};  // f_j, ЗНАКОВАЯ (ADR-061 A6)
   };
 
   // Hedge PnL record structure
@@ -101,6 +115,15 @@ class LedgerUseCases {
   }
   void SetHedgeEntriesRepo(std::shared_ptr<HedgeLedgerEntriesRepositoryPort> repo) {
     hedge_entries_repo_ = std::move(repo);
+  }
+  // F-18 v2 (T-F18-204/205, ADR-061 §7): PG-репозиторий позиций CE-агентов.
+  // Optional — nullptr оставляет write-through кэш (agent_positions_)
+  // единственным хранилищем (in-memory dev-режим, как и остальные ledger
+  // repos). При установке репозитория кэш СРАЗУ синхронно перечитывается из
+  // PG (LoadAgentPositionsFromRepo) — позиция агента переживает рестарт.
+  void SetAgentPositionRepo(std::shared_ptr<AgentPositionRepositoryPort> repo) {
+    agent_position_repo_ = std::move(repo);
+    LoadAgentPositionsFromRepo();
   }
   // F-12 / IN-009 DoD-6 (PR-F12-3c): sink that accumulates hedge_pnl/fee
   // deltas into PG `hedgeflows` row. Optional — nullptr is valid.
@@ -189,9 +212,25 @@ class LedgerUseCases {
 
   // F-18 §11 (variant A): применить Δpos от вектор-клиринга (из ce.position.delta)
   // к house-остаткам и снять снапшот NOP старая→Δ→новая по batch_id (идемпотентно).
+  //
+  // F-18 v2 (T-F18-202, ADR-061): агентские дельты — ОТДЕЛЬНЫЙ параметр (не
+  // смешивается с node_deltas), т.к. это разные пути: node_deltas двигают
+  // ce_committed_ (per-asset, legacy — БЕЗ изменений, обратная совместимость),
+  // agent_deltas накапливают per-agent знаковую позицию c←c+f (agent_positions_
+  // + PG, если репозиторий wired). Данные о том, какой путь активен, приходят
+  // от вызывающей стороны (kafka_consumers.cpp: agent_id непуст → agent-путь) —
+  // без отдельного флага здесь. Единая идемпотентность по batch_id на ВЕСЬ
+  // вызов (pos_delta_applied_) — оба пути одного батча гвардируются один раз.
   void ApplyPositionDelta(
       const std::string& batch_id, long long ts_ms,
-      const std::vector<std::pair<std::string, cex::common::Decimal>>& deltas);
+      const std::vector<std::pair<std::string, cex::common::Decimal>>& node_deltas,
+      const std::vector<AgentDelta>& agent_deltas = {});
+
+  // F-18 v2 (T-F18-203, ADR-061 §7): текущие знаковые позиции CE-агентов.
+  // Читает write-through кэш (agent_positions_) под mu_ — без похода в PG на
+  // каждый RPC. Фильтры (agent_ids/assets/venues) опциональны; пусто = все.
+  fob::ledger::v1::GetAgentPositionsResponse GetAgentPositions(
+      const fob::ledger::v1::GetAgentPositionsRequest& req);
 
  private:
   // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
@@ -242,6 +281,21 @@ class LedgerUseCases {
   // (in-flight), НЕ в house-факт. house двигают только подтверждения (execution.venue).
   // Стоячая позиция (GetExchangeBalances) = факт; снапшот Clearing = факт + committed (план).
   std::map<std::string, cex::common::Decimal> ce_committed_;
+  // F-18 v2 (T-F18-202, ADR-061 §7): write-through кэш позиций CE-агентов,
+  // ключ (agent_id, asset, venue). Источник истины при wired
+  // agent_position_repo_ — PG; кэш держится синхронным на каждый ApplyDelta
+  // и перечитывается целиком при SetAgentPositionRepo (рестарт-safe чтение).
+  // Без репозитория (dev/in-memory) кэш САМ источник истины, как остальные
+  // ledger-таблицы в этом режиме.
+  struct AgentPositionState {
+    std::string agent_kind;
+    cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
+    cex::common::Decimal in_flight{0, 0};  // committed (Э3+), пока всегда 0
+    std::string last_batch_id;
+    long long updated_at_ms{0};
+  };
+  using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
+  std::map<AgentPositionKey, AgentPositionState> agent_positions_;
   HedgePnlMap hedge_pnl_records_; // venue -> list of hedge records
   std::unordered_map<std::string, cex::common::Decimal> hedge_pnl_summary_; // venue:currency -> total PnL
   std::unordered_map<std::string, fob::execution::v1::ExecutionIntent> execution_intents_; // intent_id -> plan
@@ -263,6 +317,8 @@ class LedgerUseCases {
   std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo_;
   // F-12 / IN-009 DoD-6 (PR-F12-3c) — optional PG sink for hedge_pnl/fee.
   std::shared_ptr<HedgeflowPnlSinkPort> hedgeflow_pnl_sink_;
+  // F-18 v2 (T-F18-204/205) — optional PG repo for `ce_agent_position`.
+  std::shared_ptr<AgentPositionRepositoryPort> agent_position_repo_;
   // F-06 / F6-5 (T-F06-072, ADR-046) — optional positions.update publisher.
   std::shared_ptr<PositionsUpdatePublisherPort> positions_update_publisher_;
 
@@ -294,6 +350,12 @@ class LedgerUseCases {
       const cex::common::Decimal& qty);
 
   bool apply_execution_report_locked(const fob::execution::v1::ExecutionReport& report);
+
+  // F-18 v2 (T-F18-205): читает agent_position_repo_->GetPositions({},{},{})
+  // целиком и перезаписывает agent_positions_ под mu_. No-op без репозитория
+  // (nullptr) — вызывается из SetAgentPositionRepo(), поэтому вызов "пустого"
+  // репозитория безопасен и ничего не делает.
+  void LoadAgentPositionsFromRepo();
 };
 
 }  // namespace cex::ledger::app

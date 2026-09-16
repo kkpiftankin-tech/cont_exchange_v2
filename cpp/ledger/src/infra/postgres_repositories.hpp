@@ -140,4 +140,33 @@ class PostgresPositionAccountTx final : public app::PositionAccountTxPort {
   std::shared_ptr<LedgerPgPool> pool_;
 };
 
+// ---------------------------------------------------------------------------
+// F-18 v2 (T-F18-204, ADR-061 §7) — repository for the `ce_agent_position`
+// table (signed per-agent CE position, party_type=AGENT — ADR-063). ApplyDelta
+// UPSERTs `position += delta` guarded by `last_batch_id` (idempotent on
+// at-least-once Kafka redelivery); GetPositions reads the whole table and
+// lets the caller filter (dataset is small — tens of agent/asset/venue rows).
+// No-op / empty without libpqxx, matching the rest of this file.
+// ---------------------------------------------------------------------------
+class PostgresAgentPositionRepository final : public app::AgentPositionRepositoryPort {
+ public:
+  explicit PostgresAgentPositionRepository(
+      std::shared_ptr<LedgerPgPool> pool);
+
+  app::AgentPositionRow ApplyDelta(const std::string& agent_id,
+                                   const std::string& agent_kind,
+                                   const std::string& asset,
+                                   const std::string& venue,
+                                   const cex::common::Decimal& delta,
+                                   const std::string& batch_id,
+                                   int64_t updated_at_ms) override;
+  std::vector<app::AgentPositionRow> GetPositions(
+      const std::vector<std::string>& agent_ids,
+      const std::vector<std::string>& assets,
+      const std::vector<std::string>& venues) override;
+
+ private:
+  std::shared_ptr<LedgerPgPool> pool_;
+};
+
 }  // namespace cex::ledger::infra

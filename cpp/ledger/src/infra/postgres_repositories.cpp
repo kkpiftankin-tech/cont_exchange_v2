@@ -1,5 +1,6 @@
 #include "infra/postgres_repositories.hpp"
 
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -133,6 +134,27 @@ void insert_entry(pqxx::work& tx,
         values ($1, $2, $3, $4, $5, now())
       )sql",
       batch_id, order_id, user_id, currency, delta.to_string());
+}
+
+// F-18 v2 (T-F18-204, ADR-061 §7): self-healing CREATE TABLE IF NOT EXISTS,
+// matching infra/postgres/init.sql (docs/07-data/ce-agent-position.md).
+// Mirrors the ensure_*_table() pattern used by the rest of this file — cheap
+// no-op after the first call, and keeps the repo usable even if init.sql's
+// one-shot bootstrap missed it (ADR-061 §7 "миграция ручная").
+void ensure_agent_position_table(pqxx::work& tx) {
+  tx.exec(R"sql(
+    create table if not exists ce_agent_position (
+      agent_id      text not null,
+      asset         text not null,
+      venue         text not null,
+      agent_kind    text,
+      position      numeric(38,18) not null default 0,
+      in_flight     numeric(38,18) not null default 0,
+      last_batch_id text,
+      updated_at    timestamptz not null default now(),
+      primary key (agent_id, asset, venue)
+    )
+  )sql");
 }
 
 // Parse a PostgreSQL NUMERIC text value (e.g. "1234.56000") into a Decimal.
@@ -724,6 +746,159 @@ void PostgresPositionAccountTx::ApplyFillTx(
         "PostgresPositionAccountTx is disabled: build without libpqxx (CEX_LEDGER_HAS_LIBPQXX=0)");
   }
 #endif
+}
+
+// ============================================================================
+// F-18 v2 (T-F18-204, ADR-061 §7) — PostgresAgentPositionRepository.
+// ============================================================================
+
+PostgresAgentPositionRepository::PostgresAgentPositionRepository(
+    std::shared_ptr<LedgerPgPool> pool)
+    : pool_(std::move(pool)) {
+#ifndef CEX_LEDGER_HAS_LIBPQXX
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    cex::common::log_json(
+        "WARN",
+        "PostgresAgentPositionRepository is disabled: build without libpqxx (CEX_LEDGER_HAS_LIBPQXX=0)");
+  }
+#endif
+}
+
+app::AgentPositionRow PostgresAgentPositionRepository::ApplyDelta(
+    const std::string& agent_id,
+    const std::string& agent_kind,
+    const std::string& asset,
+    const std::string& venue,
+    const cex::common::Decimal& delta,
+    const std::string& batch_id,
+    int64_t updated_at_ms) {
+  app::AgentPositionRow out;
+  out.agent_id = agent_id;
+  out.agent_kind = agent_kind;
+  out.asset = asset;
+  out.venue = venue;
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) {
+    // Persistence disabled — caller's in-memory write-through cache stays
+    // authoritative (LedgerUseCases::agent_positions_). Echo the delta back
+    // as "position" so the caller's fallback bookkeeping stays consistent
+    // with the no-PG code path used elsewhere in this file (e.g. ReserveTx).
+    out.position = delta;
+    out.last_batch_id = batch_id;
+    out.updated_at_ms = updated_at_ms;
+    return out;
+  }
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    ensure_agent_position_table(tx);
+
+    // ADR-061 §7: c ← c + delta (f_j), guarded by batch_id (at-least-once
+    // Kafka redelivery of the same batch must NOT double-apply — CLAUDE.md
+    // §17 "применять fill дважды" запрещено). agent_kind is NULLIF-ed to ''
+    // -> NULL so an unknown kind never trips a future CHECK and never
+    // overwrites an already-known kind (COALESCE keeps the existing value).
+    auto rows = tx.exec_params(
+        R"sql(
+          INSERT INTO ce_agent_position (agent_id, asset, venue, agent_kind, position, last_batch_id, updated_at)
+          VALUES ($1, $2, $3, NULLIF($4, ''), ($5)::numeric, $6, to_timestamp($7 / 1000.0))
+          ON CONFLICT (agent_id, asset, venue) DO UPDATE SET
+            position      = ce_agent_position.position + excluded.position,
+            agent_kind    = COALESCE(excluded.agent_kind, ce_agent_position.agent_kind),
+            last_batch_id = excluded.last_batch_id,
+            updated_at    = excluded.updated_at
+          WHERE ce_agent_position.last_batch_id IS DISTINCT FROM excluded.last_batch_id
+          RETURNING agent_id, asset, venue, agent_kind, position, in_flight, last_batch_id,
+                    (extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms
+        )sql",
+        agent_id, asset, venue, agent_kind, delta.to_string(), batch_id, updated_at_ms);
+
+    if (rows.empty()) {
+      // Guard rejected the write (same batch_id already applied) — read back
+      // the current row so the caller (write-through cache) stays in sync
+      // with PG rather than silently re-applying the delta in memory.
+      rows = tx.exec_params(
+          R"sql(
+            SELECT agent_id, asset, venue, agent_kind, position, in_flight, last_batch_id,
+                   (extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms
+              FROM ce_agent_position
+             WHERE agent_id = $1 AND asset = $2 AND venue = $3
+          )sql",
+          agent_id, asset, venue);
+    }
+    tx.commit();
+
+    if (!rows.empty()) {
+      const auto& row = rows[0];
+      out.agent_kind = row["agent_kind"].is_null() ? std::string() : row["agent_kind"].as<std::string>();
+      out.position = parse_pg_numeric(row["position"].as<std::string>());
+      out.in_flight = parse_pg_numeric(row["in_flight"].as<std::string>());
+      out.last_batch_id = row["last_batch_id"].is_null() ? std::string() : row["last_batch_id"].as<std::string>();
+      out.updated_at_ms = row["updated_at_ms"].as<int64_t>();
+    }
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyDelta failed",
+                          {{"agent_id", agent_id},
+                           {"asset", asset},
+                           {"venue", venue},
+                           {"batch_id", batch_id},
+                           {"error", e.what()}});
+  }
+  return out;
+#else
+  (void)delta; (void)batch_id; (void)updated_at_ms;
+  return out;
+#endif
+}
+
+std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions(
+    const std::vector<std::string>& agent_ids,
+    const std::vector<std::string>& assets,
+    const std::vector<std::string>& venues) {
+  std::vector<app::AgentPositionRow> out;
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return out;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    ensure_agent_position_table(tx);
+    // Whole-table read + client-side filter: the CE-agent set is tiny (tens
+    // of agent/asset/venue rows, not per-user data), so this avoids brittle
+    // pqxx array-parameter binding for what is effectively an optional
+    // WHERE IN (...) filter on three independent columns.
+    auto rows = tx.exec(
+        "SELECT agent_id, asset, venue, agent_kind, position, in_flight, last_batch_id, "
+        "(extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms FROM ce_agent_position");
+    tx.commit();
+
+    const std::unordered_set<std::string> want_agents(agent_ids.begin(), agent_ids.end());
+    const std::unordered_set<std::string> want_assets(assets.begin(), assets.end());
+    const std::unordered_set<std::string> want_venues(venues.begin(), venues.end());
+    for (const auto& row : rows) {
+      app::AgentPositionRow r;
+      r.agent_id = row["agent_id"].as<std::string>();
+      r.asset = row["asset"].as<std::string>();
+      r.venue = row["venue"].as<std::string>();
+      if (!want_agents.empty() && !want_agents.count(r.agent_id)) continue;
+      if (!want_assets.empty() && !want_assets.count(r.asset)) continue;
+      if (!want_venues.empty() && !want_venues.count(r.venue)) continue;
+      r.agent_kind = row["agent_kind"].is_null() ? std::string() : row["agent_kind"].as<std::string>();
+      r.position = parse_pg_numeric(row["position"].as<std::string>());
+      r.in_flight = parse_pg_numeric(row["in_flight"].as<std::string>());
+      r.last_batch_id = row["last_batch_id"].is_null() ? std::string() : row["last_batch_id"].as<std::string>();
+      r.updated_at_ms = row["updated_at_ms"].as<int64_t>();
+      out.push_back(std::move(r));
+    }
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::GetPositions failed",
+                          {{"error", e.what()}});
+  }
+#else
+  (void)agent_ids; (void)assets; (void)venues;
+#endif
+  return out;
 }
 
 }  // namespace cex::ledger::infra

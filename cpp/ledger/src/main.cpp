@@ -57,6 +57,8 @@ int main() {
   std::shared_ptr<cex::ledger::app::PositionAccountTxPort> position_account_tx;
   // F-06 P0-A (T-F06-070, ADR-044) — mirror reserve/release into PG `accounts`.
   std::shared_ptr<cex::ledger::app::AccountReserveTxPort> account_reserve_tx;
+  // F-18 v2 (T-F18-204/205, ADR-061 §7) — persist ce_agent_position.
+  std::shared_ptr<cex::ledger::app::AgentPositionRepositoryPort> agent_position_repo;
 
   if (!pg_dsn.empty()) {
     // ADR-045: единый пул PG-соединений на сервис (вместо нового
@@ -74,12 +76,14 @@ int main() {
     account_repo = std::make_shared<cex::ledger::infra::PostgresAccountRepository>(pg_pool);
     position_account_tx = std::make_shared<cex::ledger::infra::PostgresPositionAccountTx>(pg_pool);
     account_reserve_tx = std::make_shared<cex::ledger::infra::PostgresAccountReserveTx>(pg_pool);
+    agent_position_repo = std::make_shared<cex::ledger::infra::PostgresAgentPositionRepository>(pg_pool);
 
     cex::common::log_json("INFO", "PostgreSQL repositories initialized",
                           {{"dsn", pg_dsn},
                            {"pool_size", std::to_string(pool_size)},
                            {"hedgeflow_pnl_sink", "ready"},
-                           {"f06_positions_accounts", "ready"}});
+                           {"f06_positions_accounts", "ready"},
+                           {"ce_agent_position", "ready"}});
   } else {
     cex::common::log_json("WARN", "PostgreSQL DSN not set, persistence disabled");
   }
@@ -93,6 +97,9 @@ int main() {
   uc.SetAccountRepo(account_repo);
   uc.SetPositionAccountTx(position_account_tx);
   uc.SetAccountReserveTx(account_reserve_tx);
+  // F-18 v2 (T-F18-204/205): wiring синхронно перечитывает ce_agent_position
+  // в write-through кэш при старте — позиция агента переживает рестарт.
+  uc.SetAgentPositionRepo(agent_position_repo);
 
   // F-18 (ADR-054 §10): seed house-аккаунта ('__ce_house__') капиталом биржи из
   // env при старте. Валюты — CE_TREASURY_ASSETS (+ CE_NUMERAIRE); сумма —

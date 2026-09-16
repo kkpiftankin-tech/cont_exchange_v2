@@ -15,6 +15,22 @@
 
 namespace cex::ledger::infra {
 
+namespace {
+
+// F-18 v2 (T-F18-201/202, ADR-061 §1): AssetDelta.agent_kind → строка,
+// как хранится в agent_positions_/PG ce_agent_position (docs/07-data/
+// ce-agent-position.md). AGENT_KIND_UNSPECIFIED → "" (kind ещё неизвестен —
+// не перетирает ранее известный kind в LedgerUseCases::ApplyPositionDelta).
+std::string AgentKindToString(fob::treasury::v1::AgentKind kind) {
+  switch (kind) {
+    case fob::treasury::v1::AGENT_KIND_TRANSLATOR: return "translator";
+    case fob::treasury::v1::AGENT_KIND_ARBITRAGEUR: return "arbitrageur";
+    default: return "";
+  }
+}
+
+}  // namespace
+
 KafkaConsumers::KafkaConsumers(app::LedgerUseCases* uc,
                                const std::string& brokers)
     : uc_(uc), brokers_(brokers) {}
@@ -57,10 +73,27 @@ void KafkaConsumers::loop_ce_position_delta() {
         cex::common::log_json("ERROR", "Failed to parse CePositionDeltaBatch");
         return;
       }
-      std::vector<std::pair<std::string, cex::common::Decimal>> deltas;
-      for (const auto& ad : dpb.deltas())
-        deltas.emplace_back(ad.asset(), cex::common::Decimal::from_proto(ad.delta()));
-      uc_->ApplyPositionDelta(dpb.batch_id(), dpb.event_time_ms(), deltas);
+      // T-F18-201/202 (ADR-061 §1/§7, CE_AGENT_POS): маршрутизация data-driven
+      // по каждой AssetDelta-записи, а не отдельным env-флагом здесь — сам
+      // факт непустого agent_id уже означает, что matching эмитировал эту
+      // запись с CE_AGENT_POS=1. agent_id пуст → LEGACY per-asset путь
+      // (node_deltas, ce_committed_) БЕЗ ИЗМЕНЕНИЙ — обратная совместимость.
+      std::vector<std::pair<std::string, cex::common::Decimal>> node_deltas;
+      std::vector<cex::ledger::app::LedgerUseCases::AgentDelta> agent_deltas;
+      for (const auto& ad : dpb.deltas()) {
+        if (!ad.agent_id().empty()) {
+          cex::ledger::app::LedgerUseCases::AgentDelta d;
+          d.agent_id = ad.agent_id();
+          d.agent_kind = AgentKindToString(ad.agent_kind());
+          d.asset = ad.asset();
+          d.venue = ad.venue();
+          d.delta = cex::common::Decimal::from_proto(ad.delta());
+          agent_deltas.push_back(std::move(d));
+        } else {
+          node_deltas.emplace_back(ad.asset(), cex::common::Decimal::from_proto(ad.delta()));
+        }
+      }
+      uc_->ApplyPositionDelta(dpb.batch_id(), dpb.event_time_ms(), node_deltas, agent_deltas);
     });
     if (!ok) break;
   }

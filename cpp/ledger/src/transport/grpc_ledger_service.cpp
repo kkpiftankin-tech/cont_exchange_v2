@@ -45,6 +45,14 @@ grpc::Status GrpcLedgerService::GetNodeBalances(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::GetAgentPositions(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetAgentPositionsRequest* request,
+    fob::ledger::v1::GetAgentPositionsResponse* response) {
+  *response = uc_->GetAgentPositions(*request);
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcLedgerService::GetExchangeNopHistory(
     grpc::ServerContext*,
     const fob::ledger::v1::GetExchangeNopHistoryRequest* request,

@@ -967,3 +967,36 @@ ALTER TABLE f05a_clearing_config
 INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- ce_agent_position: F-18 v2 (T-F18-204, ADR-061 §7, ADR-063) — знаковая
+-- накопленная позиция CE-агента (виртуального контрагента: переводчик |
+-- арбитражёр) между тактами клиринга. Owner: ledger (консюмер
+-- ce.position.delta, docs/06-api/messaging/ce-position-delta.md).
+--
+-- Несовместима с accounts (party_type=CLIENT/HOUSE, CHECK free_balance>=0,
+-- резерв/освобождение) — намеренно ОТДЕЛЬНАЯ таблица: position ЗНАКОВАЯ, БЕЗ
+-- CHECK неотрицательности (A6: базис ядра W·c=0 требует противоположную
+-- компоненту), концепта резерва нет (party_type=AGENT, ADR-063). Прецедент
+-- трёхсоставного PK — sim_positions (ADR-016).
+--
+-- position (c_j) меняется по факту клиринга такта (c ← c + f) — накопление
+-- идемпотентно по last_batch_id (UPSERT-guard в PostgresAgentPositionRepository
+-- / ledger_uc.cpp ApplyPositionDelta, CLAUDE.md §17 "применять fill дважды"
+-- запрещено). in_flight зарезервировано для Э3 (полоса ±q, T-F18-304) —
+-- до включения CE_AGENT_BAND всегда 0.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_agent_position (
+    agent_id      TEXT NOT NULL,                     -- 'Q_BIN' | 'T_BTC' ... (= имя ребра CeEdge.name)
+    asset         TEXT NOT NULL,                      -- 'BTC' | 'USD' ...
+    venue         TEXT NOT NULL,                      -- площадка узла; route-level (арбитражёр) — см. data-doc Open Question
+    agent_kind    TEXT CHECK (agent_kind IN ('translator', 'arbitrageur')),
+    position      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- c_j, ЗНАКОВАЯ (см. коммент выше)
+    in_flight     NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- committed (Э3+), ЗНАКОВАЯ
+    last_batch_id TEXT,                                -- идемпотентность per batch_id
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_id, asset, venue)
+);
+-- Запросы «все переводчики/арбитражёры вне полосы» + staleness-мониторинг.
+CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
+    ON ce_agent_position (agent_kind, updated_at DESC);

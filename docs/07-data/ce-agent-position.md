@@ -1,13 +1,13 @@
 ---
 id: DOC-DATA-CE-AGENT-POSITION
 phase: 07-data
-status: schema-pending-impl
+status: implemented (ce_agent_position; ce_transfer — Э5, planned)
 level: sea
 owner: core-team
 source:
   - incoming-docs/2026-09-15-CE_algorithm_v2.md (A2, A6, A7, A8)
 related:
-  - docs/03-architecture/adr/ADR-061-ce-v2-agent-position-model.md (TODO — supersedes ADR-057/058)
+  - docs/03-architecture/adr/ADR-061-ce-v2-agent-position-band-hedge.md (supersedes ADR-057/058)
   - docs/07-data/ce-agent-nodes.md (v1 форма — Conflict Notes ниже)
   - docs/06-api/grpc/ledger-agent-positions.md
   - docs/06-api/messaging/ce-position-delta.md
@@ -17,7 +17,7 @@ related:
 
 # Data: CE Agent Position (позиция виртуального контрагента, v2)
 
-> **Status:** ⧗ DDL — при реализации (F-18 v2, стадия кода T-F18-007..011). Этот файл — МАРКДАУН-описание схемы; собственно DDL (`init.sql`) и proto не редактируются на этом шаге (docs-first, CLAUDE.md §11.2). Деньги/объёмы — `NUMERIC(38,18)` (PG), mirror `fob.common.v1.Decimal` (CLAUDE.md §9). Диагностика такта (`σ, α, π, невязка`) — `double`; персист пересекает границу `double → Decimal` ровно в момент записи в эту таблицу (A6/A7). Таблица за флагом CE-агентов v2; при выключении не читается (обратимость ADR-061).
+> **Status:** ✅ реализовано (Э2-шаг-2, 2026-09-16, T-F18-202/203/204 + T-F18-205 party_type=AGENT). `ce_agent_position` — в `infra/postgres/init.sql` (ровно эта схема, без CHECK неотрицательности). `ledger` накапливает `c ← c + f` per `(agent_id, asset, venue)` в write-through кэше (`LedgerUseCases::agent_positions_`, `ApplyPositionDelta`) + опционально в PG (`PostgresAgentPositionRepository`, `ledger_uc.hpp/.cpp`, `infra/postgres_repositories.{hpp,cpp}`), с идемпотентностью по `last_batch_id`. Читается через `LedgerService/GetAgentPositions` ([ledger-agent-positions.md](../06-api/grpc/ledger-agent-positions.md)). `party_type = AGENT` в `ReserveFunds` — no-op (ADR-063, [ledger-reserve-funds.md](../06-api/grpc/ledger-reserve-funds.md)). Активация — data-driven по непустому `agent_id` в `AssetDelta` (не отдельным env-флагом на стороне ledger; флаг `CE_AGENT_POS` включается на стороне matching, T-F18-201). `in_flight` (Э3, полоса `±q`) и `ce_transfer` (Э5) — ещё не реализованы, поле/таблица зарезервированы. Деньги/объёмы — `NUMERIC(38,18)` (PG), mirror `fob.common.v1.Decimal` (CLAUDE.md §9).
 
 ## Назначение
 

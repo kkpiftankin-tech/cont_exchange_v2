@@ -16,7 +16,7 @@ decomposedInto:
   - UC-F18-04            # [v2] хедж по полосе ±q: такт клиринга агентов + эмиссия сверх полосы
 
 parentRequirements:
-  - ADR-061             # [planned] смена модели позиции CE: с нуля, знаковая, без target, house-невязка, полоса ±q, party_type AGENT (supersede ADR-057)
+  - ADR-061             # [accepted 2026-09-15] смена модели позиции CE: с нуля, знаковая, без target, house-невязка, полоса ±q, party_type AGENT (supersede ADR-057)
   - ADR-055             # revised — убрать STOCK-агентов (плечи запаса)
   - ADR-056             # revised — убрать book-узел/склад; добавить house-столбец
   - ADR-058             # revised — committed = позиция; полоса ±q вместо cooldown/target
@@ -61,14 +61,14 @@ primaryComponents:
 # Контракты — planned под ADR-061; реальное изменение .proto вне scope этого doc-шага.
 protoContracts:
   - contracts/proto/fob/agent/v1/agent.proto          # [planned] agent_id, agent_kind {TRANSLATOR, ARBITRAGEUR}; убрать STOCK
-  - contracts/proto/fob/ledger/v1/ledger.proto        # [planned] RPC GetAgentPositions; ExchangeNOP без target
+  - contracts/proto/fob/ledger/v1/ledger.proto        # RPC GetAgentPositions [implemented T-F18-203]; ExchangeNOP без target [planned]
   - contracts/proto/fob/risk/v1/risk.proto            # [planned] ExchangeNOP без target; Z_a=владение(t)−владение(0)
   - contracts/proto/fob/execution/v1/execution.proto  # ExecutionIntent/Report (reuse F-12 router)
   - contracts/proto/fob/common/v1/common.proto        # Decimal, EventMeta, Instrument, Side
 
 storageDependencies:
   postgresql:
-    - ce_agent_position   # [planned] (agent_id, asset, venue) → position(signed), updated_at, last_batch_id
+    - ce_agent_position   # [implemented T-F18-204] (agent_id, asset, venue) → position(signed), in_flight, updated_at, last_batch_id
     - accounts            # house-аккаунт '__ce_house__' (party_type HOUSE); reuse F-06
     - f05a_clearing_config # [planned +cols] ρ_Q, ρ_T, q_translator, q_arbitrageur, transfer_eta
   # НЕТ понятия target/net-позиции v1; позиция агента знаковая, ключ (agent_id, asset@venue)
@@ -97,7 +97,7 @@ kafkaTopics:
 
 grpcServices:
   exposes:
-    - fob.ledger.v1.LedgerService.GetAgentPositions   # [planned] (agent_id, asset, venue) → signed position
+    - fob.ledger.v1.LedgerService.GetAgentPositions   # (agent_id, asset, venue) → signed position; implemented T-F18-203
     - fob.risk.v1.RiskService.GetRiskSnapshot          # позиции агентов + band state + Z_a (для UI)
   calls:
     - fob.risk.v1.RiskService.PreHedgeCheck            # pre-hedge gate перед эмиссией сверх полосы (reuse F-12)
@@ -160,21 +160,31 @@ knownIssues:
       Пути клиринга не сведены: ce_agent_clearing (наш), vector_qp_solver/OSQP (F-05A),
       ContinuousClearingSolver (Engine A). Нужен отдельный ADR (кандидат ADR-062).
   - id: agent-position-persist
-    severity: feature-gap
+    severity: resolved
     description: >
-      Позиция агента должна переживать рестарт (PG ce_agent_position, не in-memory):
-      устраняет известный разрыв v1, где ce_committed_ терялся при рестарте.
-      Декремент c_j — при эмиссии (A7), не при исполнении (A8).
-    location: cpp/ledger/src/app/ledger_uc.cpp (planned AgentPositionRepositoryPort)
+      RESOLVED (Э2-шаг-2, 2026-09-16, T-F18-202/203/204/205). Позиция агента
+      теперь накапливается c←c+f per (agent_id, asset, venue) в write-through
+      кэше LedgerUseCases::agent_positions_ и персистится в PG ce_agent_position
+      (PostgresAgentPositionRepository), переживая рестарт — устраняет разрыв
+      v1, где ce_committed_ терялся при рестарте (проверено интеграционным
+      тестом ledger_ce_agent_position_pg_test: новый pool+repo после
+      "рестарта" читает то же накопленное значение из PG). party_type=AGENT в
+      ReserveFunds — no-op (ADR-063), не резервирует, позиция знаковая без
+      клампа/CHECK>=0 (проверено на отрицательной позиции). ОСТАЁТСЯ
+      открытым для Э3/Э4 (T-F18-301..304, T-F18-401+): декремент c_j по факту
+      исполнения (A8) и рост in_flight при эмиссии сверх полосы (A7) — сама
+      эмиссия ещё не реализована, in_flight persist-колонка всегда 0.
+    location: cpp/ledger/src/app/ledger_uc.{hpp,cpp}, cpp/ledger/src/infra/postgres_repositories.{hpp,cpp}
 
 tests:
   unit:
     - cpp/matching/tests/domain/ce_agent_clearing_closed_form_vs_osqp_test.cpp  # AC-F18v2-05
     - cpp/matching/tests/domain/ce_band_emission_test.cpp                        # AC-F18v2-08/09/10
-    - cpp/ledger/tests/app/ce_agent_position_apply_test.cpp                      # AC-F18v2-07/12/16
+    - cpp/ledger/tests/ce_agent_position_test.cpp                                # T-F18-202/203/205 (Э2-шаг-2): AC-F18v2-07 (c<-c+f, знаковая/отрицательная позиция), AC-F18v2-16 (party_type=AGENT — ReserveFunds no-op, нет резерва/неотрицательности)
     - cpp/risk/tests/app/ownership_invariant_test.cpp                            # AC-F18v2-13/14
   integration:
     - Testing/f18v2_ce_tact_e2e.sh                 # A0..A8, без клиентского потока ⇒ Z_a≡0
     - Testing/f18v2_band_vs_no_band_30_ticks.sh    # AC-F18v2-18, эффект полосы −63%
+    - cpp/ledger/tests/ce_agent_position_pg_repository_test.cpp  # T-F18-204/205: upsert+рестарт против реального PG (TEST_PG_DSN, гейт feature-gap agent-position-persist)
   contract:
     - cpp/matching/tests/transport/agent_delta_mapper_test.cpp
