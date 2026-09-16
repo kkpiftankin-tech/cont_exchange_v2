@@ -715,10 +715,23 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   // позиции биржи (см. bug 2026-09-14: coinbase выброс −2.5‰ гнал BTC/SOL). ADR-057.
   const char* mdr = std::getenv("CE_MIN_DEPTH_RATIO");
   const double min_ratio = mdr ? std::atof(mdr) : 0.05;
+  // Форс-кип venue (env CE_FORCE_KEEP_VENUES=comma) — оставить в клиринге даже при
+  // тонкой глубине. Для DEX (uniswap_v3): честно расходящаяся AMM-цена — легитимный
+  // источник CEX↔DEX арбитража, НЕ выброс (в отличие от тонкого coinbase, который
+  // фильтр по-прежнему выкидывает). Решение владельца 2026-09-16.
+  std::set<std::string> force_keep;
+  if (const char* fk = std::getenv("CE_FORCE_KEEP_VENUES")) {
+    std::string cur;
+    for (const char* p = fk; ; ++p) {
+      if (*p == ',' || *p == '\0') { if (!cur.empty()) force_keep.insert(cur); cur.clear(); if (*p == '\0') break; }
+      else cur += *p;
+    }
+  }
   std::set<std::string> kept_venues;
   int dropped = 0;
   for (const auto& ag : agents) {
-    if (ag.depth < min_ratio * max_depth[ag.base]) { ++dropped; continue; }  // тонкий → искл.
+    // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража)
+    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[ag.base]) { ++dropped; continue; }
     auto* q = out.add_quotes();
     q->set_asset(ag.base);
     q->set_venue(ag.venue);
