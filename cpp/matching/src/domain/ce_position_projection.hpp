@@ -84,6 +84,59 @@ struct CeOrders {
   std::vector<CeTransfer> transfers;       // TRANSFER-ноги
 };
 
+// ---------------------------------------------------------------------------
+// T-F18-201 (ADR-061 §1, ADR-063, флаг CE_AGENT_POS): позиция АГЕНТА (ребра
+// графа), а не узла. Направление агента = ЗНАК его потока f_j — переводчик
+// (kQuote, "T_*") торгует активом за деньги на площадке, арбитражёр (kTransfer,
+// "A_*") перевозит актив между площадками. Δc_j = f_j (A6: c←c+f) — СЫРОЙ поток
+// клиринга (тыс. USDT), БЕЗ конвертации в количество (в отличие от
+// ProjectPositionQuantity выше — там money-path по узлам для house-holdings).
+// domain не знает о protobuf (CLAUDE.md §10.2): CeAgentKind — доменный enum,
+// app-слой (matching_loop) мапит его в fob::treasury::v1::AgentKind.
+// ---------------------------------------------------------------------------
+enum class CeAgentKind { kUnspecified = 0, kTranslator = 1, kArbitrageur = 2 };
+
+struct CeAgentDelta {
+  std::string agent_id;                          // = CeEdge.name ("T_BTC_B" | "A_BTC_BO" | ...)
+  CeAgentKind agent_kind{CeAgentKind::kUnspecified};
+  std::string asset;
+  std::string venue;
+  double delta{0.0};   // Δc_j = f_j этого такта, ЗНАКОВАЯ — знак = направление агента
+};
+
+// По одной строке на РЕБРО (агента). kStock не эмитится (deprecated в v2,
+// ADR-061 §1 — плечо запаса и узел-склад убраны; AssembleCeGraphV2 их не строит,
+// но v1-граф ещё может их подать, если функцию вызвать на v1-входе).
+//
+// Правило venue: QUOTE — узел-источник ребра (node_meta[e.u].venue, площадка
+// переводчика); TRANSFER — канонический dst по индексу ребра (node_meta[e.v]
+// .venue — TRANSFER всегда строится i<j, см. AssembleCeGraph{,V2}), не
+// физический dst текущего такта (тот зависит от знака f — см. ProjectOrders).
+// asset — node_meta[e.u].asset (для TRANSFER совпадает с node_meta[e.v].asset,
+// т.к. оба конца — один актив на разных площадках).
+inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
+                                                     const CeClearResult& r,
+                                                     double eps = 1e-12) {
+  std::vector<CeAgentDelta> out;
+  if (static_cast<int>(in.node_meta.size()) != in.num_nodes) return out;  // нет метаданных
+  if (r.f.size() != in.edges.size()) return out;
+  for (std::size_t i = 0; i < in.edges.size(); ++i) {
+    const CeEdge& e = in.edges[i];
+    if (e.leg == CeLeg::kStock) continue;      // deprecated в v2 (ADR-061 §1)
+    const double f = r.f[i];
+    if (std::fabs(f) < eps) continue;          // мёртвая зона — потока нет
+    CeAgentDelta d;
+    d.agent_id = e.name;
+    d.agent_kind = (e.leg == CeLeg::kQuote) ? CeAgentKind::kTranslator
+                                             : CeAgentKind::kArbitrageur;
+    d.asset = in.node_meta[e.u].asset;
+    d.venue = (e.leg == CeLeg::kQuote) ? in.node_meta[e.u].venue : in.node_meta[e.v].venue;
+    d.delta = f;
+    out.push_back(d);
+  }
+  return out;
+}
+
 inline CeOrders ProjectOrders(const CeClearInput& in, const CeClearResult& r,
                               const std::map<std::string, double>& ref_price,
                               double eps = 1e-12) {

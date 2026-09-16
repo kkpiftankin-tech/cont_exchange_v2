@@ -4,6 +4,8 @@
 
 **Planned-contract (эволюция payload)** — proto-правка `AssetDelta → AgentDelta` относится к стадии кода F-18 v2 (T-F18-007..011; ADR-061). Топик уже создаётся в `infra/kafka/create_topics.sh`; в таблице `docs/06-api/messaging/topics.md` он на момент написания **не задокументирован** — добавить строку заодно при реализации.
 
+**Реализовано инкрементально (2026-09-15, T-F18-007/201, за флагом `CE_AGENT_POS`, default OFF).** Отгружен **аддитивный** первый шаг вместо разового breaking-перехода: в существующий `AssetDelta` добавлены поля `agent_id = 6` и `agent_kind = 7` (enum `AgentKind {UNSPECIFIED, TRANSLATOR, ARBITRAGEUR}` в `treasury.proto`), поля 1–5 не тронуты. При `CE_AGENT_POS=1` matching эмитит по строке на агента (ребро графа), а поле `delta` несёт знаковый сырой поток такта `Δc_j = f_j` (направление агента), не количество. Раздел «Эволюция payload» ниже описывает конечную целевую форму (отдельное сообщение `CeAgentPositionDeltaBatch`/`AgentDelta`) — к ней переходим позднее; текущая отгрузка её подмножество, обратно-совместимое по wire. Флаг не включать в общих средах до ledger-накопления per-agent (T-F18-202) и `GetAgentPositions` (T-F18-203) — иначе consumer примет `f_j` за количество.
+
 ## Purpose
 
 Поток дельт позиции CE между тактами клиринга: `matching` вычислил такт → публикует изменение позиции, `ledger` применяет его к источнику истины. В новой постановке (v2, [`incoming-docs/2026-09-15-CE_algorithm_v2.md`](../../../incoming-docs/2026-09-15-CE_algorithm_v2.md), A6) дельта — это `Δc_j = f_j` **на агента** (`c ← c + f`), а не проекция на holdings биржи.

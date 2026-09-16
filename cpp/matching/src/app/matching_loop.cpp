@@ -932,6 +932,12 @@ void MatchingLoop::on_ce_clearing_input(
   // CE_V2_GRAPH (default OFF): выбор сборщика графа. При OFF ветка v1 ниже —
   // идентичный прежнему коду путь (AssembleCeGraph), регрессия не допускается.
   const bool ce_v2 = cex::common::Env::get_bool("CE_V2_GRAPH", false);
+  // CE_AGENT_POS (T-F18-201, ADR-061 §1/ADR-063, default OFF): при OFF —
+  // эмиссия ce.position.delta байт-в-байт как раньше (per-node, ProjectPositionQuantity).
+  // При ON — per-agent строки (ProjectAgentDeltas): agent_id/agent_kind + знаковый
+  // "сырой" поток такта Δc_j=f_j вместо количества. Ledger-накопление per-agent —
+  // следующий шаг (T-F18-202); этот флаг только меняет то, что ЭМИТТИРУЕТ matching.
+  const bool ce_agent_pos = cex::common::Env::get_bool("CE_AGENT_POS", false);
 
   domain::CeClearInput graph;
   bool house_pinned = false;  // v2: узел house реально присутствует и зафиксирован в 0
@@ -979,22 +985,42 @@ void MatchingLoop::on_ce_clearing_input(
   }
 
   const domain::CeClearResult res = domain::ClearCe(graph);
-  const std::vector<domain::CeAssetVenueDelta> deltas =
-      domain::ProjectPositionQuantity(graph, res, ref_price);
 
   fob::treasury::v1::CePositionDeltaBatch batch;
   batch.set_batch_id(input.batch_id());
   batch.set_event_time_ms(input.event_time_ms());
   int emitted = 0;
-  for (const auto& d : deltas) {
-    if (std::fabs(d.delta_qty) < 1e-12) continue;
-    auto* ad = batch.add_deltas();
-    ad->set_asset(d.asset);
-    ad->set_venue(d.venue);
-    *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
-    *ad->mutable_price_used() = to_dec(d.price_used);
-    *ad->mutable_delta_value() = to_dec(d.delta_value);
-    ++emitted;
+  if (ce_agent_pos) {
+    // T-F18-201: per-agent строки вместо per-node. delta = Δc_j = f_j такта
+    // (ЗНАКОВАЯ — знак = направление агента); agent_id/agent_kind несут
+    // идентичность агента (переводчик/арбитражёр). price_used/delta_value
+    // (поля 4/5) для этого пути не считаются — они per-node диагностика v1.
+    const std::vector<domain::CeAgentDelta> agent_deltas =
+        domain::ProjectAgentDeltas(graph, res);
+    for (const auto& d : agent_deltas) {
+      auto* ad = batch.add_deltas();
+      ad->set_agent_id(d.agent_id);
+      ad->set_agent_kind(d.agent_kind == domain::CeAgentKind::kTranslator
+                              ? fob::treasury::v1::AGENT_KIND_TRANSLATOR
+                              : fob::treasury::v1::AGENT_KIND_ARBITRAGEUR);
+      ad->set_asset(d.asset);
+      ad->set_venue(d.venue);
+      *ad->mutable_delta() = to_dec(d.delta);
+      ++emitted;
+    }
+  } else {
+    const std::vector<domain::CeAssetVenueDelta> deltas =
+        domain::ProjectPositionQuantity(graph, res, ref_price);
+    for (const auto& d : deltas) {
+      if (std::fabs(d.delta_qty) < 1e-12) continue;
+      auto* ad = batch.add_deltas();
+      ad->set_asset(d.asset);
+      ad->set_venue(d.venue);
+      *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
+      *ad->mutable_price_used() = to_dec(d.price_used);
+      *ad->mutable_delta_value() = to_dec(d.delta_value);
+      ++emitted;
+    }
   }
   std::map<std::string, std::string> ce_log_fields{
       {"batch_id", input.batch_id()},
@@ -1002,7 +1028,8 @@ void MatchingLoop::on_ce_clearing_input(
       {"deltas", std::to_string(emitted)},
       {"converged", res.converged ? "1" : "0"},
       {"imbalance", std::to_string(res.max_imbalance)},
-      {"ce_v2_graph", ce_v2 ? "1" : "0"}};
+      {"ce_v2_graph", ce_v2 ? "1" : "0"},
+      {"ce_agent_pos", ce_agent_pos ? "1" : "0"}};
   // Э1 (T-F18-103): house-потенциал уже есть в CeClearResult.x (последний узел
   // при v2, пин π=0) — наружу пока прокидываем через диагностику лога; полноценная
   // эмиссия наружу (для признания прибыли) — Э4 (T-F18-402), отдельная таска.

@@ -66,6 +66,19 @@ message CePositionDelta {
 }
 
 // ---------------------------------------------------------------------------
+// T-F18-007 (ADR-061 §1, ADR-063): тип агента-ребра графа CE v2 — переводчик
+// (плечо QUOTE) котирует актив за деньги на одной площадке; арбитражёр (плечо
+// TRANSFER) перевозит актив между площадками. Направление агента = ЗНАК его
+// потока/позиции (AssetDelta.delta), не отдельное поле. Аддитивно к v1
+// AssetDelta (§ниже); см. docs/06-api/messaging/ce-position-delta.md.
+// ---------------------------------------------------------------------------
+enum AgentKind {
+  AGENT_KIND_UNSPECIFIED = 0;
+  AGENT_KIND_TRANSLATOR = 1;    // переводчик — плечо QUOTE (CeEdge.name "T_*")
+  AGENT_KIND_ARBITRAGEUR = 2;   // арбитражёр — плечо TRANSFER (CeEdge.name "A_*")
+}
+
+// ---------------------------------------------------------------------------
 // F-18 §11 (variant A): Δ позиции биржи от ОДНОГО вектор-клиринга (проекция x на
 // активы), эмиттится matching в топик ce.position.delta; ledger накапливает в
 // house-позицию и снимает снапшот старая→Δ→новая по batch_id. matching только
@@ -78,6 +91,12 @@ message AssetDelta {
   string venue = 3;                          // узел «asset@venue» (разрез; "" = агрегат/legacy)
   fob.common.v1.Decimal price_used = 4;      // цена узла P_node, по которой делили value
   fob.common.v1.Decimal delta_value = 5;     // диагностика: delta·price_used (тыс. USDT)
+  // T-F18-007/201 (ADR-061 §1, флаг CE_AGENT_POS, default OFF): поля 6-7 —
+  // аддитивные, пустые при CE_AGENT_POS=0 (старые consumers их игнорируют).
+  // При CE_AGENT_POS=1 delta несёт СЫРОЙ поток такта Δc_j=f_j (не количество,
+  // как поле 2 выше) — семантика per-agent, не per-node; знак = направление.
+  string agent_id = 6;                       // = имя ребра CeEdge.name ("T_BTC_B" | "A_BTC_BO")
+  AgentKind agent_kind = 7;                  // TRANSLATOR | ARBITRAGEUR
 }
 message CePositionDeltaBatch {
   fob.common.v1.EventMeta meta = 1;
