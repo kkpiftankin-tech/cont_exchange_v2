@@ -190,8 +190,9 @@ class MarketDataUseCases {
   bool               vector_two_sided_{false};         ///< ADR-052: 1 двусторонний сегм./венью
   std::int64_t       vector_window_ms_{1000};   ///< F05A_BATCH_WINDOW_MS (runtime PG override)
   std::int64_t       vector_stale_ms_{2000};    ///< F05A_STALE_LEVEL_MS (runtime PG override)
-  double             ce_taker_fee_bps_{-1.0};   ///< комиссия тейкера (bps) из f05a_clearing_config;
-                                                ///< <0 = из стакана venue; =0 = линейные кривые
+  double             ce_taker_fee_bps_{0.0};    ///< комиссия тейкера (bps) из f05a_clearing_config;
+                                                ///< по умолчанию 0 = линейные кривые (владелец 2026-09-16);
+                                                ///< <0 = из стакана venue (выставляется с фронта)
   // ADR-050/052: runtime-конфиг окна из PG (таблица f05a_clearing_config), с TTL-кэшем.
   std::string        clearing_cfg_pg_conn_{};
   std::int64_t       clearing_cfg_last_read_ms_{0};  ///< monotonic ms последнего чтения PG

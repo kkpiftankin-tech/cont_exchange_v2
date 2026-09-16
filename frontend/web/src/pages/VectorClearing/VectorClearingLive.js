@@ -383,8 +383,9 @@ function ClearingDetail({ d }) {
             </>
           ) : (
             <div className="vc-note">
-              Позиция биржи не выведена: нет клиринговых цен/x для этого батча, либо активы без порога θ.
-              Настройка порогов — <span className="vc-mono">CE_HEDGE_THRESHOLD_&lt;ASSET&gt;</span>.
+              Позиция ещё не готова: свежий батч — ledger применяет клиринг (обновится
+              автоматически через 1–3&nbsp;с), либо нет клиринговых цен/x для этого батча
+              (активы без порога θ). Настройка порогов — <span className="vc-mono">CE_HEDGE_THRESHOLD_&lt;ASSET&gt;</span>.
             </div>
           )}
         </div>
@@ -479,6 +480,7 @@ function VectorClearingLive() {
   const [error, setError] = useState('');
   const [updatedAt, setUpdatedAt] = useState(null);
   const [openKey, setOpenKey] = useState(null);
+  const [openItem, setOpenItem] = useState(null);   // открытая строка (для авто-рефетча детали)
   const [detailByKey, setDetailByKey] = useState({});
   const [detailErr, setDetailErr] = useState('');
   // Runtime-конфиг цикла батч-клиринга (окно/staleness).
@@ -515,22 +517,29 @@ function VectorClearingLive() {
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
+  // Загрузка детали батча. Всегда обновляет кэш (позиция/агенты «догоняют» по мере
+  // применения ledger — свежий батч отдаёт позицию с лагом 1-3с).
+  const fetchDetail = useCallback(async (it) => {
+    const key = rowKey(it);
+    try {
+      const resp = await axios.get(`${API_BASE}/vector-clearing/detail`, {
+        params: { batch_id: it.batch_id, ts: it.event_time_ms }, timeout: 12000
+      });
+      setDetailByKey((m) => ({ ...m, [key]: resp.data }));
+      setDetailErr('');
+    } catch (e) {
+      setDetailErr(e.message || 'ошибка загрузки детали');
+    }
+  }, []);
+
   const toggleRow = useCallback(async (it) => {
     const key = rowKey(it);
-    if (openKey === key) { setOpenKey(null); return; }
+    if (openKey === key) { setOpenKey(null); setOpenItem(null); return; }
     setOpenKey(key);
+    setOpenItem(it);
     setDetailErr('');
-    if (!detailByKey[key]) {
-      try {
-        const resp = await axios.get(`${API_BASE}/vector-clearing/detail`, {
-          params: { batch_id: it.batch_id, ts: it.event_time_ms }, timeout: 12000
-        });
-        setDetailByKey((m) => ({ ...m, [key]: resp.data }));
-      } catch (e) {
-        setDetailErr(e.message || 'ошибка загрузки детали');
-      }
-    }
-  }, [openKey, detailByKey]);
+    await fetchDetail(it);   // при открытии всегда тянем свежее
+  }, [openKey, fetchDetail]);
 
   useEffect(() => {
     (async () => {
@@ -560,6 +569,12 @@ function VectorClearingLive() {
 
   useInterval(() => {
     if (isAuth) load();
+  }, POLL_INTERVAL_MS);
+
+  // Авто-рефетч открытой детали: позиция/агенты появляются, как только ledger
+  // применит клиринг свежего батча (без повторного открытия строки).
+  useInterval(() => {
+    if (isAuth && openItem) fetchDetail(openItem);
   }, POLL_INTERVAL_MS);
 
   if (isAuth === null) return <div className="loading-screen">Загрузка...</div>;

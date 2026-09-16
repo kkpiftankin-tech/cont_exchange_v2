@@ -29,10 +29,11 @@ namespace cex::market_data::domain {
 struct AgentBuilderConfig {
   double theta = 0.5;            // haircut глубины (0.3..0.7)
   double reference_price = 0.0;  // P0 для mid_pm; ≤0 ⇒ anchor=0 (вырожденный такт)
-  // Настраиваемая с фронта комиссия тейкера, bps. <0 ⇒ брать комиссию из стакана venue
-  // (прежнее поведение). =0 ⇒ мёртвая зона c = ½·spread (при тесном спреде ≈ линейная
-  // кривая без полки). Runtime из f05a_clearing_config.ce_taker_fee_bps.
-  double taker_fee_bps_override = -1.0;
+  // Настраиваемая с фронта комиссия тейкера, bps. По умолчанию 0 ⇒ мёртвая зона
+  // c = ½·spread (при тесном спреде ≈ линейная кривая без полки-комиссии; решение
+  // владельца 2026-09-16). <0 ⇒ брать комиссию из стакана venue (прежнее поведение,
+  // выставляется с фронта). Runtime из f05a_clearing_config.ce_taker_fee_bps.
+  double taker_fee_bps_override = 0.0;
 };
 
 struct QuoteAgent {
