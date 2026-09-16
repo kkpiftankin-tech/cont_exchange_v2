@@ -88,11 +88,16 @@ message NodeBasis {
 // matching добавляет плечи перевода/запаса из капитал/риск-конфига (AssembleCeGraph)
 // и решает клиринг (ce_agent_clearing). Значения ‰/α — Decimal (единый стиль proto).
 message CeQuoteAgent {
-  string asset = 1;                     // tradeable, "BTC"
+  string asset = 1;                     // tradeable (base), "BTC"
   string venue = 2;                     // "Binance"
   fob.common.v1.Decimal anchor = 3;     // σ* = mid_pm, ‰
   fob.common.v1.Decimal depth = 4;      // α (глубина минорант×θ)
   fob.common.v1.Decimal dead_zone = 5;  // c, ‰
+  // ADR-064: котируемая валюта пары (quote). Аддитивное поле — пусто ⇒
+  // трактуется как numeraire (прежнее поведение, регрессия при CE_CROSS_PAIRS=0).
+  // Непусто для прямых кросс-пар (напр. "BTC" для пары ETH/BTC): ребро
+  // переводчика соединяет asset@venue ↔ quote@venue напрямую, минуя numeraire.
+  string quote = 6;
 }
 message CeAssetMark {
   string asset = 1;

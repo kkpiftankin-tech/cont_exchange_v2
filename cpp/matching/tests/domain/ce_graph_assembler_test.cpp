@@ -153,6 +153,63 @@ int main() {
     close(r2.x[in2.num_free], 0.0, 1e-15, "v2.house x fixed at 0");
   }
 
+  // ---- ADR-064: прямые кросс-пары — переводчик обобщён с base/numeraire на
+  // любую пару base/quote. V=1 площадка, A=2 tradeable-актива (BTC, ETH) +
+  // нумерарий USD; house = единственная площадка "v1". Один номинальный
+  // переводчик BTC/USD (q.quote пуст — регрессия) и один кросс-переводчик
+  // ETH/BTC (q.quote="BTC" — ребро ETH@v1↔BTC@v1 напрямую, минуя USD).
+  {
+    CeAssembleConfigV2 cfg3;
+    cfg3.numeraire = "USD";
+    cfg3.assets = {"BTC", "ETH"};
+    cfg3.venues = {"v1"};
+    cfg3.house_venue = "v1";
+
+    std::vector<CeQuoteParams> quotes3 = {
+        {"BTC", "v1", 0.10, 30.0, 0.05, ""},     // BTC/USD — номинал (quote пуст)
+        {"ETH", "v1", 0.20, 20.0, 0.05, "BTC"},  // ETH/BTC — прямая кросс-пара
+    };
+
+    CeClearInput in3 = AssembleCeGraphV2(cfg3, quotes3);
+
+    // узлы: BTC@v1, ETH@v1 — свободные; USD@v1 — house (последний индекс).
+    close(in3.num_nodes, 3, 0, "cross.num_nodes (BTC@v1, ETH@v1, USD@v1[house])");
+    close(in3.num_free, 2, 0, "cross.num_free (house-пин)");
+    close(static_cast<double>(in3.edges.size()), 2, 0, "cross.num_edges (2 QUOTE, без TRANSFER)");
+
+    const CeEdge* e_num = nullptr;
+    const CeEdge* e_cross = nullptr;
+    for (const auto& e : in3.edges) {
+      if (e.name == "T_BTC_v1") e_num = &e;
+      if (e.name == "T_ETH_BTC_v1") e_cross = &e;
+    }
+    if (!e_num) { std::printf("FAIL cross: номинальное ребро T_BTC_v1 не найдено\n"); ++g_fail; }
+    if (!e_cross) { std::printf("FAIL cross: кросс-ребро T_ETH_BTC_v1 не найдено\n"); ++g_fail; }
+    if (e_num) {
+      // регрессия: номинальный переводчик по-прежнему соединяет BTC@v1 ↔ USD@v1 (house).
+      if (in3.node_meta[e_num->u].asset != "BTC" ||
+          in3.node_meta[e_num->v].asset != cfg3.numeraire) {
+        std::printf("FAIL cross: T_BTC_v1 должен соединять BTC@v1 и USD@v1 (регрессия)\n");
+        ++g_fail;
+      }
+    }
+    if (e_cross) {
+      // кросс-ребро соединяет ETH@v1 и BTC@v1 НАПРЯМУЮ, а не через USD.
+      const auto& um = in3.node_meta[e_cross->u];
+      const auto& vm = in3.node_meta[e_cross->v];
+      const bool ok = um.asset == "ETH" && um.venue == "v1" && vm.asset == "BTC" &&
+                       vm.venue == "v1";
+      if (!ok) {
+        std::printf("FAIL cross: T_ETH_BTC_v1 должен соединять ETH@v1 и BTC@v1, got %s@%s <-> %s@%s\n",
+                    um.asset.c_str(), um.venue.c_str(), vm.asset.c_str(), vm.venue.c_str());
+        ++g_fail;
+      }
+      close(e_cross->anchor, 0.20, 1e-12, "cross.anchor");
+      close(e_cross->depth, 20.0, 1e-12, "cross.depth");
+      close(e_cross->dead_zone, 0.05, 1e-12, "cross.dead_zone");
+    }
+  }
+
   // ---- T-F18-103: IsHouseVenueValid (guard в matching_loop перед AssembleCeGraphV2) ----
   {
     const std::vector<std::string> venues = {"B", "O", "K"};

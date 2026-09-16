@@ -927,7 +927,10 @@ void MatchingLoop::on_ce_clearing_input(
 
   std::vector<domain::CeQuoteParams> quotes;
   for (const auto& q : input.quotes())
-    quotes.push_back({q.asset(), q.venue(), d2(q.anchor()), d2(q.depth()), d2(q.dead_zone())});
+    // ADR-064: q.quote() — котируемая валюта пары (пусто ⇒ numeraire). Поле
+    // используется только v2-сборщиком (AssembleCeGraphV2); v1 его игнорирует.
+    quotes.push_back({q.asset(), q.venue(), d2(q.anchor()), d2(q.depth()), d2(q.dead_zone()),
+                       q.quote()});
 
   // CE_V2_GRAPH (default OFF): выбор сборщика графа. При OFF ветка v1 ниже —
   // идентичный прежнему коду путь (AssembleCeGraph), регрессия не допускается.

@@ -31,11 +31,16 @@ namespace cex::matching::domain {
 
 // Book-derived параметры переводчика на площадке (из market_data agent_builder).
 struct CeQuoteParams {
-  std::string asset;   // tradeable, напр. "BTC"
+  std::string asset;   // tradeable base, напр. "BTC"
   std::string venue;   // "Binance"
   double anchor{0.0};  // σ* = mid_pm, ‰
   double depth{0.0};   // α
   double dead_zone{0.0};
+  // ADR-064: котируемая валюта пары. Пусто ⇒ numeraire (прежнее поведение,
+  // регрессия). Непусто ⇒ прямая кросс-пара (напр. "BTC" для ETH/BTC) — ребро
+  // соединяет asset@venue ↔ quote@venue напрямую, минуя numeraire. Используется
+  // только AssembleCeGraphV2; AssembleCeGraph (v1) поле игнорирует.
+  std::string quote;
 };
 
 // Капитал/риск-параметры плеч перевода и запаса (per asset, включая нумерарий).
@@ -130,8 +135,10 @@ inline CeClearInput AssembleCeGraph(const CeAssembleConfig& cfg,
 //    (book_potential[num_free]=0.0) — это и есть «house-столбец в узле
 //    нумерария», восстанавливающий ранг/фиксируемость вместо узла-склада на
 //    актив; остальные num_free = num_nodes-1 узлов свободны;
-//  - рёбра: QUOTE (a@v → numeraire@v) и TRANSFER (a@vi → a@vj, i<j) per asset;
-//    STOCK-рёбер НЕТ (плечо запаса убрано вместе с узлом-складом, ADR-061 §1);
+//  - рёбра: QUOTE (a@v → q@v, q=quote-агента; по умолчанию q=numeraire, ADR-064
+//    обобщает на прямые кросс-пары base/quote) и TRANSFER (a@vi → a@vj, i<j)
+//    per asset; STOCK-рёбер НЕТ (плечо запаса убрано вместе с узлом-складом,
+//    ADR-061 §1);
 //  - движок ClearCe (num_free/book_potential хвост) не меняется — v2-граф
 //    просто подаёт на вход другую топологию с num_free = num_nodes-1.
 // ============================================================================
@@ -188,11 +195,18 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
   auto add = [&](const std::string& nm, CeLeg leg, int u, int v, double anc, double dep,
                  double c) { in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c}); };
 
-  // QUOTE: a@v → num@v (по одному переводчику на площадку/актив)
+  // QUOTE: a@v → q@v (по одному переводчику на площадку/пару). ADR-064: q.quote
+  // пуст ⇒ numeraire (прежнее поведение T_<asset>_<venue>, байт-в-байт регрессия);
+  // q.quote непуст ⇒ прямая кросс-пара — ребро соединяет base@v и quote@v
+  // напрямую, минуя numeraire; имя несёт пару T_<asset>_<quote>_<venue>.
   for (const auto& q : quotes) {
+    const std::string quote_asset = q.quote.empty() ? cfg.numeraire : q.quote;
     const int u = node_index.at(q.asset + "@" + q.venue);
-    const int v = node_index.at(cfg.numeraire + "@" + q.venue);
-    add("T_" + q.asset + "_" + q.venue, CeLeg::kQuote, u, v, q.anchor, q.depth, q.dead_zone);
+    const int v = node_index.at(quote_asset + "@" + q.venue);
+    const std::string name = (quote_asset == cfg.numeraire)
+                                  ? ("T_" + q.asset + "_" + q.venue)
+                                  : ("T_" + q.asset + "_" + quote_asset + "_" + q.venue);
+    add(name, CeLeg::kQuote, u, v, q.anchor, q.depth, q.dead_zone);
   }
   // TRANSFER: a@vi → a@vj (i<j), для каждого актива (включая нумерарий), если задано плечо
   for (const auto& a : all_assets) {

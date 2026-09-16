@@ -646,7 +646,12 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
 
 // F-05A CE (вариант A): свежие кривые окна → book-derived quote-агенты (agent_builder §A1)
 // → CeClearingInput (agents + марки μ + P0) → ce.clearing.input. matching добавит плечи
-// перевода/запаса из env и решит клиринг. Только пары base/numeraire.
+// перевода/запаса из env и решит клиринг.
+//
+// ADR-064 (флаг CE_CROSS_PAIRS, default OFF): по умолчанию — только пары base/numeraire,
+// как раньше (байт-в-байт регрессия). При CE_CROSS_PAIRS=1 переводчик обобщается на ЛЮБУЮ
+// пару base/quote — обрабатываются и прямые кросс-пары (напр. ETH/BTC), чтобы агенты
+// соответствовали реальным парам стаканов площадок, а не только X/номинал.
 void MarketDataUseCases::BuildAndPublishCeClearingInput(
     const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
     const std::string& batch_id, std::int64_t window_close_ms) {
@@ -654,15 +659,18 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   const std::string numeraire = num_env ? std::string(num_env) : std::string("USDT");
   const char* theta_env = std::getenv("CE_AGENT_THETA");
   const double theta = theta_env ? std::atof(theta_env) : 0.5;
+  const bool cross_pairs = cex::common::Env::get_bool("CE_CROSS_PAIRS", false);
   auto to_dec = [](double x) {
     return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
   };
 
   struct Book {
-    std::string base, venue;
+    std::string base, quote, venue;
     std::vector<domain::ExternalOrderLevel> levels;
   };
   std::vector<Book> books;
+  // P0 (опорная цена в numeraire) считается ТОЛЬКО из пар base/numeraire —
+  // кросс-пары (base/quote, quote≠numeraire) используют уже посчитанный P0.
   std::map<std::string, std::pair<double, int>> p0acc;  // base → (Σ mid, count)
   std::set<std::string> venues_set;
   std::vector<std::string> assets_order;
@@ -671,7 +679,9 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     const std::string base = c.instrument().base();
     const std::string quote = c.instrument().quote();
     const std::string venue = c.venue_id();
-    if (base.empty() || venue.empty() || quote != numeraire) continue;  // только base/numeraire
+    if (base.empty() || venue.empty() || quote.empty()) continue;
+    // CE_CROSS_PAIRS=0 (default): только base/numeraire — прежний фильтр, регрессия.
+    if (!cross_pairs && quote != numeraire) continue;
     auto levels = LevelsFromCurve(c, vectorize_cfg_.decimal_scale);
     double bb = -1.0, ba = -1.0;
     for (const auto& l : levels) {
@@ -681,11 +691,16 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
       else ba = (ba < 0.0) ? p : std::min(ba, p);
     }
     if (bb <= 0.0 || ba <= 0.0) continue;
-    p0acc[base].first += 0.5 * (bb + ba);
-    p0acc[base].second += 1;
+    if (quote == numeraire) {  // P0_base — только из пар к номиналу (ADR-064)
+      p0acc[base].first += 0.5 * (bb + ba);
+      p0acc[base].second += 1;
+    }
     venues_set.insert(venue);
     if (assets_seen.insert(base).second) assets_order.push_back(base);
-    books.push_back({base, venue, std::move(levels)});
+    // Кросс-пара: quote тоже tradeable-актив (не numeraire) — регистрируем его
+    // узел asset@venue в графе наравне с base (ADR-064 §Последствия).
+    if (quote != numeraire && assets_seen.insert(quote).second) assets_order.push_back(quote);
+    books.push_back({base, quote, venue, std::move(levels)});
   }
   if (books.empty()) return;
   std::map<std::string, double> p0;
@@ -697,19 +712,33 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   out.set_numeraire(numeraire);
   std::map<std::string, std::pair<double, double>> markacc;  // base → (Σ α·anchor, Σ α)
   // 1-й проход: строим валидных агентов, копим max глубину по активу.
-  struct Ag { std::string base, venue; double anchor, depth, dead_zone; };
+  struct Ag { std::string base, quote, venue; double anchor, depth, dead_zone; };
   std::vector<Ag> agents;
   std::map<std::string, double> max_depth;
+  int skipped_no_p0 = 0;
   for (const auto& b : books) {
+    const double p0_base = p0.count(b.base) ? p0.at(b.base) : 0.0;
+    double reference_price = p0_base;
+    if (b.quote != numeraire) {
+      // Кросс-пара (ADR-064 §Решение): reference_price = P0_base/P0_quote —
+      // согласовано с потенциалами узлов x[a@v]; для base/numeraire P0_quote=1,
+      // reference_price=P0_base (без изменений). Без P0_quote пара недостроима.
+      const double p0_quote = p0.count(b.quote) ? p0.at(b.quote) : 0.0;
+      if (p0_base <= 0.0 || p0_quote <= 0.0) { ++skipped_no_p0; continue; }
+      reference_price = p0_base / p0_quote;
+    }
     domain::AgentBuilderConfig acfg;
     acfg.theta = theta;
-    acfg.reference_price = p0[b.base];
+    acfg.reference_price = reference_price;
     acfg.taker_fee_bps_override = ce_taker_fee_bps_;  // настраиваемая комиссия (0 ⇒ линейно)
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
-    agents.push_back({b.base, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});
+    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});
     if (a.depth > max_depth[b.base]) max_depth[b.base] = a.depth;
   }
+  if (skipped_no_p0 > 0)
+    cex::common::log_json("DEBUG", "CE clearing: кросс-пара без P0_quote пропущена",
+                          {{"batch_id", batch_id}, {"skipped", std::to_string(skipped_no_p0)}});
   // Фильтр тонких/ненадёжных venue: глубина < ratio·max по активу (env CE_MIN_DEPTH_RATIO,
   // деф 0.05). Тонкие venue дают выбросные/устаревшие цены → fake-арбитраж → раздувание
   // позиции биржи (см. bug 2026-09-14: coinbase выброс −2.5‰ гнал BTC/SOL). ADR-057.
@@ -738,6 +767,9 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     *q->mutable_anchor() = to_dec(ag.anchor);
     *q->mutable_depth() = to_dec(ag.depth);
     *q->mutable_dead_zone() = to_dec(ag.dead_zone);
+    // ADR-064: quote непуст только для кросс-пар; для номинальных пар оставляем
+    // пустым (обратная совместимость — "пусто ⇒ numeraire").
+    if (ag.quote != numeraire) q->set_quote(ag.quote);
     markacc[ag.base].first += ag.depth * ag.anchor;
     markacc[ag.base].second += ag.depth;
     kept_venues.insert(ag.venue);
