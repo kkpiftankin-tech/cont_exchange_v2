@@ -44,6 +44,7 @@
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
 #include "domain/margin_calculator.hpp"
+#include "domain/ce_agent_band.hpp"  // F-18 v2 Э3: полоса ±q агента
 #include "fob/venue/v1/venue.pb.h"
 
 namespace cex::risk::app {
@@ -1217,6 +1218,100 @@ void RiskUseCases::EmitNetHedges() {
     cex::common::log_json("INFO", "F-18 net-hedge intent emitted",
                           {{"currency", ccy}, {"side", item.hedge_side()},
                            {"hedge_flow_id", hedge_flow_id}});
+  }
+  (void)emitted;
+}
+
+// ============================================================================
+// F-18 v2 · Э3 (T-F18-303, ADR-061 §4) — EmitAgentBandHedges.
+// Per-АГЕНТ эмиссия по полосе ±q (в отличие от EmitNetHedges — агрегатный
+// NOP-порог). Читает ledger.GetAgentPositions; для переводчика с выходом за
+// свободную полосу (|c|−q−|in_flight|>0) публикует ExecutionIntent на избыток.
+// Позицию НЕ трогает — её уменьшит ledger по факту исполнения (Э4). Защита от
+// переэмиссии — in_flight (ledger помечает по hedge_flow_id), а не cooldown.
+//
+// Ограничения слайса: (1) только переводчики (арбитражёры — Э5 CE_TRANSFER_AGENT);
+// (2) инструмент строится как asset/numeraire — кросс-пары (quote≠numeraire)
+// не эмитятся здесь корректно, т.к. AgentPosition не несёт quote; на практике их
+// позиция ≈0 (эффективный рынок), но при накоплении нужен quote в контракте
+// (follow-up). (3) Security CRITICAL-2 (PreHedgeCheck/kill-switch в пути venues)
+// — отслеживаемый риск за флагом CE_AGENT_BAND (default OFF), см. F-18 open-questions.
+// ============================================================================
+void RiskUseCases::EmitAgentBandHedges() {
+  if (intents_producer_ == nullptr || ledger_stub_ == nullptr) return;
+  if (!cex::common::Env::get_bool("CE_AGENT_BAND", false)) return;
+
+  fob::ledger::v1::GetAgentPositionsRequest lreq;
+  fob::ledger::v1::GetAgentPositionsResponse lresp;
+  grpc::ClientContext ctx;
+  const grpc::Status st = ledger_stub_->GetAgentPositions(&ctx, lreq, &lresp);
+  if (!st.ok()) {
+    cex::common::log_json("WARN", "EmitAgentBandHedges: ledger call failed",
+                          {{"error", st.error_message()}});
+    return;
+  }
+
+  using cex::common::Decimal;
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const Decimal q_translator{
+      cex::common::Env::get_int("CE_AGENT_BAND_Q_TRANSLATOR", 18), 0};
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  const Decimal thousand{1000, 0};
+
+  int emitted = 0;
+  for (const auto& p : lresp.positions()) {
+    if (p.agent_kind() != "translator") continue;  // арбитражёры — Э5
+    const Decimal position = Decimal::from_proto(p.position());
+    const Decimal in_flight = Decimal::from_proto(p.in_flight());
+    const auto band = domain::ComputeBandEmission(position, in_flight, q_translator);
+    if (!band.emit) continue;
+
+    const Decimal ref_price = Decimal::from_proto(p.reference_price());
+    if (ref_price.units == 0) continue;  // без цены узла не перевести value→qty
+
+    // Стоимость избытка (k-USDT) → нотионал (USDT) → количество актива по P_node.
+    const Decimal excess = Decimal::cmp(band.signed_qty, Decimal::zero()) >= 0
+                               ? band.signed_qty
+                               : Decimal::sub(Decimal::zero(), band.signed_qty);
+    const Decimal notional = Decimal::mul(excess, thousand);   // USDT
+    const Decimal qty = Decimal::div(notional, ref_price, 8);  // единицы актива
+    if (qty.units == 0) continue;
+    const bool sell = Decimal::cmp(band.signed_qty, Decimal::zero()) >= 0;
+
+    fob::execution::v1::ExecutionIntent intent;
+    intent.mutable_meta()->set_source("risk");
+    // hedge_flow_id несёт идентичность агента для ledger (пометка in_flight +
+    // декремент по исполнению): "ce|band|<agent_id>|<asset>|<venue>".
+    const std::string flow_id =
+        "ce|band|" + p.agent_id() + "|" + p.asset() + "|" + p.venue();
+    intent.set_hedge_flow_id(flow_id);
+    intent.set_intent_id(flow_id + "|" + std::to_string(now_ms));
+    intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+    intent.set_reason("ce_agent_band");
+    intent.set_venue(p.venue());
+    auto* instr = intent.mutable_instrument();
+    instr->set_symbol(p.asset() + "/" + numeraire);
+    instr->set_base(p.asset());
+    instr->set_quote(numeraire);
+    intent.set_side(sell ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+    *intent.mutable_target_qty() = qty.to_proto();
+    *intent.mutable_target_notional() = notional.to_proto();
+    intent.set_strategy(fob::execution::v1::EXEC_STRATEGY_MARKET);
+    intent.set_urgency(fob::execution::v1::URGENCY_HIGH);
+    intent.set_tif(fob::common::v1::TIF_IOC);
+    intent.add_allowed_venues(p.venue());  // хедж — на площадке самого агента
+
+    intents_producer_->produce("execution.intents", flow_id,
+                               cex::common::to_bytes(intent));
+    ++emitted;
+    cex::common::log_json("INFO", "F-18 band hedge intent emitted",
+                          {{"agent_id", p.agent_id()},
+                           {"asset", p.asset()}, {"venue", p.venue()},
+                           {"side", sell ? "SELL" : "BUY"},
+                           {"excess_value", excess.to_string()},
+                           {"qty", qty.to_string()},
+                           {"hedge_flow_id", flow_id}});
   }
   (void)emitted;
 }

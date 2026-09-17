@@ -659,6 +659,15 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   const std::string numeraire = num_env ? std::string(num_env) : std::string("USDT");
   const char* theta_env = std::getenv("CE_AGENT_THETA");
   const double theta = theta_env ? std::atof(theta_env) : 0.5;
+  // Множитель ½-спреда в полке агента (dead_zone). Дефолт 0 ⇒ полка нулевая
+  // (решение владельца: переводчики клирят ликвидность книг, не простаивая на
+  // полуспреде). Настраивается с фронта через env CE_DEAD_ZONE_HALF_SPREAD_MULT.
+  const char* hsm_env = std::getenv("CE_DEAD_ZONE_HALF_SPREAD_MULT");
+  const double half_spread_mult = hsm_env ? std::atof(hsm_env) : 0.0;
+  // Порог широкого спреда (‰): тонкие/ненадёжные книги (кросс-пары с рассинхроном,
+  // почти пустой стакан) сохраняют полный ½спред как полку. Дефолт 20‰.
+  const char* wsg_env = std::getenv("CE_DEAD_ZONE_WIDE_SPREAD_PM");
+  const double wide_spread_guard_pm = wsg_env ? std::atof(wsg_env) : 20.0;
   const bool cross_pairs = cex::common::Env::get_bool("CE_CROSS_PAIRS", false);
   auto to_dec = [](double x) {
     return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
@@ -731,10 +740,16 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     acfg.theta = theta;
     acfg.reference_price = reference_price;
     acfg.taker_fee_bps_override = ce_taker_fee_bps_;  // настраиваемая комиссия (0 ⇒ линейно)
+    acfg.half_spread_mult = half_spread_mult;          // 0 ⇒ полка нулевая
+    acfg.wide_spread_guard_pm = wide_spread_guard_pm;  // тонкие книги сохраняют ½спред
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
     agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});
-    if (a.depth > max_depth[b.base]) max_depth[b.base] = a.depth;
+    // ADR-064: max глубина копится по ПАРЕ (base|quote), а не по base. Глубины
+    // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT) —
+    // сравнение «тонкости» валидно только между площадками одной пары.
+    const std::string pk = b.base + "|" + b.quote;
+    if (a.depth > max_depth[pk]) max_depth[pk] = a.depth;
   }
   if (skipped_no_p0 > 0)
     cex::common::log_json("DEBUG", "CE clearing: кросс-пара без P0_quote пропущена",
@@ -759,8 +774,11 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   std::set<std::string> kept_venues;
   int dropped = 0;
   for (const auto& ag : agents) {
-    // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража)
-    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[ag.base]) { ++dropped; continue; }
+    // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража).
+    // ADR-064: порог считается по ПАРЕ (base|quote) — иначе кросс-пара (ETH/BTC)
+    // всегда «тонкая» против глубокого ETH/USDT (разные валюты котировки).
+    const std::string pk = ag.base + "|" + ag.quote;
+    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[pk]) { ++dropped; continue; }
     auto* q = out.add_quotes();
     q->set_asset(ag.base);
     q->set_venue(ag.venue);

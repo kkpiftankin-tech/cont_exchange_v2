@@ -901,4 +901,42 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
   return out;
 }
 
+// F-18 v2 · Э3/Э4 (ADR-061 §4): execution-путь — position/in_flight += сдвиги.
+// НЕ идемпотентно по batch_id (это не клиринг; идемпотентность исполнения —
+// на уровне report_id в ledger_uc). Только UPDATE существующей строки: строку
+// создаёт клиринг (ApplyDelta) раньше, чем агент может выйти за полосу.
+void PostgresAgentPositionRepository::ApplyHedge(
+    const std::string& agent_id,
+    const std::string& asset,
+    const std::string& venue,
+    const cex::common::Decimal& position_delta,
+    const cex::common::Decimal& in_flight_delta,
+    int64_t updated_at_ms) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return;  // persistence disabled — кэш ledger_uc авторитетен
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    ensure_agent_position_table(tx);
+    tx.exec_params(
+        R"sql(
+          UPDATE ce_agent_position SET
+            position   = position + ($4)::numeric,
+            in_flight  = in_flight + ($5)::numeric,
+            updated_at = to_timestamp($6 / 1000.0)
+          WHERE agent_id = $1 AND asset = $2 AND venue = $3
+        )sql",
+        agent_id, asset, venue, position_delta.to_string(),
+        in_flight_delta.to_string(), updated_at_ms);
+    tx.commit();
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyHedge failed",
+                          {{"error", e.what()}, {"agent_id", agent_id}});
+  }
+#else
+  (void)agent_id; (void)asset; (void)venue;
+  (void)position_delta; (void)in_flight_delta; (void)updated_at_ms;
+#endif
+}
+
 }  // namespace cex::ledger::infra

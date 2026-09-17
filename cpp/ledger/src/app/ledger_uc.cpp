@@ -813,6 +813,10 @@ void LedgerUseCases::ApplyPositionDelta(
     const Decimal position_before = st.position;  // ДО применения дельты ЭТОГО такта
     if (!ad.agent_kind.empty()) st.agent_kind = ad.agent_kind;  // не перетираем известный kind пустым
     st.position = Decimal::add(st.position, ad.delta);
+    // F-18 v2 Э3: запоминаем последнюю цену узла (P_node), по которой клиринг
+    // делил value→qty — risk конвертирует ею избыток полосы в объём хеджа.
+    // Нулевую (price_used не пришёл) не затираем последней валидной.
+    if (ad.price_used.units != 0) st.last_price = ad.price_used;
     st.last_batch_id = batch_id;
     st.updated_at_ms = ts_ms;
 
@@ -925,6 +929,7 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     p->set_venue(venue);
     *p->mutable_position() = st.position.to_proto();
     *p->mutable_in_flight() = st.in_flight.to_proto();
+    *p->mutable_reference_price() = st.last_price.to_proto();  // F-18 v2 Э3
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
   }
@@ -1358,6 +1363,11 @@ void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::Execution
   std::lock_guard<std::mutex> lg(mu_);
   execution_intents_[intent.intent_id()] = intent;
 
+  // F-18 v2 Э3 (ADR-061 §4): band-хедж агента-переводчика — помечаем in_flight,
+  // чтобы следующий такт не отправил тот же избыток повторно. Позицию НЕ трогаем
+  // (уменьшится по факту исполнения — apply_agent_band_report_locked).
+  mark_agent_band_in_flight_locked(intent);
+
   auto pending_it = pending_execution_reports_.find(intent.intent_id());
   if (pending_it == pending_execution_reports_.end()) return;
 
@@ -1368,6 +1378,110 @@ void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::Execution
     ++exec_recon_stats_.replayed_reports;
     (void)apply_execution_report_locked(report);
   }
+}
+
+// ============================================================================
+// F-18 v2 Э3/Э4 (ADR-061 §4) — учёт band-хеджей агента-переводчика.
+// hedge_flow_id формата "ce|band|<agent_id>|<asset>|<venue>" (эмитит risk).
+// ============================================================================
+namespace {
+// Разбирает "ce|band|<agent_id>|<asset>|<venue>". Возвращает false, если это не
+// band-хедж или формат неполон. agent_id/asset/venue — без '|' по построению.
+bool parse_band_flow_id(const std::string& flow_id, std::string& agent_id,
+                        std::string& asset, std::string& venue) {
+  static const std::string kPrefix = "ce|band|";
+  if (flow_id.rfind(kPrefix, 0) != 0) return false;
+  std::vector<std::string> parts;
+  std::string cur;
+  for (char ch : flow_id) {
+    if (ch == '|') { parts.push_back(cur); cur.clear(); }
+    else cur += ch;
+  }
+  parts.push_back(cur);
+  // ["ce","band",agent_id,asset,venue]
+  if (parts.size() != 5) return false;
+  agent_id = parts[2]; asset = parts[3]; venue = parts[4];
+  return !agent_id.empty() && !asset.empty() && !venue.empty();
+}
+}  // namespace
+
+void LedgerUseCases::mark_agent_band_in_flight_locked(
+    const fob::execution::v1::ExecutionIntent& intent) {
+  std::string agent_id, asset, venue;
+  if (!parse_band_flow_id(intent.hedge_flow_id(), agent_id, asset, venue)) return;
+  // Стоимость отправленного (k-USDT) = target_notional(USDT)/1000; знак = сторона
+  // (SELL уменьшает положительную позицию ⇒ in_flight>0; BUY ⇒ <0). Всё в Decimal
+  // (CLAUDE.md §9 — без double для денежных величин ledger).
+  const Decimal notional = Decimal::from_proto(intent.target_notional());
+  if (notional.units == 0) return;  // без нотионала учитывать нечего
+  Decimal sent = Decimal::div(notional, Decimal{1000, 0}, 8);  // magnitude (нотионал ≥ 0)
+  if (intent.side() != fob::common::v1::SIDE_SELL)
+    sent = Decimal::sub(Decimal::zero(), sent);  // BUY ⇒ отрицательный in_flight
+  const AgentPositionKey key{agent_id, asset, venue};
+  const long long ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
+  band_hedges_[intent.intent_id()] = AgentBandHedge{key, sent, Decimal::zero()};
+  auto& st = agent_positions_[key];
+  st.in_flight = Decimal::add(st.in_flight, sent);
+  st.updated_at_ms = ts_ms;
+  if (agent_position_repo_)
+    agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), sent, ts_ms);
+
+  cex::common::log_json("INFO", "F-18 band hedge in_flight marked",
+                        {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
+                         {"sent_value", sent.to_string()},
+                         {"side", intent.side() == fob::common::v1::SIDE_SELL ? "SELL" : "BUY"}});
+}
+
+bool LedgerUseCases::apply_agent_band_report_locked(
+    const fob::execution::v1::ExecutionIntent& intent,
+    const fob::execution::v1::ExecutionReport& report,
+    const Decimal& incr_filled_qty,
+    const Decimal& average_price,
+    bool terminal) {
+  (void)intent;
+  auto it = band_hedges_.find(report.intent_id());
+  if (it == band_hedges_.end()) return false;  // не band-хедж
+  auto& hedge = it->second;
+  const auto& [agent_id, asset, venue] = hedge.key;
+  const bool sent_positive = Decimal::cmp(hedge.sent_value, Decimal::zero()) >= 0;
+  const long long ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  auto& st = agent_positions_[hedge.key];
+
+  // Инкремент исполнения → стоимость (k-USDT): |fq·price|/1000. И c_j, и in_flight
+  // движутся к нулю на эту величину (ADR-061 §4: c уменьшается ПО ИСПОЛНЕНИЮ).
+  // Всё в Decimal (CLAUDE.md §9).
+  if (incr_filled_qty.units != 0 && average_price.units != 0) {
+    const Decimal magnitude =
+        Decimal::div(Decimal::mul(incr_filled_qty, average_price), Decimal{1000, 0}, 8);
+    // filled копит знак sent; pos_delta ведёт к нулю (противоположный знак).
+    const Decimal filled_incr = sent_positive ? magnitude
+                                              : Decimal::sub(Decimal::zero(), magnitude);
+    const Decimal pos_delta = sent_positive ? Decimal::sub(Decimal::zero(), magnitude)
+                                            : magnitude;
+    st.position = Decimal::add(st.position, pos_delta);
+    st.in_flight = Decimal::add(st.in_flight, pos_delta);
+    hedge.filled_value = Decimal::add(hedge.filled_value, filled_incr);
+    if (agent_position_repo_)
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue, pos_delta, pos_delta, ts_ms);
+  }
+
+  // Терминальный статус: освобождаем неисполненный остаток in_flight (позицию
+  // НЕ трогаем — ADR-061 §4 "по таймауту/отказу in_flight освобождается").
+  if (terminal) {
+    const Decimal residual = Decimal::sub(hedge.sent_value, hedge.filled_value);
+    if (residual.units != 0) {
+      st.in_flight = Decimal::sub(st.in_flight, residual);
+      if (agent_position_repo_)
+        agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(),
+                                         Decimal::sub(Decimal::zero(), residual), ts_ms);
+    }
+    band_hedges_.erase(it);
+  }
+  st.updated_at_ms = ts_ms;
+  return true;
 }
 
 // ============================================================================
@@ -2051,6 +2165,13 @@ bool LedgerUseCases::apply_execution_report_locked(
     state.fee_currency = report.fee_total().cost().currency();
   }
   state.terminal = is_terminal_status(status);
+
+  // F-18 v2 Э3/Э4 (ADR-061 §4): если это band-хедж агента — уменьшаем позицию и
+  // in_flight на инкремент исполнения (delta_qty), а по терминальному статусу
+  // освобождаем неисполненный остаток in_flight (позицию не трогая). Вызываем
+  // безусловно: reject с нулевым fill тоже должен освободить in_flight.
+  (void)apply_agent_band_report_locked(intent, report, delta_qty, average_price,
+                                       is_terminal_status(status));
 
   cex::common::log_json("INFO", "Execution report reconciled",
                         {{"intent_id", report.intent_id()},

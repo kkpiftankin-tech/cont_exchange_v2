@@ -39,7 +39,7 @@ int RunAgentDeltasV2Test() {
   CeClearResult r2 = ClearCe(in2);
   check(r2.converged, "v2.converged");
 
-  std::vector<CeAgentDelta> ad = ProjectAgentDeltas(in2, r2);
+  std::vector<CeAgentDelta> ad = ProjectAgentDeltas(in2, r2, {});
   // 4 ребра (2 QUOTE + 2 TRANSFER, без STOCK в v2) — все активны (расхождение
   // цен площадок выводит каждое ребро из мёртвой зоны на этом сетапе).
   check(ad.size() == 4, "num agent deltas == 4");
@@ -104,7 +104,7 @@ int RunAgentDeltasV2Test() {
         {"BTC", "B", 0.00, 50.0, 0.05}, {"BTC", "O", 0.40, 50.0, 0.05}};
     CeClearInput in1 = AssembleCeGraph(cfg1, quotes1);
     CeClearResult r1 = ClearCe(in1);
-    std::vector<CeAgentDelta> ad1 = ProjectAgentDeltas(in1, r1);
+    std::vector<CeAgentDelta> ad1 = ProjectAgentDeltas(in1, r1, {});
     for (const auto& d : ad1) {
       check(d.agent_id.rfind("S_", 0) != 0, "kStock (S_*) исключён из ProjectAgentDeltas");
     }

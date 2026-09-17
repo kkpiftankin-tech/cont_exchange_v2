@@ -351,6 +351,11 @@ message AgentPosition {
   fob.common.v1.Decimal in_flight = 6;         // committed (Э3+), ЗНАКОВАЯ, пока всегда 0
   int64 updated_at_ms = 7;                     // unix ms последнего изменения
   string last_batch_id = 8;                    // последний такт, менявший позицию
+  // F-18 v2 · Э3 (T-F18-303): последняя цена узла P_node (USDT/актив), по которой
+  // клиринг делил value→qty (AgentDelta.price_used). Нужна risk для перевода
+  // избытка полосы (в стоимости) в количество актива хедж-заявки. Аддитивно,
+  // 0 у арбитражёров и до первой дельты (risk такие пропускает).
+  fob.common.v1.Decimal reference_price = 9;
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;

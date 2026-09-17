@@ -42,6 +42,15 @@ public:
   // защитой от переэмиссии. Вызывается из фонового таймера (risk main).
   void EmitNetHedges();
 
+  // F-18 v2 · Э3 (T-F18-303, ADR-061 §4): при CE_AGENT_BAND публикует хедж
+  // per-АГЕНТ (не по агрегатному NOP-порогу): читает ledger.GetAgentPositions,
+  // для переводчика с |c|>q эмитит ExecutionIntent на избыток (|c|−q) в сторону
+  // реализации накопленного потока (c>0 ⇒ SELL, c<0 ⇒ BUY), помечая in_flight
+  // через hedge_flow_id "ce|band|<agent_id>|<asset>|<venue>". Арбитражёров
+  // пропускает (их перевоз — Э5/CE_TRANSFER_AGENT). Вызывается из того же
+  // фонового таймера, что и EmitNetHedges.
+  void EmitAgentBandHedges();
+
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
 

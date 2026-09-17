@@ -56,6 +56,10 @@ class LedgerUseCases {
     std::string asset;
     std::string venue;
     cex::common::Decimal delta{0, 0};  // f_j, ЗНАКОВАЯ (ADR-061 A6)
+    // F-18 v2 · Э3: цена узла P_node, по которой клиринг делил value→qty
+    // (AssetDelta.price_used). Храним как last_price агента для конвертации
+    // избытка полосы в количество актива при эмиссии хеджа (risk).
+    cex::common::Decimal price_used{0, 0};
   };
 
   // Hedge PnL record structure
@@ -299,12 +303,36 @@ class LedgerUseCases {
   struct AgentPositionState {
     std::string agent_kind;
     cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
-    cex::common::Decimal in_flight{0, 0};  // committed (Э3+), пока всегда 0
+    cex::common::Decimal in_flight{0, 0};  // committed (Э3+), знаковая
+    cex::common::Decimal last_price{0, 0}; // F-18 v2 Э3: P_node последней дельты
     std::string last_batch_id;
     long long updated_at_ms{0};
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // F-18 v2 · Э3/Э4 (ADR-061 §4): учёт хедж-заявок агента «в пути». Ключ —
+  // hedge_flow_id ("ce|band|<agent_id>|<asset>|<venue>"). Позволяет: (1) на
+  // эмиссии пометить in_flight и не слать избыток повторно; (2) по исполнению
+  // уменьшать позицию и in_flight на фактический объём; (3) по терминальному
+  // статусу освободить неисполненный остаток in_flight (позицию не трогая).
+  struct AgentBandHedge {
+    AgentPositionKey key;
+    cex::common::Decimal sent_value{0, 0};    // отправлено, k-USDT, ЗНАКОВАЯ (знак позиции)
+    cex::common::Decimal filled_value{0, 0};  // исполнено, k-USDT, ЗНАКОВАЯ
+  };
+  std::map<std::string, AgentBandHedge> band_hedges_;
+  // Помечает in_flight агента на эмиссии band-заявки (RememberExecutionIntent).
+  // sent_notional_usdt — target_notional заявки (USDT); знак берём из side.
+  // Вызывается под mu_.
+  void mark_agent_band_in_flight_locked(const fob::execution::v1::ExecutionIntent& intent);
+  // По band-report уменьшает position/in_flight на incr-исполнение и освобождает
+  // остаток in_flight по терминальному статусу. Вызывается под mu_ из
+  // apply_execution_report_locked. Возвращает true, если это band-заявка.
+  bool apply_agent_band_report_locked(const fob::execution::v1::ExecutionIntent& intent,
+                                      const fob::execution::v1::ExecutionReport& report,
+                                      const cex::common::Decimal& incr_filled_qty,
+                                      const cex::common::Decimal& average_price,
+                                      bool terminal);
   // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): ring-история
   // per-agent дельт ПО ТАКТАМ клиринга (в отличие от agent_positions_ выше,
   // которая хранит только ТЕКУЩУЮ накопленную позицию без привязки к такту).

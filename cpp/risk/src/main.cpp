@@ -75,6 +75,11 @@ int main() {
       catch (const std::exception& e) {
         cex::common::log_json("ERROR", "EmitNetHedges failed", {{"error", e.what()}});
       }
+      // F-18 v2 Э3: per-агент эмиссия по полосе ±q (за флагом CE_AGENT_BAND).
+      try { uc.EmitAgentBandHedges(); }
+      catch (const std::exception& e) {
+        cex::common::log_json("ERROR", "EmitAgentBandHedges failed", {{"error", e.what()}});
+      }
     }
   });
   hedge_thread.detach();

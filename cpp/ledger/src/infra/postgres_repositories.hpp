@@ -164,6 +164,12 @@ class PostgresAgentPositionRepository final : public app::AgentPositionRepositor
       const std::vector<std::string>& agent_ids,
       const std::vector<std::string>& assets,
       const std::vector<std::string>& venues) override;
+  void ApplyHedge(const std::string& agent_id,
+                  const std::string& asset,
+                  const std::string& venue,
+                  const cex::common::Decimal& position_delta,
+                  const cex::common::Decimal& in_flight_delta,
+                  int64_t updated_at_ms) override;
 
  private:
   std::shared_ptr<LedgerPgPool> pool_;

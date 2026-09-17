@@ -53,6 +53,7 @@ message AgentPosition {
   fob.common.v1.Decimal in_flight = 6;         // committed (Э3+), ЗНАКОВАЯ, пока всегда 0
   int64 updated_at_ms = 7;                     // unix ms последнего изменения
   string last_batch_id = 8;                    // последний такт, менявший позицию
+  fob.common.v1.Decimal reference_price = 9;   // Э3: P_node последней дельты (USDT/актив)
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;
@@ -70,7 +71,8 @@ message GetAgentPositionsResponse {
 
 - `position` — `fob.common.v1.Decimal` (деньги/объём, CLAUDE.md §9), **без** ограничения знака (позиция агента знаковая — A6, проверено тестом на отрицательную позицию).
 - `agent_kind` — **строка** ("translator" | "arbitrageur" | ""), НЕ общий `enum AgentKind` из черновика: совпадает с PG-хранением (`ce_agent_position.agent_kind TEXT CHECK (... IN ('translator','arbitrageur'))`, [ce-agent-position.md](../../07-data/ce-agent-position.md)) и не создаёт зависимость `ledger.proto → treasury.proto` (где живёт `AgentKind`) ради одного поля.
-- `in_flight` — добавлено к черновику: зарезервировано для Э3 (полоса `±q`, T-F18-304); до включения `CE_AGENT_BAND` всегда `0`.
+- `in_flight` — часть позиции, отправленная наружу band-хеджем и ещё не исполненная (Э3, T-F18-304). При `CE_AGENT_BAND=0` всегда `0`; при `=1` растёт на эмиссии (`RememberExecutionIntent` для `hedge_flow_id` вида `ce|band|<agent_id>|<asset>|<venue>`) и убывает по исполнению/терминалу (`apply_agent_band_report_locked`, Э4).
+- `reference_price` — цена узла `P_node` (USDT/актив) последней дельты клиринга (`AgentDelta.price_used`). Нужна `risk.EmitAgentBandHedges` для перевода избытка полосы (в стоимости) в количество актива хедж-заявки. `0` у арбитражёров и до первой дельты (такие агенты хедж не эмитят). Не персистится — восстанавливается первой же дельтой после рестарта.
 - `updated_at_ms` (`int64`, не `google.protobuf.Timestamp`) — консистентно с остальными `int64`-таймстемпами `ledger.proto` (напр. `BatchNopSnapshot.event_time_ms`).
 - **Идемпотентность:** RPC read-only, идемпотентен по конструкции — без явного `idempotency_key` (тот же паттерн, что `GetNodeBalances` / `GetBalances`). Чтение — из write-through кэша `LedgerUseCases::agent_positions_` (под `mu_`), не из PG на каждый вызов; кэш синхронно перечитывается из PG при старте сервиса (`SetAgentPositionRepo` → `LoadAgentPositionsFromRepo`) — позиция агента переживает рестарт.
 - `venue = ""` для арбитражёра — явный сентинел «route-level» (позиция арбитражёра скалярна, не per-venue); конвенция ключа при `V>2` — открытый вопрос ADR-061 (см. data-doc).

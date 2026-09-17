@@ -34,6 +34,18 @@ struct AgentBuilderConfig {
   // владельца 2026-09-16). <0 ⇒ брать комиссию из стакана venue (прежнее поведение,
   // выставляется с фронта). Runtime из f05a_clearing_config.ce_taker_fee_bps.
   double taker_fee_bps_override = 0.0;
+  // Множитель члена ½·spread в полке (dead_zone). По умолчанию 0 => ПОЛКА НУЛЕВАЯ
+  // (переводчик клирит ликвидность книг до мида, а не только при разрыве > ½спреда;
+  // решение владельца 2026-09-16 — «полку по умолчанию сделать нулевой»). >0 =>
+  // вернуть долю полуспреда как барьер маркет-мейкера (выставляется с фронта/конфига).
+  double half_spread_mult = 0.0;
+  // Порог «широкого спреда» (‰): книги с half_spread ≥ порога считаются тонкими/
+  // ненадёжными (почти пустой стакан, кросс-пара с рассинхроном) и СОХРАНЯЮТ полный
+  // ½·спред как полку — иначе клиринг гоняет их шум (напр. якорь ETH/BTC ~97‰) через
+  // ликвидные рёбра, раздувая позиции. Ликвидные книги (спред ~1‰) < порога ⇒ полка
+  // по half_spread_mult (0 по умолчанию). Дефолт 20‰ отсекает кросс-пару (~144‰),
+  // но пускает CEX (~1‰) и uniswap (~6‰). 0 ⇒ порог выключен (защиты нет).
+  double wide_spread_guard_pm = 20.0;
 };
 
 struct QuoteAgent {
@@ -108,7 +120,16 @@ inline QuoteAgent BuildQuoteAgent(const std::vector<ExternalOrderLevel>& levels,
   const double eff_fee_bps =
       cfg.taker_fee_bps_override >= 0.0 ? cfg.taker_fee_bps_override : taker_fee_bps;
   const double taker_fee_pm = eff_fee_bps / 10.0;  // bps→‰ (1‰ = 10 bps)
-  a.dead_zone_pm = taker_fee_pm + half_spread_pm;
+  // Полка = комиссия + множитель·½спред. Ликвидная книга (спред < порога) с
+  // множителем 0 ⇒ ПОЛКА НУЛЕВАЯ: клиринг двигает поток на любой девиации,
+  // переводчики клирят ликвидность. Тонкая/ненадёжная книга (спред ≥ порога) ⇒
+  // полный ½спред как барьер, иначе её шум (напр. ETH/BTC ~97‰) гоняется через
+  // ликвидные рёбра и раздувает позиции. Порог 0 ⇒ выключен.
+  const double guard_mult =
+      (cfg.wide_spread_guard_pm > 0.0 && half_spread_pm >= cfg.wide_spread_guard_pm)
+          ? 1.0
+          : cfg.half_spread_mult;
+  a.dead_zone_pm = taker_fee_pm + guard_mult * half_spread_pm;
 
   a.valid = a.depth > 0.0;
   if (!a.valid) a.reason = "non-positive depth";

@@ -88,6 +88,7 @@ void KafkaConsumers::loop_ce_position_delta() {
           d.asset = ad.asset();
           d.venue = ad.venue();
           d.delta = cex::common::Decimal::from_proto(ad.delta());
+          d.price_used = cex::common::Decimal::from_proto(ad.price_used());  // F-18 v2 Э3
           agent_deltas.push_back(std::move(d));
         } else {
           node_deltas.emplace_back(ad.asset(), cex::common::Decimal::from_proto(ad.delta()));

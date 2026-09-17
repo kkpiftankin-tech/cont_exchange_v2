@@ -195,6 +195,18 @@ class AgentPositionRepositoryPort {
       const std::vector<std::string>& agent_ids,
       const std::vector<std::string>& assets,
       const std::vector<std::string>& venues) = 0;
+  // F-18 v2 · Э3/Э4 (ADR-061 §4): аддитивно применить сдвиги, вызванные
+  // хеджем — НЕ идемпотентно по batch_id (это execution-путь, не клиринг):
+  // position += position_delta, in_flight += in_flight_delta. Оба знаковые,
+  // в единицах позиции (k-USDT). Строка обязана существовать (создаётся
+  // клирингом раньше эмиссии); при отсутствии — no-op. Пустой default для
+  // no-op/тестовых репозиториев.
+  virtual void ApplyHedge(const std::string& /*agent_id*/,
+                          const std::string& /*asset*/,
+                          const std::string& /*venue*/,
+                          const cex::common::Decimal& /*position_delta*/,
+                          const cex::common::Decimal& /*in_flight_delta*/,
+                          int64_t /*updated_at_ms*/) {}
 };
 
 }  // namespace cex::ledger::app

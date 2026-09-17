@@ -989,6 +989,50 @@ void MatchingLoop::on_ce_clearing_input(
 
   const domain::CeClearResult res = domain::ClearCe(graph);
 
+  // F-18 v2 диагностика (env CE_CLEARING_DEBUG, default OFF): по-рёберная картина
+  // клиринга — почему поток f нулевой/ненулевой. Для КАЖДОГО ребра логируем якорь
+  // σ*, разность потенциалов x[u]−x[v], девиацию d=σ*−(x[u]−x[v]), полку dead_zone,
+  // «зазор» |d|−dead_zone (>0 ⇒ ребро активно) и поток f. Отдельно — сколько рёбер
+  // переводчиков (QUOTE) активно и максимальный |d|/dead_zone. Не меняет поведение;
+  // нужно, чтобы на живых данных отличить «переводчики корректно стоят (девиация <
+  // полки)» от «упускается исполнимая ликвидность». domain не логирует (§10.2) —
+  // поэтому здесь, в app-слое, где доступны graph.edges + res.x/res.f.
+  if (cex::common::Env::get_bool("CE_CLEARING_DEBUG", false)) {
+    int quote_active = 0, quote_total = 0;
+    double max_ratio = 0.0;
+    for (size_t i = 0; i < graph.edges.size(); ++i) {
+      const auto& e = graph.edges[i];
+      const double xu = e.u < static_cast<int>(res.x.size()) ? res.x[e.u] : 0.0;
+      const double xv = e.v < static_cast<int>(res.x.size()) ? res.x[e.v] : 0.0;
+      const double d = e.anchor - (xu - xv);
+      const double gap = std::fabs(d) - e.dead_zone;  // >0 ⇒ активно
+      const double f = i < res.f.size() ? res.f[i] : 0.0;
+      const bool is_quote = (e.leg == domain::CeLeg::kQuote);
+      if (is_quote) {
+        ++quote_total;
+        if (gap > 0.0) ++quote_active;
+        if (e.dead_zone > 1e-12)
+          max_ratio = std::fmax(max_ratio, std::fabs(d) / e.dead_zone);
+      }
+      cex::common::log_json("DEBUG", "CE clearing edge",
+          {{"batch_id", input.batch_id()},
+           {"edge", e.name},
+           {"leg", is_quote ? "QUOTE(translator)" : "TRANSFER(arbitrageur)"},
+           {"anchor_pm", std::to_string(e.anchor)},
+           {"xu_minus_xv_pm", std::to_string(xu - xv)},
+           {"deviation_pm", std::to_string(d)},
+           {"dead_zone_pm", std::to_string(e.dead_zone)},
+           {"gap_pm", std::to_string(gap)},
+           {"flow_f", std::to_string(f)}});
+    }
+    cex::common::log_json("INFO", "CE clearing edge summary",
+        {{"batch_id", input.batch_id()},
+         {"quote_edges", std::to_string(quote_total)},
+         {"quote_active", std::to_string(quote_active)},
+         {"max_dev_over_deadzone", std::to_string(max_ratio)},
+         {"max_imbalance", std::to_string(res.max_imbalance)}});
+  }
+
   fob::treasury::v1::CePositionDeltaBatch batch;
   batch.set_batch_id(input.batch_id());
   batch.set_event_time_ms(input.event_time_ms());
@@ -1023,7 +1067,7 @@ void MatchingLoop::on_ce_clearing_input(
     // между per-node (house) и per-agent (ce_agent_position) нет: это разные
     // книги учёта одного и того же такта клиринга.
     const std::vector<domain::CeAgentDelta> agent_deltas =
-        domain::ProjectAgentDeltas(graph, res);
+        domain::ProjectAgentDeltas(graph, res, ref_price);
     for (const auto& d : agent_deltas) {
       auto* ad = batch.add_deltas();
       ad->set_agent_id(d.agent_id);
@@ -1033,6 +1077,9 @@ void MatchingLoop::on_ce_clearing_input(
       ad->set_asset(d.asset);
       ad->set_venue(d.venue);
       *ad->mutable_delta() = to_dec(d.delta);
+      // Э3: P_node базового узла → ledger.last_price → GetAgentPositions.reference_price
+      // → risk переводит избыток полосы в количество хедж-заявки (иначе полоса молчит).
+      if (d.price_used > 0.0) *ad->mutable_price_used() = to_dec(d.price_used);
       ++emitted;
     }
   }

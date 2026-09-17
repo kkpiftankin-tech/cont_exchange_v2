@@ -102,6 +102,10 @@ struct CeAgentDelta {
   std::string asset;
   std::string venue;
   double delta{0.0};   // Δc_j = f_j этого такта, ЗНАКОВАЯ — знак = направление агента
+  // F-18 v2 Э3 (T-F18-303): цена узла P_node базового конца ребра (USDT/актив),
+  // по которой risk переводит избыток полосы (стоимость) в количество хедж-заявки.
+  // Хранится в ledger как last_price → отдаётся в GetAgentPositions.reference_price.
+  double price_used{0.0};
 };
 
 // По одной строке на РЕБРО (агента). kStock не эмитится (deprecated в v2,
@@ -116,6 +120,7 @@ struct CeAgentDelta {
 // т.к. оба конца — один актив на разных площадках).
 inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
                                                      const CeClearResult& r,
+                                                     const std::map<std::string, double>& ref_price,
                                                      double eps = 1e-12) {
   std::vector<CeAgentDelta> out;
   if (static_cast<int>(in.node_meta.size()) != in.num_nodes) return out;  // нет метаданных
@@ -132,6 +137,11 @@ inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
     d.asset = in.node_meta[e.u].asset;
     d.venue = (e.leg == CeLeg::kQuote) ? in.node_meta[e.u].venue : in.node_meta[e.v].venue;
     d.delta = f;
+    // P_node базового узла (e.u) — та же формула, что в ProjectPositionQuantity:
+    // P_node = P0·exp(x/1000). Нужна risk для перевода value→qty при band-хедже.
+    auto rp = ref_price.find(d.asset);
+    if (rp != ref_price.end() && rp->second > 0.0)
+      d.price_used = rp->second * std::exp(r.x[e.u] / 1000.0);
     out.push_back(d);
   }
   return out;
