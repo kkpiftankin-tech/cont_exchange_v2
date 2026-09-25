@@ -977,9 +977,16 @@ std::map<std::string, double> MatchingLoop::FetchAgentPositionsCached() {
     return inv_positions_;
   }
   std::map<std::string, double> m;
-  for (const auto& p : resp.positions())
-    m[p.agent_id()] =
-        static_cast<double>(cex::common::Decimal::from_proto(p.position()));
+  for (const auto& p : resp.positions()) {
+    // Модель A7: при пробое избыток УХОДИТ из position в заявку (in_flight), поэтому
+    // position сам по себе держится у band. Истинный инвентарь агента (для inventory-
+    // skew, обратная связь позиция→цена) = position + in_flight (обе одного знака) —
+    // отправленное в заявку тоже ещё удерживается до исполнения. Иначе skew ослабевает,
+    // когда в заявках висит большой объём (follow-up F-18: skew на полное обязательство).
+    const double c = static_cast<double>(cex::common::Decimal::from_proto(p.position()));
+    const double in_flight = static_cast<double>(cex::common::Decimal::from_proto(p.in_flight()));
+    m[p.agent_id()] = c + in_flight;
+  }
   std::lock_guard<std::mutex> lk(inv_mu_);
   inv_positions_.swap(m);
   inv_last_fetch_ = std::chrono::steady_clock::now();

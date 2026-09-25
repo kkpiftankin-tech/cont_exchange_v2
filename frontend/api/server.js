@@ -7497,25 +7497,41 @@ async function handleVectorClearing(req, res, pathname, query) {
     ]);
     const agent = buildAgentRows(agentPositions, agentDeltas).find((a) => a.agent_id === agentId) || null;
     if (!agent) return writeJson(res, 404, { error: "agent_not_found" });
-    // γ/клэмп из конфига (для сдвига цены от позиции).
+    // Конфиг для дисплея, согласованный с backend: skew (γ/клэмп) + трёхзонные пороги
+    // band от комиссии (Кривые §6.4). Дефолты = env-дефолты ledger/matching.
     let gamma = 0.005, clamp = 8;
+    let cmktBps = 10, climBps = 2, kBand = 1.8;  // = CE_BAND_REF_FEE_BPS/MAKER_FEE_BPS/FEE_K
     const pool = getPgPool();
     if (pool) {
       try {
-        const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
-        if (r.rows[0]) { gamma = Number(r.rows[0].ce_inv_skew_gamma) || 0; clamp = Number(r.rows[0].ce_inv_skew_max_pm) || 0; }
+        const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm, ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k FROM f05a_clearing_config WHERE id=1");
+        if (r.rows[0]) {
+          const row = r.rows[0];
+          gamma = Number(row.ce_inv_skew_gamma) || 0; clamp = Number(row.ce_inv_skew_max_pm) || 0;
+          if (Number(row.ce_taker_fee_bps) > 0) cmktBps = Number(row.ce_taker_fee_bps);
+          if (Number(row.ce_maker_fee_bps) > 0) climBps = Number(row.ce_maker_fee_bps);
+          if (row.ce_band_fee_k != null) kBand = Number(row.ce_band_fee_k);
+        }
       } catch (e) { /* дефолты */ }
     }
     const isT = agent.agent_kind === 'translator';
-    const c = Number(agent.c_position) || 0;
-    const skewPm = Math.max(-clamp, Math.min(clamp, gamma * c));  // clamp(γ·c_j), ‰
+    // Модель A7: skew на ПОЛНОЕ обязательство c+in_flight (истинный инвентарь), как в
+    // matching — а не на c_position (у band под A7). c_total уже = c + in_flight.
+    const c = (agent.c_total != null) ? Number(agent.c_total)
+                                      : (Number(agent.c_position) || 0) + (Number(agent.in_flight) || 0);
+    const skewPm = Math.max(-clamp, Math.min(clamp, gamma * c));  // clamp(γ·(c+in_flight)), ‰
     const priceShiftPm = -skewPm;   // anchor_eff = anchor − skew ⇒ сдвиг цены = −skew
-    // Порог q (Вариант 2, ledger): CE_AGENT_BAND_Q_TRANSLATOR=18 / _ARBITRAGEUR=30.
-    // Хедж-заявку эмитит ТОЛЬКО переводчик (арбитражёр в текущей модели не хеджируется).
-    const q = isT ? 18 : 30;
+    // Трёхзонные пороги от комиссии (как в ledger detect_and_emit): rt=round-trip
+    // (арбитражёр ×2 биржи). Z̄lim — вход в хедж (пассив-мейкер), Z̄mkt — агрессив-тейкер.
+    const rt = isT ? 1 : 2;
+    const qFloor = 5;  // = CE_AGENT_BAND_Q_MIN
+    const zLim = Math.max(qFloor, kBand * climBps * rt);
+    const zMkt = Math.max(zLim, kBand * cmktBps * rt);
+    const q = zLim;  // порог входа = Z̄lim (совместимость с фронтом b.q)
     const absC = Math.abs(c);
     const excess = absC - q;
-    const breached = isT && excess > 0;
+    const breached = excess > 0;   // хеджируются оба типа (переводчик и арбитражёр)
+    const aggressive = absC > zMkt;  // зона: taker (>Z̄mkt) | maker
     // Хедж-диагностика этого агента (последняя): заявка + публичные сделки + исполнение.
     let hedge = null;
     if (pool) {
@@ -7554,7 +7570,7 @@ async function handleVectorClearing(req, res, pathname, query) {
     }
     return writeJson(res, 200, {
       agent, skew: { gamma, clamp, skewPm, priceShiftPm },
-      band: { q, applies: isT, absC, excess, breached },
+      band: { q, zLim, zMkt, aggressive, applies: true, absC, excess, breached },
       hedge, generatedAt: new Date().toISOString()
     });
   }

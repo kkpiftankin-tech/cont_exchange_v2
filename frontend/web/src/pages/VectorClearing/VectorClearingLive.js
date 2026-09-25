@@ -341,28 +341,27 @@ function AgentDrillDown({ detail }) {
       </div>
       <div style={box}>
         <div style={head}>Сдвиг цены от позиции (inventory-skew)</div>
-        <div style={{ fontSize: 13 }}>anchor_eff = anchor − clamp(γ·c_j), γ={sk.gamma}, клэмп={sk.clamp}‰</div>
+        <div style={{ fontSize: 13 }}>anchor_eff = anchor − clamp(γ·(c_j+in_flight)), γ={sk.gamma}, клэмп={sk.clamp}‰</div>
         <div>текущий сдвиг цены:{' '}
           <b style={{ color: psColor }}>{ps >= 0 ? '+' : ''}{ps.toFixed(3)} ‰</b>{' '}
-          ({c > 1e-9 ? 'позиция + ⇒ цена ↓ (возврат к нулю)' : c < -1e-9 ? 'позиция − ⇒ цена ↑ (возврат к нулю)' : 'позиция 0 ⇒ сдвига нет'})
+          ({cTotal > 1e-9 ? 'обязательство + ⇒ цена ↓ (возврат к нулю)' : cTotal < -1e-9 ? 'обязательство − ⇒ цена ↑ (возврат к нулю)' : 'обязательство 0 ⇒ сдвига нет'})
         </div>
       </div>
       <div style={box}>
-        <div style={head}>Порог по позиции (band q)</div>
-        {isT ? (
-          <div>|c_j| = <b>{kusd(b.absC)}</b> vs порог q = <b>{kusd(b.q)}</b> ⇒ избыток = <b>{kusd(b.excess)}</b>{'  '}
-            <span style={{ padding: '1px 8px', borderRadius: 10, fontWeight: 600, color: b.breached ? '#f0b0b0' : '#8fe0b0', background: b.breached ? '#5a2020' : '#1f3a2a', border: `1px solid ${b.breached ? '#7a3030' : '#2a4a3a'}` }}>
-              {b.breached ? 'ПОРОГ ПРЕВЫШЕН' : 'в полосе'}</span>
+        <div style={head}>Порог по позиции — трёхзонное правило от комиссии (Кривые §6.4)</div>
+        <div>|обязательство| = <b>{kusd(b.absC)}</b> vs порог входа Z̄lim = <b>{kusd(b.zLim != null ? b.zLim : b.q)}</b> ⇒ избыток = <b>{kusd(b.excess)}</b>{'  '}
+          <span style={{ padding: '1px 8px', borderRadius: 10, fontWeight: 600, color: b.breached ? '#f0b0b0' : '#8fe0b0', background: b.breached ? '#5a2020' : '#1f3a2a', border: `1px solid ${b.breached ? '#7a3030' : '#2a4a3a'}` }}>
+            {b.breached ? 'ПОРОГ ПРЕВЫШЕН' : 'в полосе'}</span>
+        </div>
+        {b.zMkt != null && (
+          <div style={{ fontSize: 12, color: MUTE, marginTop: 3 }}>
+            зоны: ≤{kusd(b.zLim)} — не хеджируем; {kusd(b.zLim)}…{kusd(b.zMkt)} — пассивный <b>мейкер</b>-лимит; &gt;{kusd(b.zMkt)} — агрессивный <b>тейкер</b>-сброс.{' '}
+            текущая зона: <b style={{ color: b.aggressive ? '#e6a15a' : '#8fb0e0' }}>{b.aggressive ? 'тейкер (агрессив)' : 'мейкер (пассив)'}</b>
+            {!isT && ' · арбитражёр: round-trip 2 биржи (комиссия ×2)'}
           </div>
-        ) : (b.q != null ? (
-          <div>|c_j| = <b>{kusd(b.absC)}</b> vs порог q = <b>{kusd(b.q)}</b> ⇒ избыток = <b>{kusd(b.excess)}</b>{'  '}
-            <span style={{ padding: '1px 8px', borderRadius: 10, fontWeight: 600, color: b.breached ? '#f0b0b0' : '#8fe0b0', background: b.breached ? '#5a2020' : '#1f3a2a', border: `1px solid ${b.breached ? '#7a3030' : '#2a4a3a'}` }}>
-              {b.breached ? 'ПОРОГ ПРЕВЫШЕН' : 'в полосе'}</span>
-            <div style={{ fontSize: 12, color: MUTE, marginTop: 2 }}>порог арбитражёра шире: round-trip 2 биржи (комиссия ×2)</div>
-          </div>
-        ) : <div style={{ fontSize: 13 }}>порог band = k_band·φ_rt (комиссия внешних бирж).</div>)}
+        )}
       </div>
-      {isT && b.breached && (
+      {b.breached && (
         <div style={box}>
           <div style={head}>Хедж-заявка → публичные сделки → имитируемое исполнение</div>
           {h ? (
