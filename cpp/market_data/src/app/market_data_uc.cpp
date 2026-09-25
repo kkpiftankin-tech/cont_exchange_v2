@@ -668,6 +668,9 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   // почти пустой стакан) сохраняют полный ½спред как полку. Дефолт 20‰.
   const char* wsg_env = std::getenv("CE_DEAD_ZONE_WIDE_SPREAD_PM");
   const double wide_spread_guard_pm = wsg_env ? std::atof(wsg_env) : 20.0;
+  // ADR-065 Q1 (§6.4): комиссия НЕ в полке кривой, только в порогах band. Дефолт false;
+  // CE_COMMISSION_IN_POLKA=1 возвращает §A1 (полка = комиссия + ½спред).
+  const bool commission_in_polka = cex::common::Env::get_bool("CE_COMMISSION_IN_POLKA", false);
   const bool cross_pairs = cex::common::Env::get_bool("CE_CROSS_PAIRS", false);
   auto to_dec = [](double x) {
     return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
@@ -750,6 +753,7 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     acfg.taker_fee_bps_override = ce_taker_fee_bps_;  // настраиваемая комиссия (0 ⇒ линейно)
     acfg.half_spread_mult = half_spread_mult;          // 0 ⇒ полка нулевая
     acfg.wide_spread_guard_pm = wide_spread_guard_pm;  // тонкие книги сохраняют ½спред
+    acfg.commission_in_polka = commission_in_polka;    // ADR-065 Q1: комиссия в порогах, не в полке
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
     // Масштаб скорости: глубина(запас) → скорость·dt = глубина·(dt/τ). τ≤0 или

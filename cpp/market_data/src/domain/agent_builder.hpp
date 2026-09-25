@@ -46,6 +46,10 @@ struct AgentBuilderConfig {
   // по half_spread_mult (0 по умолчанию). Дефолт 20‰ отсекает кросс-пару (~144‰),
   // но пускает CEX (~1‰) и uniswap (~6‰). 0 ⇒ порог выключен (защиты нет).
   double wide_spread_guard_pm = 20.0;
+  // ADR-065 Q1 (решение владельца §6.4): комиссия НЕ в полке кривой, а ТОЛЬКО в
+  // порогах band (ledger). false (дефолт) ⇒ полка = ½·spread без комиссии. true ⇒
+  // §A1-поведение (полка = комиссия + ½·spread) — обратимо через env CE_COMMISSION_IN_POLKA.
+  bool commission_in_polka = false;
 };
 
 struct QuoteAgent {
@@ -129,7 +133,9 @@ inline QuoteAgent BuildQuoteAgent(const std::vector<ExternalOrderLevel>& levels,
       (cfg.wide_spread_guard_pm > 0.0 && half_spread_pm >= cfg.wide_spread_guard_pm)
           ? 1.0
           : cfg.half_spread_mult;
-  a.dead_zone_pm = taker_fee_pm + guard_mult * half_spread_pm;
+  // ADR-065 Q1: комиссия входит в полку ТОЛЬКО при commission_in_polka (§A1-совместимость);
+  // по умолчанию (§6.4) полка = множитель·½спред, комиссия — только в порогах band (ledger).
+  a.dead_zone_pm = (cfg.commission_in_polka ? taker_fee_pm : 0.0) + guard_mult * half_spread_pm;
 
   a.valid = a.depth > 0.0;
   if (!a.valid) a.reason = "non-positive depth";
