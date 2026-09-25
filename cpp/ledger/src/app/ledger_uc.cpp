@@ -1596,10 +1596,13 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const Decimal q{static_cast<int64_t>(std::llround(z_lim * 1e6)), 6};
   const Decimal abs_c = Decimal::cmp(st.position, zero) >= 0 ? st.position
                                                              : Decimal::sub(zero, st.position);
-  const Decimal abs_if = Decimal::cmp(st.in_flight, zero) >= 0 ? st.in_flight
-                                                               : Decimal::sub(zero, st.in_flight);
-  const Decimal excess = Decimal::sub(Decimal::sub(abs_c, q), abs_if);  // свободный избыток
-  if (Decimal::cmp(excess, zero) <= 0) return;  // в no-action зоне или покрыт in_flight
+  // Модель A7: избыток эмиссии УЖЕ вычтен из c (c -= excess ниже), поэтому c — это
+  // НЕОТПРАВЛЕННЫЙ остаток (in_flight из него исключён). excess = |c| − z_lim: хеджируем
+  // весь остаток за band. НЕ вычитаем in_flight повторно — это было двойное вычитание
+  // (наследие модели B, где c включал всё) → excess≈0 → эмитились крохи, backlog запирался
+  // в in_flight и позиция росла (F-18 fix). in_flight-гард не нужен: c сам исключает in-flight.
+  const Decimal excess = Decimal::sub(abs_c, q);
+  if (Decimal::cmp(excess, zero) <= 0) return;  // c в no-action зоне (весь остаток в полосе)
   // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
   // При выключенном линке — всегда агрессив (старое поведение).
   const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
