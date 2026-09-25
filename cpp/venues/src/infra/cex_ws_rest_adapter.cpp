@@ -2161,7 +2161,36 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       if (dt_sec < cfg_.sim_price_impact_min_dt_sec) dt_sec = cfg_.sim_price_impact_min_dt_sec;
       const double filled_d = static_cast<double>(filled);
       const double v_signed = (is_sell ? -filled_d : filled_d) / dt_sec;   // лот/с, знак стороны
-      const double shift = cfg_.sim_price_impact_k * v_signed;             // сдвиг цены k·v
+      // k выводим из РЕАЛЬНОГО стакана (спец §3): k ~ τ/ρ, ρ — плотность стакана
+      // (лот на единицу цены) = Σqty верхних уровней / их ценовой диапазон. Глубокий
+      // стакан (большой ρ) ⇒ малый k ⇒ малый импакт (физически: малый хедж не двигает
+      // глубокий рынок); тонкий ⇒ большой k. Это согласует импакт между активами
+      // (BTC/SOL) — плоский k давал ~0 для дорогого BTC и завышал дешёвый SOL.
+      // CE_PRICE_IMPACT_K — безразмерный множитель поверх τ/ρ. ρ=0 ⇒ плоский k (fallback).
+      double rho = 0.0;
+      {
+        const std::size_t kMaxLvl = 10;
+        double qty_sum = 0.0, p_min = 0.0, p_max = 0.0; bool first = true;
+        const auto scan = [&](const std::vector<domain::VenueBookLevel>& side) {
+          std::size_t n = 0;
+          for (const auto& lv : side) {
+            if (n++ >= kMaxLvl) break;
+            const double p = static_cast<double>(lv.price);
+            const double q = static_cast<double>(lv.qty);
+            if (p <= 0.0 || q <= 0.0) continue;
+            qty_sum += q;
+            if (first) { p_min = p_max = p; first = false; }
+            else { p_min = std::min(p_min, p); p_max = std::max(p_max, p); }
+          }
+        };
+        scan(st.bids); scan(st.asks);
+        const double span = p_max - p_min;
+        if (span > 0.0 && qty_sum > 0.0) rho = qty_sum / span;  // лот/цена
+      }
+      const double k_eff = (rho > 0.0)
+          ? cfg_.sim_price_impact_k * (cfg_.sim_impact_tau_sec / rho)   // физический k=τ/ρ
+          : cfg_.sim_price_impact_k;                                    // fallback: плоский
+      const double shift = k_eff * v_signed;                           // сдвиг цены k·v
       impact_base_vwap = static_cast<double>(base_vwap);
       impact_v = v_signed;
       impact_dt = dt_sec;

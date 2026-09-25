@@ -759,7 +759,11 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       cfg->sim_trade_window_ms = static_cast<uint32_t>(
           std::max(500, cex::common::Env::get_int("VENUES_SIM_TRADE_WINDOW_MS", 30000)));
       // Temporary price-impact в симуляции исполнения: p_exec=S+k·v, v=filled/Δt.
+      // CE_PRICE_IMPACT_K — множитель на физический k=τ/ρ (спец §3): при >0 и наличии
+      // стакана k_eff = CE_PRICE_IMPACT_K·τ/ρ (ρ — плотность стакана лот/цена), иначе
+      // плоский k=CE_PRICE_IMPACT_K. τ — время восстановления стакана (сек).
       cfg->sim_price_impact_k = env_double("CE_PRICE_IMPACT_K", 0.0);
+      cfg->sim_impact_tau_sec = env_double("CE_IMPACT_TAU_SEC", 5.0);
       cfg->circuit_breaker_enabled = env_bool(
           "CIRCUIT_BREAKER_ENABLED", cfg->circuit_breaker_enabled);
       cfg->circuit_breaker_errors = static_cast<uint32_t>(

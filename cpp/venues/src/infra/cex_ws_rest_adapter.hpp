@@ -53,7 +53,8 @@ struct CexWsRestAdapterConfig {
   uint32_t sim_trade_buf_cap{512};
   // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
   // v=filled/Δt. k в цена·с/лот; 0 ⇒ импакт выключен (регрессия).
-  double sim_price_impact_k{0.0};
+  double sim_price_impact_k{0.0};            // множитель на физический k=τ/ρ (спец §3)
+  double sim_impact_tau_sec{5.0};            // τ — время восстановления стакана (сек), для k~τ/ρ
   double sim_price_impact_min_dt_sec{0.1};   // пол Δt (защита от деления на ~0)
   double sim_price_impact_default_dt_sec{1.0};  // Δt для первого fill символа
 
