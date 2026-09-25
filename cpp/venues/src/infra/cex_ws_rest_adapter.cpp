@@ -2099,6 +2099,11 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     // «ценовым контекстом по счёту» (устаревшие сделки больше не показываются как
     // «исполнила бы»). crosses = цена кроссит лимит (SELL: price≥limit; BUY:
     // price≤limit) И qty>0.
+    // Возраст (A): от БИРЖЕВОГО времени сделки (exchange_ms) — насколько сделка реально
+    // стара, независимо от каденса чтения REST. Fallback на read-time (now−tr.ts), если
+    // биржевое время неизвестно (coinbase ISO / WS-путь).
+    const int64_t sys_now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
     considered.reserve(std::min<std::size_t>(it->second.recent_trades.size(), 100));
     for (const auto& tr : it->second.recent_trades) {
       if (considered.size() >= 100) break;
@@ -2106,7 +2111,9 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       app::ConsideredTrade ct;
       ct.price = DecimalText(tr.price);
       ct.qty = DecimalText(tr.qty);
-      ct.age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - tr.ts).count();
+      ct.age_ms = (tr.exchange_ms > 0)
+          ? std::max<int64_t>(0, sys_now_ms - tr.exchange_ms)   // биржевое время (A)
+          : std::chrono::duration_cast<std::chrono::milliseconds>(now - tr.ts).count();  // fallback: read-time
       ct.crosses = cross;
       considered.push_back(std::move(ct));
     }
@@ -2413,8 +2420,9 @@ void CexWsRestAdapter::parse_rest_trades_locked(
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded()) return;
 
-  // Собираем нормализованные (key, price_text, qty_text) по формату биржи.
-  struct Row { int64_t key; std::string price; std::string qty; };
+  // Собираем нормализованные (key, price_text, qty_text, exch_ms) по формату биржи.
+  // exch_ms — БИРЖЕВОЕ время сделки (Unix ms) для возраста в UI (A); 0 = неизвестно.
+  struct Row { int64_t key; std::string price; std::string qty; int64_t exch_ms; };
   std::vector<Row> rows;
   const auto num_str = [](const json& v) -> std::string {
     if (v.is_string()) return v.get<std::string>();
@@ -2427,27 +2435,36 @@ void CexWsRestAdapter::parse_rest_trades_locked(
     if (v.is_string()) { try { return std::stoll(v.get<std::string>()); } catch (...) { return 0; } }
     return 0;
   };
+  // Unix ms из числа (ms) или строки (ms). Секунды kraken → ×1000 отдельно.
+  const auto to_ms = [](const json& v) -> int64_t {
+    if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+    if (v.is_string()) { try { return static_cast<int64_t>(std::stod(v.get<std::string>())); } catch (...) { return 0; } }
+    return 0;
+  };
 
   if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     if (root.contains("data") && root["data"].is_array())
       for (const auto& t : root["data"])
         rows.push_back({to_key(t.value("tradeId", t.value("ts", json(0)))),
-                        num_str(t.value("px", json())), num_str(t.value("sz", json()))});
+                        num_str(t.value("px", json())), num_str(t.value("sz", json())),
+                        to_ms(t.value("ts", json(0)))});  // okx ts — ms (строка)
   } else if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     if (root.contains("result") && root["result"].is_object())
       for (auto it = root["result"].begin(); it != root["result"].end(); ++it) {
         if (it.key() == "last" || !it.value().is_array()) continue;
         for (const auto& t : it.value())
-          if (t.is_array() && t.size() >= 3)
-            rows.push_back({static_cast<int64_t>(t[2].is_number() ? t[2].get<double>() * 1000.0 : 0),
-                            num_str(t[0]), num_str(t[1])});
+          if (t.is_array() && t.size() >= 3) {
+            const int64_t ms = static_cast<int64_t>(t[2].is_number() ? t[2].get<double>() * 1000.0 : 0);
+            rows.push_back({ms, num_str(t[0]), num_str(t[1]), ms});  // kraken t[2] — сек → ms
+          }
       }
   } else if (root.is_array()) {  // binance / coinbase — массив объектов
     for (const auto& t : root) {
       const bool coinbase = t.contains("trade_id") || t.contains("size");
       rows.push_back({to_key(t.value(coinbase ? "trade_id" : "id", json(0))),
                       num_str(t.value("price", json())),
-                      num_str(t.value(coinbase ? "size" : "qty", json()))});
+                      num_str(t.value(coinbase ? "size" : "qty", json())),
+                      coinbase ? 0 : to_ms(t.value("time", json(0)))});  // binance time — ms; coinbase ISO ⇒ 0
     }
   }
 
@@ -2472,7 +2489,7 @@ void CexWsRestAdapter::parse_rest_trades_locked(
     if (!parse_decimal_to_scale(r.price, cfg_.market_price_scale, &price_u) || price_u <= 0) continue;
     if (!parse_decimal_to_scale(r.qty, cfg_.market_qty_scale, &qty_u) || qty_u <= 0) continue;
     const TradePrint tp{cex::common::Decimal{price_u, cfg_.market_price_scale},
-                        cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now};
+                        cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now, r.exch_ms};
     state.recent_trades.push_back(tp);
     state.context_trades.push_back(tp);  // ценовой контекст (#3), без time-прунинга
     if (r.key > max_key) max_key = r.key;

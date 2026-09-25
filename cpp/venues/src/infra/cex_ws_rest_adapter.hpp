@@ -185,7 +185,8 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   struct TradePrint {
     cex::common::Decimal price{0, 0};
     cex::common::Decimal qty{0, 0};  // остаток объёма (потребляется при филлах)
-    SteadyClock::time_point ts{};
+    SteadyClock::time_point ts{};    // время ЧТЕНИЯ по REST — для окна матчинга (staleness)
+    int64_t exchange_ms{0};          // биржевое время сделки (Unix ms) — для ВОЗРАСТА в UI; 0=неизв.
   };
 
   struct SymbolBookState {
