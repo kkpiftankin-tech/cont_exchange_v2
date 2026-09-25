@@ -1535,10 +1535,40 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   if (!cex::common::Env::get_bool("CE_AGENT_BAND", false)) return;
   const bool is_arbitrageur = st.agent_kind == "arbitrageur";
   if (st.agent_kind != "translator" && !is_arbitrageur) return;
-  if (st.base_price.units == 0 || st.last_price.units == 0) return;  // нет цен — не размерить
   const auto& [agent_id, asset, venue] = key;
-
   const Decimal zero = Decimal::zero();
+
+  // F-18 (follow-up 1a, §«Счёт дома»/«свобода нумерария»): арбитражёр ПЕРЕНОСА
+  // НУМЕРАРИЯ (A_USDT/T_USD, asset == numeraire) НЕ хеджируется рынком — хедж
+  // «USDT/USDT» вырожден, рыночного риска нет. Его план-позиция — счётная невязка
+  // нумерария; по доку остаток СМЕТАЕТСЯ в счёт дома. Дренируем план к band
+  // (владение НЕ трогаем — §«клиринг/накопление/перевозы владение не меняют»),
+  // без AgentBandBreach. Иначе позиция парковалась (base_price=0 → guard пропускал).
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  if (is_arbitrageur && asset == numeraire) {
+    const auto cfg_n = LoadBandFeeConfig();
+    const double floor_n = [] { const char* v = std::getenv("CE_AGENT_BAND_Q_MIN"); return v ? std::atof(v) : 5.0; }();
+    const double z_lim_n = (cfg_n.k_band > 0.0)
+        ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 2.0)   // rt=2 (арбитражёр)
+        : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
+    const Decimal q_n{static_cast<int64_t>(std::llround(z_lim_n * 1e6)), 6};
+    const Decimal abs_c_n = Decimal::cmp(st.position, zero) >= 0 ? st.position
+                                                                 : Decimal::sub(zero, st.position);
+    const Decimal excess_n = Decimal::sub(abs_c_n, q_n);
+    if (Decimal::cmp(excess_n, zero) <= 0) return;  // в полосе — ничего
+    const bool pos_pos_n = Decimal::cmp(st.position, zero) >= 0;
+    const Decimal drain = pos_pos_n ? excess_n : Decimal::sub(zero, excess_n);
+    st.position = Decimal::sub(st.position, drain);  // план → ±band (сметён в дом)
+    st.updated_at_ms = ts_ms;
+    if (agent_position_repo_)
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::sub(zero, drain), zero, ts_ms);
+    cex::common::log_json("INFO", "F-18 numeraire swept to house",
+                          {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
+                           {"swept", excess_n.to_string()}, {"band", q_n.to_string()}});
+    return;
+  }
+
+  if (st.base_price.units == 0 || st.last_price.units == 0) return;  // нет цен — не размерить
   // ТРЁХЗОННОЕ правило хеджа от комиссии внешних бирж (Кривые §6.4). Две границы:
   //   Z̄lim = k_band·clim·rt (no-action → пассивный мейкер-лимит, комиссия clim),
   //   Z̄mkt = k_band·cmkt·rt (пассив → агрессивный тейкер-сброс, cmkt=тейкер+½спред),
