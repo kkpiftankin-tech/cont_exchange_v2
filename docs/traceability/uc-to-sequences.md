@@ -63,6 +63,14 @@
 | UC-F15-06 | `…/UC-F15-06-replay-determinism-check/sequences/` | (TBD) | (none yet) |
 | UC-F16-01 | `…/UC-F16-01-trigger-kill-switch/sequences/` | (TBD) | (none yet) |
 | UC-F17-01 | `…/UC-F17-01-fire-alert/sequences/` | (TBD) | (none yet) |
+| UC-F18-04 (v2, primary) | `…/UC-F18-04-ce-v2-agent-band-hedge/sequences/SEQ-UC-F18-04-system.md` | `SEQ-F18-UC-F18-04-services.md` | (planned — L2 gated под ADR-061) |
+| UC-F18-01 (v1, superseded) | `…/UC-F18-01-form-ce-capital/sequences/` | — | — (заменён UC-F18-04) |
+| UC-F18-02 (v1, superseded) | `…/UC-F18-02-derive-ce-position/sequences/` | — | — (заменён UC-F18-04) |
+| UC-F18-03 (v1, superseded) | `…/UC-F18-03-hedge-net-position/sequences/` | — | — (заменён UC-F18-04) |
+
+> **F-18 v2 (2026-09-15):** активная цепочка — UC-F18-04 → L0 `SEQ-UC-F18-04-system`
+> (kite) + L1 `SEQ-F18-UC-F18-04-services` (sea). v1 UC-F18-01..03 сохранены как
+> superseded (CLAUDE.md §0a Conflict rule), модель заменяется под ADR-061 (planned).
 
 ## L2 Component-internal sequences (Fish 🐟)
 

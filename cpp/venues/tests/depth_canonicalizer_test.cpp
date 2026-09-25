@@ -130,6 +130,31 @@ bool TestOrderBookEmptyStatus() {
   return true;
 }
 
+bool TestCoarseTickPreservesDepthForLowPricedPair() {
+  // ETH/BTC-подобная книга: цена ~0.032 (scale 5), но venue-wide tick 0.01.
+  // Без guard'а floor/ceil к тику схлопнул бы все уровни в один бакет (0.03);
+  // guard (best price < 100·tick ⇒ тик отключается) сохраняет глубину книги.
+  const DepthCanonicalizationConfig config{
+      .tick_size = Decimal{.units = 1, .scale = 2},  // 0.01 — грубый для цены ~0.032
+      .lot_size = Decimal{.units = 0, .scale = 0},
+      .min_qty = Decimal{.units = 0, .scale = 0},
+      .max_levels_per_side = 0,
+  };
+
+  const std::vector<BookLevel> raw_bids = {
+      Level(3217, 500, 5),  // 0.03217
+      Level(3216, 600, 5),  // 0.03216
+      Level(3215, 700, 5),  // 0.03215
+  };
+
+  const auto bids = CanonicalizeBookSide(raw_bids, BookSide::kBid, config);
+  if (!Check(bids.size() == 3, "coarse tick must NOT collapse low-priced book depth")) return false;
+  if (!CheckLevel(bids[0], 3217, 500, 5)) return false;
+  if (!CheckLevel(bids[1], 3216, 600, 5)) return false;
+  if (!CheckLevel(bids[2], 3215, 700, 5)) return false;
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -137,6 +162,7 @@ int main() {
   if (!TestAskSideCanonicalization()) return EXIT_FAILURE;
   if (!TestMinQtyAndTopN()) return EXIT_FAILURE;
   if (!TestOrderBookEmptyStatus()) return EXIT_FAILURE;
+  if (!TestCoarseTickPreservesDepthForLowPricedPair()) return EXIT_FAILURE;
 
   std::cout << "[OK] depth_canonicalizer_test passed" << std::endl;
   return EXIT_SUCCESS;

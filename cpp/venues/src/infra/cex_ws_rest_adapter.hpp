@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "infra/cex_local_lob_assembler.hpp"
+#include "app/fill_diagnostics_sink.hpp"
 #include "domain/venue_adapter.hpp"
 
 namespace cex::venues::infra {
@@ -47,8 +48,14 @@ struct CexWsRestAdapterConfig {
   // avg=VWAP реальных сделок; объём сделок потребляется (частичные филлы). Окно —
   // sim_trade_window_ms. Нет пересечения ⇒ filled=0 (заявка «висит», переэмитится).
   bool sim_match_real_trades{false};
-  uint32_t sim_trade_window_ms{10000};
+  uint32_t sim_trade_window_ms{10000};   // фолбэк-окно до измерения периода чтения
+  uint32_t sim_trade_stale_periods{3};   // окно = N · фактический период чтения ленты
   uint32_t sim_trade_buf_cap{512};
+  // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
+  // v=filled/Δt. k в цена·с/лот; 0 ⇒ импакт выключен (регрессия).
+  double sim_price_impact_k{0.0};
+  double sim_price_impact_min_dt_sec{0.1};   // пол Δt (защита от деления на ~0)
+  double sim_price_impact_default_dt_sec{1.0};  // Δt для первого fill символа
 
   double rest_requests_per_sec{10.0};
   double rest_burst{10.0};
@@ -159,6 +166,10 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   bool ApplyRuntimeConfig(const domain::VenueAdapterRuntimeConfig& config) override;
 
+  // F-18/ADR-060: приёмник диагностики sim-fill (venue_fill_diagnostics → Clearing).
+  // Опционален (nullptr ⇒ не пишем). Устанавливается в venues main. Не владеет.
+  void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) { diag_sink_ = sink; }
+
   // Ingest external WS events from transport driver.
   bool OnWsTextMessage(const std::string& payload);
   void OnWsPong();
@@ -190,6 +201,18 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     // Лента недавних реальных публичных сделок для реалистичной симуляции исполнения
     // (price+qty+время). qty потребляется по мере матчинга sim-заявок (дефицит объёма).
     std::deque<TradePrint> recent_trades;
+    // Ценовой контекст для диагностики (вкладка Clearing, #3): последние N публичных
+    // сделок БЕЗ прунинга по времени (только по ёмкости). Нужен, чтобы показать
+    // ближайшие по цене сделки вокруг лимита хеджа, даже когда окно матчинга пусто —
+    // видно, почему заявка не исполняется (все сделки по «другой» стороне цены).
+    std::deque<TradePrint> context_trades;
+    // Измерение ФАКТИЧЕСКОГО периода чтения ленты (rate-limited REST): интервал между
+    // вызовами parse_rest_trades для символа (EMA). Окно матчинга = N·этот период —
+    // тогда при отсутствии новых сделок матчим недавние старые за N последних чтений.
+    SteadyClock::time_point last_trades_read{};
+    double read_interval_ms{0.0};
+    // Момент прошлого CE-исполнения по символу — для Δt в price-impact (v=filled/Δt).
+    SteadyClock::time_point last_ce_fill_at{};
     // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.
     int64_t last_trade_key{0};
   };
@@ -256,6 +279,10 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
                                 const std::string& venue_symbol,
                                 SteadyClock::time_point now);
 
+  // Окно устаревания сделок для символа = N · измеренный период чтения ленты (EMA).
+  // До первого измерения — фолбэк cfg_.sim_trade_window_ms.
+  std::chrono::milliseconds effective_trade_window_locked(const SymbolBookState& st) const;
+
   void sync_state_from_lob_locked(SymbolBookState* state);
   void push_pending_diff_locked(SymbolBookState* state,
                                 CexLocalLobAssembler::DiffEvent diff);
@@ -298,6 +325,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   std::vector<domain::VenueSubscription> subscriptions_;
   std::unordered_map<std::string, SymbolBookState> books_;
+  app::FillDiagnosticsSink* diag_sink_{nullptr};  // ADR-060 sim-fill диагностика, не владеет
 
   TokenBucket rest_bucket_;
   TokenBucket ws_bucket_;

@@ -749,8 +749,17 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       // Реалистичная симуляция исполнения по ленте реальных публичных сделок.
       cfg->sim_match_real_trades =
           env_bool("VENUES_SIM_MATCH_REAL_TRADES", false);
+      // Окно матчинга (порог устаревания публичных сделок) СОГЛАСОВАНО с ФАКТИЧЕСКИМ
+      // периодом ЧТЕНИЯ ленты сделок (rate-limited REST — реально ~десятки секунд, а не
+      // MD-цикл): адаптер сам мерит период чтения per-symbol и держит окно = N·период.
+      // N = CE_SIM_TRADE_STALE_PERIODS (деф 3). Здесь — только N и фолбэк-окно до
+      // первого измерения (VENUES_SIM_TRADE_WINDOW_MS как стартовое значение).
+      cfg->sim_trade_stale_periods = static_cast<uint32_t>(
+          std::max(1, cex::common::Env::get_int("CE_SIM_TRADE_STALE_PERIODS", 3)));
       cfg->sim_trade_window_ms = static_cast<uint32_t>(
-          std::max(500, cex::common::Env::get_int("VENUES_SIM_TRADE_WINDOW_MS", 10000)));
+          std::max(500, cex::common::Env::get_int("VENUES_SIM_TRADE_WINDOW_MS", 30000)));
+      // Temporary price-impact в симуляции исполнения: p_exec=S+k·v, v=filled/Δt.
+      cfg->sim_price_impact_k = env_double("CE_PRICE_IMPACT_K", 0.0);
       cfg->circuit_breaker_enabled = env_bool(
           "CIRCUIT_BREAKER_ENABLED", cfg->circuit_breaker_enabled);
       cfg->circuit_breaker_errors = static_cast<uint32_t>(
@@ -1437,6 +1446,11 @@ void VenuesLoop::extra_ticker_loop() {
       req.instrument.set_base(base);
       req.instrument.set_quote(quote);
       req.venue_symbol = base + quote;
+      // Ticker-цикл — только тикеры для UX /quote; ленту сделок НЕ тянем, чтобы не
+      // жечь REST-бюджет на не-CE символах и не вытеснять чтения CE-ленты в ядровом
+      // md_publish_loop (там include_trades=true). Иначе каденс публичных сделок по
+      // CE-парам растягивается до десятков секунд (табло «застывает»).
+      req.include_trades = false;
       reqs.push_back(std::move(req));
     }
     if (comma == std::string::npos) break;
@@ -1638,6 +1652,19 @@ void VenuesLoop::connect_and_subscribe_defaults() {
     }
     (void)observability_.PublishStatus(hb, "startup", routing_mode);
   }
+}
+
+void VenuesLoop::SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) {
+  // Навешиваем на все CEX-адаптеры (у них лента публичных сделок для ADR-060).
+  int attached = 0;
+  for (auto& adapter : adapters_) {
+    if (auto* cex = dynamic_cast<infra::CexWsRestAdapter*>(adapter.get())) {
+      cex->SetFillDiagnosticsSink(sink);
+      ++attached;
+    }
+  }
+  cex::common::log_json("INFO", "ADR-060 fill-diagnostics sink attached",
+                        {{"cex_adapters", std::to_string(attached)}});
 }
 
 domain::VenueAdapter* VenuesLoop::find_adapter(const std::string& venue_id) {

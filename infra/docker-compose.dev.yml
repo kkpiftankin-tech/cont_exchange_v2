@@ -212,6 +212,9 @@ services:
       # Coinbase доступен → будет основным источником реальных данных
       VENUES_ADAPTER_MODE: "multi_real"
       CURVE_LEVEL: "L3"
+      # Temporary price-impact в симуляции исполнения: p_exec=S+k·v, v=filled/Δt
+      # (цена·с/лот). Влияние CE-заявки на рынок; 0 = выкл. Тюнится по маркету.
+      CE_PRICE_IMPACT_K: "1.0"
       # Все пары среди BTC/ETH/SOL/USDT (включая кросс ETH/BTC, SOL/BTC) → треугольный
       # арбитраж. Одна кривая на (venue, instrument); неподдержанные символы биржей
       # просто не дают кривую. DEX (uniswap) обслуживает только свой пул.

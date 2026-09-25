@@ -19,6 +19,9 @@
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // AgentBandBreach (Вариант 2)
+
+namespace cex::common { class KafkaProducer; }  // fwd: только указатель в члене
 
 namespace cex::ledger::app {
 
@@ -56,10 +59,12 @@ class LedgerUseCases {
     std::string asset;
     std::string venue;
     cex::common::Decimal delta{0, 0};  // f_j, ЗНАКОВАЯ (ADR-061 A6)
-    // F-18 v2 · Э3: цена узла P_node, по которой клиринг делил value→qty
-    // (AssetDelta.price_used). Храним как last_price агента для конвертации
-    // избытка полосы в количество актива при эмиссии хеджа (risk).
+    // Пары X/Y (Вариант 2): price_used = ЦЕНА ПАРЫ P(base)/P(quote) (лимит заявки);
+    // base_price = P(base) USDT (конверсия стоимость→объём); quote = котируемая
+    // (номинал ⇒ "USDT"; арбитражёр ⇒ пусто). Идут в breach-событие для risk.
     cex::common::Decimal price_used{0, 0};
+    cex::common::Decimal base_price{0, 0};
+    std::string quote;
   };
 
   // Hedge PnL record structure
@@ -141,6 +146,12 @@ class LedgerUseCases {
   void SetPositionsUpdatePublisher(std::shared_ptr<PositionsUpdatePublisherPort> publisher) {
     positions_update_publisher_ = std::move(publisher);
   }
+  // Вариант 2 (ADR-061 §4): продюсер топика ce.agent.band.breach (не владеет).
+  // При null — событие пробоя не эмитится (band-эмиссия отключена).
+  void SetBandBreachProducer(cex::common::KafkaProducer* p) { band_breach_producer_ = p; }
+  // Живая настройка порога band от комиссии внешних бирж (F-18): DSN к
+  // f05a_clearing_config (ce_taker_fee_bps, ce_band_fee_k). Пусто ⇒ env/дефолты.
+  void SetPostgresDsn(std::string dsn) { postgres_dsn_ = std::move(dsn); }
   void SeedBalance(const std::string& user_id,
                    const std::string& currency,
                    const cex::common::Decimal& available,
@@ -245,6 +256,13 @@ class LedgerUseCases {
   fob::ledger::v1::GetAgentPositionDeltasResponse GetAgentPositionDeltas(
       const fob::ledger::v1::GetAgentPositionDeltasRequest& req);
 
+  // F-18 v2 (кнопка «сброс позиций» на вкладке Clearing): обнуляет c_j и in_flight
+  // агентов (agent_ids пусто ⇒ ВСЕ) и очищает band-хеджи. Реальный сброс состояния
+  // владельца (in-memory кэш + PG-репозиторий, если подключён), чтобы наблюдать
+  // расхождение позиций с нуля. Возвращает число сброшенных агентов.
+  fob::ledger::v1::ResetAgentPositionsResponse ResetAgentPositions(
+      const fob::ledger::v1::ResetAgentPositionsRequest& req);
+
  private:
   // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
   std::map<std::string, cex::common::Decimal> ComputeExchangeNopLocked() const;
@@ -284,6 +302,15 @@ class LedgerUseCases {
   using HedgePnlMap = std::unordered_map<std::string, std::vector<HedgePnlRecord>>; // venue -> records
 
   mutable std::mutex mu_;
+  // F-18: живая настройка порога band от комиссии. DSN + TTL-кэш (~1с), чтобы не
+  // бить PG на каждый пробой. Возвращает {fee_bps, k_band} (см. LoadBandFeeConfig).
+  std::string postgres_dsn_;
+  std::mutex band_cfg_mu_;
+  double band_cfg_clim_bps_ = 0.0;   // мейкер-комиссия (пассивная зона), bps
+  double band_cfg_cmkt_bps_ = 0.0;   // тейкер+½спред (агрессивная зона), bps
+  double band_cfg_k_ = 0.0;          // 1/Γ — калибровка порога (k-USDT на bps)
+  std::chrono::steady_clock::time_point band_cfg_last_{};
+  bool band_cfg_have_ = false;
   std::unordered_map<std::string, UserBalances> balances_; // user -> currency -> balance
   std::unordered_map<std::string, UserPositions> positions_; // user -> instrument -> position
   std::unordered_map<std::string, Reservation> reservations_; // reservation_id -> reservation
@@ -304,7 +331,9 @@ class LedgerUseCases {
     std::string agent_kind;
     cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
     cex::common::Decimal in_flight{0, 0};  // committed (Э3+), знаковая
-    cex::common::Decimal last_price{0, 0}; // F-18 v2 Э3: P_node последней дельты
+    cex::common::Decimal last_price{0, 0}; // ЦЕНА ПАРЫ P(base)/P(quote) последней дельты
+    cex::common::Decimal base_price{0, 0}; // P(base) USDT (для объёма заявки)
+    std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
     std::string last_batch_id;
     long long updated_at_ms{0};
   };
@@ -321,10 +350,27 @@ class LedgerUseCases {
     cex::common::Decimal filled_value{0, 0};  // исполнено, k-USDT, ЗНАКОВАЯ
   };
   std::map<std::string, AgentBandHedge> band_hedges_;
-  // Помечает in_flight агента на эмиссии band-заявки (RememberExecutionIntent).
-  // sent_notional_usdt — target_notional заявки (USDT); знак берём из side.
-  // Вызывается под mu_.
-  void mark_agent_band_in_flight_locked(const fob::execution::v1::ExecutionIntent& intent);
+  // Вариант 2 (2026-09-17): продюсер топика ce.agent.band.breach. Не владеет.
+  // При null событие пробоя не эмитится (band выключен / нет продюсера).
+  cex::common::KafkaProducer* band_breach_producer_{nullptr};
+  // Вариант 2: детект пробоя полосы в момент применения дельты (позиция устоялась).
+  // Для переводчика с |c|−|in_flight| > q: помечает in_flight += избыток (guard от
+  // переэмиссии) и эмитит AgentBandBreach (risk строит заявку в паре). Вызывается
+  // под mu_ из ApplyPositionDelta для КАЖДОГО затронутого агента.
+  void detect_and_emit_band_breach_locked(const AgentPositionKey& key,
+                                          AgentPositionState& st,
+                                          const std::string& batch_id,
+                                          long long ts_ms);
+  // F-18: трёхзонное правило хеджа от комиссии (Кривые §6.4). Возвращает
+  // {clim_bps, cmkt_bps, k_band}: clim=мейкер (пассив), cmkt=тейкер+½спред (агрессив),
+  // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (rt=2 арбитражёр).
+  // Из f05a_clearing_config (TTL-кэш ~1с; при отсутствии DSN/колонок — env/дефолты).
+  struct BandFeeCfg { double clim_bps; double cmkt_bps; double k_band; };
+  BandFeeCfg LoadBandFeeConfig();
+  // Регистрирует band-заявку в band_hedges_ по её intent_id (RememberExecutionIntent)
+  // для последующего дренажа по исполнению. in_flight НЕ трогает (уже помечен при
+  // пробое — detect_and_emit_band_breach_locked). Вызывается под mu_.
+  void register_band_hedge_locked(const fob::execution::v1::ExecutionIntent& intent);
   // По band-report уменьшает position/in_flight на incr-исполнение и освобождает
   // остаток in_flight по терминальному статусу. Вызывается под mu_ из
   // apply_execution_report_locked. Возвращает true, если это band-заявка.

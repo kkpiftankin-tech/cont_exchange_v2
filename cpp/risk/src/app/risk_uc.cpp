@@ -1316,4 +1316,77 @@ void RiskUseCases::EmitAgentBandHedges() {
   (void)emitted;
 }
 
+// ============================================================================
+// Вариант 2 (2026-09-17) — EmitBandHedgeFromBreach.
+// Событие пробоя полосы от ledger (ce.agent.band.breach) → хедж-заявка в ПАРЕ
+// base/quote: qty = excess·1000/base_price (единицы base), limit = pair_price.
+// Анализ позиции/порог/in_flight — в ledger (владелец позиции); здесь только
+// формирование и публикация ExecutionIntent (layering сохранён).
+// ============================================================================
+void RiskUseCases::EmitBandHedgeFromBreach(
+    const fob::treasury::v1::AgentBandBreach& breach) {
+  if (intents_producer_ == nullptr) return;
+  using cex::common::Decimal;
+  const Decimal excess = Decimal::from_proto(breach.excess_value());   // k-USDT, модуль
+  const Decimal base_price = Decimal::from_proto(breach.base_price());  // P(base) USDT
+  const Decimal pair_price = Decimal::from_proto(breach.pair_price());  // цена пары (лимит)
+  if (excess.units == 0 || base_price.units == 0) return;
+
+  const Decimal notional = Decimal::mul(excess, Decimal{1000, 0});   // USDT
+  const Decimal qty = Decimal::div(notional, base_price, 8);          // единицы base
+  if (qty.units == 0) return;
+  const bool sell = (breach.side() == "SELL");
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const std::string quote = breach.quote().empty() ? numeraire : breach.quote();
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
+  fob::execution::v1::ExecutionIntent intent;
+  intent.mutable_meta()->set_source("risk");
+  const std::string flow_id =
+      "ce|band|" + breach.agent_id() + "|" + breach.asset() + "|" + breach.venue();
+  intent.set_hedge_flow_id(flow_id);
+  intent.set_intent_id(flow_id + "|" + std::to_string(now_ms));
+  // client_order_id УНИКАЛЕН на заявку (= intent_id с таймстампом). hedge_flow_id
+  // стабилен по агенту (для дренажа в ledger), поэтому без уникального
+  // client_order_id каждый следующий band-хедж падал на child_orders_idem
+  // (hedge_flow_id, client_order_id='') duplicate → консьюмер venues_exec копил
+  // отказы и отставал (F-18: дрейф позиции из-за задержки исполнения хеджей).
+  intent.set_client_order_id(intent.intent_id());
+  intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+  intent.set_reason("ce_agent_band");
+  intent.set_venue(breach.venue());
+  auto* instr = intent.mutable_instrument();
+  instr->set_symbol(breach.asset() + "/" + quote);   // ПАРА base/quote
+  instr->set_base(breach.asset());
+  instr->set_quote(quote);
+  intent.set_venue_symbol(breach.asset() + "/" + quote);
+  intent.set_side(sell ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+  *intent.mutable_target_qty() = qty.to_proto();
+  *intent.mutable_target_notional() = notional.to_proto();
+  if (pair_price.units != 0) *intent.mutable_limit_price() = pair_price.to_proto();
+  // Трёхзонное правило (Кривые §6.4): aggressive ⇒ рыночный сброс (taker, MARKET);
+  // иначе пассивный лимит-мейкер (LIMIT, дешевле, исполнение не гарантировано).
+  // TIF_IOC в обеих зонах: single-shot на такт — неисполненный остаток по таймауту
+  // возвращается в позицию (ledger освобождает in_flight), повтор на след. такте.
+  const bool aggressive = breach.aggressive();
+  intent.set_strategy(aggressive ? fob::execution::v1::EXEC_STRATEGY_MARKET
+                                  : fob::execution::v1::EXEC_STRATEGY_LIMIT);
+  intent.set_urgency(aggressive ? fob::execution::v1::URGENCY_HIGH
+                                 : fob::execution::v1::URGENCY_LOW);
+  intent.set_tif(fob::common::v1::TIF_IOC);
+  intent.add_allowed_venues(breach.venue());
+
+  intents_producer_->produce("execution.intents", flow_id, cex::common::to_bytes(intent));
+  cex::common::log_json("INFO", "F-18 band hedge intent emitted (breach)",
+                        {{"agent_id", breach.agent_id()},
+                         {"pair", breach.asset() + "/" + quote},
+                         {"venue", breach.venue()},
+                         {"side", sell ? "SELL" : "BUY"},
+                         {"qty", qty.to_string()},
+                         {"limit", pair_price.to_string()},
+                         {"zone", aggressive ? "taker" : "maker"},
+                         {"hedge_flow_id", flow_id}});
+}
+
 }  // namespace cex::risk::app

@@ -99,12 +99,16 @@ enum class CeAgentKind { kUnspecified = 0, kTranslator = 1, kArbitrageur = 2 };
 struct CeAgentDelta {
   std::string agent_id;                          // = CeEdge.name ("T_BTC_B" | "A_BTC_BO" | ...)
   CeAgentKind agent_kind{CeAgentKind::kUnspecified};
-  std::string asset;
+  std::string asset;                             // base (узел e.u)
   std::string venue;
   double delta{0.0};   // Δc_j = f_j этого такта, ЗНАКОВАЯ — знак = направление агента
-  // F-18 v2 Э3 (T-F18-303): цена узла P_node базового конца ребра (USDT/актив),
-  // по которой risk переводит избыток полосы (стоимость) в количество хедж-заявки.
-  // Хранится в ledger как last_price → отдаётся в GetAgentPositions.reference_price.
+  // F-18 v2 Э3 + пары X/Y (2026-09-17): данные для эмиссии хедж-заявки risk'ом.
+  // quote — котируемая валюта пары (для QUOTE-ребра = node_meta[e.v].asset;
+  // номинал ⇒ "USDT"/numeraire). base_price — цена базы в USDT (P(base@v)) для
+  // конверсии стоимость→объём (объём в base). price_used — клиринговая цена ПАРЫ
+  // P(base@v)/P(quote@v) для лимит-цены заявки в паре base/quote (номинал ⇒ =base_price).
+  std::string quote;
+  double base_price{0.0};
   double price_used{0.0};
 };
 
@@ -134,14 +138,28 @@ inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
     d.agent_id = e.name;
     d.agent_kind = (e.leg == CeLeg::kQuote) ? CeAgentKind::kTranslator
                                              : CeAgentKind::kArbitrageur;
-    d.asset = in.node_meta[e.u].asset;
+    d.asset = in.node_meta[e.u].asset;                       // base (узел e.u)
     d.venue = (e.leg == CeLeg::kQuote) ? in.node_meta[e.u].venue : in.node_meta[e.v].venue;
     d.delta = f;
-    // P_node базового узла (e.u) — та же формула, что в ProjectPositionQuantity:
-    // P_node = P0·exp(x/1000). Нужна risk для перевода value→qty при band-хедже.
-    auto rp = ref_price.find(d.asset);
-    if (rp != ref_price.end() && rp->second > 0.0)
-      d.price_used = rp->second * std::exp(r.x[e.u] / 1000.0);
+    // Цены узлов: P_node = P0·exp(x/1000). base_price = P(base@v) в USDT (для
+    // конверсии стоимость→объём). Для QUOTE-ребра quote = node_meta[e.v].asset и
+    // price_used = ЦЕНА ПАРЫ P(base@v)/P(quote@v) (лимит заявки в base/quote).
+    // Номинал: quote=USDT, P(USDT@house)=1 ⇒ price_used=base_price (регрессия).
+    // Для TRANSFER-ребра (арбитражёр) пара не применяется — quote пуст.
+    auto node_price = [&](int node) -> double {
+      const auto& m = in.node_meta[node];
+      auto rp = ref_price.find(m.asset);
+      return (rp != ref_price.end() && rp->second > 0.0)
+                 ? rp->second * std::exp(r.x[node] / 1000.0) : 0.0;
+    };
+    d.base_price = node_price(e.u);
+    if (e.leg == CeLeg::kQuote) {
+      d.quote = in.node_meta[e.v].asset;
+      const double pq = node_price(e.v);
+      d.price_used = (pq > 0.0) ? d.base_price / pq : d.base_price;
+    } else {
+      d.price_used = d.base_price;  // арбитражёр — пары нет
+    }
     out.push_back(d);
   }
   return out;

@@ -120,9 +120,60 @@ AC: AC-F05A-009.
 - [x] `app/curve_to_levels` (VenueLiquidityCurve → уровни) + `transport/mappers/vectorized_liquidity` (domain → proto); `MarketDataUseCases::OnLiquidityCurve` → `Vectorize` → publish `marketdata.vectorized` через `KafkaVectorizedProducer` (вход = F-11 `venue.liquidity.fob`, D2). Пропуск невалидных.
 - [ ] staleness-фильтр по `ts_event` (KI-F05A-004) — TODO (нужен clock/порог).
 
-#### T-F05A-206. CH persistence сегментов  ⏳ next
+#### T-F05A-206. CH persistence сегментов  ✅
 AC: AC-F05A-012.
-- Персист `vector_flow_segments_history` (переиспользовать паттерн `ClickHouseBatchStorage::SaveExecutionGroup`, F-09).
+- [x] Персист `vector_flow_segments_history` (`ClickHouseVectorSegmentStorage`).
+
+#### T-F05A-207. Batch-window aggregator (cross-venue / triangular)  ⏳ — [ADR-050](../03-architecture/adr/ADR-050-f05a-batch-window-aggregation.md)
+AC: AC-F05A-006 (треугольный кейс клирится), UC-F05A-01.
+> **Причина:** текущий `OnLiquidityCurve` векторизует **каждую кривую отдельно** →
+> single-venue/single-pair batch → `x≈0` (арбитраж непредставим). Постановка
+> (IN-014 §12.1/§12.3, R-F05A-002/004, AC-F05A-006, UC-F05A-01 batch-timer) требует
+> агрегировать многие венью/пары в один клиринг над общим asset-basis.
+- [ ] **207a. Freshness-буфер + batch-timer** в `market_data`: буфер «последняя кривая
+      на `(venue_id, pair)`» (новая вытесняет старую); фоновый таймер `F05A_BATCH_WINDOW_MS`
+      (dev 1000ms) с чётким lifecycle + graceful shutdown (§12.2). За флагом
+      `F05A_BATCH_WINDOW_ENABLED` (default off → прежнее поканальное поведение).
+- [ ] **207b. Оконный vectorize:** собрать уровни всех свежих кривых → **общий**
+      `BuildAssetBasis` (объединение активов всех пар) → один `W`; вес свежести
+      `f=clamp(1−age/F05A_STALE_LEVEL_MS,0,1)` на `q_max` (`q_max_eff=q_max·f`);
+      `age≥порог` → отбросить (метрика `stale_external_levels_total`). Публиковать
+      **один** `marketdata.vectorized` с оконным `batch_id`.
+- [ ] **207c. `seg_index`:** `ALTER TABLE vector_flow_segments_history ADD COLUMN seg_index UInt32`;
+      писать позицию сегмента в векторе (детерминированный порядок `(venue,pair,side,k)`),
+      чтобы `x[i]↔segment[i]` восстанавливалось точно при мульти-venue.
+- [ ] **207d. Detail-API** переключить выравнивание черновиков с реконструкции по
+      `source_order_id` на `seg_index`.
+- [ ] **207e. Тесты:** unit (оконный vectorize: 2 венью одной пары с расхождением →
+      ненулевой `x`; треугольный AC-F05A-006 → `Wx=0`); детерминизм окна.
+
+#### T-F05A-208. Линейный сегмент ликвидности венью  ⏳ — [ADR-051](../03-architecture/adr/ADR-051-f05a-linear-venue-segment.md)
+AC: ликвидность стороны венью = один линейный сегмент с реальным наклоном.
+> **Причина:** `curve_to_levels` делал сегмент на каждую точку `q_grid` (135–300/сторону),
+> а `d_hl = dhl_fraction·P_eff` (фикс. 1 %) — не реальный наклон. Постановка (владелец):
+> ликвидность = линейная функция `p(q)=a+b·q`.
+- [x] Поле `ExternalOrderLevel.d_hl_override` (0 = policy); `Vectorize` использует его.
+- [x] `LinearSegmentsFromCurve`: сторона → 1 уровень: anchor `a=p_of_q[0]`, `q_max=q_grid[last]`,
+      `d_hl_override=|p_of_q[last]−p_of_q[0]|` (= `|b|·q_max` ⇒ `D=|b|`).
+- [x] Выбор Linear vs per-level в `OnLiquidityCurve` и `FlushVectorWindow` по флагу
+      `F05A_LINEAR_SEGMENTS_ENABLED` (default off; on в dev). Вес свежести масштабирует
+      и `d_hl_override` (наклон инвариантен).
+- [x] Тест `TestLinearSegments` (vectorize_wiring_test).
+- Поправка R-F05A-002: provenance с per-level на per-(venue,pair,side) при модели A.
+
+#### T-F05A-209. Двусторонний знаковый сегмент венью (academic)  ✅ — [ADR-052](../03-architecture/adr/ADR-052-f05a-two-sided-signed-segment.md)
+AC: одна двусторонняя кривая/венью, знаковый `x` (покупка/продажа), кросс-venue арбитраж → ненулевой `x`.
+> Каноника постановки (academic §5.1.1, `entities.md:148-150`): венью = одна кривая
+> `p(q̇)=m·q̇+a`, `q̇` знаковая. Заменяет per-side (ADR-051).
+- [x] proto `VectorFlowSegment` += `q_min`, `anchor`, `slope`.
+- [x] matching `AssembleProblemTwoSided` (P=diag(m), q=+a, знаковый box) + флаг
+      `F05A_TWO_SIDED_ENABLED`; closed-form тест (`x_i=(p*−a_i)/m_i`).
+- [x] market_data `TwoSidedSegmentsFromCurves`: 1 сегмент/венью (w=e_base−e_quote,
+      anchor=mid, slope=avg, `q_max=+Q_ask`, `q_min=−Q_bid`).
+- [x] detail-API: курс = `pi[quote]−pi[base]` (дуальная p*); сторона черновика по знаку x.
+- [x] **Проверено live:** 3 венью → `x=[+1.33,+0.61,−1.94]` (Σ=0), курс 78211, 3 черновика
+      (2 BUY + 1 SELL, балансируются).
+- Остаток: status часто degraded (tol на 3 сегм. — косметика); staleness иногда роняет венью.
 
 ---
 
@@ -158,6 +209,12 @@ AC: AC-F05A-008, AC-F05A-010.
 - [x] **Persister диагностики (PR #40):** market_data потребляет `matching.vector_clearing` → ClickHouse `vector_clearing_results` (`ClickHouseVectorClearingStorage` + `MarketDataUseCases::OnVectorClearingResult`). Диагностический контур F-05A замкнут end-to-end с персистом.
 - [x] **Money-path MVP — hedge (PR #43, ADR-049):** решено — сошедшийся external-клиринг = биржевой хедж (F-12). `vector_clearing_hedge_builder`: сегмент `x_i>0` → `ExecutionIntent` (venue/side против external level, `target_qty=x_i`, `limit_price=|w[quote]|`) → `execution.intents` → venues → ledger `venue_balances_`/hedge-PnL. За флагом **`F05A_MONEY_ENABLED` (default OFF)**, только `kProceedNoSurplus`. `intent_id=batch|segment` (идемпотентно). НЕ user-проводки. Тест `matching_vector_clearing_hedge_builder_test`.
 - [ ] **Дальнейшее (по решению владельца):** user-проводки через F-09 `ExecutionGroup` (нужна привязка user/parent + `LegResult` source-trace T-F05A-106); `EXCHANGE_PNL` surplus (нужен house-счёт в ledger, T-F05A-401); persistent-идемпотентность на F-05A execution-path.
+
+#### T-F05A-306. Клиринговые цены (pi) — дуальные OSQP  ✅
+AC: результат клиринга содержит равновесные цены по активам.
+- [x] `pi` = первые `N` дуальных OSQP по ограничению `Wx=0` (тень актива = равновесная цена). `OsqpBackend` копирует `work->solution->y`; `VectorQpSolver` извлекает первые `N` и квантует (граница §9); `ToVectorClearingResult` пробрасывает в proto-поле `VectorClearingResult.pi` (уже существовало, теперь наполняется). `market_data` персистит `pi_json` без изменений. Тесты: извлечение pi (fake + реальный OSQP e2e) + маппер.
+- Семантика: абсолютные `pi` определены с точностью до нормировки (Wx=0 однороден; D-регуляризатор фиксирует масштаб). **Клиринговая цена инструмента = `pi[base]/pi[quote]`** (стабильна, ≈ рыночная): проверено live — BTC/USDT ≈ 79 300 при разных абсолютных `pi`.
+- НЕ breaking (наполняем существующее контракт-поле, ADR не требуется).
 
 ---
 
@@ -202,6 +259,14 @@ AC: AC-F05A-011. (R-F05A-001)
 #### T-F05A-601. MVP charts
 AC: AC-F05A-UI-003/004/005/007.
 - W heatmap, execution vector `x`, residual `Wx`, source-trace (клик segment→venue level). Остальные экраны (raw depth, clearing graph, surplus/PnL, replay) — T-F05A-602..606, по мере.
+
+#### T-F05A-607. Clearing detail (клик по строке)  ✅
+AC: по клику строки клиринга видны исходные заявки + клиринговые цены + черновики хеджа.
+- [x] Ops-страница `Clearing` (`/vector-clearing-live`): клик по строке раскрывает деталь через `GET /api/vector-clearing/detail?batch_id&ts` (frontend-api, read-only ClickHouse). Три секции:
+  - **(1) Исходные заявки** — `vector_flow_segments_history` (инструмент `pair`, биржа `venue_id`, сторона, скорость `q_rate`, цена `effective_price`, `q_max`), привязка к циклу по `batch_id` + ближайшей группе `event_time_ms`.
+  - **(2) Клиринговые цены** — `pi_json` (T-F05A-306) с метками активов (asset-basis восстановлен как отсортированное объединение `pair`); заголовок — клиринговый курс `pi[base]/pi[quote]`.
+  - **(3) Черновики хеджа** — вычисляются read-time из сегментов + `x_json` (та же логика `vector_clearing_hedge_builder`: `x_i>0` → venue/side/qty/limit). Выравнивание `x[i]↔сегмент[i]` восстановлено по порядку сборки vectorize (bid k=0..n, затем ask k=0..n; k числовой), т.к. `batch` single-venue.
+- Ограничение: multi-venue цикл потребует порядка венью солвера (или `seg_index` в persist) — для текущих single-venue данных корректно.
 
 ---
 

@@ -14,10 +14,10 @@ find_package(Boost REQUIRED COMPONENTS thread)
 
 include(FetchContent)
 
+# codeload tar.gz archive вместо git clone (github анонимный клон падает в Docker-build).
 FetchContent_Declare(
         httplib
-        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG master
+        URL https://github.com/yhirose/cpp-httplib/archive/refs/heads/master.tar.gz
 )
 FetchContent_MakeAvailable(httplib)
 

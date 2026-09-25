@@ -193,6 +193,32 @@ CREATE INDEX IF NOT EXISTS idx_child_orders_hedge_flow ON child_orders (hedge_fl
 CREATE INDEX IF NOT EXISTS idx_child_orders_venue_order_id
   ON child_orders (venue_id, venue_order_id) WHERE venue_order_id IS NOT NULL;
 
+-- venue_fill_diagnostics: per hedge-order sim-fill attempt (ADR-060) — почему
+-- симулятор исполнил / не исполнил заявку. Захватывается в момент матчинга
+-- (cex_ws_rest_adapter ApplyRealTradeFillLocked), где доступна лента публичных
+-- сделок venue. Диагностика для вкладки Clearing: показать заявку рядом с
+-- рассматриваемыми публичными исполнениями + причиной. Одна строка на intent.
+CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
+  intent_id         TEXT PRIMARY KEY,             -- = ExecutionIntent.intent_id
+  hedge_flow_id     TEXT,                          -- корреляция с hedgeflows
+  batch_id          TEXT,                          -- такт клиринга (у §A7-заявок; у band пусто)
+  venue             TEXT NOT NULL,
+  symbol            TEXT NOT NULL,                 -- канонический ключ ленты
+  side              TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  limit_price       NUMERIC(38, 18),               -- лимит заявки (NULL/0 ⇒ матчинг пропущен!)
+  target_qty        NUMERIC(38, 18),
+  filled_qty        NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  avg_price         NUMERIC(38, 18),
+  status            TEXT NOT NULL,                 -- NEW | PARTIALLY_FILLED | FILLED | REJECTED
+  reason            TEXT NOT NULL,                 -- код причины (no_limit_price | no_trades_in_window | none_cross_limit | partial_window_volume | filled | ...)
+  window_trades     INTEGER NOT NULL DEFAULT 0,    -- сколько публичных сделок было в окне
+  considered_trades JSONB,                         -- [{price, qty, ts_ms, crosses}] — те самые публичные исполнения
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_batch ON venue_fill_diagnostics (batch_id);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_hedge ON venue_fill_diagnostics (hedge_flow_id);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_created ON venue_fill_diagnostics (created_at DESC);
+
 -- execution_reports_raw: optional landing zone for normalized ExecutionReport
 -- events before aggregation into ClickHouse `execution_reports`. Useful for:
 -- (a) idempotency check against duplicate Kafka deliveries;
@@ -958,12 +984,35 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- c = комиссия + ½·spread. <0 = брать комиссию из стакана venue (прежнее поведение);
     -- =0 = линейные кривые без полки-комиссии. market_data поллит эту строку.
     ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 0,
+    -- Inventory-skew (F-18 v2, обратная связь позиция→цена): matching смещает
+    -- эффективный якорь агента на clamp(γ·c_j, ±max_pm), разворачивая поток при
+    -- накоплении позиции. γ=0 ⇒ выкл. matching поллит эту строку (живая настройка).
+    ce_inv_skew_gamma  NUMERIC(38,18) NOT NULL DEFAULT 0.005, -- ‰ на k-USDT позиции (0=выкл)
+    ce_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 8,    -- клэмп величины смещения (‰)
+    -- Порог band агента ПРИВЯЗАН К КОМИССИИ внешних бирж (F-18): q = k_band·φ_rt,
+    -- φ_rt — round-trip комиссия в bps (переводчик: fee_bps; арбитражёр: 2·fee_bps
+    -- — покупка+продажа на двух биржах). fee_bps = ce_taker_fee_bps (fallback env).
+    -- k_band в k-USDT на bps; 1.8 калибрует переводчика к ~18 при 10 bps. 0 = линк
+    -- выключен (плоский env-порог). ledger поллит эту строку (живая настройка).
+    ce_band_fee_k      NUMERIC(38,18) NOT NULL DEFAULT 1.8,
+    -- Мейкер-комиссия clim (bps) для ПАССИВНОЙ зоны трёхзонного правила (Кривые §6.4):
+    -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
+    -- (пассив → агрессив-тейкер), cmkt = ce_taker_fee_bps. clim < cmkt (мейкер дешевле).
+    ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 2,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1)
 );
 -- Миграция для существующих БД (таблица уже создана без колонки).
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 0;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_inv_skew_gamma NUMERIC(38,18) NOT NULL DEFAULT 0.005;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 8;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_fee_k NUMERIC(38,18) NOT NULL DEFAULT 1.8;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
 INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;

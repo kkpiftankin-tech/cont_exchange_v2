@@ -6524,6 +6524,55 @@ async function fetchVectorClearingRows(limit) {
   }
 }
 
+// Живость ПОСТАДИЙНО: Стаканы → Кривые → Клиринг → Позиции → Хеджи. Для каждой
+// стадии берём max(timestamp) её реального выхода (CH/PG/gRPC) и возраст = серверные
+// часы − last_ms. Одна упавшая стадия не роняет остальные (allSettled). Показывает,
+// ГДЕ именно встала цепочка, а не только общий heartbeat клиринга.
+async function chMaxMs(db, table, col) {
+  const q = "SELECT toInt64(max(" + col + ")) AS last_ms FROM " + db + "." + table
+    + " FORMAT JSONEachRow";
+  const rows = await clickhouseQueryJson(q);
+  const v = rows && rows[0] ? Number(rows[0].last_ms) : 0;
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+async function pgMaxCreatedMs(table) {
+  const pool = getPgPool();
+  if (!pool) return null;
+  const r = await pool.query(
+    "SELECT (EXTRACT(EPOCH FROM max(created_at)) * 1000)::bigint AS last_ms FROM " + table);
+  const v = r.rows && r.rows[0] ? Number(r.rows[0].last_ms) : 0;
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+async function positionsMaxUpdatedMs() {
+  const pos = await fetchAgentPositions();
+  let mx = 0;
+  for (const p of pos) mx = Math.max(mx, Number(p.updated_at_ms) || 0);
+  return mx > 0 ? mx : null;
+}
+
+async function buildChainLiveness(nowMs, staleThresholdMs) {
+  const stageDefs = [
+    { key: "books",     label: "Стаканы",  src: () => chMaxMs(VENUE_SNAPSHOTS_DB, "venue_snapshots", "event_time_ms") },
+    { key: "curves",    label: "Кривые",   src: () => chMaxMs(CLICKHOUSE_DB, "venue_liquidity_curves", "event_time_ms") },
+    { key: "clearing",  label: "Клиринг",  src: () => chMaxMs(CLICKHOUSE_DB, "vector_clearing_results", "event_time_ms") },
+    { key: "positions", label: "Позиции",  src: () => positionsMaxUpdatedMs() },
+    { key: "hedges",    label: "Хеджи",    src: () => pgMaxCreatedMs("venue_fill_diagnostics") },
+  ];
+  const settled = await Promise.allSettled(stageDefs.map((s) => s.src()));
+  return stageDefs.map((s, i) => {
+    const r = settled[i];
+    const lastMs = r.status === "fulfilled" ? r.value : null;
+    const ageMs = lastMs != null ? Math.max(0, nowMs - lastMs) : null;
+    return {
+      key: s.key, label: s.label, lastMs, ageMs,
+      stale: ageMs != null ? ageMs > staleThresholdMs : null,   // null = нет данных стадии
+      error: r.status === "rejected" ? String((r.reason && r.reason.message) || r.reason) : null,
+    };
+  });
+}
+
 // --- Детализация одной строки клиринга (клик по строке) --------------------
 // Показывает 3 блока: (1) исходные заявки-сегменты, (2) клиринговые цены (pi),
 // (3) черновики хедж-заявок. Ключ строки — (batch_id, event_time_ms), т.к.
@@ -6721,6 +6770,12 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // (в отличие от per-batch ring). Показываем рядом с ДО→Δ→ПОСЛЕ, чтобы агенты
   // были видны даже на тактах без потока. Реальный DTO ledger.GetAgentPositions.
   const agentPositions = await fetchAgentPositions();
+  // ADR-060: реальные хедж-заявки + рассматриваемые публичные исполнения venue +
+  // причина (заменяет синтетические черновики; см. задачу 2026-09-17).
+  const fillDiagnostics = await fetchVenueFillDiagnostics(clr.batch_id);
+  // Money-path строки агентов: одна строка на агента, позиция/Δ разложены на ноги
+  // пары (base−/quote+). Мердж и домен-математика — в BFF, не в браузере.
+  const agentRows = buildAgentRows(agentPositions, agentDeltas);
 
   return {
     batch_id: clr.batch_id,
@@ -6736,14 +6791,201 @@ async function fetchVectorClearingDetail(batchId, ts) {
     clearingRates,
     clearingPricesAvailable: piArr.length > 0,
     hedgeDrafts: drafts,
+    fillDiagnostics,
     agentDeltas,
     agentPositions,
+    agentRows,
     generatedAt: new Date().toISOString()
   };
 }
 
 // F-18 v2: текущая НАКОПЛЕННАЯ знаковая позиция всех агентов (не per-batch) —
 // через ledger.GetAgentPositions (реальный DTO, без SQL). [] при ошибке/пусто.
+// ADR-060 / F-18 — диагностика симуляции fill хедж-заявок для вкладки Clearing:
+// реальная заявка (venues пишет в PG venue_fill_diagnostics в момент матчинга) +
+// рассматриваемые публичные исполнения venue + причина (почему не исполнилось).
+// Реальные данные через PG (BFF — DTO-слой, как /api/v1/hedge/flows). Возвращаем
+// заявки ЭТОГО такта (batch_id) первыми, затем свежие CE-заявки (в т.ч. band,
+// у которых batch_id пуст) — чтобы были видны и failing-случаи.
+// #1 единая пара X/Y: venue-символ хедж-заявки нормализован без слэша (ETHBTC),
+// приводим к паре как в стаканах (ETH/BTC). Известные котируемые — от длинных к
+// коротким (USDT перед USD, USDC перед USD), иначе неоднозначно.
+const KNOWN_QUOTES = ["USDT", "USDC", "USD", "EUR", "BTC", "ETH", "BNB", "SOL"];
+function splitPairSymbol(sym) {
+  if (!sym) return sym || "";
+  if (String(sym).indexOf("/") >= 0) return sym;   // уже X/Y
+  const up = String(sym).toUpperCase();
+  for (const q of KNOWN_QUOTES) {
+    if (up.length > q.length && up.endsWith(q)) {
+      return up.slice(0, up.length - q.length) + "/" + q;
+    }
+  }
+  return sym;
+}
+
+async function fetchVenueFillDiagnostics(batchId) {
+  const pool = getPgPool();
+  if (!pool) return [];
+  try {
+    // ВАЖНО: batch_id CE-хедж-заявок (§A7 / band) не совпадает с batch_id
+    // векторного клиринга (vector_clearing_results), на котором построена вкладка —
+    // это разные пайплайны. Поэтому показываем СВЕЖИЕ N диагностик (все хедж-заявки),
+    // а строки этого такта (если batch совпал) поднимаем наверх.
+    const { rows } = await pool.query(
+      `SELECT intent_id, hedge_flow_id, batch_id, venue, symbol, side,
+              limit_price::text  AS limit_price,
+              target_qty::text   AS target_qty,
+              filled_qty::text   AS filled_qty,
+              avg_price::text    AS avg_price,
+              base_vwap::text    AS base_vwap,
+              impact_shift::text AS impact_shift,
+              impact_cost::text  AS impact_cost,
+              impact_v, impact_dt_sec,
+              status, reason, window_trades, considered_trades, created_at
+         FROM venue_fill_diagnostics
+        ORDER BY (batch_id = $1) DESC, created_at DESC
+        LIMIT 40`,
+      [batchId || ""]
+    );
+    return rows.map((r) => ({
+      intentId: r.intent_id,
+      hedgeFlowId: r.hedge_flow_id,
+      batchId: r.batch_id,
+      venue: r.venue,
+      symbol: r.symbol,
+      pair: splitPairSymbol(r.symbol),   // #1 единый вид пары X/Y (ETHBTC → ETH/BTC)
+      side: r.side,
+      limitPrice: r.limit_price,
+      targetQty: r.target_qty,
+      filledQty: r.filled_qty,
+      avgPrice: r.avg_price,          // p_exec (с price-impact)
+      baseVwap: r.base_vwap,          // S — цена до импакта
+      impactShift: r.impact_shift,    // k·v
+      impactCost: r.impact_cost,      // k·v²·Δt
+      impactV: r.impact_v,
+      impactDtSec: r.impact_dt_sec,
+      status: r.status,
+      reason: r.reason,
+      windowTrades: r.window_trades,
+      // considered_trades — JSONB, pg отдаёт как JS-массив [{price,qty,age_ms,crosses}]
+      consideredTrades: Array.isArray(r.considered_trades) ? r.considered_trades : [],
+      createdAt: r.created_at,
+      // band-заявка (ce|band|...) vs §A7 (batch|ce|asset@venue) — для группировки на фронте
+      kind: (r.hedge_flow_id || "").indexOf("ce|band|") === 0 ? "band" : "clearing"
+    }));
+  } catch (e) {
+    // Таблицы может ещё не быть (venues не успел EnsureSchema) — не роняем detail.
+    return [];
+  }
+}
+
+// Money-path разложение позиции агента на ДВЕ ноги пары (ADR-057): переводчик
+// торгует base/quote — при SELL (c>0) он short base / long quote (base−, quote+),
+// при BUY наоборот. Величины: quote-нога = c·1000 (USDT-стоимость), base-нога =
+// c·1000/цена_пары (единицы base). Одна нога +, другая − (в ОДНОЙ строке).
+// Арбитражёр перевозит ОДИН актив — у него одна нога (актив), пары нет.
+// Домен-математику держим в BFF (не в браузере, [frontend-no-domain-compute]).
+function buildAgentRows(agentPositions, agentDeltas) {
+  const keyOf = (p) => (p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '');
+  const delByKey = new Map((agentDeltas || []).map((d) => [keyOf(d), d]));
+  const posByKey = new Map((agentPositions || []).map((p) => [keyOf(p), p]));
+  const kindOrder = { translator: 0, arbitrageur: 1 };
+  const rows = [];
+  for (const k of new Set([...posByKey.keys(), ...delByKey.keys()])) {
+    const pos = posByKey.get(k);
+    const del = delByKey.get(k);
+    const b = pos || del;
+    const kind = (pos && pos.agent_kind) || (del && del.agent_kind) || '';
+    const isT = kind === 'translator';
+    const price = pos ? Number(pos.reference_price) : 0;   // цена пары P_base/P_quote (номинал ⇒ P_base)
+    const basePrice = pos ? Number(pos.base_price) : 0;    // P(base) USDT (абсолют)
+    const cPos = pos ? Number(pos.position) : null;         // c_j (k-USDT), НЕОТПРАВЛЕННЫЙ остаток (A7)
+    const inFlight = pos ? Number(pos.in_flight) : 0;       // отправлено в заявку (A7)
+    // Модель A7 (док §A7): при пробое избыток УХОДИТ из c в заявку (c→±q), поэтому c
+    // сам по себе дёргается. Истинное накопленное обязательство = c + in_flight
+    // (обе величины одного знака): именно оно сходится к band. Показываем его.
+    const cTotal = (cPos == null) ? null : cPos + inFlight;
+    const cDel = del ? Number(del.delta) : null;
+    // Разложение стоимости val (k-USDT) на ноги В СВОИХ валютах пары (money-path,
+    // ADR-057). value_USDT = val·1000. base_qty = value/P_base, quote_qty = value/P_quote,
+    // где P_quote = P_base/reference_price. Переводчик: SELL base ⇒ base−, quote+ (при c>0);
+    // обе ноги. Арбитражёр: одна нога base (перевозимый актив), quote нет. Номинал
+    // (quote=USDT): P_quote=1 ⇒ quote-нога = value USDT (регрессия сохранена).
+    const legs = (val) => {
+      if (val == null) return { base: null, quote: null };
+      if (val === 0) return { base: 0, quote: isT ? 0 : null };  // нулевая позиция — 0, не пусто (#3)
+      const v = val * 1000;  // стоимость в USDT
+      if (isT) {
+        if (basePrice > 0) {
+          const pQuote = price > 0 ? basePrice / price : basePrice;  // P_quote USDT
+          return { base: -(v / basePrice), quote: pQuote > 0 ? v / pQuote : null };
+        }
+        if (price > 0) return { base: -(v / price), quote: v };  // fallback без base_price (номинал)
+        return { base: null, quote: null };
+      }
+      if (price > 0) return { base: v / price, quote: null };  // арбитражёр
+      return { base: null, quote: null };
+    };
+    const pl = legs(cPos);
+    const dl = legs(cDel);
+    // #1/#2 Арбитражёр: маршрут ДВУХ площадок (из agent_id) + позиция по КАЖДОЙ.
+    // agent_id = A_<asset>_<src><dst>, dst = поле venue (канонический приёмник),
+    // src = остаток. Перевозит актив src→dst ⇒ short на src, long на dst (net≈0).
+    // «v3» в id — это venue uniswap_v3, не версия; здесь разносим явно.
+    let arb = null;
+    if (!isT) {
+      const prefix = `A_${b.asset}_`;
+      const mid = String(b.agent_id || '').startsWith(prefix)
+        ? b.agent_id.slice(prefix.length) : '';
+      const dst = b.venue || '';
+      const src = (dst && mid.endsWith(dst)) ? mid.slice(0, mid.length - dst.length) : mid;
+      const qty = (val) => {
+        if (val == null) return null;
+        if (val === 0) return 0;
+        const v = val * 1000;
+        if (b.asset === 'USDT') return v;   // перенос номинала: qty в USDT
+        if (price > 0) return v / price;    // единицы актива
+        return null;
+      };
+      const q = qty(cPos), dq = qty(cDel);
+      arb = {
+        src, dst, unit: b.asset,
+        leg_src: q == null ? null : -q, leg_dst: q == null ? null : q,
+        dleg_src: dq == null ? null : -dq, dleg_dst: dq == null ? null : dq,
+      };
+    }
+    rows.push({
+      agent_id: b.agent_id,
+      agent_kind: kind,
+      // Единая пара X/Y для ВСЕХ агентов (#1). Переводчик: base/quote (BTC/USDT,
+      // ETH/BTC). Арбитражёр возит актив между площадками, оценённый в номинале ⇒
+      // asset/USDT (маршрут площадок — в agent_id). A_USDT (перенос номинала) ⇒ "USDT".
+      pair: isT
+        ? `${b.asset}/${(pos && pos.quote) || 'USDT'}`
+        : (b.asset === 'USDT' ? 'USDT' : `${b.asset}/USDT`),
+      base: b.asset,
+      quote: isT ? ((pos && pos.quote) || 'USDT') : (b.asset === 'USDT' ? '' : 'USDT'),
+      venue: b.venue,
+      hasDelta: !!del,
+      // ноги пары (money-path):
+      pos_base: pl.base, pos_quote: pl.quote,      // текущая позиция (сейчас)
+      delta_base: dl.base, delta_quote: dl.quote,  // Δ этого такта
+      // c_j — неотправленный остаток (A7); c_total — истинное обязательство (c+in_flight):
+      c_position: cPos, c_total: cTotal, in_flight: inFlight, c_delta: cDel,
+      pair_price: price,
+      arb,  // #1/#2 маршрут+ноги арбитражёра по площадкам (null у переводчика)
+    });
+  }
+  rows.sort((a, b) => {
+    const ka = kindOrder[a.agent_kind] != null ? kindOrder[a.agent_kind] : 2;
+    const kb = kindOrder[b.agent_kind] != null ? kindOrder[b.agent_kind] : 2;
+    if (ka !== kb) return ka - kb;
+    if (a.hasDelta !== b.hasDelta) return a.hasDelta ? -1 : 1;
+    return String(a.agent_id).localeCompare(String(b.agent_id));
+  });
+  return rows;
+}
+
 async function fetchAgentPositions() {
   const led = initLedgerClient();
   if (!led) return [];
@@ -6755,8 +6997,12 @@ async function fetchAgentPositions() {
       agent_kind: p.agent_kind,
       asset: p.asset,
       venue: p.venue,
+      quote: p.quote || "",              // котируемая валюта пары (переводчик; номинал ⇒ USDT)
+      reference_price: decToNum(p.reference_price),  // цена ПАРЫ P(base)/P(quote) (номинал ⇒ P(base))
+      base_price: decToNum(p.base_price),  // P(base) USDT — абсолют для разложения ног
       position: decToNum(p.position),
       in_flight: decToNum(p.in_flight),
+      updated_at_ms: Number(p.updated_at_ms) || 0,  // unix ms последнего изменения (свежесть стадии «Позиции»)
     }));
   } catch (e) {
     console.error("[ledger] GetAgentPositions failed:", e.message || e);
@@ -7118,8 +7364,8 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (req.method === "GET") {
       try {
         const r = await pool.query(
-          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, updated_at FROM f05a_clearing_config WHERE id=1");
-        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1 });
+          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8 });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
@@ -7133,19 +7379,45 @@ async function handleVectorClearing(req, res, pathname, query) {
       let fee = Number(body.ce_taker_fee_bps);
       if (!Number.isFinite(fee)) fee = -1;
       fee = Math.max(-1, Math.min(1000, fee));
+      // Inventory-skew: γ (‰ на k-USDT, 0=выкл) и клэмп смещения (‰). matching поллит.
+      let skewGamma = Number(body.ce_inv_skew_gamma);
+      if (!Number.isFinite(skewGamma)) skewGamma = 0.02;
+      skewGamma = Math.max(0, Math.min(100, skewGamma));
+      let skewMaxPm = Number(body.ce_inv_skew_max_pm);
+      if (!Number.isFinite(skewMaxPm)) skewMaxPm = 8;
+      skewMaxPm = Math.max(0, Math.min(500, skewMaxPm));
       try {
         await pool.query(
-          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, updated_at)"
-          + " VALUES (1,$1,$2,$3,now()) ON CONFLICT (id) DO UPDATE SET"
+          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, updated_at)"
+          + " VALUES (1,$1,$2,$3,$4,$5,now()) ON CONFLICT (id) DO UPDATE SET"
           + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms,"
-          + " ce_taker_fee_bps=EXCLUDED.ce_taker_fee_bps, updated_at=now()",
-          [win, stale, fee]);
-        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, applied: true });
+          + " ce_taker_fee_bps=EXCLUDED.ce_taker_fee_bps, ce_inv_skew_gamma=EXCLUDED.ce_inv_skew_gamma,"
+          + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, updated_at=now()",
+          [win, stale, fee, skewGamma, skewMaxPm]);
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, applied: true });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
     }
     return writeJson(res, 405, { error: "method_not_allowed" });
+  }
+
+  // #3 Кнопка сброса позиций: РЕАЛЬНЫЙ сброс c_j/in_flight в ledger (не фронт-фикс).
+  // POST — чтобы отличать от чтений. Пустой agent_ids ⇒ все агенты.
+  if (pathname === "/api/vector-clearing/reset-positions") {
+    if (req.method !== "POST") return writeJson(res, 405, { error: "method_not_allowed" });
+    const led = initLedgerClient();
+    if (!led) return writeJson(res, 502, { error: "ledger_unavailable" });
+    let body = {};
+    try { body = await parseBody(req); } catch (e) { /* пустое тело = сбросить всё */ }
+    const agentIds = Array.isArray(body && body.agent_ids) ? body.agent_ids : [];
+    try {
+      const resp = await grpcCall(led, "ResetAgentPositions", { agent_ids: agentIds });
+      return writeJson(res, 200, { cleared: Number(resp && resp.cleared) || 0, scope: agentIds.length ? "filtered" : "all" });
+    } catch (e) {
+      console.error("[ledger] ResetAgentPositions failed:", e.message || e);
+      return writeJson(res, 502, { error: "grpc_error", message: String(e.message || e) });
+    }
   }
 
   if (req.method !== "GET") return false;
@@ -7165,8 +7437,125 @@ async function handleVectorClearing(req, res, pathname, query) {
       if (it.executed) acc.executed = (acc.executed || 0) + 1;
       return acc;
     }, {});
+    // Живость цепочки: возраст ДАННЫХ (не браузера) = серверные часы − event_time_ms
+    // самого свежего такта клиринга. Это heartbeat всей цепочки: клиринг эмитит
+    // такт только если Стаканы→Кривые→Клиринг реально текут. Заморозка (venues спин,
+    // остановленный market_data) сразу видна как большой dataAgeMs → фронт покажет
+    // «ЦЕПОЧКА ОСТАНОВЛЕНА», а не молча отрендерит историю как живое.
+    const newestEventTimeMs = items.reduce(
+      (mx, it) => Math.max(mx, Number(it.event_time_ms) || 0), 0);
+    const serverNowMs = Date.now();
+    const dataAgeMs = newestEventTimeMs > 0
+      ? Math.max(0, serverNowMs - newestEventTimeMs) : null;
     return writeJson(res, 200, {
-      items, summary, total: items.length, generatedAt: new Date().toISOString()
+      items, summary, total: items.length, generatedAt: new Date().toISOString(),
+      newestEventTimeMs: newestEventTimeMs || null, serverNowMs, dataAgeMs
+    });
+  }
+  if (pathname === "/api/vector-clearing/liveness") {
+    const nowMs = Date.now();
+    let threshold = 60000;
+    try {
+      const pool = getPgPool();
+      if (pool) {
+        const r = await pool.query("SELECT stale_level_ms FROM f05a_clearing_config WHERE id=1");
+        if (r.rows[0] && Number(r.rows[0].stale_level_ms) > 0) threshold = Number(r.rows[0].stale_level_ms);
+      }
+    } catch (e) { /* дефолт 60с */ }
+    const stages = await buildChainLiveness(nowMs, threshold);
+    const worstAgeMs = stages.reduce((mx, s) => (s.ageMs != null && s.ageMs > mx ? s.ageMs : mx), 0);
+    const anyStale = stages.some((s) => s.stale === true);
+    return writeJson(res, 200, {
+      stages, serverNowMs: nowMs, staleThresholdMs: threshold, worstAgeMs, anyStale,
+      generatedAt: new Date().toISOString()
+    });
+  }
+  // Живые позиции агентов (для кнопки динамического просмотра): ТЕКУЩИЕ позиции
+  // всех переводчиков/арбитражёров + дельты самого свежего такта. Независимо от
+  // выбранного статичного батча — этот эндпоинт всегда отдаёт «сейчас».
+  if (pathname === "/api/vector-clearing/agent-positions") {
+    const rows = await fetchVectorClearingRows(1);
+    const newest = rows && rows[0] ? rows[0].batch_id : "";
+    const [agentPositions, agentDeltas] = await Promise.all([
+      fetchAgentPositions(),
+      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([])
+    ]);
+    const agentRows = buildAgentRows(agentPositions, agentDeltas);
+    return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
+  }
+  // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —
+  // позиция → сдвиг цены от позиции (inventory-skew) → порог q → пробой → хедж-заявка
+  // в паре → рассматриваемые публичные сделки → имитируемое (полное/частичное) исполнение.
+  if (pathname === "/api/vector-clearing/agent-detail") {
+    const agentId = query && query.agent_id;
+    if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
+    const rows = await fetchVectorClearingRows(1);
+    const newest = rows && rows[0] ? rows[0].batch_id : "";
+    const [agentPositions, agentDeltas] = await Promise.all([
+      fetchAgentPositions(),
+      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([])
+    ]);
+    const agent = buildAgentRows(agentPositions, agentDeltas).find((a) => a.agent_id === agentId) || null;
+    if (!agent) return writeJson(res, 404, { error: "agent_not_found" });
+    // γ/клэмп из конфига (для сдвига цены от позиции).
+    let gamma = 0.005, clamp = 8;
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+        if (r.rows[0]) { gamma = Number(r.rows[0].ce_inv_skew_gamma) || 0; clamp = Number(r.rows[0].ce_inv_skew_max_pm) || 0; }
+      } catch (e) { /* дефолты */ }
+    }
+    const isT = agent.agent_kind === 'translator';
+    const c = Number(agent.c_position) || 0;
+    const skewPm = Math.max(-clamp, Math.min(clamp, gamma * c));  // clamp(γ·c_j), ‰
+    const priceShiftPm = -skewPm;   // anchor_eff = anchor − skew ⇒ сдвиг цены = −skew
+    // Порог q (Вариант 2, ledger): CE_AGENT_BAND_Q_TRANSLATOR=18 / _ARBITRAGEUR=30.
+    // Хедж-заявку эмитит ТОЛЬКО переводчик (арбитражёр в текущей модели не хеджируется).
+    const q = isT ? 18 : 30;
+    const absC = Math.abs(c);
+    const excess = absC - q;
+    const breached = isT && excess > 0;
+    // Хедж-диагностика этого агента (последняя): заявка + публичные сделки + исполнение.
+    let hedge = null;
+    if (pool) {
+      try {
+        const hr = await pool.query(
+          `SELECT symbol, side, limit_price::text AS limit_price, target_qty::text AS target_qty,
+                  filled_qty::text AS filled_qty, avg_price::text AS avg_price, status, reason,
+                  window_trades, considered_trades, created_at,
+                  base_vwap::text AS base_vwap, impact_shift::text AS impact_shift,
+                  impact_cost::text AS impact_cost, impact_v, impact_dt_sec
+             FROM venue_fill_diagnostics
+            WHERE hedge_flow_id LIKE $1 ORDER BY created_at DESC LIMIT 1`,
+          [`ce|band|${agentId}|%`]);
+        if (hr.rows[0]) {
+          const h = hr.rows[0];
+          const considered = Array.isArray(h.considered_trades) ? h.considered_trades : [];
+          // crossVol — объём сделок КОНТЕКСТА (60 последних, для ценовой лестницы),
+          // пересекающих лимит. Это НЕ исполненный объём: матчинг сима идёт по ОКНУ.
+          const crossVol = considered.filter((t) => t.crosses).reduce((s, t) => s + Number(t.qty || 0), 0);
+          const target = Number(h.target_qty) || 0;
+          const filled = Number(h.filled_qty) || 0;
+          // 5.3: исполнение — по ФАКТУ матчинга сима (filled_qty vs target), а не по
+          // контексту. filled≥target ⇒ полное; 0<filled<target ⇒ частичное; 0 ⇒ нет.
+          const outcome = (target > 0 && filled >= target) ? 'full'
+            : filled > 0 ? 'partial' : 'none';
+          hedge = {
+            pair: splitPairSymbol(h.symbol), side: h.side, limitPrice: h.limit_price,
+            targetQty: h.target_qty, filledQty: h.filled_qty, avgPrice: h.avg_price,
+            baseVwap: h.base_vwap, impactShift: h.impact_shift, impactCost: h.impact_cost,
+            impactV: h.impact_v, impactDtSec: h.impact_dt_sec,
+            status: h.status, reason: h.reason, windowTrades: h.window_trades,
+            considered, crossVol, outcome, createdAt: h.created_at
+          };
+        }
+      } catch (e) { /* таблицы может не быть */ }
+    }
+    return writeJson(res, 200, {
+      agent, skew: { gamma, clamp, skewPm, priceShiftPm },
+      band: { q, applies: isT, absC, excess, breached },
+      hedge, generatedAt: new Date().toISOString()
     });
   }
   if (pathname === "/api/vector-clearing/detail") {
@@ -7892,6 +8281,10 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/vector-clearing/live" || pathname === "/api/vector-clearing/view"
         || pathname === "/api/vector-clearing/detail"
+        || pathname === "/api/vector-clearing/liveness"
+        || pathname === "/api/vector-clearing/agent-positions"
+        || pathname === "/api/vector-clearing/agent-detail"
+        || pathname === "/api/vector-clearing/reset-positions"
         || pathname === "/api/vector-clearing/config"
         || pathname === "/api/vector-clearing/curve") {
       const handled = await handleVectorClearing(req, res, pathname, query);

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "app/execute_on_venue.hpp"
+#include "app/fill_diagnostics_sink.hpp"
 #include "app/liquidity_curve_producer.hpp"
 #include "app/sim_execution_assembler.hpp"
 #include "app/sim_session_registry.hpp"
@@ -103,6 +104,11 @@ class VenuesLoop {
   void SetChildOrderRepository(infra::PostgresChildOrderRepository* repo) {
     child_order_repo_ = repo;
   }
+  // ADR-060 — навесить приёмник диагностики sim-fill на все CEX-адаптеры
+  // (CexWsRestAdapter). Вызывается из main после конструктора (адаптеры уже
+  // построены). DEX/AMM (uniswap) идёт через отдельный адаптер и здесь не
+  // покрывается. nullptr допустим (диагностика отключена).
+  void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink);
 
   // F-20 Phase 4 — live registry of active SimSessions, populated by the
   // sim.config consume loop (hot reload). Exposed so the VenueSimRouter
@@ -149,6 +155,8 @@ class VenuesLoop {
   LiquidityCurveProducerConfig curve_config_{};
   domain::VenueSubscription default_subscription_{};
   domain::VenueSnapshotRequest default_snapshot_request_{};
+  // Инструменты sim (env VENUES_SIM_INSTRUMENTS): одна кривая на (venue, instrument).
+  std::vector<fob::common::v1::Instrument> sim_instruments_{};
   mutable std::mutex runtime_mu_;
   std::unordered_map<std::string, VenueConfigRecord> venue_configs_;
   mutable std::mutex config_mu_;
@@ -164,6 +172,23 @@ class VenuesLoop {
   std::unordered_map<std::string, VenueRuntimeMetrics> runtime_metrics_by_venue_;
   std::chrono::steady_clock::time_point md_started_at_{};
   std::size_t next_exec_adapter_idx_{0};
+
+  // Runtime-порог устаревания venue-снапшота из PG (таблица f05a_clearing_config,
+  // колонка venue_stale_ms). Настраивается из UI (вкладка Площадки). -1 = не задан
+  // (используется env STALE_THRESHOLD_MS). TTL-поллинг в md_publish_loop.
+  void RefreshVenueStaleFromPg();
+  std::string venue_stale_pg_dsn_{};
+  std::atomic<int64_t> runtime_stale_ms_{-1};
+  std::chrono::steady_clock::time_point last_stale_poll_{};
+
+  // Параллельный REST-опрос: md_publish_loop опрашивает биржи конкурентно (по
+  // адаптеру на задачу). poll_adapter — вынесенное тело одного адаптера.
+  // snapshot_mutex_for — per-venue мьютекс вокруг RequestSnapshot: разные биржи
+  // не конфликтуют, а общий binance-адаптер (md_publish_loop vs extra_ticker_loop)
+  // сериализуется на одном мьютексе (rest_client_ handle не потокобезопасен).
+  void poll_adapter(domain::VenueAdapter* adapter);
+  std::mutex& snapshot_mutex_for(const std::string& venue_id);
+  std::unordered_map<std::string, std::unique_ptr<std::mutex>> snapshot_mu_by_venue_;
 
   std::atomic<bool> running_{false};
   std::thread t_md_;

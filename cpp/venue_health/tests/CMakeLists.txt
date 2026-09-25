@@ -5,10 +5,10 @@ endif ()
 find_package(GTest CONFIG QUIET)
 if (NOT GTest_FOUND)
     include(FetchContent)
+    # codeload tar.gz archive вместо git clone (github анонимный клон падает в Docker-build).
     FetchContent_Declare(
             googletest
-            GIT_REPOSITORY https://github.com/google/googletest.git
-            GIT_TAG v1.15.2
+            URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
     )
     FetchContent_MakeAvailable(googletest)
 endif ()

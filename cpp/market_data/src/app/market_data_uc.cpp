@@ -675,6 +675,7 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
 
   struct Book {
     std::string base, quote, venue;
+    double tau_ms{0.0};  // τ кривой (v = q/τ) — для согласования скорости с окном батча
     std::vector<domain::ExternalOrderLevel> levels;
   };
   std::vector<Book> books;
@@ -709,7 +710,7 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     // Кросс-пара: quote тоже tradeable-актив (не numeraire) — регистрируем его
     // узел asset@venue в графе наравне с base (ADR-064 §Последствия).
     if (quote != numeraire && assets_seen.insert(quote).second) assets_order.push_back(quote);
-    books.push_back({base, quote, venue, std::move(levels)});
+    books.push_back({base, quote, venue, c.tau_ms(), std::move(levels)});
   }
   if (books.empty()) return;
   std::map<std::string, double> p0;
@@ -725,6 +726,13 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   std::vector<Ag> agents;
   std::map<std::string, double> max_depth;
   int skipped_no_p0 = 0;
+  // Согласование скорости торговли, окна батча и цен: кривая моделирует v = q/τ
+  // (τ_eff калибрована по реальному обороту venue). CE-поток за такт = скорость·dt =
+  // глубина·(dt/τ). Масштабируем α агента на batch_window/τ_кривой, чтобы позиция
+  // менялась со скоростью реальной торговли биржи, а не «запаса» книги за такт.
+  const bool ce_speed_scale = cex::common::Env::get_bool("CE_SPEED_SCALE", true);
+  const double batch_window_ms =
+      static_cast<double>(cex::common::Env::get_int("F05A_BATCH_WINDOW_MS", 1000));
   for (const auto& b : books) {
     const double p0_base = p0.count(b.base) ? p0.at(b.base) : 0.0;
     double reference_price = p0_base;
@@ -744,12 +752,20 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     acfg.wide_spread_guard_pm = wide_spread_guard_pm;  // тонкие книги сохраняют ½спред
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
     if (!a.valid) continue;
-    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, a.depth, a.dead_zone_pm});
+    // Масштаб скорости: глубина(запас) → скорость·dt = глубина·(dt/τ). τ≤0 или
+    // выключено ⇒ прежнее поведение (без масштаба, регрессия).
+    double depth = a.depth;
+    if (ce_speed_scale && b.tau_ms > 0.0 && batch_window_ms > 0.0) {
+      double s = batch_window_ms / b.tau_ms;  // dt/τ
+      if (s < 1e-6) s = 1e-6; else if (s > 100.0) s = 100.0;
+      depth *= s;
+    }
+    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, depth, a.dead_zone_pm});
     // ADR-064: max глубина копится по ПАРЕ (base|quote), а не по base. Глубины
     // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT) —
     // сравнение «тонкости» валидно только между площадками одной пары.
     const std::string pk = b.base + "|" + b.quote;
-    if (a.depth > max_depth[pk]) max_depth[pk] = a.depth;
+    if (depth > max_depth[pk]) max_depth[pk] = depth;
   }
   if (skipped_no_p0 > 0)
     cex::common::log_json("DEBUG", "CE clearing: кросс-пара без P0_quote пропущена",

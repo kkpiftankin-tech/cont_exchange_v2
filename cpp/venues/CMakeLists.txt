@@ -53,6 +53,7 @@ add_executable(venues
   src/infra/postgres_venue_config_repository.cpp
   src/infra/postgres_hedgeflow_repository.cpp
   src/infra/postgres_child_order_repository.cpp
+  src/infra/postgres_fill_diagnostics_repository.cpp
   src/infra/sim_session_pg_codec.cpp
   src/infra/postgres_sim_session_repository.cpp
   src/app/sim_session_manager.cpp

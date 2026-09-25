@@ -43,8 +43,30 @@ std::string JsonEscape(const std::string& input) {
   return out.str();
 }
 
-double DecimalToDouble(const fob::common::v1::Decimal& d) {
-  return static_cast<double>(d.units()) / std::pow(10.0, d.scale());
+// Точная сериализация Decimal (§9): строим строку из units/scale без прохода
+// через double. Прежняя версия (units/10^scale + ostream с дефолтной точностью
+// 6 значащих цифр) резала крупные цены: BTC 76625.47 → "76625.3", из-за чего
+// bid==ask (замкнутый стакан). ETH/SOL меньше по величине и уцелевали.
+std::string DecimalToJsonNumber(const fob::common::v1::Decimal& d) {
+  const int64_t units = d.units();
+  int32_t scale = d.scale();
+  if (scale <= 0) return std::to_string(units);  // целое (или редкий отрицательный scale)
+  const bool neg = units < 0;
+  // abs через unsigned — корректно и для INT64_MIN.
+  const uint64_t mag = neg ? (~static_cast<uint64_t>(units) + 1ULL)
+                           : static_cast<uint64_t>(units);
+  std::string digits = std::to_string(mag);
+  if (static_cast<int32_t>(digits.size()) <= scale) {
+    digits.insert(0, static_cast<std::size_t>(scale) - digits.size() + 1, '0');
+  }
+  const std::size_t cut = digits.size() - static_cast<std::size_t>(scale);
+  std::string int_part = digits.substr(0, cut);
+  std::string frac_part = digits.substr(cut);
+  while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
+  std::string out = neg ? "-" : "";
+  out += int_part;
+  if (!frac_part.empty()) out += "." + frac_part;
+  return out;
 }
 
 int64_t TimestampToUnixMs(const google::protobuf::Timestamp& ts) {
@@ -60,8 +82,8 @@ std::string DecimalArrayToJson(
   const int n = std::min(prices.size(), quantities.size());
   for (int i = 0; i < n; ++i) {
     if (i > 0) out << ",";
-    out << "[" << DecimalToDouble(prices.Get(i)) << ","
-        << DecimalToDouble(quantities.Get(i)) << "]";
+    out << "[" << DecimalToJsonNumber(prices.Get(i)) << ","
+        << DecimalToJsonNumber(quantities.Get(i)) << "]";
   }
   out << "]";
   return out.str();
@@ -130,18 +152,18 @@ bool SnapshotClickHouseWriter::SaveSnapshot(
   row << "\"venue_id\":\"" << JsonEscape(snapshot.venue_id()) << "\",";
   row << "\"symbol\":\"" << JsonEscape(snapshot.instrument().symbol()) << "\",";
   row << "\"event_time_ms\":" << event_time_ms << ",";
-  row << "\"best_bid\":" << DecimalToDouble(snapshot.best_bid()) << ",";
-  row << "\"best_ask\":" << DecimalToDouble(snapshot.best_ask()) << ",";
-  row << "\"mid_price\":" << DecimalToDouble(snapshot.mid_price()) << ",";
-  row << "\"spread\":" << DecimalToDouble(snapshot.spread()) << ",";
+  row << "\"best_bid\":" << DecimalToJsonNumber(snapshot.best_bid()) << ",";
+  row << "\"best_ask\":" << DecimalToJsonNumber(snapshot.best_ask()) << ",";
+  row << "\"mid_price\":" << DecimalToJsonNumber(snapshot.mid_price()) << ",";
+  row << "\"spread\":" << DecimalToJsonNumber(snapshot.spread()) << ",";
   row << "\"bid_depth_json\":\"" << JsonEscape(bid_depth) << "\",";
   row << "\"ask_depth_json\":\"" << JsonEscape(ask_depth) << "\",";
-  row << "\"maker_fee\":" << DecimalToDouble(snapshot.maker_fee()) << ",";
-  row << "\"taker_fee\":" << DecimalToDouble(snapshot.taker_fee()) << ",";
-  row << "\"tick_size\":" << DecimalToDouble(snapshot.tick_size()) << ",";
-  row << "\"lot_size\":" << DecimalToDouble(snapshot.lot_size()) << ",";
+  row << "\"maker_fee\":" << DecimalToJsonNumber(snapshot.maker_fee()) << ",";
+  row << "\"taker_fee\":" << DecimalToJsonNumber(snapshot.taker_fee()) << ",";
+  row << "\"tick_size\":" << DecimalToJsonNumber(snapshot.tick_size()) << ",";
+  row << "\"lot_size\":" << DecimalToJsonNumber(snapshot.lot_size()) << ",";
   row << "\"status\":\"" << JsonEscape(snapshot.status()) << "\",";
-  row << "\"volume_24h\":" << DecimalToDouble(snapshot.volume_24h()) << ",";
+  row << "\"volume_24h\":" << DecimalToJsonNumber(snapshot.volume_24h()) << ",";
   row << "\"source\":\"" << JsonEscape(
       snapshot.has_meta() ? snapshot.meta().source() : "") << "\",";
   row << "\"correlation_id\":\"" << JsonEscape(
@@ -162,11 +184,11 @@ bool SnapshotClickHouseWriter::SaveSnapshot(
                            {"symbol", snapshot.instrument().symbol()},
                            {"event_time_ms", std::to_string(event_time_ms)},
                            {"status", snapshot.status()},
-                           {"best_bid", DecimalToDouble(snapshot.best_bid()) == 0.0
+                           {"best_bid", snapshot.best_bid().units() == 0
                                             ? "0"
                                             : cex::common::Decimal::from_proto(
                                                   snapshot.best_bid()).to_string()},
-                           {"best_ask", DecimalToDouble(snapshot.best_ask()) == 0.0
+                           {"best_ask", snapshot.best_ask().units() == 0
                                             ? "0"
                                             : cex::common::Decimal::from_proto(
                                                   snapshot.best_ask()).to_string()},

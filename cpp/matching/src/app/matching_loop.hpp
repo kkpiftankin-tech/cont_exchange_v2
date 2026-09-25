@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -8,6 +9,9 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+
+#include <grpcpp/grpcpp.h>
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // inventory-skew: чтение c_j из ledger
 
 #include "app/run_batch_uc.hpp"
 #include "app/execution_intent_builder.hpp"
@@ -133,6 +137,28 @@ class MatchingLoop {
   // лаге venue возможен over-fill сверх q_max и двойной постинг в ledger (§17).
   std::set<std::string> external_in_flight_;
   std::mutex external_inflight_mu_;
+
+  // Inventory-skew (обратная связь позиция→цена, F-18 v2): при накоплении позиции
+  // c_j эффективный якорь агента смещается (anchor_eff = anchor − clamp(γ·c_j)),
+  // разворачивая поток — позиции перестают дрейфовать. c_j читаем из ledger (владелец),
+  // чтобы учесть хедж-исполнения и кнопку сброса. TTL-кэш: клиринг идёт часто.
+  std::unique_ptr<fob::ledger::v1::LedgerService::Stub> ledger_stub_;
+  std::mutex inv_mu_;
+  std::map<std::string, double> inv_positions_;  // agent_id → c_j (k-USDT)
+  std::chrono::steady_clock::time_point inv_last_fetch_{};
+  bool inv_have_{false};
+  // agent_id → c_j из ledger, кэш на CE_INVENTORY_SKEW_REFRESH_MS. Пустой при сбое.
+  std::map<std::string, double> FetchAgentPositionsCached();
+
+  // Живая настройка inventory-skew из f05a_clearing_config (γ, клэмп) — без пересборки.
+  std::string postgres_dsn_;
+  std::mutex inv_cfg_mu_;
+  double inv_cfg_gamma_{0.0};
+  double inv_cfg_max_pm_{8.0};
+  std::chrono::steady_clock::time_point inv_cfg_last_{};
+  bool inv_cfg_have_{false};
+  // Читает γ/клэмп из PG (кэш ~1с). Fallback — env, затем дефолты. Возврат: {γ, max_pm}.
+  std::pair<double, double> LoadInvSkewConfig();
 };
 
 }  // namespace cex::matching::app

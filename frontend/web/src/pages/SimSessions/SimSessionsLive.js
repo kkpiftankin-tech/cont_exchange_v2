@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import NavBar from '../../components/NavBar';
 import { isAuthenticated } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import './SimSessionsLive.css';
@@ -119,6 +120,8 @@ const SimSessionsLive = () => {
 
   return (
     <div className="sim-sessions-page">
+      <NavBar />
+      <div className="sim-content">
       <header className="sim-header">
         <h1>F-20 Sim Sessions</h1>
         <p className="sim-sub">
@@ -221,6 +224,7 @@ const SimSessionsLive = () => {
           <a href="/reconciliation-alerts-live">Reconciliation Alerts</a>.
         </p>
       </footer>
+      </div>
     </div>
   );
 };

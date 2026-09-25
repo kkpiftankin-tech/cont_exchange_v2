@@ -231,6 +231,23 @@ export const updateVenueRoutingMode = async (venueId, mode) => {
   }
 };
 
+// Реальные периоды обновления стаканов + список пар (CH venue_liquidity_curves).
+export const getVenueStats = async (windowS = 600) => {
+  const response = await api.get('/venues/stats', { params: { window_s: windowS } });
+  return response.data;
+};
+
+// Порог устаревания venue-снапшота (runtime, из UI). venues поллит PG.
+export const getVenueStaleConfig = async () => {
+  const response = await api.get('/venues/config');
+  return response.data;
+};
+
+export const setVenueStaleConfig = async (venueStaleMs) => {
+  const response = await api.post('/venues/config', { venue_stale_ms: venueStaleMs });
+  return response.data;
+};
+
 export const upsertVenueConfig = async (venueId, payload) => {
   const response = await api.put(`/venues/${encodeURIComponent(venueId)}/config`, payload);
   return response.data;

@@ -177,7 +177,24 @@ INSERT INTO hedgeflows (
   NULLIF($8, '')::NUMERIC,
   NULLIF($9, '')::NUMERIC,
   $10, $11, 'OPEN')
-ON CONFLICT (hedge_flow_id) DO NOTHING
+ON CONFLICT (hedge_flow_id) DO UPDATE SET
+  -- CE band-хеджи переиспользуют стабильный hedge_flow_id: каждый новый хедж
+  -- ДОБАВЛЯЕТ свой target к бегущей сумме (ApplyReport копит filled += по тому же
+  -- flow_id). Без аккумуляции target filled обгонял бы фиксированный target →
+  -- hedgeflows_filled_le_target violation на каждом отчёте → отказы тормозили
+  -- консьюмер (F-18). Для обычных F-12 flow'ов hedge_flow_id уникален и конфликт
+  -- не возникает — поведение не меняется.
+  target_qty      = hedgeflows.target_qty + EXCLUDED.target_qty,
+  target_notional = COALESCE(hedgeflows.target_notional, 0) + COALESCE(EXCLUDED.target_notional, 0),
+  intent_id       = EXCLUDED.intent_id,
+  batch_id        = COALESCE(EXCLUDED.batch_id, hedgeflows.batch_id),
+  status          = CASE
+    WHEN hedgeflows.status IN ('COMPLETED','UNDERFILLED','REJECTED','CANCELLED','RISK_REJECTED')
+      THEN 'OPEN'                                  -- новая волна хеджа — снова активен
+    ELSE hedgeflows.status
+  END,
+  updated_at      = now(),
+  completed_at    = NULL
 )SQL",
         hedge_flow_id,
         intent.intent_id(),

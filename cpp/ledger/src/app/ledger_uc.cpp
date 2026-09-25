@@ -39,8 +39,10 @@
 
 #include "app/ledger_uc.hpp"
 
+#include <algorithm>      // std::max — порог band (floor) от комиссии
 #include <chrono>         // F-18 §11: epoch-ms для снапшота позиции по клирингу
 #include <cmath>          // std::pow, std::llround для PnL вычислений
+#include <cstdlib>        // std::getenv/std::atof — env-дефолты порога band
 #include <exception>      // std::exception::what() в catch
 #include <map>            // std::map — агрегат валют в GetExchangeBalances (F-18)
 #include <sstream>        // std::ostringstream для composite key
@@ -48,8 +50,15 @@
 #include <utility>
 
 #include "cex/common/log.hpp"
+#include "cex/common/env.hpp"     // Вариант 2: CE_AGENT_BAND / q-порог
+#include "cex/common/kafka.hpp"   // Вариант 2: KafkaProducer (ce.agent.band.breach)
+#include "cex/common/proto.hpp"   // Вариант 2: to_bytes(AgentBandBreach)
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
+
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+#include <pqxx/pqxx>  // F-18: живая настройка порога band от комиссии (f05a_clearing_config)
+#endif
 
 namespace cex::ledger::app {
 
@@ -816,7 +825,9 @@ void LedgerUseCases::ApplyPositionDelta(
     // F-18 v2 Э3: запоминаем последнюю цену узла (P_node), по которой клиринг
     // делил value→qty — risk конвертирует ею избыток полосы в объём хеджа.
     // Нулевую (price_used не пришёл) не затираем последней валидной.
-    if (ad.price_used.units != 0) st.last_price = ad.price_used;
+    if (ad.price_used.units != 0) st.last_price = ad.price_used;  // цена ПАРЫ
+    if (ad.base_price.units != 0) st.base_price = ad.base_price;  // P(base) USDT
+    if (!ad.quote.empty()) st.quote = ad.quote;                    // котируемая пары
     st.last_batch_id = batch_id;
     st.updated_at_ms = ts_ms;
 
@@ -848,6 +859,10 @@ void LedgerUseCases::ApplyPositionDelta(
     rec.delta = ad.delta;
     rec.position_after = st.position;  // финальная позиция (с учётом PG-подтяжки выше)
     batch_records.push_back(std::move(rec));
+
+    // Вариант 2: позиция «устоялась» этим тактом — проверяем полосу и, при
+    // пробое, помечаем in_flight + эмитим AgentBandBreach (risk строит заявку).
+    detect_and_emit_band_breach_locked(key, st, batch_id, ts_ms);
   }
 
   // Снимаем снапшот такта, только если он реально затронул позиции агентов —
@@ -929,10 +944,49 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     p->set_venue(venue);
     *p->mutable_position() = st.position.to_proto();
     *p->mutable_in_flight() = st.in_flight.to_proto();
-    *p->mutable_reference_price() = st.last_price.to_proto();  // F-18 v2 Э3
+    *p->mutable_reference_price() = st.last_price.to_proto();  // цена ПАРЫ P(base)/P(quote)
+    *p->mutable_base_price() = st.base_price.to_proto();        // P(base) USDT (разложение ног)
+    p->set_quote(st.quote);                                    // котируемая пары (номинал ⇒ "USDT")
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
   }
+  return resp;
+}
+
+// F-18 v2 (кнопка сброса): обнуляет c_j/in_flight агентов и очищает band-хеджи.
+// Реальный сброс состояния владельца (in-memory кэш + PG-репозиторий занулением
+// дельтой, если подключён). agent_ids пусто ⇒ все агенты.
+fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions(
+    const fob::ledger::v1::ResetAgentPositionsRequest& req) {
+  using cex::common::Decimal;
+  fob::ledger::v1::ResetAgentPositionsResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("ledger");
+  const std::unordered_set<std::string> want(req.agent_ids().begin(), req.agent_ids().end());
+  const long long ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
+  std::lock_guard<std::mutex> lg(mu_);
+  std::uint32_t cleared = 0;
+  for (auto& [key, st] : agent_positions_) {
+    const auto& [agent_id, asset, venue] = key;
+    if (!want.empty() && !want.count(agent_id)) continue;
+    // Персист сброса в PG (если репозиторий подключён): зануляющая дельта.
+    if (agent_position_repo_ && (st.position.units != 0 || st.in_flight.units != 0)) {
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue,
+                                       Decimal::sub(Decimal::zero(), st.position),
+                                       Decimal::sub(Decimal::zero(), st.in_flight), ts_ms);
+    }
+    st.position = Decimal::zero();
+    st.in_flight = Decimal::zero();
+    st.updated_at_ms = ts_ms;
+    ++cleared;
+  }
+  band_hedges_.clear();  // in_flight guard — с нуля, чтобы новые пробои эмитились
+  resp.set_cleared(cleared);
+  cex::common::log_json("INFO", "F-18 agent positions reset",
+                        {{"cleared", std::to_string(cleared)},
+                         {"scope", want.empty() ? "all" : "filtered"}});
   return resp;
 }
 
@@ -1363,10 +1417,10 @@ void LedgerUseCases::RememberExecutionIntent(const fob::execution::v1::Execution
   std::lock_guard<std::mutex> lg(mu_);
   execution_intents_[intent.intent_id()] = intent;
 
-  // F-18 v2 Э3 (ADR-061 §4): band-хедж агента-переводчика — помечаем in_flight,
-  // чтобы следующий такт не отправил тот же избыток повторно. Позицию НЕ трогаем
-  // (уменьшится по факту исполнения — apply_agent_band_report_locked).
-  mark_agent_band_in_flight_locked(intent);
+  // Вариант 2: band-заявка приходит уже ПОСЛЕ пробоя (in_flight помечен в
+  // detect_and_emit_band_breach_locked). Здесь только регистрируем её в
+  // band_hedges_ по intent_id для дренажа по исполнению — in_flight НЕ трогаем.
+  register_band_hedge_locked(intent);
 
   auto pending_it = pending_execution_reports_.find(intent.intent_id());
   if (pending_it == pending_execution_reports_.end()) return;
@@ -1405,33 +1459,162 @@ bool parse_band_flow_id(const std::string& flow_id, std::string& agent_id,
 }
 }  // namespace
 
-void LedgerUseCases::mark_agent_band_in_flight_locked(
+void LedgerUseCases::register_band_hedge_locked(
     const fob::execution::v1::ExecutionIntent& intent) {
   std::string agent_id, asset, venue;
   if (!parse_band_flow_id(intent.hedge_flow_id(), agent_id, asset, venue)) return;
-  // Стоимость отправленного (k-USDT) = target_notional(USDT)/1000; знак = сторона
-  // (SELL уменьшает положительную позицию ⇒ in_flight>0; BUY ⇒ <0). Всё в Decimal
-  // (CLAUDE.md §9 — без double для денежных величин ledger).
+  // Вариант 2: in_flight уже помечен при пробое (detect_and_emit_band_breach).
+  // Здесь только регистрируем заявку по intent_id для дренажа по исполнению.
   const Decimal notional = Decimal::from_proto(intent.target_notional());
-  if (notional.units == 0) return;  // без нотионала учитывать нечего
-  Decimal sent = Decimal::div(notional, Decimal{1000, 0}, 8);  // magnitude (нотионал ≥ 0)
+  if (notional.units == 0) return;
+  Decimal sent = Decimal::div(notional, Decimal{1000, 0}, 8);  // magnitude
   if (intent.side() != fob::common::v1::SIDE_SELL)
-    sent = Decimal::sub(Decimal::zero(), sent);  // BUY ⇒ отрицательный in_flight
-  const AgentPositionKey key{agent_id, asset, venue};
-  const long long ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
+    sent = Decimal::sub(Decimal::zero(), sent);  // знак = знак позиции
+  band_hedges_[intent.intent_id()] =
+      AgentBandHedge{AgentPositionKey{agent_id, asset, venue}, sent, Decimal::zero()};
+}
 
-  band_hedges_[intent.intent_id()] = AgentBandHedge{key, sent, Decimal::zero()};
-  auto& st = agent_positions_[key];
-  st.in_flight = Decimal::add(st.in_flight, sent);
+// F-18: порог band как функция комиссии внешних бирж. Экономический смысл — «мёртвая
+// зона»: не хеджируем, пока инвентарь не оправдывает уплату round-trip комиссии.
+// q = k_band · φ_rt, где φ_rt — комиссия в bps на round-trip (переводчик: один кросс;
+// арбитражёр: два — покупка на одной бирже + продажа на другой). fee_bps берём из
+// f05a_clearing_config.ce_taker_fee_bps (та же комиссия, что «полка» на кривой —
+// консистентно), с fallback на env CE_BAND_REF_FEE_BPS. TTL-кэш ~1с (не бьём PG на
+// каждый пробой). k_band=0 ⇒ линк выключен (плоский env-порог, старое поведение).
+LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
+  auto env_d = [](const char* n, double def) {
+    const char* v = std::getenv(n);
+    return v ? std::atof(v) : def;
+  };
+  const double ref_cmkt = env_d("CE_BAND_REF_FEE_BPS", 10.0);      // тейкер+½спред fallback
+  const double def_clim = env_d("CE_BAND_MAKER_FEE_BPS", 2.0);     // мейкер-комиссия fallback
+  const double def_k = env_d("CE_BAND_FEE_K", 1.8);                // 1/Γ (k-USDT на bps)
+  {
+    std::lock_guard<std::mutex> lk(band_cfg_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    if (band_cfg_have_ &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - band_cfg_last_).count() < 1000)
+      return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_};
+  }
+  double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k;
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!postgres_dsn_.empty()) {
+    try {
+      pqxx::connection c(postgres_dsn_);
+      pqxx::work tx(c);
+      const pqxx::row r = tx.exec1(
+          "SELECT ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k "
+          "FROM f05a_clearing_config WHERE id=1");
+      const double cfg_taker = r[0].as<double>();
+      const double cfg_maker = r[1].as<double>();
+      const double cfg_k = r[2].as<double>();
+      // ce_taker_fee_bps ≤0 = «нет полки-комиссии» → env-референс.
+      if (cfg_taker > 0.0) cmkt_bps = cfg_taker;
+      if (cfg_maker > 0.0) clim_bps = cfg_maker;
+      k_band = cfg_k;  // 0 ⇒ линк выключен (флаг в detect вернёт плоский порог)
+      tx.commit();
+    } catch (const std::exception&) { /* нет колонок/БД — env/дефолты */ }
+  }
+#endif
+  std::lock_guard<std::mutex> lk(band_cfg_mu_);
+  band_cfg_clim_bps_ = clim_bps;
+  band_cfg_cmkt_bps_ = cmkt_bps;
+  band_cfg_k_ = k_band;
+  band_cfg_last_ = std::chrono::steady_clock::now();
+  band_cfg_have_ = true;
+  return {clim_bps, cmkt_bps, k_band};
+}
+
+void LedgerUseCases::detect_and_emit_band_breach_locked(
+    const AgentPositionKey& key, AgentPositionState& st,
+    const std::string& batch_id, long long ts_ms) {
+  // Вариант 2 (ADR-061 §4/§5): полоса ±q для переводчиков И арбитражёров. Оба копят
+  // позицию и хеджируются по пробою; у арбитражёра свой порог q и пара = asset/USDT
+  // (quote пуст ⇒ номинал), заявка на площадку breach.venue.
+  if (band_breach_producer_ == nullptr) return;
+  if (!cex::common::Env::get_bool("CE_AGENT_BAND", false)) return;
+  const bool is_arbitrageur = st.agent_kind == "arbitrageur";
+  if (st.agent_kind != "translator" && !is_arbitrageur) return;
+  if (st.base_price.units == 0 || st.last_price.units == 0) return;  // нет цен — не размерить
+  const auto& [agent_id, asset, venue] = key;
+
+  const Decimal zero = Decimal::zero();
+  // ТРЁХЗОННОЕ правило хеджа от комиссии внешних бирж (Кривые §6.4). Две границы:
+  //   Z̄lim = k_band·clim·rt (no-action → пассивный мейкер-лимит, комиссия clim),
+  //   Z̄mkt = k_band·cmkt·rt (пассив → агрессивный тейкер-сброс, cmkt=тейкер+½спред),
+  // k_band=1/Γ (неприятие риска), rt=round-trip (арбитражёр 2 — две биржи). Хедж
+  // стартует за Z̄lim; выше Z̄mkt — агрессивно (taker). Live-настройка из PG.
+  // k_band ≤ 0 ⇒ линк выключен: плоский env-порог, всегда агрессив (обратная совм.).
+  const auto cfg = LoadBandFeeConfig();
+  const double q_floor = [] {
+    const char* v = std::getenv("CE_AGENT_BAND_Q_MIN");
+    return v ? std::atof(v) : 5.0;  // минимум, чтобы порог не схлопнулся при малой комиссии
+  }();
+  const double rt = is_arbitrageur ? 2.0 : 1.0;
+  const bool fee_linked = cfg.k_band > 0.0 && cfg.cmkt_bps > 0.0;
+  double z_lim, z_mkt;
+  if (fee_linked) {
+    z_lim = std::max(q_floor, cfg.k_band * cfg.clim_bps * rt);
+    z_mkt = std::max(z_lim, cfg.k_band * cfg.cmkt_bps * rt);  // Z̄mkt ≥ Z̄lim всегда
+  } else {
+    z_lim = is_arbitrageur
+        ? static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30))
+        : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_TRANSLATOR", 18));
+    z_mkt = z_lim;  // без пассивной зоны — сразу агрессив
+  }
+  // Порог входа в хедж = Z̄lim; scale 6 для дробного порога от комиссии.
+  const Decimal q{static_cast<int64_t>(std::llround(z_lim * 1e6)), 6};
+  const Decimal abs_c = Decimal::cmp(st.position, zero) >= 0 ? st.position
+                                                             : Decimal::sub(zero, st.position);
+  const Decimal abs_if = Decimal::cmp(st.in_flight, zero) >= 0 ? st.in_flight
+                                                               : Decimal::sub(zero, st.in_flight);
+  const Decimal excess = Decimal::sub(Decimal::sub(abs_c, q), abs_if);  // свободный избыток
+  if (Decimal::cmp(excess, zero) <= 0) return;  // в no-action зоне или покрыт in_flight
+  // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
+  // При выключенном линке — всегда агрессив (старое поведение).
+  const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
+
+  const bool pos_positive = Decimal::cmp(st.position, zero) >= 0;
+  // c>0 ⇒ реализуем накопленный поток SELL; c<0 ⇒ BUY. in_flight того же знака.
+  const Decimal in_flight_delta = pos_positive ? excess : Decimal::sub(zero, excess);
+  // Модель A7 (док CE_algorithm_v2 §A7): отправленное УХОДИТ из позиции в заявку —
+  // c уменьшается на избыток СРАЗУ (c→±q), избыток учитывается в in_flight. По
+  // исполнению c не трогаем; по таймауту неисполненный остаток возвращается в c
+  // (apply_agent_band_report_locked). Так заявка = ВЕСЬ избыток (крупная) ⇒ позиция
+  // сходится к band, а не паркуется на маржинальном потоке.
+  st.position = Decimal::sub(st.position, in_flight_delta);   // c → ±q (к границе)
+  st.in_flight = Decimal::add(st.in_flight, in_flight_delta); // отправлено в заявку
   st.updated_at_ms = ts_ms;
   if (agent_position_repo_)
-    agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), sent, ts_ms);
+    agent_position_repo_->ApplyHedge(agent_id, asset, venue,
+                                     Decimal::sub(zero, in_flight_delta), in_flight_delta, ts_ms);
 
-  cex::common::log_json("INFO", "F-18 band hedge in_flight marked",
-                        {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
-                         {"sent_value", sent.to_string()},
-                         {"side", intent.side() == fob::common::v1::SIDE_SELL ? "SELL" : "BUY"}});
+  // Эмитим событие пробоя → risk строит заявку в паре base/quote.
+  fob::treasury::v1::AgentBandBreach breach;
+  breach.set_agent_id(agent_id);
+  breach.set_agent_kind(is_arbitrageur ? fob::treasury::v1::AGENT_KIND_ARBITRAGEUR
+                                       : fob::treasury::v1::AGENT_KIND_TRANSLATOR);
+  breach.set_asset(asset);
+  breach.set_quote(st.quote.empty() ? std::string("USDT") : st.quote);
+  breach.set_venue(venue);
+  breach.set_side(pos_positive ? "SELL" : "BUY");
+  *breach.mutable_excess_value() = excess.to_proto();     // модуль, k-USDT
+  *breach.mutable_base_price() = st.base_price.to_proto(); // P(base) USDT
+  *breach.mutable_pair_price() = st.last_price.to_proto(); // цена пары (лимит)
+  breach.set_batch_id(batch_id);
+  breach.set_event_time_ms(ts_ms);
+  breach.set_aggressive(aggressive);   // зона: taker (агрессив) | maker (пассив)
+  band_breach_producer_->produce("ce.agent.band.breach", agent_id,
+                                 cex::common::to_bytes(breach));
+
+  cex::common::log_json("INFO", "F-18 band breach emitted",
+                        {{"agent_id", agent_id}, {"asset", asset}, {"quote", st.quote},
+                         {"venue", venue}, {"side", pos_positive ? "SELL" : "BUY"},
+                         {"excess_value", excess.to_string()},
+                         {"z_lim", q.to_string()},                    // порог входа (k-USDT)
+                         {"z_mkt", std::to_string(z_mkt)},            // порог агрессии (k-USDT)
+                         {"zone", aggressive ? "taker" : "maker"},
+                         {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
 
 bool LedgerUseCases::apply_agent_band_report_locked(
@@ -1450,32 +1633,36 @@ bool LedgerUseCases::apply_agent_band_report_locked(
       std::chrono::system_clock::now().time_since_epoch()).count();
   auto& st = agent_positions_[hedge.key];
 
-  // Инкремент исполнения → стоимость (k-USDT): |fq·price|/1000. И c_j, и in_flight
-  // движутся к нулю на эту величину (ADR-061 §4: c уменьшается ПО ИСПОЛНЕНИЮ).
-  // Всё в Decimal (CLAUDE.md §9).
-  if (incr_filled_qty.units != 0 && average_price.units != 0) {
+  // Модель A7 (док §A7/§A8): позиция c уже уменьшена на весь избыток ПРИ ЭМИССИИ.
+  // Здесь по ИСПОЛНЕНИЮ позицию НЕ трогаем (§A8.2 «Позицию агента НЕ трогаем —
+  // уменьшена на A7») — двигаем только in_flight к нулю: исполненное окончательно
+  // ушло из обязательства. Стоимость fill (k-USDT): |fq·P_base|/1000; base_price в
+  // USDT (для кросс-пары average_price — цена пары, поэтому берём st.base_price).
+  const Decimal price_usd = st.base_price.units != 0 ? st.base_price : average_price;
+  if (incr_filled_qty.units != 0 && price_usd.units != 0) {
     const Decimal magnitude =
-        Decimal::div(Decimal::mul(incr_filled_qty, average_price), Decimal{1000, 0}, 8);
-    // filled копит знак sent; pos_delta ведёт к нулю (противоположный знак).
+        Decimal::div(Decimal::mul(incr_filled_qty, price_usd), Decimal{1000, 0}, 8);
+    // filled копит знак sent; in_flight ведём к нулю (противоположный знак).
     const Decimal filled_incr = sent_positive ? magnitude
                                               : Decimal::sub(Decimal::zero(), magnitude);
-    const Decimal pos_delta = sent_positive ? Decimal::sub(Decimal::zero(), magnitude)
-                                            : magnitude;
-    st.position = Decimal::add(st.position, pos_delta);
-    st.in_flight = Decimal::add(st.in_flight, pos_delta);
+    const Decimal if_delta = sent_positive ? Decimal::sub(Decimal::zero(), magnitude)
+                                           : magnitude;
+    st.in_flight = Decimal::add(st.in_flight, if_delta);   // позицию НЕ трогаем (A7)
     hedge.filled_value = Decimal::add(hedge.filled_value, filled_incr);
     if (agent_position_repo_)
-      agent_position_repo_->ApplyHedge(agent_id, asset, venue, pos_delta, pos_delta, ts_ms);
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta, ts_ms);
   }
 
-  // Терминальный статус: освобождаем неисполненный остаток in_flight (позицию
-  // НЕ трогаем — ADR-061 §4 "по таймауту/отказу in_flight освобождается").
+  // Терминальный статус (§A8.3): неисполненный остаток ВОЗВРАЩАЕТСЯ в позицию (был
+  // вычтен при эмиссии), и снимается с in_flight. residual = sent − filled (знаковый,
+  // знак позиции). c += residual восстанавливает необслуженную часть для ретрая.
   if (terminal) {
     const Decimal residual = Decimal::sub(hedge.sent_value, hedge.filled_value);
     if (residual.units != 0) {
-      st.in_flight = Decimal::sub(st.in_flight, residual);
+      st.position = Decimal::add(st.position, residual);       // возврат в позицию
+      st.in_flight = Decimal::sub(st.in_flight, residual);     // снятие с in_flight
       if (agent_position_repo_)
-        agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(),
+        agent_position_repo_->ApplyHedge(agent_id, asset, venue, residual,
                                          Decimal::sub(Decimal::zero(), residual), ts_ms);
     }
     band_hedges_.erase(it);

@@ -161,6 +161,16 @@ dm::QpSolution OsqpBackend::Solve(const dm::QpProblem& problem,
     }
   }
 
+  // Копируем дуальные y (длина m = N+I). Первые N — тень ограничения Wx=0,
+  // т.е. равновесные клиринговые цены по активам (pi). Извлечение pi из y — в
+  // доменном VectorQpSolver (граница §9 там же квантует).
+  out.y = Eigen::VectorXd::Zero(m);
+  if (work->solution != nullptr && work->solution->y != nullptr) {
+    for (int r = 0; r < m; ++r) {
+      out.y(r) = static_cast<double>(work->solution->y[r]);
+    }
+  }
+
   osqp_cleanup(work);
   return out;
 }

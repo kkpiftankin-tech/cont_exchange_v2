@@ -72,6 +72,16 @@ mv1::VectorizedLiquiditySnapshot ToVectorizedSnapshot(
     *ps->mutable_q_rate() = s.q_rate.to_proto();
     *ps->mutable_q_max() = s.q_max.to_proto();
     *ps->mutable_remaining_quantity() = s.q_max.to_proto();
+    // ADR-052 (academic двусторонний): anchor/slope/q_min. Пусты в F1/per-side.
+    *ps->mutable_anchor() = s.anchor.to_proto();
+    *ps->mutable_slope() = s.slope.to_proto();
+    *ps->mutable_q_min() = s.q_min.to_proto();
+    // ADR-053 safe-translator диагностика.
+    *ps->mutable_alpha_ext() = s.alpha_ext.to_proto();
+    *ps->mutable_alpha_t() = s.alpha_t.to_proto();
+    *ps->mutable_beta_t() = s.beta_t.to_proto();
+    *ps->mutable_theta() = s.theta.to_proto();
+    ps->set_translator_model(s.translator_model);
     SetTs(ps->mutable_source_timestamp(), s.source_timestamp_ms);
   }
 

@@ -39,6 +39,10 @@ std::string JsonEscape(const std::string& input) {
 
 std::string DoubleArrayToJsonString(const google::protobuf::RepeatedField<double>& values) {
   std::ostringstream out;
+  // Дефолтная точность ostream — 6 значащих цифр: для крупных цен (BTC ~76000)
+  // это резало 2-й знак после запятой (p_of_q "76643.31" → "76643.3"), схлопывая
+  // тонкую структуру кривой. 15 цифр сохраняют double-значение без float-шума.
+  out.precision(15);
   out << "[";
   for (int i = 0; i < values.size(); ++i) {
     if (i > 0) out << ",";
@@ -214,8 +218,9 @@ void ClickHouseLiquidityCurveStorage::Save(const fob::venue::v1::VenueLiquidityC
   insert_query << "INSERT INTO " << database_ << "." << table_name_ << " FORMAT JSONEachRow";
   
   std::ostringstream row;
+  row.precision(15);  // иначе mid_price крупных активов (BTC) режется до 6 знач. цифр
   row << "{";
-  
+
   // Timestamp
   int64_t ts_ms = curve.has_timestamp() ? TimestampToUnixMs(curve.timestamp()) : 0;
   row << "\"timestamp_ms\":" << ts_ms << ",";

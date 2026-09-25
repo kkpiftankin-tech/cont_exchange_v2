@@ -15,6 +15,13 @@ struct NormalizedLevel {
 
 constexpr int32_t kMaxScale = 18;
 
+// Минимум тиков, укладывающихся в цену книги, ниже которого настроенный tick
+// считается заведомо грубым (мис-конфиг). Реальный биржевой тик — крошечная
+// доля цены (цена = тысячи+ тиков). Если best price < kMinTicksAcrossPrice·tick,
+// квантизация по тику схлопнула бы всю книгу в один бакет (см. ETH/BTC: цена
+// ~0.032 при venue-wide tick 0.01 ⇒ ~3 тика на всю цену) — тик отключается.
+constexpr int64_t kMinTicksAcrossPrice = 100;
+
 int64_t pow10_i64(const int32_t p) {
   if (p < 0 || p > kMaxScale) return 0;
   int64_t out = 1;
@@ -115,6 +122,24 @@ std::vector<BookLevel> CanonicalizeBookSide(const std::vector<BookLevel>& levels
     min_qty_units = 0;
   }
   if (min_qty_units <= 0) min_qty_units = 0;
+
+  // Защита от заведомо грубого venue-wide тика для дешёвой (напр. BTC-котируемой)
+  // пары: floor/ceil каждого уровня к такому тику сминает всю книгу в один бакет и
+  // уничтожает глубину (ETH/BTC цена ~0.032 при tick 0.01 ⇒ все уровни → 0.03/0.04).
+  // Если лучшая цена укладывает < kMinTicksAcrossPrice тиков — тик не настоящий:
+  // отключаем квантизацию по тику, сохраняя сырые уровни (глубину).
+  if (tick_units > 0) {
+    int64_t ref_price_units = 0;
+    for (const auto& level : levels) {
+      if (level.price.units <= 0) continue;
+      int64_t p = 0;
+      if (!align_to_scale(level.price, price_scale, &p)) continue;
+      if (p > ref_price_units) ref_price_units = p;
+    }
+    if (ref_price_units > 0 && ref_price_units < tick_units * kMinTicksAcrossPrice) {
+      tick_units = 0;
+    }
+  }
 
   std::vector<NormalizedLevel> normalized;
   normalized.reserve(levels.size());

@@ -1022,7 +1022,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     std::string trades_body;
     long trades_http_code = 0;
     bool trades_ok = false;
-    if (cfg_.sim_match_real_trades) {
+    if (cfg_.sim_match_real_trades && normalized.include_trades) {
       bool can_fetch_trades = false;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -1981,11 +1981,14 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
     int64_t price_units = 0;
     if (parse_decimal_to_scale(price_text, cfg_.market_price_scale, &price_units) &&
         price_units > 0) {
-      state.recent_trades.push_back(
-          TradePrint{cex::common::Decimal{price_units, cfg_.market_price_scale},
-                     cex::common::Decimal{qty_units, cfg_.market_qty_scale}, now});
-      // Эвикт по окну и по ёмкости (лента — недавнее time-and-sales).
-      const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+      const TradePrint tp{cex::common::Decimal{price_units, cfg_.market_price_scale},
+                          cex::common::Decimal{qty_units, cfg_.market_qty_scale}, now};
+      state.recent_trades.push_back(tp);
+      // Ценовой контекст (#3): без прунинга по времени, только по ёмкости.
+      state.context_trades.push_back(tp);
+      while (state.context_trades.size() > 60) state.context_trades.pop_front();
+      // Эвикт по окну (= N·период чтения) и по ёмкости (лента — недавнее time-and-sales).
+      const auto window = effective_trade_window_locked(state);
       while (!state.recent_trades.empty() &&
              (now - state.recent_trades.front().ts) > window) {
         state.recent_trades.pop_front();
@@ -2026,6 +2029,25 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       ? Decimal::from_proto(intent.limit_price()) : Decimal{0, cfg_.market_price_scale};
   const bool is_sell = intent.side() == fob::common::v1::SIDE_SELL;
   const Decimal zero_q{0, cfg_.market_qty_scale};
+  // Рыночная заявка (band-хедж CE помечен EXEC_STRATEGY_MARKET / IOC / HIGH) —
+  // агрессивная: забирает любую доступную свежую ликвидность независимо от limit
+  // (SELL берёт любой bid, BUY — любой ask). Пассивный лимит на off-market цене
+  // (pair_price выше рынка) иначе никогда не бьётся → позиция не дренится (F-18).
+  // Price-impact (k·v) всё равно начисляется, т.е. агрессия несёт свою издержку.
+  const bool marketable =
+      intent.strategy() == fob::execution::v1::EXEC_STRATEGY_MARKET;
+  // IOC/single-shot: неисполненный остаток отменяется сразу (не «висит»). Band-хедж
+  // помечен TIF_IOC — при неполном исполнении отчёт ДОЛЖЕН быть терминальным
+  // (EXPIRED), иначе ledger не освободит зарезервированный in_flight (утечка in_flight
+  // растёт выше позиции и подавляет новые пробои → позиция не дренится, F-18).
+  const bool single_shot =
+      marketable || intent.tif() == fob::common::v1::TIF_IOC;
+  // Пересечение по цене: для marketable — любая сделка; иначе жёсткий лимит.
+  const auto crosses_price = [&](const cex::common::Decimal& price) -> bool {
+    if (marketable) return true;
+    return is_sell ? Decimal::cmp(price, limit) >= 0
+                   : Decimal::cmp(price, limit) <= 0;
+  };
 
   // Ключ ленты сделок: канонизируем (без /-_ пробелов, верхний регистр), чтобы совпал
   // с ключом из parse_rest_trades_locked независимо от формата символа венью.
@@ -2041,20 +2063,58 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
   Decimal notional{0, cfg_.market_price_scale + cfg_.market_qty_scale};
   auto it = books_.find(key);
   std::size_t window_trades = 0;
-  if (it != books_.end() && limit.units != 0 && target.units > 0) {
-    const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+  // Диагностика (ADR-060): захватываем причину и рассматриваемые публичные сделки
+  // для вкладки Clearing. considered — снимок ленты ДО потребления (loop мутирует
+  // tr.qty), чтобы показать реальные публичные исполнения, против которых матчим.
+  std::vector<app::ConsideredTrade> considered;
+  std::string diag_reason;
+  const bool have_book = (it != books_.end());
+  if (limit.units == 0 && !marketable) {
+    diag_reason = "no_limit_price";  // ← симулятор пропускает матчинг (баг band-заявок)
+  } else if (target.units <= 0) {
+    diag_reason = "no_target_qty";
+  } else if (!have_book) {
+    diag_reason = "no_trade_feed";
+  }
+  if (have_book && (limit.units != 0 || marketable) && target.units > 0) {
+    const auto window = effective_trade_window_locked(it->second);
     while (!it->second.recent_trades.empty() &&
            (now - it->second.recent_trades.front().ts) > window) {
       it->second.recent_trades.pop_front();
     }
     window_trades = it->second.recent_trades.size();
+    // cross_count — по ОКНУ матчинга. «Пересекает» = цена кроссит лимит И остался
+    // непотреблённый объём (qty>0): ровно то, что потребит цикл ниже. Так reason
+    // согласован с фактом: cross_count>0 ⟺ fill>0 ⟺ filled/partial;
+    // cross_count==0 ⟺ none_cross_limit.
+    std::size_t cross_count = 0;
+    for (const auto& tr : it->second.recent_trades) {
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0;
+      if (cross) ++cross_count;
+    }
+    // considered — РОВНО множество матчинга (ADR-060): свежее окно recent_trades,
+    // тот же список, что потребляет цикл ниже, снимок ДО потребления. Инвариант
+    // наблюдаемости: публичная сделка, показанная как пересекающая (crosses=true),
+    // реально исполнила бы хедж ⇒ fill ⇒ выравнивание позиции. Без рассинхрона с
+    // «ценовым контекстом по счёту» (устаревшие сделки больше не показываются как
+    // «исполнила бы»). crosses = цена кроссит лимит (SELL: price≥limit; BUY:
+    // price≤limit) И qty>0.
+    considered.reserve(std::min<std::size_t>(it->second.recent_trades.size(), 100));
+    for (const auto& tr : it->second.recent_trades) {
+      if (considered.size() >= 100) break;
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0;
+      app::ConsideredTrade ct;
+      ct.price = DecimalText(tr.price);
+      ct.qty = DecimalText(tr.qty);
+      ct.age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - tr.ts).count();
+      ct.crosses = cross;
+      considered.push_back(std::move(ct));
+    }
     // Матчим против пересёкших реальных сделок (FIFO ленты), потребляя объём.
     // SELL@P исполняется сделками price>=P; BUY@P — сделками price<=P.
     for (auto& tr : it->second.recent_trades) {
       if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
-      const bool cross = is_sell ? Decimal::cmp(tr.price, limit) >= 0
-                                 : Decimal::cmp(tr.price, limit) <= 0;
-      if (!cross) continue;
+      if (!crosses_price(tr.price)) continue;
       const Decimal want = Decimal::sub(target, filled);
       if (Decimal::cmp(want, zero_q) <= 0) break;
       const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
@@ -2062,20 +2122,60 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       notional = Decimal::add(notional, Decimal::mul(take, tr.price));
       tr.qty = Decimal::sub(tr.qty, take);  // потребляем реальный объём (дефицит → partial)
     }
+    if (diag_reason.empty()) {
+      if (window_trades == 0) diag_reason = "no_trades_in_window";
+      else if (cross_count == 0) diag_reason = "none_cross_limit";
+    }
   }
 
   out->accepted = true;
   out->filled_qty = filled;
   out->remaining_qty = Decimal::sub(target, filled);
+  // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
+  // v = filled/Δt — скорость CE-исполнения, Δt — интервал с прошлого CE-fill.
+  double impact_base_vwap = 0.0, impact_shift = 0.0, impact_cost = 0.0;
+  double impact_v = 0.0, impact_dt = 0.0;
+  bool has_impact = false;
   if (Decimal::cmp(filled, zero_q) <= 0) {
-    // Нет пересечения с реальной лентой ⇒ заявка «висит» (не исполнена этим тактом).
-    out->status = fob::execution::v1::EXECUTION_REPORT_STATUS_NEW;
+    // Нет пересечения со свежей лентой. IOC/market ⇒ отменяется сразу (EXPIRED,
+    // терминальный — ledger освободит in_flight); обычный лимит ⇒ «висит» (NEW).
+    out->status = single_shot
+                      ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                      : fob::execution::v1::EXECUTION_REPORT_STATUS_NEW;
     out->average_price = Decimal{0, cfg_.market_price_scale};
   } else {
-    out->average_price = Decimal::div(notional, filled, cfg_.market_price_scale);
+    const Decimal base_vwap = Decimal::div(notional, filled, cfg_.market_price_scale);
+    out->average_price = base_vwap;
+    // Полное ⇒ FILLED. Частичное: IOC/market ⇒ EXPIRED (остаток отменён, терминально
+    // → освобождение in_flight); обычный лимит ⇒ PARTIALLY_FILLED (остаток «висит»).
     out->status = (Decimal::cmp(out->remaining_qty, zero_q) <= 0)
                       ? fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED
-                      : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED;
+                      : (single_shot
+                             ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                             : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED);
+    if (cfg_.sim_price_impact_k > 0.0 && have_book) {
+      auto& st = it->second;
+      double dt_sec = cfg_.sim_price_impact_default_dt_sec;  // первый fill символа
+      if (st.last_ce_fill_at.time_since_epoch().count() != 0)
+        dt_sec = std::chrono::duration<double>(now - st.last_ce_fill_at).count();
+      if (dt_sec < cfg_.sim_price_impact_min_dt_sec) dt_sec = cfg_.sim_price_impact_min_dt_sec;
+      const double filled_d = static_cast<double>(filled);
+      const double v_signed = (is_sell ? -filled_d : filled_d) / dt_sec;   // лот/с, знак стороны
+      const double shift = cfg_.sim_price_impact_k * v_signed;             // сдвиг цены k·v
+      impact_base_vwap = static_cast<double>(base_vwap);
+      impact_v = v_signed;
+      impact_dt = dt_sec;
+      impact_shift = shift;
+      impact_cost = std::fabs(shift) * filled_d;  // = k·|v|·filled = k·v²·Δt (≥0)
+      has_impact = true;
+      // p_exec = S + k·v (для BUY выше, для SELL ниже — всегда хуже для агента).
+      const double scale_mul = std::pow(10.0, static_cast<double>(cfg_.market_price_scale));
+      const double p_exec = impact_base_vwap + shift;
+      if (p_exec > 0.0)
+        out->average_price = Decimal{static_cast<int64_t>(std::llround(p_exec * scale_mul)),
+                                     cfg_.market_price_scale};
+      st.last_ce_fill_at = now;
+    }
   }
   cex::common::log_json("INFO", "Sim fill vs real trades",
                         {{"service", "venues"},
@@ -2091,6 +2191,43 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
                          {"trades_in_window", std::to_string(window_trades)},
                          {"source_file",
                           "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+
+  // Диагностика симуляции fill → PG (venue_fill_diagnostics) для вкладки Clearing.
+  if (diag_sink_ != nullptr) {
+    const bool filled_any = Decimal::cmp(filled, zero_q) > 0;
+    const bool fully = filled_any && Decimal::cmp(out->remaining_qty, zero_q) <= 0;
+    if (filled_any) diag_reason = fully ? "filled" : "partial_window_volume";
+    else if (diag_reason.empty()) diag_reason = "none_cross_limit";
+    const char* status_txt =
+        out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED ? "FILLED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED ? "PARTIALLY_FILLED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED ? "REJECTED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED ? "EXPIRED"
+        : "NEW";
+    app::FillDiagnostic diag;
+    diag.intent_id = intent.intent_id();
+    diag.hedge_flow_id = intent.hedge_flow_id();
+    diag.batch_id = intent.batch_id();
+    diag.venue = cfg_.venue_id;
+    diag.symbol = key;
+    diag.side = is_sell ? "SELL" : "BUY";
+    diag.limit_price = DecimalText(limit);
+    diag.target_qty = DecimalText(target);
+    diag.filled_qty = DecimalText(filled);
+    diag.avg_price = DecimalText(out->average_price);   // p_exec (с импактом, если вкл)
+    diag.status = status_txt;
+    diag.reason = diag_reason;
+    diag.window_trades = static_cast<int>(window_trades);
+    if (has_impact) {
+      diag.base_vwap = std::to_string(impact_base_vwap);   // S — цена до импакта
+      diag.impact_shift = std::to_string(impact_shift);    // k·v
+      diag.impact_cost = std::to_string(impact_cost);      // k·v²·Δt
+      diag.impact_v = impact_v;
+      diag.impact_dt_sec = impact_dt;
+    }
+    diag.considered_trades = std::move(considered);
+    try { diag_sink_->WriteFillDiagnostic(diag); } catch (...) { /* диагностика не критична */ }
+  }
 }
 
 bool CexWsRestAdapter::apply_ws_ticker_event_locked(
@@ -2225,6 +2362,19 @@ std::string CexWsRestAdapter::rest_trades_url(
   return oss.str();
 }
 
+// Окно устаревания сделок = N·(измеренный период чтения ленты). До измерения —
+// фолбэк cfg_.sim_trade_window_ms; не меньше фолбэка; потолок 10 мин.
+std::chrono::milliseconds CexWsRestAdapter::effective_trade_window_locked(
+    const SymbolBookState& st) const {
+  double win = static_cast<double>(cfg_.sim_trade_window_ms);
+  if (st.read_interval_ms > 0.0) {
+    const double periods = std::max<uint32_t>(1u, cfg_.sim_trade_stale_periods);
+    win = std::max(win, periods * st.read_interval_ms);
+  }
+  if (win > 600000.0) win = 600000.0;
+  return std::chrono::milliseconds(static_cast<int64_t>(win));
+}
+
 // ADR-060: разбор REST recent-trades (per-venue формат) → recent_trades символа.
 // Дедуп по last_trade_key; пуш только новее уже принятого; эвикт по окну/ёмкости.
 void CexWsRestAdapter::parse_rest_trades_locked(
@@ -2274,6 +2424,17 @@ void CexWsRestAdapter::parse_rest_trades_locked(
 
   // Ключ канонизируем идентично матчеру ApplyRealTradeFillLocked (совпадение ключей).
   SymbolBookState& state = books_[canon_trade_key(venue_symbol)];
+  // Мерим ФАКТИЧЕСКИЙ период чтения ленты (интервал между вызовами, EMA): окно
+  // устаревания = N·период (см. effective_trade_window_locked). Вызов = один читок.
+  if (state.last_trades_read.time_since_epoch().count() != 0) {
+    const double dt_ms =
+        std::chrono::duration<double, std::milli>(now - state.last_trades_read).count();
+    if (dt_ms > 0.0)
+      state.read_interval_ms = (state.read_interval_ms > 0.0)
+                                   ? 0.6 * state.read_interval_ms + 0.4 * dt_ms
+                                   : dt_ms;
+  }
+  state.last_trades_read = now;
   int64_t max_key = state.last_trade_key;
   int accepted = 0;
   for (const auto& r : rows) {
@@ -2281,15 +2442,17 @@ void CexWsRestAdapter::parse_rest_trades_locked(
     int64_t price_u = 0, qty_u = 0;
     if (!parse_decimal_to_scale(r.price, cfg_.market_price_scale, &price_u) || price_u <= 0) continue;
     if (!parse_decimal_to_scale(r.qty, cfg_.market_qty_scale, &qty_u) || qty_u <= 0) continue;
-    state.recent_trades.push_back(
-        TradePrint{cex::common::Decimal{price_u, cfg_.market_price_scale},
-                   cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now});
+    const TradePrint tp{cex::common::Decimal{price_u, cfg_.market_price_scale},
+                        cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now};
+    state.recent_trades.push_back(tp);
+    state.context_trades.push_back(tp);  // ценовой контекст (#3), без time-прунинга
     if (r.key > max_key) max_key = r.key;
     ++accepted;
   }
   state.last_trade_key = max_key;
-  // Эвикт по окну и ёмкости.
-  const auto window = std::chrono::milliseconds(cfg_.sim_trade_window_ms);
+  while (state.context_trades.size() > 60) state.context_trades.pop_front();
+  // Эвикт по окну (= N·период чтения) и ёмкости.
+  const auto window = effective_trade_window_locked(state);
   while (!state.recent_trades.empty() && (now - state.recent_trades.front().ts) > window)
     state.recent_trades.pop_front();
   while (state.recent_trades.size() > cfg_.sim_trade_buf_cap)

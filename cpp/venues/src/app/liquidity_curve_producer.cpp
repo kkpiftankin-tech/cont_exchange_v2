@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/env.hpp"  // ADR-053: F05A_SAFE_SHARE (θ)
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
 #include "cex/common/time.hpp"
@@ -66,6 +67,94 @@ double DecimalAsDouble(const cex::common::Decimal& value) {
 
 double ProtoDecimalAsDouble(const fob::common::v1::Decimal& value) {
   return static_cast<double>(cex::common::Decimal::from_proto(value));
+}
+
+// ADR-053: proto-Decimal из double (для q_bid/q_ask/mid safe-translator).
+fob::common::v1::Decimal MakeDecimal(double val, std::int32_t scale) {
+  const double f = std::pow(10.0, static_cast<double>(scale));
+  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(val * f)), scale}
+      .to_proto();
+}
+
+// ADR-053: α = min_k D_k/|δ_k| для одной СЫРОЙ стороны стакана (proto repeated
+// Decimal). Возвращает α (или +inf) и суммарную глубину стороны через out_depth.
+double RawSideAlpha(
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& prices,
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& qtys,
+    double mid, bool is_bid, double* out_depth) {
+  const int n = std::min(prices.size(), qtys.size());
+  std::vector<std::pair<double, double>> lv;
+  lv.reserve(static_cast<std::size_t>(n));
+  double depth = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double p = ProtoDecimalAsDouble(prices.Get(i));
+    const double q = ProtoDecimalAsDouble(qtys.Get(i));
+    if (!std::isfinite(p) || !std::isfinite(q) || p <= 0.0 || q <= 0.0) continue;
+    lv.emplace_back(p, q);
+    depth += q;
+  }
+  if (out_depth) *out_depth = depth;
+  std::sort(lv.begin(), lv.end(), [is_bid](const std::pair<double, double>& a,
+                                           const std::pair<double, double>& b) {
+    return is_bid ? (a.first > b.first) : (a.first < b.first);
+  });
+  double cum_q = 0.0, cum_n = 0.0;
+  double alpha = std::numeric_limits<double>::infinity();
+  for (const auto& [p, q] : lv) {
+    cum_q += q;
+    cum_n += p * q;
+    if (cum_q <= 0.0) continue;
+    const double vwap = cum_n / cum_q;
+    if (!(vwap > 0.0) || !(mid > 0.0)) continue;
+    const double delta_bps = 10000.0 * std::fabs(std::log(vwap / mid));
+    if (delta_bps <= 1e-9) continue;
+    const double a = cum_n / delta_bps;
+    if (std::isfinite(a) && a > 0.0 && a < alpha) alpha = a;
+  }
+  return alpha;
+}
+
+// ADR-053: посчитать safe-translator ИЗ СЫРОГО стакана и записать в кривую.
+// Конвейер «стакан → кривая → клиринг»: наклон/anchor кладём в кривую, клиринг
+// (market_data → matching) берёт их отсюда, НЕ трогая сырой стакан.
+void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
+                       fob::venue::v1::VenueLiquidityCurve* curve) {
+  if (snapshot.bid_prices_size() == 0 || snapshot.ask_prices_size() == 0) return;
+  const double rb = ProtoDecimalAsDouble(snapshot.best_bid());
+  const double ra = ProtoDecimalAsDouble(snapshot.best_ask());
+  double mid = (snapshot.has_mid_price() && ProtoDecimalAsDouble(snapshot.mid_price()) > 0.0)
+                   ? ProtoDecimalAsDouble(snapshot.mid_price())
+                   : ((rb > 0.0 && ra > 0.0) ? 0.5 * (rb + ra) : 0.0);
+  if (!(mid > 0.0)) return;
+  double theta = 0.60;
+  try {
+    const auto ts = cex::common::Env::try_get_string("F05A_SAFE_SHARE");
+    if (ts && !ts->empty()) theta = std::stod(*ts);
+  } catch (...) { theta = 0.60; }
+  if (!(theta > 0.0) || !(theta <= 1.0)) theta = 0.60;
+
+  double qb = 0.0, qa = 0.0;
+  const double a_bid = RawSideAlpha(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true, &qb);
+  const double a_ask = RawSideAlpha(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false, &qa);
+  if (!(qb > 0.0) || !(qa > 0.0)) return;
+  const double alpha_ext = std::min(a_bid, a_ask);
+  double alpha_t = 0.0, m = 1e-12, beta_t = 0.0;
+  if (std::isfinite(alpha_ext) && alpha_ext > 0.0) {
+    alpha_t = theta * alpha_ext;
+    m = mid / (10000.0 * alpha_t);
+    beta_t = (mid * mid) / (10000.0 * alpha_t);
+  }
+  auto* st = curve->mutable_safe_translator();
+  *st->mutable_mid() = MakeDecimal(mid, 8);
+  st->set_anchor_log(std::log(mid));
+  st->set_slope(m);
+  st->set_alpha_ext(std::isfinite(alpha_ext) ? alpha_ext : 0.0);
+  st->set_alpha_t(alpha_t);
+  st->set_beta_t(beta_t);
+  st->set_theta(theta);
+  *st->mutable_q_bid() = MakeDecimal(qb, 8);
+  *st->mutable_q_ask() = MakeDecimal(qa, 8);
+  st->set_model("safe_vwap_raw");
 }
 
 double CurveQMax(const domain::DepthSideCurves& curves) {
@@ -1163,6 +1252,9 @@ bool LiquidityCurveProducer::Publish(
 
   *curve.mutable_bid_curve() = ToProtoCurve(bid_curve);
   *curve.mutable_ask_curve() = ToProtoCurve(ask_curve);
+  // ADR-053: safe-translator из СЫРОГО стакана этого снапшота — кладём в кривую,
+  // клиринг берёт наклон/anchor отсюда (конвейер стакан→кривая→клиринг).
+  SetSafeTranslator(snapshot, &curve);
 
   curve.set_epsilon1(selected_quality.epsilon1);
   curve.set_epsilon2(selected_quality.epsilon2);

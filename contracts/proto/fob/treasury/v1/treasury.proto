@@ -97,12 +97,46 @@ message AssetDelta {
   // как поле 2 выше) — семантика per-agent, не per-node; знак = направление.
   string agent_id = 6;                       // = имя ребра CeEdge.name ("T_BTC_B" | "A_BTC_BO")
   AgentKind agent_kind = 7;                  // TRANSLATOR | ARBITRAGEUR
+  // Пары X/Y (2026-09-17): для per-agent пути (agent_id непуст) заявка идёт в ПАРЕ
+  // base/quote, а не base/USDT. quote — котируемая валюта (QUOTE-ребро =
+  // node_meta[e.v].asset; номинал ⇒ "USDT"/numeraire; арбитражёр ⇒ пусто).
+  // base_price — цена базы в USDT P(base@v) (конверсия стоимость→объём). Поле 4
+  // price_used на per-agent пути несёт ЦЕНУ ПАРЫ P(base)/P(quote) (лимит заявки).
+  string quote = 8;
+  fob.common.v1.Decimal base_price = 9;
 }
 message CePositionDeltaBatch {
   fob.common.v1.EventMeta meta = 1;
   string batch_id = 2;                  // batch_id вектор-клиринга ("w|<ts>")
   int64 event_time_ms = 3;
   repeated AssetDelta deltas = 4;
+}
+
+// F-18 v2 Э3, Вариант 2 (2026-09-17): событие пробоя полосы ±q. Эмитит LEDGER
+// (владелец позиции) в момент, когда после применения дельты клиринга
+// |c_j|−|in_flight| > q — т.е. сразу после «устаканивания» позиции матчингом,
+// без gRPC-чтения и без лага. Топик: ce.agent.band.breach. Консюмер — RISK:
+// строит ExecutionIntent в ПАРЕ base/quote (qty = excess·1000/base_price,
+// limit = pair_price) → execution.intents. Порог/учёт in_flight — в ledger.
+message AgentBandBreach {
+  fob.common.v1.EventMeta meta = 1;
+  string agent_id = 2;                 // = CeEdge.name (несёт пару для кросс-пар)
+  AgentKind agent_kind = 3;            // TRANSLATOR (band эмитит только переводчиков)
+  string asset = 4;                    // base
+  string quote = 5;                    // котируемая (номинал ⇒ "USDT")
+  string venue = 6;                    // площадка агента
+  string side = 7;                     // "SELL" (c>0) | "BUY" (c<0) — реализация избытка
+  fob.common.v1.Decimal excess_value = 8;  // избыток сверх полосы, МОДУЛЬ, стоимость (k-USDT)
+  fob.common.v1.Decimal base_price = 9;    // P(base@v) USDT — для конверсии в объём base
+  fob.common.v1.Decimal pair_price = 10;   // P(base)/P(quote) — лимит-цена пары
+  string batch_id = 11;
+  int64 event_time_ms = 12;
+  // Трёхзонное правило хеджа (Кривые §6.4): зона по |c| относительно двух порогов
+  // Z̄lim=clim/Γ (no-action→пассив-мейкер) и Z̄mkt=cmkt/Γ (пассив→агрессив-тейкер).
+  // aggressive=true (|c|>Z̄mkt) ⇒ рыночный сброс (taker); false (Z̄lim<|c|≤Z̄mkt) ⇒
+  // пассивный лимит-мейкер (дешевле, исполнение не гарантировано). risk выбирает
+  // strategy MARKET/LIMIT по этому флагу.
+  bool aggressive = 13;
 }
 
 // ---------------------------------------------------------------------------

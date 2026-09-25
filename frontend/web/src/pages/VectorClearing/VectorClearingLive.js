@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import NavBar from '../../components/NavBar';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
@@ -195,41 +196,265 @@ function LiquidityChart({ venue, symbol, ts }) {
 }
 
 // Деталь одной строки клиринга: (1) исходные заявки, (2) клиринговые цены,
-// (3) черновики хедж-заявок.
+// ADR-060 — человекочитаемая причина + цвет строки диагностики sim-fill.
+const REASON_LABEL = {
+  no_limit_price: 'нет лимит-цены → симулятор пропускает матчинг',
+  no_target_qty: 'нет target_qty',
+  no_trade_feed: 'нет ленты публичных сделок venue',
+  no_trades_in_window: 'нет публичных сделок в окне',
+  none_cross_limit: 'ни одна публичная сделка не пересекла лимит',
+  partial_window_volume: 'частично: объёма окна < target',
+  filled: 'исполнено',
+  rejected: 'отклонено venue',
+};
+const reasonLabel = (r) => REASON_LABEL[r] || r || '—';
+const reasonBg = (r) => {
+  if (r === 'filled') return '#e7f6e7';                 // зелёный — исполнено
+  if (r === 'partial_window_volume') return '#fdf3d8';  // янтарь — частично
+  return '#fbe4e4';                                     // красный — не исполнено
+};
+
+// Две таблицы позиций агентов (переводчики base/quote + арбитражёры источник/приёмник).
+// Переиспользуется: статичный снимок батча (ClearingDetail) и живая панель (кнопка).
+// Money-path/маршрут/ноги считает BFF — здесь только рендер (frontend-no-domain-compute).
+function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
+  const rows = Array.isArray(agentRows) ? agentRows : [];
+  const clickable = typeof onSelectAgent === 'function';
+  const rowProps = (a) => clickable ? {
+    onClick: () => onSelectAgent(a.agent_id),
+    style: { cursor: 'pointer', background: a.agent_id === selectedId ? 'rgba(37,99,235,0.12)' : undefined },
+    title: 'клик — разбор агента (цена/порог/хедж/исполнение)'
+  } : {};
+  const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
+  const leg = (v, cur) => (v == null) ? <span title="ещё нет цены пары в этом такте">—</span> : (
+    <span className={Number(v) > 1e-9 ? 'vc-side-ask' : Number(v) < -1e-9 ? 'vc-side-bid' : ''}>
+      {sgn(v)}<span style={{ opacity: 0.6, fontSize: '0.85em' }}> {cur}</span>
+    </span>
+  );
+  const dash = <span title="ещё нет цены пары для перевода стоимости в объём" style={{ opacity: 0.4 }}>—</span>;
+  const zero = <span title="агент не двигался в этом такте (Δ=0)" style={{ opacity: 0.3 }}>0</span>;
+  const tRows = rows.filter((a) => a.agent_kind === 'translator');
+  const aRows = rows.filter((a) => a.agent_kind === 'arbitrageur');
+  return (
+    <div className="vc-sec">
+      <div className="vc-sec-title">{title}</div>
+      <div className="vc-sec-body">
+        <div className="vc-sub-head">Переводчики (пара base/quote) — <b>{tRows.length}</b></div>
+        {tRows.length > 0 ? (
+          <table className="vc-sub-table">
+            <thead><tr>
+              <th>agent_id</th><th>пара</th><th>площадка</th>
+              <th title="Δ ЭТОГО такта в БАЗОВОЙ валюте">Δ база</th>
+              <th title="Δ ЭТОГО такта в КОТИРУЕМОЙ валюте">Δ котир.</th>
+              <th title="ТЕКУЩАЯ позиция в БАЗОВОЙ валюте">позиция база</th>
+              <th title="ТЕКУЩАЯ позиция в КОТИРУЕМОЙ валюте">позиция котир.</th>
+            </tr></thead>
+            <tbody>
+              {tRows.map((a, i) => (
+                <tr key={(a.agent_id || '') + '|t|' + i} {...rowProps(a)}>
+                  <td className="vc-mono">{a.agent_id}</td>
+                  <td className="vc-mono">{a.pair}</td>
+                  <td>{a.venue || '—'}</td>
+                  <td className="vc-mono">{a.hasDelta ? leg(a.delta_base, a.base) : zero}</td>
+                  <td className="vc-mono">{a.hasDelta ? (a.quote ? leg(a.delta_quote, a.quote) : zero) : zero}</td>
+                  <td className="vc-mono"><b>{leg(a.pos_base, a.base)}</b></td>
+                  <td className="vc-mono">{a.quote ? <b>{leg(a.pos_quote, a.quote)}</b> : dash}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <div className="vc-note vc-note-tight">нет переводчиков с позицией</div>}
+
+        <div className="vc-sub-head" style={{ marginTop: 14 }}>Арбитражёры (перевоз актива между площадками) — <b>{aRows.length}</b></div>
+        {aRows.length > 0 ? (
+          <table className="vc-sub-table">
+            <thead><tr>
+              <th>agent_id</th><th>актив</th><th>маршрут</th>
+              <th title="Δ ЭТОГО такта на площадке-источнике">Δ источник</th>
+              <th title="Δ ЭТОГО такта на площадке-приёмнике">Δ приёмник</th>
+              <th title="ТЕКУЩАЯ позиция на площадке-источнике">позиция источник</th>
+              <th title="ТЕКУЩАЯ позиция на площадке-приёмнике">позиция приёмник</th>
+            </tr></thead>
+            <tbody>
+              {aRows.map((a, i) => {
+                const r = a.arb || {};
+                const lblS = `${a.base}@${r.src || '?'}`;
+                const lblD = `${a.base}@${r.dst || '?'}`;
+                return (
+                  <tr key={(a.agent_id || '') + '|a|' + i} {...rowProps(a)}>
+                    <td className="vc-mono">{a.agent_id}</td>
+                    <td className="vc-mono">{a.base}</td>
+                    <td className="vc-mono">{(r.src || '?')} ↔ {(r.dst || '?')}</td>
+                    <td className="vc-mono">{a.hasDelta ? leg(r.dleg_src, lblS) : zero}</td>
+                    <td className="vc-mono">{a.hasDelta ? leg(r.dleg_dst, lblD) : zero}</td>
+                    <td className="vc-mono"><b>{leg(r.leg_src, lblS)}</b></td>
+                    <td className="vc-mono"><b>{leg(r.leg_dst, lblD)}</b></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : <div className="vc-note vc-note-tight">нет арбитражёров с позицией</div>}
+
+        <div className="vc-note vc-note-tight">
+          <b>Переводчик</b> держит пару <b>base/quote</b>: одна нога +, другая − (при SELL base он short базовую / long котируемую).
+          <b> Арбитражёр</b> перевозит один актив между двумя площадками: <b>short на источнике / long на приёмнике</b> (напр. −BTC@binance / +BTC@okx). «v3» в id — это площадка <code>uniswap_v3</code>, не версия.
+          <b> Прочерк</b>: в колонке Δ — агент не двигался в этом такте (позиция при этом показана); в позиции — ещё нет цены пары. Ноги считает BFF из <code>c_j</code> и цены пары (money-path, ADR-057).
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Drill-down по выбранному агенту: позиция → сдвиг цены от позиции (skew) → порог q
+// → пробой → хедж-заявка в паре → публичные сделки → имитируемое (полное/частичное)
+// исполнение. Данные из /agent-detail (BFF), здесь только рендер.
+function AgentDrillDown({ detail }) {
+  if (!detail) return <div className="vc-note vc-note-tight">кликните агента в таблице выше — покажу цену/порог/хедж/исполнение.</div>;
+  const a = detail.agent || {};
+  const sk = detail.skew || {};
+  const b = detail.band || {};
+  const h = detail.hedge;
+  const isT = a.agent_kind === 'translator';
+  const c = Number(a.c_position) || 0;               // неотправленный остаток (A7)
+  const inFlight = Number(a.in_flight) || 0;          // отправлено в заявку (A7)
+  const cTotal = (a.c_total != null) ? Number(a.c_total) : (c + inFlight);  // истинное обязательство
+  const num = (v, dd = 6) => (v == null || v === '') ? '—' : Number(v).toFixed(dd);
+  // c_j/q/избыток — в k-USDT (тысячи USDT). Показываем в K USDT (как задаётся порог
+  // «18 K»): kusd(18) = «18 K USDT», kusd(292.5) = «292.5 K USDT». K = тысяч USDT.
+  const kusd = (kv) => (kv == null) ? '—' : Number(kv).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + ' K USDT';
+  const GREEN = '#5fd08a', RED = '#e6725a', MUTE = '#8a9aa8';
+  const posColor = (v) => v > 1e-9 ? GREEN : v < -1e-9 ? RED : MUTE;
+  const ps = Number(sk.priceShiftPm) || 0;
+  const psColor = posColor(ps);
+  const box = { border: '1px solid #1c2733', background: '#101821', borderRadius: 8, padding: '8px 12px', marginBottom: 8 };
+  const head = { fontWeight: 600, marginBottom: 4, color: '#cdd9e4' };
+  return (
+    <div style={{ padding: '4px 2px', color: '#dfe6ee' }}>
+      <div style={box}>
+        <b>{a.agent_id}</b> · {isT ? 'переводчик' : 'арбитражёр'} · пара <b>{a.pair}</b> · обязательство ={' '}
+        <b style={{ color: posColor(cTotal) }}>{kusd(cTotal)}</b>
+        <div style={{ fontSize: 12, color: MUTE, marginTop: 2 }}>
+          = c_j (неотправл.) <b style={{ color: posColor(c) }}>{kusd(c)}</b> + in_flight (в заявке) <b>{kusd(inFlight)}</b>{' '}
+          <span title="Модель A7: при пробое избыток уходит из c_j в заявку (c→±q); истинная накопленная позиция = c_j + in_flight, она и сходится к band">ⓘ</span>
+        </div>
+      </div>
+      <div style={box}>
+        <div style={head}>Сдвиг цены от позиции (inventory-skew)</div>
+        <div style={{ fontSize: 13 }}>anchor_eff = anchor − clamp(γ·c_j), γ={sk.gamma}, клэмп={sk.clamp}‰</div>
+        <div>текущий сдвиг цены:{' '}
+          <b style={{ color: psColor }}>{ps >= 0 ? '+' : ''}{ps.toFixed(3)} ‰</b>{' '}
+          ({c > 1e-9 ? 'позиция + ⇒ цена ↓ (возврат к нулю)' : c < -1e-9 ? 'позиция − ⇒ цена ↑ (возврат к нулю)' : 'позиция 0 ⇒ сдвига нет'})
+        </div>
+      </div>
+      <div style={box}>
+        <div style={head}>Порог по позиции (band q)</div>
+        {isT ? (
+          <div>|c_j| = <b>{kusd(b.absC)}</b> vs порог q = <b>{kusd(b.q)}</b> ⇒ избыток = <b>{kusd(b.excess)}</b>{'  '}
+            <span style={{ padding: '1px 8px', borderRadius: 10, fontWeight: 600, color: b.breached ? '#f0b0b0' : '#8fe0b0', background: b.breached ? '#5a2020' : '#1f3a2a', border: `1px solid ${b.breached ? '#7a3030' : '#2a4a3a'}` }}>
+              {b.breached ? 'ПОРОГ ПРЕВЫШЕН' : 'в полосе'}</span>
+          </div>
+        ) : (b.q != null ? (
+          <div>|c_j| = <b>{kusd(b.absC)}</b> vs порог q = <b>{kusd(b.q)}</b> ⇒ избыток = <b>{kusd(b.excess)}</b>{'  '}
+            <span style={{ padding: '1px 8px', borderRadius: 10, fontWeight: 600, color: b.breached ? '#f0b0b0' : '#8fe0b0', background: b.breached ? '#5a2020' : '#1f3a2a', border: `1px solid ${b.breached ? '#7a3030' : '#2a4a3a'}` }}>
+              {b.breached ? 'ПОРОГ ПРЕВЫШЕН' : 'в полосе'}</span>
+            <div style={{ fontSize: 12, color: MUTE, marginTop: 2 }}>порог арбитражёра шире: round-trip 2 биржи (комиссия ×2)</div>
+          </div>
+        ) : <div style={{ fontSize: 13 }}>порог band = k_band·φ_rt (комиссия внешних бирж).</div>)}
+      </div>
+      {isT && b.breached && (
+        <div style={box}>
+          <div style={head}>Хедж-заявка → публичные сделки → имитируемое исполнение</div>
+          {h ? (
+            <>
+              <div>Заявка (пара): <b>{h.pair}</b> <b>{h.side}</b> target <b>{num(h.targetQty)}</b> @ лимит {num(h.limitPrice, 2)}</div>
+              <div style={{ marginTop: 4 }}>Ближайшие по цене публичные сделки вокруг лимита (контекст последних 60, объём пересекающих по цене = <b>{num(h.crossVol)}</b>). «Исполнила бы» — по цене; фактический матч идёт по свежему окну (см. причину ниже).</div>
+              {(() => {
+                const L = Number(h.limitPrice) || 0;
+                const isSell = h.side === 'SELL';
+                const ts = (h.considered || []).map((t) => ({ price: Number(t.price), qty: Number(t.qty), age_ms: t.age_ms }));
+                const above = ts.filter((t) => t.price > L).sort((a, b) => a.price - b.price).slice(0, 5).reverse();  // 5 ближайших выше, сверху выше цена
+                const below = ts.filter((t) => t.price < L).sort((a, b) => b.price - a.price).slice(0, 5);            // 5 ближайших ниже
+                // Для SELL исполняют сделки ВЫШЕ лимита; для BUY — НИЖЕ. Помечаем сторону.
+                const aboveFills = isSell, belowFills = !isSell;
+                const tgt = Number(h.targetQty) || 0;
+                // Бар объёма — доля от макс. объёма среди строк (хедж + сделки), чтобы
+                // визуально сравнить объём заявки и публичных сделок (#2) в ранжировании по цене.
+                const maxQty = Math.max(tgt, ...above.map((t) => t.qty), ...below.map((t) => t.qty), 1e-12);
+                const bar = (qty, color) => (
+                  <div style={{ position: 'relative', minWidth: 96 }}>
+                    <div style={{ position: 'absolute', left: 0, top: 2, bottom: 2, width: `${Math.min(100, 100 * qty / maxQty)}%`, background: color, opacity: 0.4, borderRadius: 2 }} />
+                    <span style={{ position: 'relative' }}>{qty.toFixed(6)}</span>
+                  </div>
+                );
+                const row = (t, i, fills) => (
+                  <tr key={i} style={{ background: fills ? 'rgba(95,208,138,0.08)' : 'rgba(230,114,90,0.07)' }}>
+                    <td className="vc-mono">{t.price.toFixed(2)}</td>
+                    <td className="vc-mono">{bar(t.qty, fills ? GREEN : RED)}</td>
+                    <td className="vc-mono">{t.age_ms}</td>
+                    <td style={{ color: fills ? GREEN : MUTE }}>{fills ? '✓ исполнила бы' : '—'}</td>
+                  </tr>
+                );
+                return (
+                  <table className="vc-sub-table" style={{ marginTop: 4 }}>
+                    <thead><tr><th>цена</th><th>объём (бар)</th><th>возраст, мс</th><th>vs лимит</th></tr></thead>
+                    <tbody>
+                      {above.length === 0 && <tr><td colSpan={4} style={{ opacity: 0.5 }}>нет публичных сделок выше лимита</td></tr>}
+                      {above.map((t, i) => row(t, 'a' + i, aboveFills))}
+                      <tr style={{ background: '#24384a', color: '#e6c15a', fontWeight: 700 }}>
+                        <td className="vc-mono" style={{ color: '#e6c15a' }}>{L.toFixed(2)}</td>
+                        <td className="vc-mono">{bar(tgt, '#e6c15a')}</td>
+                        <td>◀ ХЕДЖ {h.side}</td><td>лимит заявки</td>
+                      </tr>
+                      {below.map((t, i) => row(t, 'b' + i, belowFills))}
+                      {below.length === 0 && <tr><td colSpan={4} style={{ opacity: 0.5 }}>нет публичных сделок ниже лимита</td></tr>}
+                    </tbody>
+                  </table>
+                );
+              })()}
+              <div style={{ marginTop: 6 }}>Имитируемое исполнение:{' '}
+                <b style={{ color: h.outcome === 'full' ? GREEN : h.outcome === 'partial' ? '#e6c15a' : RED }}>
+                  {h.outcome === 'full' ? 'ПОЛНОЕ (filled ≥ target)' : h.outcome === 'partial' ? 'ЧАСТИЧНОЕ (0 < filled < target)' : 'НЕ ИСПОЛНЕНО'}
+                </b>{' — '}status {h.status}, filled {num(h.filledQty)}, причина <code>{h.reason}</code>
+              </div>
+              {h.impactShift != null && h.impactShift !== '' && (
+                <div style={{ marginTop: 6, borderTop: '1px dashed #223140', paddingTop: 6, fontSize: 13 }}>
+                  <b style={{ color: '#cdd9e4' }}>Price-impact (влияние CE-заявки на рынок):</b>{' '}
+                  S (до) = {num(h.baseVwap, 2)} → p_exec = {num(h.avgPrice, 2)};{' '}
+                  сдвиг k·v = <b style={{ color: '#e6725a' }}>{num(h.impactShift, 6)}</b>,{' '}
+                  издержки k·v²·Δt = <b style={{ color: '#e6725a' }}>{num(h.impactCost, 6)}</b>{' '}
+                  (v = {Number(h.impactV || 0).toFixed(4)} лот/с, Δt = {Number(h.impactDtSec || 0).toFixed(2)} с)
+                </div>
+              )}
+            </>
+          ) : <div className="vc-note vc-note-tight">хедж-заявок по этому агенту пока нет в диагностике (порог только что превышен либо сделок не было).</div>}
+        </div>
+      )}
+      {isT && !b.breached && <div className="vc-note vc-note-tight">порог не превышен — хедж-заявка не формируется.</div>}
+    </div>
+  );
+}
+
+// (3) диагностика симуляции fill хедж-заявок (реальные заявки + публичные сделки).
 function ClearingDetail({ d }) {
   const src = Array.isArray(d.source) ? d.source : [];
   const prices = Array.isArray(d.clearingPrices) ? d.clearingPrices : [];
   const rates = Array.isArray(d.clearingRates) ? d.clearingRates : [];
-  const drafts = Array.isArray(d.hedgeDrafts) ? d.hedgeDrafts : [];
+  // ADR-060: реальные хедж-заявки + рассматриваемые публичные исполнения venue +
+  // причина (почему симулятор исполнил / не исполнил). Реальный DTO из
+  // venue_fill_diagnostics через BFF. Заменяет синтетические черновики.
+  const fills = Array.isArray(d.fillDiagnostics) ? d.fillDiagnostics : [];
   // F-18 v2 (наблюдаемость такта клиринга, ADR-061/063): позиции CE-агентов
   // (переводчики/арбитражёры) ИМЕННО ДЛЯ ЭТОГО такта (batch_id) — ДО→Δ→ПОСЛЕ,
   // из ledger.GetAgentPositionDeltas (реальный DTO, ring-история на стороне
   // ledger, без фейков). Группировка: сначала переводчики, затем
   // арбитражёры, затем прочее; внутри группы — по agent_id/активу.
-  const agentDeltas = Array.isArray(d.agentDeltas) ? d.agentDeltas : [];
-  const agentKindOrder = { translator: 0, arbitrageur: 1 };
-  const agentKindLabel = (k) => (k === 'translator' ? 'переводчик' : k === 'arbitrageur' ? 'арбитражёр' : (k || '—'));
-  const sortedAgentDeltas = [...agentDeltas].sort((a, b) => {
-    const ka = agentKindOrder[a.agent_kind] != null ? agentKindOrder[a.agent_kind] : 2;
-    const kb = agentKindOrder[b.agent_kind] != null ? agentKindOrder[b.agent_kind] : 2;
-    if (ka !== kb) return ka - kb;
-    if (a.agent_id !== b.agent_id) return String(a.agent_id).localeCompare(String(b.agent_id));
-    return String(a.asset).localeCompare(String(b.asset));
-  });
-  // Текущая НАКОПЛЕННАЯ позиция агентов (переживает рестарт ledger) — из
-  // ledger.GetAgentPositions. Показываем рядом, чтобы агенты были видны даже
-  // на тактах без потока (per-batch ring пуст).
-  const agentPositions = Array.isArray(d.agentPositions) ? d.agentPositions : [];
-  const sortedAgentPositions = [...agentPositions]
-    .filter((p) => Math.abs(Number(p.position)) > 1e-9)
-    .sort((a, b) => {
-      const ka = agentKindOrder[a.agent_kind] != null ? agentKindOrder[a.agent_kind] : 2;
-      const kb = agentKindOrder[b.agent_kind] != null ? agentKindOrder[b.agent_kind] : 2;
-      if (ka !== kb) return ka - kb;
-      return String(a.agent_id).localeCompare(String(b.agent_id));
-    });
+  // Money-path строки агентов из BFF: одна строка на агента, позиция и Δ такта
+  // РАЗЛОЖЕНЫ на ДВЕ НОГИ пары (переводчик: base−/quote+ или наоборот; арбитражёр:
+  // одна нога — перевозимый актив). Мердж + домен-математика в BFF (не в браузере).
+  const agentRows = (Array.isArray(d.agentRows) ? d.agentRows : [])
+    .filter((a) => Math.abs(Number(a.c_total != null ? a.c_total : a.c_position)) > 1e-9 || a.hasDelta);
   const twoSided = src.some((s) => s.twoSided);
-  const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
   const [chartKey, setChartKey] = useState(null);
 
   // Только раскрытие строки. Запрос кривой и все вычисления — внутри LiquidityChart
@@ -358,130 +583,77 @@ function ClearingDetail({ d }) {
         </div>
       </div>
 
-      {/* (3) Черновики заявок на хеджирование */}
+      {/* (3) Хедж-заявки → внешняя биржа и ближайшие публичные исполнения симулятора.
+          Реальные данные (venue_fill_diagnostics): заявка + рассматриваемые публичные
+          сделки venue + причина, почему симулятор исполнил / не исполнил (ADR-060). */}
       <div className="vc-sec">
-        <div className="vc-sec-title">3. Черновики хедж-заявок на внешние биржи — <b>{drafts.length}</b></div>
+        <div className="vc-sec-title">3. Хедж-заявки → биржа и публичные исполнения симулятора (почему fill) — <b>{fills.length}</b></div>
         <div className="vc-sec-body">
-          {drafts.length > 0 ? (
+          {fills.length > 0 ? (
             <table className="vc-sub-table">
               <thead>
-                <tr><th>биржа</th><th>инструмент</th><th>сторона</th><th>объём (target_qty)</th><th>лимит-цена</th><th>intent_id</th></tr>
+                <tr>
+                  <th>вид</th><th>биржа</th><th>символ</th><th>сторона</th>
+                  <th>target</th><th>лимит</th><th>исполнено</th><th>ср.цена</th>
+                  <th>статус</th><th>причина</th><th>публичные сделки окна</th>
+                </tr>
               </thead>
               <tbody>
-                {drafts.map((h, i) => (
-                  <tr key={h.intent_id || i}>
-                    <td>{h.venue}</td>
-                    <td>{h.instrument}</td>
-                    <td className={h.side === 'SELL' ? 'vc-side-bid' : 'vc-side-ask'}>{h.side}</td>
-                    <td className="vc-mono">{h.target_qty}</td>
-                    <td className="vc-mono">{h.limit_price}</td>
-                    <td className="vc-mono vc-ellipsis" title={h.intent_id}>{h.intent_id}</td>
+                {fills.map((f, i) => (
+                  <tr key={f.intentId || i} style={{ background: reasonBg(f.reason) }}>
+                    <td>{f.kind === 'band' ? 'полоса' : 'клиринг'}</td>
+                    <td>{f.venue}</td>
+                    <td className="vc-mono">{f.pair || f.symbol}</td>
+                    <td className={f.side === 'SELL' ? 'vc-side-bid' : 'vc-side-ask'}>{f.side}</td>
+                    <td className="vc-mono">{f.targetQty}</td>
+                    <td className="vc-mono">{f.limitPrice}</td>
+                    <td className="vc-mono">{f.filledQty}</td>
+                    <td className="vc-mono">{f.avgPrice}</td>
+                    <td>{f.status}</td>
+                    <td title={f.reason}>{reasonLabel(f.reason)}</td>
+                    <td>
+                      <details>
+                        <summary className="vc-mono" style={{ cursor: 'pointer' }}>
+                          {f.windowTrades}{(f.consideredTrades || []).length ? '' : ' (пусто)'}
+                        </summary>
+                        {(f.consideredTrades || []).length > 0 && (
+                          <table className="vc-sub-table" style={{ marginTop: 4 }}>
+                            <thead>
+                              <tr><th>цена</th><th>объём</th><th>возраст, мс</th><th>пересекает лимит</th></tr>
+                            </thead>
+                            <tbody>
+                              {f.consideredTrades.map((t, j) => (
+                                <tr key={j} style={{ background: t.crosses ? '#e7f6e7' : 'transparent' }}>
+                                  <td className="vc-mono">{t.price}</td>
+                                  <td className="vc-mono">{t.qty}</td>
+                                  <td className="vc-mono">{t.age_ms}</td>
+                                  <td>{t.crosses ? '✓ да' : '— нет'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </details>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           ) : (
             <div className="vc-note">
-              Нет исполняемого объёма (все x ≈ 0 — нет арбитража), поэтому хедж-черновики не формируются.
-              Черновик появится для сегментов с x&gt;0 (bid→SELL, ask→BUY, лимит = effective_price).
+              Пока нет диагностики sim-fill (venue пишет в <span className="vc-mono">venue_fill_diagnostics</span>,
+              когда обрабатывает хедж-заявку). Частый случай отказа: band-заявка без лимит-цены →
+              «нет лимит-цены → симулятор пропускает матчинг».
             </div>
           )}
         </div>
       </div>
 
-      {/* (4) Позиции агентов (переводчики/арбитражёры) ДЛЯ ЭТОГО такта клиринга —
-          ДО → Δ → ПОСЛЕ, из ledger.GetAgentPositionDeltas (реальный DTO,
-          ring-история по batch_id на стороне ledger, без фейков). */}
-      <div className="vc-sec">
-        <div className="vc-sec-title">4. Позиции агентов — ДО → Δ клиринга → ПОСЛЕ (переводчики / арбитражёры) — <b>{agentDeltas.length}</b></div>
-        <div className="vc-sec-body">
-          {sortedAgentDeltas.length > 0 ? (
-            <>
-            <table className="vc-sub-table">
-              <thead>
-                <tr>
-                  <th>agent_id</th>
-                  <th>тип</th>
-                  <th>актив</th>
-                  <th>площадка</th>
-                  <th title="c_j ДО применения дельты этого такта">позиция ДО</th>
-                  <th title="f_j, ЗНАКОВАЯ: + = длинная (купил/накопил), − = короткая (продал/должен)">Δ клиринга</th>
-                  <th title="ПОСЛЕ = ДО + Δ">позиция ПОСЛЕ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedAgentDeltas.map((p, i) => (
-                  <tr key={(p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '') + '|' + i}>
-                    <td className="vc-mono">{p.agent_id}</td>
-                    <td>{agentKindLabel(p.agent_kind)}</td>
-                    <td>{p.asset}</td>
-                    <td>{p.venue || '—'}</td>
-                    <td className="vc-mono">{sgn(p.position_before)}</td>
-                    <td className={`vc-mono ${Number(p.delta) > 0 ? 'vc-side-ask' : Number(p.delta) < 0 ? 'vc-side-bid' : ''}`}>
-                      {sgn(p.delta)}
-                    </td>
-                    <td className={`vc-mono ${Number(p.position_after) > 0 ? 'vc-side-ask' : Number(p.position_after) < 0 ? 'vc-side-bid' : ''}`}>
-                      <b>{sgn(p.position_after)}</b>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="vc-note vc-note-tight">
-              Знак Δ = направление такта: <b>+</b> длинная (агент купил/накопил актив), <b>−</b> короткая
-              (агент продал/должен актив). ПОСЛЕ = ДО + Δ — снимок ИМЕННО этого такта клиринга
-              (batch_id), а не только текущая накопленная позиция.
-            </div>
-            </>
-          ) : (
-            <div className="vc-note">
-              На этом такте позиции агентов не менялись (клиринг без потока, deltas=0),
-              либо агентские дельты выключены (CE_AGENT_POS).
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* (5) Текущая НАКОПЛЕННАЯ позиция агентов — из ledger.GetAgentPositions
-          (реальный DTO). Видна всегда, даже когда на такте не было потока. */}
-      <div className="vc-sec">
-        <div className="vc-sec-title">5. Текущая накопленная позиция агентов (знаковая) — <b>{sortedAgentPositions.length}</b></div>
-        <div className="vc-sec-body">
-          {sortedAgentPositions.length > 0 ? (
-            <>
-            <table className="vc-sub-table">
-              <thead>
-                <tr>
-                  <th>agent_id</th><th>тип</th><th>актив</th><th>площадка</th>
-                  <th title="c_j — накопленная знаковая позиция агента">позиция</th>
-                  <th title="отправлено наружу, ещё не исполнено (Э3)">in_flight</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedAgentPositions.map((p, i) => (
-                  <tr key={(p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '') + '|' + i}>
-                    <td className="vc-mono">{p.agent_id}</td>
-                    <td>{agentKindLabel(p.agent_kind)}</td>
-                    <td>{p.asset}</td>
-                    <td>{p.venue || '—'}</td>
-                    <td className={`vc-mono ${Number(p.position) > 0 ? 'vc-side-ask' : Number(p.position) < 0 ? 'vc-side-bid' : ''}`}>
-                      <b>{sgn(p.position)}</b>
-                    </td>
-                    <td className="vc-mono">{fmtNum(p.in_flight)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="vc-note vc-note-tight">
-              Знак = направление: <b>+</b> длинная, <b>−</b> короткая. Это ТЕКУЩАЯ накопленная
-              позиция (не привязана к этому такту); меняется только когда клиринг даёт поток.
-            </div>
-            </>
-          ) : (
-            <div className="vc-note">Нет накопленных позиций агентов (включите CE_AGENT_POS; либо клиринг без потока).</div>
-          )}
-        </div>
-      </div>
+      {/* (4) Позиции агентов ПО ПАРАМ ВАЛЮТ (money-path): одна строка на агента,
+          позиция и Δ такта разложены на ДВЕ НОГИ пары (переводчик: base−/quote+ при
+          SELL, наоборот при BUY; арбитражёр: одна нога — перевозимый актив). Ноги
+          считает BFF из c_j и цены пары (реальный DTO, без фейков; не в браузере). */}
+      <AgentPositionsTables agentRows={agentRows} title="4. Позиции агентов по парам валют (money-path)" />
     </div>
   );
 }
@@ -494,16 +666,26 @@ function VectorClearingLive() {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState('');
   const [updatedAt, setUpdatedAt] = useState(null);
+  const [dataAgeMs, setDataAgeMs] = useState(null);  // возраст ДАННЫХ клиринга (heartbeat цепочки)
+  const [stages, setStages] = useState(null);        // постадийная свежесть цепочки (/liveness)
+  const [liveOpen, setLiveOpen] = useState(false);   // панель ЖИВЫХ позиций агентов (динамика)
+  const [liveRows, setLiveRows] = useState(null);    // agentRows живого просмотра
+  const [liveAt, setLiveAt] = useState(null);        // время последнего обновления живой панели
+  const [selAgent, setSelAgent] = useState(null);    // выбранный агент для drill-down
+  const [agentDetail, setAgentDetail] = useState(null); // /agent-detail выбранного агента
   const [openKey, setOpenKey] = useState(null);
-  const [openItem, setOpenItem] = useState(null);   // открытая строка (для авто-рефетча детали)
   const [detailByKey, setDetailByKey] = useState({});
   const [detailErr, setDetailErr] = useState('');
   // Runtime-конфиг цикла батч-клиринга (окно/staleness).
   const [cfgWindowMs, setCfgWindowMs] = useState('');
   const [cfgStaleMs, setCfgStaleMs] = useState('');
   const [cfgFeeBps, setCfgFeeBps] = useState('');   // комиссия тейкера, bps (0 = линейно)
+  const [cfgSkewGamma, setCfgSkewGamma] = useState('');   // inventory-skew γ (‰/k-USDT, 0=выкл)
+  const [cfgSkewMaxPm, setCfgSkewMaxPm] = useState('');   // клэмп смещения (‰)
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgSaving, setCfgSaving] = useState(false);
+  const [resetMsg, setResetMsg] = useState('');   // #3 фидбек сброса позиций
+  const [resetting, setResetting] = useState(false);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -511,6 +693,8 @@ function VectorClearingLive() {
       setCfgWindowMs(String(r.data.batch_window_ms ?? 1000));
       setCfgStaleMs(String(r.data.stale_level_ms ?? 60000));
       setCfgFeeBps(String(r.data.ce_taker_fee_bps ?? -1));
+      setCfgSkewGamma(String(r.data.ce_inv_skew_gamma ?? 0.02));
+      setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm ?? 8));
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
 
@@ -519,16 +703,19 @@ function VectorClearingLive() {
     try {
       const r = await axios.post(`${API_BASE}/vector-clearing/config`, {
         batch_window_ms: Number(cfgWindowMs), stale_level_ms: Number(cfgStaleMs),
-        ce_taker_fee_bps: Number(cfgFeeBps)
+        ce_taker_fee_bps: Number(cfgFeeBps),
+        ce_inv_skew_gamma: Number(cfgSkewGamma), ce_inv_skew_max_pm: Number(cfgSkewMaxPm)
       }, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms));
       setCfgStaleMs(String(r.data.stale_level_ms));
       setCfgFeeBps(String(r.data.ce_taker_fee_bps));
-      setCfgMsg('применено ✓ (market_data подхватит ≤2с)');
+      setCfgSkewGamma(String(r.data.ce_inv_skew_gamma));
+      setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm));
+      setCfgMsg('применено ✓ (matching/market_data подхватят ≤2с)');
     } catch (e) {
       setCfgMsg('ошибка: ' + (e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
-  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps]);
+  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -549,11 +736,10 @@ function VectorClearingLive() {
 
   const toggleRow = useCallback(async (it) => {
     const key = rowKey(it);
-    if (openKey === key) { setOpenKey(null); setOpenItem(null); return; }
+    if (openKey === key) { setOpenKey(null); return; }
     setOpenKey(key);
-    setOpenItem(it);
     setDetailErr('');
-    await fetchDetail(it);   // при открытии всегда тянем свежее
+    await fetchDetail(it);   // тянем СНИМОК батча один раз (деталь статична, без авто-рефетча)
   }, [openKey, fetchDetail]);
 
   useEffect(() => {
@@ -572,32 +758,174 @@ function VectorClearingLive() {
       setSummary(data.summary || {});
       setTotal(Number(data.total) || 0);
       setUpdatedAt(new Date());
+      setDataAgeMs(Number.isFinite(Number(data.dataAgeMs)) ? Number(data.dataAgeMs) : null);
       setError('');
     } catch (e) {
       setError(e.message || 'ошибка загрузки');
     }
   }, []);
 
+  const loadLiveness = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API_BASE}/vector-clearing/liveness`, { timeout: 10000 });
+      setStages(Array.isArray(r.data && r.data.stages) ? r.data.stages : null);
+    } catch (e) { /* эндпоинт недоступен — полоса стадий скрыта */ }
+  }, []);
+
+  // Живые позиции агентов (динамическая панель по кнопке): ТЕКУЩИЕ позиции всех
+  // агентов + дельты свежего такта. Независимо от выбранного статичного батча.
+  const loadLivePositions = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API_BASE}/vector-clearing/agent-positions`, { timeout: 10000 });
+      const all = Array.isArray(r.data && r.data.agentRows) ? r.data.agentRows : [];
+      setLiveRows(all.filter((a) => Math.abs(Number(a.c_total != null ? a.c_total : a.c_position)) > 1e-9 || a.hasDelta));
+      setLiveAt(new Date());
+    } catch (e) { /* недоступно — панель покажет прошлое/пусто */ }
+  }, []);
+
+  // Drill-down выбранного агента (цена/порог/хедж/исполнение) — тоже вживую.
+  const loadAgentDetail = useCallback(async (agentId) => {
+    if (!agentId) { setAgentDetail(null); return; }
+    try {
+      const r = await axios.get(`${API_BASE}/vector-clearing/agent-detail`, { params: { agent_id: agentId }, timeout: 10000 });
+      setAgentDetail(r.data || null);
+    } catch (e) { /* агент мог исчезнуть — оставляем прошлое */ }
+  }, []);
+
+  const selectAgent = useCallback((agentId) => {
+    setSelAgent((cur) => {
+      const next = cur === agentId ? null : agentId;  // повторный клик — снять выбор
+      loadAgentDetail(next);
+      if (!next) setAgentDetail(null);
+      return next;
+    });
+  }, [loadAgentDetail]);
+
+  // #3 РЕАЛЬНЫЙ сброс позиций агентов в ledger (не фронт-фикс): c_j→0, in_flight→0,
+  // band-хеджи очищаются. После — сразу перезагружаем, чтобы видеть рост с нуля.
+  const resetPositions = useCallback(async () => {
+    if (resetting) return;
+    if (!window.confirm('Сбросить ВСЕ позиции агентов к нулю? Это реальный сброс в ledger — позиции начнут копиться заново с текущего клиринга.')) return;
+    setResetting(true); setResetMsg('');
+    try {
+      const r = await axios.post(`${API_BASE}/vector-clearing/reset-positions`, {}, { timeout: 10000 });
+      setResetMsg(`сброшено агентов: ${(r.data && r.data.cleared) || 0} ✓ — позиции копятся с нуля`);
+      await load();
+    } catch (e) {
+      setResetMsg('ошибка сброса: ' + (e.message || 'не выполнено'));
+    } finally { setResetting(false); }
+  }, [resetting, load]);
+
   useEffect(() => {
-    if (isAuth) { load(); loadConfig(); }
-  }, [isAuth, load, loadConfig]);
+    if (isAuth) { load(); loadConfig(); loadLiveness(); }
+  }, [isAuth, load, loadConfig, loadLiveness]);
 
   useInterval(() => {
-    if (isAuth) load();
+    if (isAuth) { load(); loadLiveness(); }
   }, POLL_INTERVAL_MS);
 
-  // Авто-рефетч открытой детали: позиция/агенты появляются, как только ledger
-  // применит клиринг свежего батча (без повторного открытия строки).
+  // Живая панель обновляется только когда открыта (кнопка). Не трогает статичный батч.
   useInterval(() => {
-    if (isAuth && openItem) fetchDetail(openItem);
+    if (isAuth && liveOpen) {
+      loadLivePositions();
+      if (selAgent) loadAgentDetail(selAgent);  // drill-down выбранного агента — тоже вживую
+    }
   }, POLL_INTERVAL_MS);
+
+  const toggleLive = useCallback(() => {
+    setLiveOpen((v) => {
+      const next = !v;
+      if (next) loadLivePositions();  // сразу подтянуть при открытии
+      return next;
+    });
+  }, [loadLivePositions]);
+
+  // Открытая деталь батча — СТАТИЧНА (снимок выбранного клиринга): тянется один раз
+  // при клике (toggleRow → fetchDetail) и НЕ обновляется во время просмотра. Живой
+  // просмотр позиций — отдельная кнопка «Живые позиции агентов» (ниже).
 
   if (isAuth === null) return <div className="loading-screen">Загрузка...</div>;
+
+  // Живость цепочки Стаканы→Кривые→Клиринг→Позиции→Хеджи. dataAgeMs — возраст
+  // ДАННЫХ (серверные часы − event_time_ms свежего такта), а не время загрузки в
+  // браузере. Порог — из runtime-конфига stale_level_ms. Заморозка пайплайна сразу
+  // видна: клиринг не эмитит такты → возраст растёт → «ЦЕПОЧКА ОСТАНОВЛЕНА».
+  const staleThresholdMs = Math.max(2000, Number(cfgStaleMs) || 60000);
+  const chainStale = dataAgeMs != null && dataAgeMs > staleThresholdMs;
+  const fmtAge = (ms) => {
+    if (ms == null) return '—';
+    const s = Math.round(ms / 1000);
+    if (s < 90) return `${s} с`;
+    const m = Math.round(s / 60);
+    if (m < 90) return `${m} мин`;
+    const h = Math.round(m / 60);
+    if (h < 48) return `${h} ч`;
+    return `${Math.round(h / 24)} дн`;
+  };
 
   return (
     <div className="vc-page">
       <NavBar />
       <div className="vc-content">
+        {dataAgeMs != null && (
+          <div
+            className={`vc-liveness ${chainStale ? 'vc-liveness--stale' : 'vc-liveness--live'}`}
+            role="status"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 14px', marginBottom: 12, borderRadius: 8,
+              fontWeight: 600,
+              border: `1px solid ${chainStale ? '#c0392b' : '#1e8449'}`,
+              background: chainStale ? 'rgba(192,57,43,0.12)' : 'rgba(30,132,73,0.10)',
+              color: chainStale ? '#c0392b' : '#1e8449'
+            }}
+          >
+            <span style={{ fontSize: 18, lineHeight: 1 }}>{chainStale ? '⚠' : '●'}</span>
+            {chainStale ? (
+              <span>
+                ЦЕПОЧКА ОСТАНОВЛЕНА — последний клиринг <b>{fmtAge(dataAgeMs)}</b> назад
+                (порог {fmtAge(staleThresholdMs)}). Данные историчны, не живой процесс.
+                Проверьте venues/market_data/matching.
+              </span>
+            ) : (
+              <span>
+                ЖИВОЙ ПРОЦЕСС — Стаканы → Кривые → Клиринг → Позиции → Хеджи.
+                Последний такт <b>{fmtAge(dataAgeMs)}</b> назад.
+              </span>
+            )}
+          </div>
+        )}
+        {Array.isArray(stages) && stages.length > 0 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6,
+            padding: '8px 12px', marginBottom: 12, borderRadius: 8,
+            border: '1px solid #d0d7de', background: 'rgba(127,127,127,0.06)'
+          }}>
+            {stages.map((s, i) => {
+              const noData = s.ageMs == null;
+              const bad = s.stale === true;
+              const col = noData ? '#8a8a8a' : (bad ? '#c0392b' : '#1e8449');
+              return (
+                <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {i > 0 && <span style={{ color: '#8a8a8a', fontWeight: 700 }}>→</span>}
+                  <span
+                    title={noData ? 'нет данных стадии' : `свежесть ${fmtAge(s.ageMs)}`}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                      padding: '3px 9px', borderRadius: 14, fontSize: 12.5, fontWeight: 600,
+                      border: `1px solid ${col}`, color: col,
+                      background: noData ? 'transparent' : (bad ? 'rgba(192,57,43,0.10)' : 'rgba(30,132,73,0.08)')
+                    }}
+                  >
+                    <span style={{ fontSize: 9 }}>{noData ? '○' : (bad ? '⚠' : '●')}</span>
+                    {s.label}
+                    <b>{noData ? '—' : fmtAge(s.ageMs)}</b>
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div className="vc-header">
           <div>
             <h1 className="vc-title">Vector Clearing <span className="vc-sub">— F-05A live</span></h1>
@@ -614,6 +942,32 @@ function VectorClearingLive() {
             {updatedAt && (
               <span className="vc-updated">обновлено {updatedAt.toLocaleTimeString('ru-RU', { hour12: false })}</span>
             )}
+            <button
+              onClick={toggleLive}
+              title="Динамический просмотр позиций агентов (обновляется вживую), независимо от выбранного батча"
+              style={{
+                padding: '4px 12px', borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
+                border: `1px solid ${liveOpen ? '#1e8449' : '#2563eb'}`,
+                color: liveOpen ? '#1e8449' : '#2563eb',
+                background: liveOpen ? 'rgba(30,132,73,0.10)' : 'transparent'
+              }}
+            >
+              {liveOpen ? '● Живые позиции: вкл' : '◐ Живые позиции агентов'}
+            </button>
+            <button
+              onClick={resetPositions}
+              disabled={resetting}
+              title="Реальный сброс c_j→0 в ledger — наблюдать расхождение позиций с нуля"
+              style={{
+                padding: '4px 12px', borderRadius: 6, fontSize: 12.5, fontWeight: 600,
+                cursor: resetting ? 'default' : 'pointer',
+                border: '1px solid #c0392b', color: '#c0392b',
+                background: resetting ? 'rgba(192,57,43,0.06)' : 'transparent'
+              }}
+            >
+              {resetting ? 'сброс…' : '⟲ Сбросить позиции'}
+            </button>
+            {resetMsg && <span style={{ fontSize: 12, color: '#1e8449' }}>{resetMsg}</span>}
           </div>
         </div>
 
@@ -657,12 +1011,67 @@ function VectorClearingLive() {
             <input type="number" min="-1" max="1000" step="0.5" value={cfgFeeBps}
               onChange={(e) => setCfgFeeBps(e.target.value)} />
           </label>
+          <label className="vc-config-field" title="Inventory-skew γ: обратная связь позиция→цена. anchor_eff = anchor − clamp(γ·c_j). Больше γ → сильнее возврат позиций к нулю; 0 = выкл (позиции дрейфуют). Крутить осторожно — возможны колебания.">
+            skew γ (‰/kU)
+            <input type="number" min="0" max="100" step="0.01" value={cfgSkewGamma}
+              onChange={(e) => setCfgSkewGamma(e.target.value)} />
+          </label>
+          <label className="vc-config-field" title="Клэмп смещения скью (‰): максимум |anchor_eff − anchor|. Ограничивает силу возврата (устойчивость).">
+            skew клэмп (‰)
+            <input type="number" min="0" max="500" step="1" value={cfgSkewMaxPm}
+              onChange={(e) => setCfgSkewMaxPm(e.target.value)} />
+          </label>
           <button className="vc-config-apply" onClick={saveConfig} disabled={cfgSaving}>
             {cfgSaving ? '…' : 'Применить'}
           </button>
           {cfgMsg && <span className="vc-config-msg">{cfgMsg}</span>}
-          <span className="vc-config-hint">комиссия 0 = линейные кривые (нет зоны бездействия); больше окно / staleness → больше кривых накапливается перед клирингом</span>
+          <span className="vc-config-hint">комиссия 0 = линейные кривые; skew γ&gt;0 = обратная связь позиция→цена (позиции не дрейфуют), γ=0 = выкл. Крутить γ/клэмп вживую и смотреть позиции.</span>
         </div>
+
+        {/* ЖИВОЙ просмотр позиций агентов (по кнопке) — динамика, независимо от
+            выбранного статичного батча. Обновляется каждые POLL_INTERVAL_MS. */}
+        {liveOpen && (
+          <div style={{ marginBottom: 12, border: '1px solid #1e8449', borderRadius: 8, background: 'rgba(30,132,73,0.04)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 12px', fontWeight: 600, color: '#1e8449' }}>
+              <span>● ЖИВЫЕ позиции агентов — обновляется каждые {Math.round(POLL_INTERVAL_MS / 1000)} с</span>
+              {liveAt && <span style={{ fontSize: 12, opacity: 0.7 }}>обновлено {liveAt.toLocaleTimeString('ru-RU', { hour12: false })}</span>}
+              <button onClick={toggleLive} style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer', border: '1px solid #888', background: 'transparent' }}>закрыть</button>
+            </div>
+            {liveRows == null
+              ? <div className="vc-note vc-note-tight">загрузка живых позиций…</div>
+              : <AgentPositionsTables agentRows={liveRows}
+                  title="Позиции агентов — ЖИВОЙ просмотр (money-path) · клик по строке — разбор агента"
+                  onSelectAgent={selectAgent} selectedId={selAgent} />}
+          </div>
+        )}
+
+        {/* #3 Разбор агента — модал ЧЕРЕЗ ПОРТАЛ в body (иначе fixed ломается родителем
+            с transform и окно уезжает вниз). По центру экрана, без прокрутки. */}
+        {selAgent && createPortal((
+          <div
+            onClick={() => selectAgent(selAgent)}
+            style={{
+              position: 'fixed', inset: 0, zIndex: 3000, background: 'rgba(0,0,0,0.6)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '3vh 12px', overflow: 'auto'
+            }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                background: '#0b0f14', borderRadius: 10, border: '1px solid #223140', width: 'min(760px, 96vw)',
+                maxHeight: '88vh', overflow: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,0.6)', color: '#dfe6ee'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', fontWeight: 700, color: '#cdd9e4', borderBottom: '1px solid #1c2733', position: 'sticky', top: 0, background: '#1a2531' }}>
+                <span>Разбор агента: {selAgent}</span>
+                <button onClick={() => selectAgent(selAgent)} style={{ marginLeft: 'auto', padding: '3px 12px', borderRadius: 6, fontSize: 13, cursor: 'pointer', border: '1px solid #2a4a5a', background: 'transparent', color: '#9fb2c2' }}>✕ закрыть</button>
+              </div>
+              <div style={{ padding: '8px 12px' }}>
+                <AgentDrillDown detail={agentDetail} />
+              </div>
+            </div>
+          </div>
+        ), document.body)}
 
         {error && <div className="vc-error">Ошибка: {error}</div>}
 

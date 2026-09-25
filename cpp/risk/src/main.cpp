@@ -75,11 +75,9 @@ int main() {
       catch (const std::exception& e) {
         cex::common::log_json("ERROR", "EmitNetHedges failed", {{"error", e.what()}});
       }
-      // F-18 v2 Э3: per-агент эмиссия по полосе ±q (за флагом CE_AGENT_BAND).
-      try { uc.EmitAgentBandHedges(); }
-      catch (const std::exception& e) {
-        cex::common::log_json("ERROR", "EmitAgentBandHedges failed", {{"error", e.what()}});
-      }
+      // Вариант 2 (2026-09-17): band-эмиссия ушла из опроса в событийный путь —
+      // ledger детектит пробой → ce.agent.band.breach → KafkaConsumer::band_breach_loop
+      // → uc.EmitBandHedgeFromBreach. EmitAgentBandHedges (опрос) больше не вызываем.
     }
   });
   hedge_thread.detach();

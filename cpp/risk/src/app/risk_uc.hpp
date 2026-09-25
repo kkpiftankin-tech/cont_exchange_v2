@@ -7,6 +7,7 @@
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/venue/v1/venue.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // Вариант 2: AgentBandBreach
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
 #include "cex/common/decimal.hpp"
@@ -50,6 +51,12 @@ public:
   // пропускает (их перевоз — Э5/CE_TRANSFER_AGENT). Вызывается из того же
   // фонового таймера, что и EmitNetHedges.
   void EmitAgentBandHedges();
+
+  // Вариант 2 (2026-09-17): по событию пробоя полосы (ce.agent.band.breach от
+  // ledger) строит ExecutionIntent в ПАРЕ base/quote (qty = excess·1000/base_price,
+  // limit = pair_price) и публикует в execution.intents. Заменяет опрос
+  // EmitAgentBandHedges: анализ позиции/порог — в ledger, эмиссия — здесь.
+  void EmitBandHedgeFromBreach(const fob::treasury::v1::AgentBandBreach& breach);
 
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);

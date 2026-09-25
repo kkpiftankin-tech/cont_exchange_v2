@@ -57,6 +57,7 @@ create_topic marketdata.vectorized "$(retention_for_topic marketdata.vectorized 
 create_topic matching.vector_clearing "$(retention_for_topic matching.vector_clearing 3600000)" # F-05A: VectorClearingResult diagnostics (T-F05A-305 1a), key = batch_id
 create_topic ce.position.delta "$(retention_for_topic ce.position.delta 3600000)" # F-18 §11: CePositionDeltaBatch (Δpos биржи от вектор-клиринга), key = batch_id
 create_topic ce.clearing.input "$(retention_for_topic ce.clearing.input 3600000)" # F-05A CE (ADR-055/056, вариант A): CeClearingInput (market_data→matching: агенты+марки), key = batch_id
+create_topic ce.agent.band.breach "$(retention_for_topic ce.agent.band.breach 3600000)" # F-18 v2 Вариант 2: AgentBandBreach (ledger→risk: пробой полосы ±q), key = agent_id
 # F-05: MarketDataSnapshot после каждого batch-clearing; 7 дней retention, partition key = asset
 create_topic marketdata.snapshots "$(retention_for_topic marketdata.snapshots 604800000)"
 create_topic orders.normalized "$(retention_for_topic orders.normalized 604800000)"

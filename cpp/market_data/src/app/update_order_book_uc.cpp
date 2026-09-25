@@ -138,7 +138,10 @@ void UpdateOrderBookUseCase::OnBatchResult(const fob::matching::v1::BatchResult&
 }
 
 void UpdateOrderBookUseCase::OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot) {
-  latest_venue_snapshots_[VenueSymbolKey(snapshot)] = snapshot;
+  {
+    std::lock_guard<std::mutex> lk(snapshots_mu_);
+    latest_venue_snapshots_[VenueSymbolKey(snapshot)] = snapshot;
+  }
   RebuildAggregatedVenueBook(snapshot.instrument().symbol());
   if (!book_.has_value()) return;
   storage_->Store(*book_);

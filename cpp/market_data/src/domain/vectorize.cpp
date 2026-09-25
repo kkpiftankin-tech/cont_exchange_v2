@@ -97,9 +97,14 @@ VectorizeResult Vectorize(const std::vector<ExternalOrderLevel>& levels,
       seg.w[static_cast<std::size_t>(iy)] = p_eff;
     }
 
-    // d_hl = dHL-policy(P_eff); p_low=0; p_high=d_hl.
-    const double d_hl_d = cfg.dhl_fraction * p_eff;
-    seg.d_hl = Quantize(d_hl_d, cfg.decimal_scale);
+    // d_hl: ADR-051 — если задан override (реальный наклон кривой венью, |b|·q_max),
+    // берём его; иначе dHL-policy = dhl_fraction·P_eff. p_low=0; p_high=d_hl.
+    if (Positive(lvl.d_hl_override)) {
+      seg.d_hl = lvl.d_hl_override;
+    } else {
+      const double d_hl_d = cfg.dhl_fraction * p_eff;
+      seg.d_hl = Quantize(d_hl_d, cfg.decimal_scale);
+    }
     seg.p_low = cex::common::Decimal{0, cfg.decimal_scale};
     seg.p_high = seg.d_hl;
     seg.effective_price = Quantize(p_eff, cfg.decimal_scale);

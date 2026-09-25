@@ -355,7 +355,16 @@ message AgentPosition {
   // клиринг делил value→qty (AgentDelta.price_used). Нужна risk для перевода
   // избытка полосы (в стоимости) в количество актива хедж-заявки. Аддитивно,
   // 0 у арбитражёров и до первой дельты (risk такие пропускает).
-  fob.common.v1.Decimal reference_price = 9;
+  fob.common.v1.Decimal reference_price = 9;  // цена ПАРЫ P(base)/P(quote) (номинал ⇒ P(base))
+  // Пары X/Y (2026-09-17): котируемая валюта пары агента (QUOTE-ребро; номинал ⇒
+  // "USDT"). Для отображения пары base/quote на фронте и корреляции с заявками.
+  string quote = 10;
+  // P(base) в USDT (абсолютная цена базового актива). reference_price даёт лишь
+  // отношение P_base/P_quote — для корректного разложения стоимости c_j на ноги в
+  // СВОИХ валютах пары (base_qty=value/P_base, quote_qty=value/P_quote, где
+  // P_quote=base_price/reference_price) нужна одна абсолютная цена. Номинал ⇒
+  // base_price=reference_price=P_base. 0 у арбитражёров/до первой дельты.
+  fob.common.v1.Decimal base_price = 11;
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;
@@ -381,6 +390,14 @@ message AgentPositionDelta {
   fob.common.v1.Decimal position_before = 5;    // c_j ДО применения этой дельты
   fob.common.v1.Decimal delta = 6;              // f_j, ЗНАКОВАЯ дельта этого такта
   fob.common.v1.Decimal position_after = 7;     // c_j ПОСЛЕ = ДО + Δ
+}
+message ResetAgentPositionsRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;                // пусто = ВСЕ агенты (полный сброс к нулю)
+}
+message ResetAgentPositionsResponse {
+  fob.common.v1.EventMeta meta = 1;
+  uint32 cleared = 2;                           // сколько агентских позиций сброшено
 }
 message GetAgentPositionDeltasRequest {
   fob.common.v1.EventMeta meta = 1;
@@ -451,4 +468,9 @@ service LedgerService {
   // F-18 v2 (наблюдаемость такта клиринга): per-agent дельты ОДНОГО такта
   // (batch_id) — ДО → Δ → ПОСЛЕ, для вкладки Clearing (замена house-секции).
   rpc GetAgentPositionDeltas(GetAgentPositionDeltasRequest) returns (GetAgentPositionDeltasResponse);
+
+  // F-18 v2 (кнопка «сброс позиций» на вкладке Clearing): обнуляет накопленные
+  // позиции агентов (c_j→0), in_flight и band-хеджи — чтобы наблюдать расхождение
+  // позиций с нуля. РЕАЛЬНЫЙ сброс состояния владельца (ledger), не фронт-фикс.
+  rpc ResetAgentPositions(ResetAgentPositionsRequest) returns (ResetAgentPositionsResponse);
 }

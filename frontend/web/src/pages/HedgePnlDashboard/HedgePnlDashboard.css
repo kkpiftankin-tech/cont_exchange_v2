@@ -1,6 +1,6 @@
 .pnl-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   --pnl-panel: rgba(20, 10, 40, 0.86);
   --pnl-panel-strong: rgba(27, 14, 50, 0.94);
   --pnl-border: rgba(167, 74, 255, 0.28);

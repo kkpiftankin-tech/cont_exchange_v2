@@ -137,6 +137,11 @@ struct VenueSnapshotRequest {
   fob::common::v1::Instrument instrument;
   std::string venue_symbol;
   std::size_t depth_levels{20};
+  // Тянуть ли ленту публичных сделок (recent-trades) вместе со стаканом. true для
+  // ядрового md-цикла (CE-хеджируемые символы — нужна лента для sim-fill), false
+  // для лёгкого ticker-цикла (extra_ticker_loop), чтобы не жечь REST-бюджет на
+  // символах, которые CE не хеджирует, и не растягивать каденс CE-ленты.
+  bool include_trades{true};
 };
 
 // Unified raw payload expected from CEX/DEX/AMM adapters.

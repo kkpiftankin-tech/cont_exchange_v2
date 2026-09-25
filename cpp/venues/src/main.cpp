@@ -22,6 +22,7 @@
 #include "app/sim_session_manager.hpp"
 #include "infra/postgres_child_order_repository.hpp"
 #include "infra/postgres_hedgeflow_repository.hpp"
+#include "infra/postgres_fill_diagnostics_repository.hpp"
 #include "infra/postgres_sim_session_repository.hpp"
 #include "infra/postgres_venue_config_repository.hpp"
 #include "infra/sim_session_pg_codec.hpp"
@@ -136,6 +137,21 @@ int main() {
                           "F-12 PG repositories attached",
                           {{"hedgeflow_repo", "ready"},
                            {"child_order_repo", "ready"}});
+  }
+
+  // ADR-060 / F-18 — приёмник диагностики sim-fill (venue_fill_diagnostics):
+  // почему симулятор исполнил / не исполнил хедж-заявку (для вкладки Clearing).
+  // Держим unique_ptr на всё время жизни loop; nullptr-путь безопасен.
+  std::unique_ptr<cex::venues::infra::PostgresFillDiagnosticsRepository>
+      fill_diag_repo;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    fill_diag_repo =
+        std::make_unique<cex::venues::infra::PostgresFillDiagnosticsRepository>(
+            *venues_postgres_dsn);
+    if (!fill_diag_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure venue_fill_diagnostics schema");
+    }
+    loop.SetFillDiagnosticsSink(fill_diag_repo.get());
   }
 
   // F-20 DoD-3 — SimSession Manager. PG persistence (sim_sessions) + a

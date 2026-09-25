@@ -83,6 +83,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
       const fob::ledger::v1::GetAgentPositionDeltasRequest* request,
       fob::ledger::v1::GetAgentPositionDeltasResponse* response) override;
 
+  grpc::Status ResetAgentPositions(
+      grpc::ServerContext* context,
+      const fob::ledger::v1::ResetAgentPositionsRequest* request,
+      fob::ledger::v1::ResetAgentPositionsResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

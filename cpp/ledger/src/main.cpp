@@ -100,6 +100,8 @@ int main() {
   // F-18 v2 (T-F18-204/205): wiring синхронно перечитывает ce_agent_position
   // в write-through кэш при старте — позиция агента переживает рестарт.
   uc.SetAgentPositionRepo(agent_position_repo);
+  // F-18: DSN для живой настройки порога band от комиссии (f05a_clearing_config).
+  uc.SetPostgresDsn(pg_dsn);
 
   // F-18 (ADR-054 §10): seed house-аккаунта ('__ce_house__') капиталом биржи из
   // env при старте. Валюты — CE_TREASURY_ASSETS (+ CE_NUMERAIRE); сумма —
@@ -138,6 +140,13 @@ int main() {
           cex::common::KafkaProducer(
               cex::common::KafkaConfig{.brokers = brokers, .client_id = "ledger"}));
   uc.SetPositionsUpdatePublisher(positions_update_publisher);
+
+  // Вариант 2 (ADR-061 §4): продюсер топика ce.agent.band.breach. ledger детектит
+  // пробой полосы ±q в момент применения дельты клиринга и эмитит событие → risk
+  // строит хедж-заявку в паре base/quote. Живёт всё время работы сервиса.
+  static cex::common::KafkaProducer band_breach_producer(
+      cex::common::KafkaConfig{.brokers = brokers, .client_id = "ledger-band-breach"});
+  uc.SetBandBreachProducer(&band_breach_producer);
 
   // Start Kafka consumers in background (batch.outputs, execution.intents, execution.reports, execution.venue)
   // ВАЖНО: ApplyBatchResult идempotent через idempotency_repo → safe при rebalance.

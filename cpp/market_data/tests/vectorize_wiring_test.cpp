@@ -7,6 +7,8 @@
 //      w как Decimal, side enum, q_max).
 // ============================================================================
 
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -86,9 +88,52 @@ void TestEndToEndProto() {
 
 }  // namespace
 
+// ADR-051: одна сторона кривой → ОДИН линейный сегмент (наклон из кривой).
+void TestLinearSegments() {
+  auto levels = app::LinearSegmentsFromCurve(MakeCurve());
+  expect(levels.size() == 2, "linear: 2 сегмента (1 bid + 1 ask)");
+  // bid: anchor=best=100, q_max=q_grid[last]=3, d_hl=|99-100|=1 (наклон).
+  const auto& bid = levels[0];
+  expect(bid.side == dom::LevelSide::kBid, "linear: сегм0 bid");
+  expect(static_cast<double>(bid.price) == 100.0, "linear: anchor=best price 100");
+  expect(static_cast<double>(bid.quantity) == 3.0, "linear: q_max=глубина 3");
+  expect(static_cast<double>(bid.d_hl_override) == 1.0, "linear: d_hl=|99-100|=1 (наклон)");
+  // ask: одна точка → best==worst → d_hl_override=0 (fallback на policy).
+  const auto& ask = levels[1];
+  expect(ask.side == dom::LevelSide::kAsk, "linear: сегм1 ask");
+  expect(static_cast<double>(ask.price) == 101.0, "linear: ask anchor=101");
+  expect(static_cast<double>(ask.d_hl_override) == 0.0, "linear: 1 точка → d_hl_override=0");
+}
+
+// ADR-053: двусторонний сегмент с safe-translator наклоном (VWAP-глубина + θ).
+void TestSafeTranslatorSegment() {
+  setenv("F05A_TRANSLATOR_MODEL", "safe_vwap", 1);
+  setenv("F05A_SAFE_SHARE", "0.60", 1);
+  auto vr = app::TwoSidedSegmentsFromCurves({MakeCurve()}, 12);
+  expect(vr.segments.size() == 1, "safe: 1 двусторонний сегмент");
+  if (vr.segments.empty()) return;
+  const auto& s = vr.segments[0];
+  auto approx = [](double a, double b, double tol) { return std::fabs(a - b) <= tol; };
+  const double mid = 100.5;
+  // Тончайшая ликвидность = bid L0: D=100, δ=1e4·|ln(100/mid)| ⇒ α_ext≈2.005.
+  expect(approx(static_cast<double>(s.alpha_ext), 2.00501, 5e-3), "safe: α_ext≈2.005 (bid L0)");
+  expect(approx(static_cast<double>(s.theta), 0.60, 1e-6), "safe: θ=0.60");
+  const double alpha_t = 0.60 * 2.00501;
+  expect(approx(static_cast<double>(s.alpha_t), alpha_t, 5e-3), "safe: α_T=θ·α_ext");
+  expect(approx(static_cast<double>(s.slope), mid / (1e4 * alpha_t), 5e-5), "safe: m=mid/(1e4·α_T)");
+  expect(approx(static_cast<double>(s.anchor), std::log(mid), 1e-4), "safe: anchor=log(mid)");
+  // Без raw_snapshots (nullptr) → источник FOB-кривая → тег safe_vwap_fob.
+  expect(s.translator_model == "safe_vwap_fob", "safe: model tag (fob fallback)");
+  // β_T = mid·m (линейный и log-наклон совпадают у якоря).
+  expect(approx(static_cast<double>(s.beta_t), mid * static_cast<double>(s.slope), 1e-3),
+         "safe: β_T=mid·m");
+}
+
 int main() {
   TestCurveToLevels();
   TestEndToEndProto();
+  TestLinearSegments();
+  TestSafeTranslatorSegment();
   if (g_failures == 0) { std::cout << "vectorize_wiring_test: ALL PASSED\n"; return 0; }
   std::cerr << "vectorize_wiring_test: " << g_failures << " FAILURE(S)\n";
   return 1;
