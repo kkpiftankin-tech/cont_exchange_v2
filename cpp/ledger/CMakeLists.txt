@@ -51,6 +51,23 @@ if (BUILD_TESTING)
 
   add_test(NAME ledger_uc_test COMMAND ledger_uc_test)
 
+  # F-18 v2: band-хедж — трёхзонные пороги от комиссии, A7-учёт позиции
+  # (эмиссия/fill/timeout/частичное), нумерарий-sweep. Kafka-producer как заглушка
+  # (produce() best-effort), PG нет — LoadBandFeeConfig берёт env-дефолты.
+  add_executable(ce_band_hedge_a7_test
+    tests/ce_band_hedge_a7_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_hedge_a7_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_hedge_a7_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_hedge_a7_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_hedge_a7_test COMMAND ce_band_hedge_a7_test)
+
   # F-20 DoD-7 sim-book applier (pure; no PG, no Kafka).
   add_executable(ledger_sim_book_applier_test
     tests/sim_book_applier_test.cpp
