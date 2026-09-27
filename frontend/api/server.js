@@ -7540,6 +7540,8 @@ async function handleVectorClearing(req, res, pathname, query) {
           `SELECT symbol, side, limit_price::text AS limit_price, target_qty::text AS target_qty,
                   filled_qty::text AS filled_qty, avg_price::text AS avg_price, status, reason,
                   window_trades, considered_trades, created_at,
+                  (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms,
+                  read_request_ms, read_response_ms,
                   base_vwap::text AS base_vwap, impact_shift::text AS impact_shift,
                   impact_cost::text AS impact_cost, impact_v, impact_dt_sec
              FROM venue_fill_diagnostics
@@ -7563,7 +7565,11 @@ async function handleVectorClearing(req, res, pathname, query) {
             baseVwap: h.base_vwap, impactShift: h.impact_shift, impactCost: h.impact_cost,
             impactV: h.impact_v, impactDtSec: h.impact_dt_sec,
             status: h.status, reason: h.reason, windowTrades: h.window_trades,
-            considered, crossVol, outcome, createdAt: h.created_at
+            considered, crossVol, outcome, createdAt: h.created_at,
+            // Абсолютные времена (Unix ms) для ЖИВОГО разбора на фронте (now−ts):
+            createdMs: h.created_ms != null ? Number(h.created_ms) : null,       // возраст симуляции хеджа
+            readRequestMs: h.read_request_ms != null ? Number(h.read_request_ms) : null,   // t запроса ленты
+            readResponseMs: h.read_response_ms != null ? Number(h.read_response_ms) : null, // t ответа ленты
           };
         }
       } catch (e) { /* таблицы может не быть */ }

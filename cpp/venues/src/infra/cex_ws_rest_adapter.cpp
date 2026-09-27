@@ -1022,6 +1022,11 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     std::string trades_body;
     long trades_http_code = 0;
     bool trades_ok = false;
+    int64_t trades_req_ms = 0, trades_resp_ms = 0;  // wall-clock времена запроса/ответа ленты (UI)
+    const auto wall_ms = [] {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count();
+    };
     if (cfg_.sim_match_real_trades && normalized.include_trades) {
       bool can_fetch_trades = false;
       {
@@ -1029,8 +1034,10 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
         can_fetch_trades = consume_rest_token_locked(now);
       }
       if (can_fetch_trades) {
+        trades_req_ms = wall_ms();
         trades_ok = rest_client_->Get(rest_trades_url(normalized), auth_headers(),
                                       cfg_.rest_timeout_ms, &trades_body, &trades_http_code);
+        trades_resp_ms = wall_ms();
       }
     }
 
@@ -1046,6 +1053,12 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
       }
       if (trades_ok && trades_http_code >= 200 && trades_http_code < 300) {
         parse_rest_trades_locked(trades_body, parsed->venue_symbol, now);
+        // Wall-clock времена REST-чтения ленты для UI-разбора (запрос/ответ/задержка).
+        if (auto ts_it = books_.find(canon_trade_key(parsed->venue_symbol));
+            ts_it != books_.end()) {
+          ts_it->second.last_trades_request_ms = trades_req_ms;
+          ts_it->second.last_trades_response_ms = trades_resp_ms;
+        }
       }
       last_pong_at_ = now;
       record_external_success_locked();
@@ -2112,8 +2125,9 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       ct.price = DecimalText(tr.price);
       ct.qty = DecimalText(tr.qty);
       ct.age_ms = (tr.exchange_ms > 0)
-          ? std::max<int64_t>(0, sys_now_ms - tr.exchange_ms)   // биржевое время (A)
+          ? std::max<int64_t>(0, sys_now_ms - tr.exchange_ms)   // биржевое время (A), снимок
           : std::chrono::duration_cast<std::chrono::milliseconds>(now - tr.ts).count();  // fallback: read-time
+      ct.exchange_ms = tr.exchange_ms;  // абсолют — фронт пересчитывает возраст живьём
       ct.crosses = cross;
       considered.push_back(std::move(ct));
     }
@@ -2254,6 +2268,10 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     diag.status = status_txt;
     diag.reason = diag_reason;
     diag.window_trades = static_cast<int>(window_trades);
+    if (have_book) {  // времена REST-чтения ленты этого символа (UI-разбор времён)
+      diag.read_request_ms = it->second.last_trades_request_ms;
+      diag.read_response_ms = it->second.last_trades_response_ms;
+    }
     if (has_impact) {
       diag.base_vwap = std::to_string(impact_base_vwap);   // S — цена до импакта
       diag.impact_shift = std::to_string(impact_shift);    // k·v

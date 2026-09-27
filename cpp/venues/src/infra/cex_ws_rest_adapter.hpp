@@ -213,6 +213,10 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     // тогда при отсутствии новых сделок матчим недавние старые за N последних чтений.
     SteadyClock::time_point last_trades_read{};
     double read_interval_ms{0.0};
+    // Wall-clock (Unix ms) времена REST-чтения ленты — для UI-разбора времён:
+    // когда отправлен запрос и когда пришёл ответ (задержка = resp−req).
+    int64_t last_trades_request_ms{0};
+    int64_t last_trades_response_ms{0};
     // Момент прошлого CE-исполнения по символу — для Δt в price-impact (v=filled/Δt).
     SteadyClock::time_point last_ce_fill_at{};
     // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.

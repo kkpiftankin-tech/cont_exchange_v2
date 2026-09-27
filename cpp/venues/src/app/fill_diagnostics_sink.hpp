@@ -19,7 +19,8 @@ namespace cex::venues::app {
 struct ConsideredTrade {
   std::string price;   // цена публичной сделки
   std::string qty;     // ОСТАВШИЙСЯ объём на момент рассмотрения (лента потребляется FIFO)
-  int64_t age_ms{0};   // насколько раньше попытки fill произошла сделка (мс; steady-clock)
+  int64_t age_ms{0};   // возраст на момент хеджа (мс) — снимок; фронт пересчитывает живьём по exchange_ms
+  int64_t exchange_ms{0};  // БИРЖЕВОЕ время сделки (Unix ms) — для ЖИВОГО возраста в UI; 0=неизв.
   bool crosses{false}; // пересекла ли лимит заявки (SELL: price≥limit; BUY: price≤limit)
 };
 
@@ -47,6 +48,11 @@ struct FillDiagnostic {
   std::string impact_cost;   // k·v²·Δt — чистые издержки импакта (value)
   double impact_v{0.0};      // скорость исполнения v = filled/Δt (лот/с, знаковая)
   double impact_dt_sec{0.0}; // Δt интервала (с)
+  // Времена чтения публичной ленты по REST (Unix ms) — РАЗНЫЕ времена для UI:
+  // когда venues отправил запрос ленты и когда пришёл ответ (задержка = resp−req).
+  // Возраст симуляции хеджа фронт считает от created_at строки (diagnostic freshness).
+  int64_t read_request_ms{0};   // t запроса ленты (Unix ms)
+  int64_t read_response_ms{0};  // t ответа/парсинга ленты (Unix ms)
   std::vector<ConsideredTrade> considered_trades;
 };
 

@@ -310,6 +310,10 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
 // → пробой → хедж-заявка в паре → публичные сделки → имитируемое (полное/частичное)
 // исполнение. Данные из /agent-detail (BFF), здесь только рендер.
 function AgentDrillDown({ detail }) {
+  // Живые часы: возраст времён (запрос/ответ ленты, исполнение сделки, симуляция хеджа)
+  // тикает раз в секунду, чтобы разбор времён обновлялся динамически, а не был снимком.
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => { const id = setInterval(() => setNowMs(Date.now()), 1000); return () => clearInterval(id); }, []);
   if (!detail) return <div className="vc-note vc-note-tight">кликните агента в таблице выше — покажу цену/порог/хедж/исполнение.</div>;
   const a = detail.agent || {};
   const sk = detail.skew || {};
@@ -329,6 +333,10 @@ function AgentDrillDown({ detail }) {
   const psColor = posColor(ps);
   const box = { border: '1px solid #1c2733', background: '#101821', borderRadius: 8, padding: '8px 12px', marginBottom: 8 };
   const head = { fontWeight: 600, marginBottom: 4, color: '#cdd9e4' };
+  // Живой возраст: nowMs − ts_ms (тикает). fmtAgo — «N.N с назад» / «N мс назад».
+  const agoMs = (tsMs) => (tsMs == null || tsMs <= 0) ? null : Math.max(0, nowMs - Number(tsMs));
+  const fmtAgo = (ms) => ms == null ? '—' : (ms >= 1000 ? (ms / 1000).toFixed(1) + ' с назад' : Math.round(ms) + ' мс назад');
+  const fmtMs = (ms) => ms == null ? '—' : (ms >= 1000 ? (ms / 1000).toFixed(1) + ' с' : Math.round(ms) + ' мс');
   return (
     <div style={{ padding: '4px 2px', color: '#dfe6ee' }}>
       <div style={box}>
@@ -367,11 +375,21 @@ function AgentDrillDown({ detail }) {
           {h ? (
             <>
               <div>Заявка (пара): <b>{h.pair}</b> <b>{h.side}</b> target <b>{num(h.targetQty)}</b> @ лимит {num(h.limitPrice, 2)}</div>
+              {/* Разные времена (живые): когда запрошена лента, когда пришёл ответ, задержка,
+                  и насколько стар сам снимок хеджа. Возраст сделок — в колонке таблицы ниже. */}
+              <div style={{ marginTop: 6, fontSize: 12, background: '#0c141b', border: '1px solid #1c2733', borderRadius: 6, padding: '6px 8px' }}>
+                <div style={{ fontWeight: 600, color: '#cdd9e4', marginBottom: 3 }}>Времена (обновляются вживую)</div>
+                <div>• запрос ленты по REST: <b>{fmtAgo(agoMs(h.readRequestMs))}</b></div>
+                <div>• ответ по ленте получен: <b>{fmtAgo(agoMs(h.readResponseMs))}</b>{' '}
+                  <span style={{ color: MUTE }}>(задержка ответа биржи: {h.readResponseMs && h.readRequestMs ? fmtMs(h.readResponseMs - h.readRequestMs) : '—'})</span></div>
+                <div>• снимок (симуляция хеджа) сделан: <b style={{ color: (agoMs(h.createdMs) || 0) > 15000 ? '#e6a15a' : '#8fe0b0' }}>{fmtAgo(agoMs(h.createdMs))}</b>{' '}
+                  <span style={{ color: MUTE }}>— это застывший снимок; возраст сделок ниже — живой</span></div>
+              </div>
               <div style={{ marginTop: 4 }}>Ближайшие по цене публичные сделки вокруг лимита (контекст последних 60, объём пересекающих по цене = <b>{num(h.crossVol)}</b>). «Исполнила бы» — по цене; фактический матч идёт по свежему окну (см. причину ниже).</div>
               {(() => {
                 const L = Number(h.limitPrice) || 0;
                 const isSell = h.side === 'SELL';
-                const ts = (h.considered || []).map((t) => ({ price: Number(t.price), qty: Number(t.qty), age_ms: t.age_ms }));
+                const ts = (h.considered || []).map((t) => ({ price: Number(t.price), qty: Number(t.qty), age_ms: t.age_ms, exchange_ms: t.exchange_ms }));
                 const above = ts.filter((t) => t.price > L).sort((a, b) => a.price - b.price).slice(0, 5).reverse();  // 5 ближайших выше, сверху выше цена
                 const below = ts.filter((t) => t.price < L).sort((a, b) => b.price - a.price).slice(0, 5);            // 5 ближайших ниже
                 // Для SELL исполняют сделки ВЫШЕ лимита; для BUY — НИЖЕ. Помечаем сторону.
@@ -390,13 +408,13 @@ function AgentDrillDown({ detail }) {
                   <tr key={i} style={{ background: fills ? 'rgba(95,208,138,0.08)' : 'rgba(230,114,90,0.07)' }}>
                     <td className="vc-mono">{t.price.toFixed(2)}</td>
                     <td className="vc-mono">{bar(t.qty, fills ? GREEN : RED)}</td>
-                    <td className="vc-mono">{t.age_ms}</td>
+                    <td className="vc-mono">{t.exchange_ms ? fmtAgo(agoMs(t.exchange_ms)) : (t.age_ms + ' мс')}</td>
                     <td style={{ color: fills ? GREEN : MUTE }}>{fills ? '✓ исполнила бы' : '—'}</td>
                   </tr>
                 );
                 return (
                   <table className="vc-sub-table" style={{ marginTop: 4 }}>
-                    <thead><tr><th>цена</th><th>объём (бар)</th><th>возраст, мс</th><th>vs лимит</th></tr></thead>
+                    <thead><tr><th>цена</th><th>объём (бар)</th><th>возраст сделки (живой)</th><th>vs лимит</th></tr></thead>
                     <tbody>
                       {above.length === 0 && <tr><td colSpan={4} style={{ opacity: 0.5 }}>нет публичных сделок выше лимита</td></tr>}
                       {above.map((t, i) => row(t, 'a' + i, aboveFills))}

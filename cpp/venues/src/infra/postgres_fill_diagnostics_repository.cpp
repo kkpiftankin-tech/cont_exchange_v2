@@ -54,16 +54,20 @@ CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
   impact_cost       NUMERIC(38, 18),   -- k·v²·Δt: издержки импакта
   impact_v          DOUBLE PRECISION,  -- скорость исполнения v=filled/Δt (знаковая)
   impact_dt_sec     DOUBLE PRECISION,  -- Δt интервала (с)
+  read_request_ms   BIGINT,            -- t запроса REST-ленты (Unix ms) — UI-разбор времён
+  read_response_ms  BIGINT,            -- t ответа REST-ленты (Unix ms)
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 )SQL");
-    // Миграция для существующей таблицы (price-impact добавлен позже).
+    // Миграция для существующей таблицы (price-impact/времена чтения добавлены позже).
     tx.exec("ALTER TABLE venue_fill_diagnostics "
             "ADD COLUMN IF NOT EXISTS base_vwap NUMERIC(38,18), "
             "ADD COLUMN IF NOT EXISTS impact_shift NUMERIC(38,18), "
             "ADD COLUMN IF NOT EXISTS impact_cost NUMERIC(38,18), "
             "ADD COLUMN IF NOT EXISTS impact_v DOUBLE PRECISION, "
-            "ADD COLUMN IF NOT EXISTS impact_dt_sec DOUBLE PRECISION");
+            "ADD COLUMN IF NOT EXISTS impact_dt_sec DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS read_request_ms BIGINT, "
+            "ADD COLUMN IF NOT EXISTS read_response_ms BIGINT");
     tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_batch "
             "ON venue_fill_diagnostics (batch_id)");
     tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_hedge "
@@ -128,6 +132,7 @@ void PostgresFillDiagnosticsRepository::write_one(const app::FillDiagnostic& dia
       arr.push_back({{"price", t.price},
                      {"qty", t.qty},
                      {"age_ms", t.age_ms},
+                     {"exchange_ms", t.exchange_ms},  // абсолют — фронт считает возраст живьём
                      {"crosses", t.crosses}});
     }
     const std::string considered_json = arr.dump();
@@ -141,13 +146,15 @@ INSERT INTO venue_fill_diagnostics (
   intent_id, hedge_flow_id, batch_id, venue, symbol, side,
   limit_price, target_qty, filled_qty, avg_price,
   status, reason, window_trades, considered_trades,
-  base_vwap, impact_shift, impact_cost, impact_v, impact_dt_sec
+  base_vwap, impact_shift, impact_cost, impact_v, impact_dt_sec,
+  read_request_ms, read_response_ms
 ) VALUES (
   $1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6,
   NULLIF($7, '')::NUMERIC, NULLIF($8, '')::NUMERIC,
   NULLIF($9, '')::NUMERIC, NULLIF($10, '')::NUMERIC,
   $11, $12, $13, NULLIF($14, '')::JSONB,
-  NULLIF($15, '')::NUMERIC, NULLIF($16, '')::NUMERIC, NULLIF($17, '')::NUMERIC, $18, $19)
+  NULLIF($15, '')::NUMERIC, NULLIF($16, '')::NUMERIC, NULLIF($17, '')::NUMERIC, $18, $19,
+  NULLIF($20::bigint,0), NULLIF($21::bigint,0))
 ON CONFLICT (intent_id) DO UPDATE SET
   filled_qty        = excluded.filled_qty,
   avg_price         = excluded.avg_price,
@@ -160,6 +167,8 @@ ON CONFLICT (intent_id) DO UPDATE SET
   impact_cost       = excluded.impact_cost,
   impact_v          = excluded.impact_v,
   impact_dt_sec     = excluded.impact_dt_sec,
+  read_request_ms   = excluded.read_request_ms,
+  read_response_ms  = excluded.read_response_ms,
   created_at        = now()
 )SQL",
         diag.intent_id, diag.hedge_flow_id, diag.batch_id, diag.venue,
@@ -167,7 +176,8 @@ ON CONFLICT (intent_id) DO UPDATE SET
         diag.filled_qty, diag.avg_price, diag.status, diag.reason,
         diag.window_trades, considered_json,
         diag.base_vwap, diag.impact_shift, diag.impact_cost,
-        diag.impact_v, diag.impact_dt_sec);
+        diag.impact_v, diag.impact_dt_sec,
+        diag.read_request_ms, diag.read_response_ms);
     tx.commit();
   } catch (const std::exception& ex) {
     cex::common::log_json("WARN", "venue_fill_diagnostics write failed",
