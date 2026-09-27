@@ -1603,6 +1603,13 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // в in_flight и позиция росла (F-18 fix). in_flight-гард не нужен: c сам исключает in-flight.
   const Decimal excess = Decimal::sub(abs_c, q);
   if (Decimal::cmp(excess, zero) <= 0) return;  // c в no-action зоне (весь остаток в полосе)
+  // Cooldown эмиссии (F-18): под A7 c пиннится к band, поток каждый такт даёт пробой —
+  // без гарда эмиссия (6+/с·агентов) обгоняет консьюмер venues_exec (~3/с) → бэклог
+  // растёт, хеджи не исполняются, in_flight «утекает». Не переэмитим для агента, пока
+  // предыдущий хедж «в полёте» (лик-устойчивая замена in_flight-гарду). За cooldown c
+  // копит поток → следующий хедж крупнее (реже, но полнее). Env CE_BAND_HEDGE_COOLDOWN_MS.
+  const long long cooldown_ms = cex::common::Env::get_int("CE_BAND_HEDGE_COOLDOWN_MS", 3000);
+  if (st.last_band_emit_ms != 0 && (ts_ms - st.last_band_emit_ms) < cooldown_ms) return;
   // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
   // При выключенном линке — всегда агрессив (старое поведение).
   const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
@@ -1618,6 +1625,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   st.position = Decimal::sub(st.position, in_flight_delta);   // c → ±q (к границе)
   st.in_flight = Decimal::add(st.in_flight, in_flight_delta); // отправлено в заявку
   st.updated_at_ms = ts_ms;
+  st.last_band_emit_ms = ts_ms;   // cooldown: следующий пробой этого агента не раньше +cooldown
   if (agent_position_repo_)
     agent_position_repo_->ApplyHedge(agent_id, asset, venue,
                                      Decimal::sub(zero, in_flight_delta), in_flight_delta, ts_ms);

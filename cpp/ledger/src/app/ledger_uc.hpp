@@ -336,6 +336,7 @@ class LedgerUseCases {
     std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
     std::string last_batch_id;
     long long updated_at_ms{0};
+    long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;

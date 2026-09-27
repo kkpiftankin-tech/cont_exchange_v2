@@ -143,6 +143,11 @@ services:
         TARGET: ledger
         BUILD_JOBS: ${BUILD_JOBS:-1}
     env_file: [ ./env/.env-example ]
+    environment:
+      # F-18: cooldown эмиссии band-хеджа (мс). Под A7 c пиннится к band → каждый такт
+      # поток даёт пробой; без гарда эмиссия (~N_агентов/такт) обгоняет консьюмер
+      # venues_exec (~3/с) → бэклог растёт, in_flight «утекает». ~16 агентов / 8с ≈ 2/с.
+      CE_BAND_HEDGE_COOLDOWN_MS: "8000"
     depends_on:
       postgres:
         condition: service_healthy
