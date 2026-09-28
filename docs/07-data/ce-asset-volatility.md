@@ -1,7 +1,7 @@
 ---
 id: DOC-DATA-CE-ASSET-VOLATILITY
 phase: 07-data
-status: planned (T-F18-701 schema added; writer T-F18-702, reader T-F18-703)
+status: implemented (T-F18-701 schema, T-F18-702 writer, T-F18-703 reader); flag CE_BAND_GAMMA_MODE off до T-F18-705
 level: sea
 owner: core-team
 source:
@@ -14,9 +14,10 @@ related:
 
 # Data: CE Asset Volatility (σ для динамического порога band)
 
-> **Status:** 🟡 schema-only (T-F18-701, 2026-09-28). Таблица `ce_asset_volatility` добавлена в
-> `infra/postgres/init.sql`. Writer (market_data EWMA-σ, T-F18-702) и reader (ledger `Γ=γσ²τ`,
-> T-F18-703) — planned. До включения `CE_BAND_GAMMA_MODE=1` таблица не влияет на поведение
+> **Status:** ✅ реализовано (T-F18-701 схема + T-F18-702 writer + T-F18-703 reader, 2026-09-28).
+> market_data пишет EWMA-σ (`PostgresAssetVolatilityRepository`); ledger читает
+> (`LoadAssetSigma`, `LoadBandFeeConfig.gamma`) и масштабирует порог band `Γ=γσ²τ` ЗА ФЛАГОМ
+> `CE_BAND_GAMMA_MODE` (деф off). До включения флага (T-F18-705) таблица не влияет на поведение
 > (ledger использует плоский `ce_band_fee_k`, ADR-066 D2).
 
 ## Назначение
@@ -40,7 +41,7 @@ related:
 
 | Колонка | Тип | Смысл |
 | --- | --- | --- |
-| `asset` | TEXT | Актив (`BTC`/`ETH`/`SOL`), часть PK |
+| `asset` | TEXT | Нормализованный **символ пары** (`BTCUSDT`/`ETHBTC`/`SOLUSDT` — `snap.asset` writer'а, слэш убран), часть PK. Ledger строит ключ как `agent.asset + quote` (quote пуст ⇒ numeraire) |
 | `venue` | TEXT | Площадка; `''` = агрегат по площадкам (первый срез per-asset), часть PK |
 | `sigma` | NUMERIC(38,18) | σ лог-доходности mid (**безразмерная доля** за окно), EWMA |
 | `window_sec` | INT | Окно/полупериод EWMA (диагностика, не влияет на чтение) |

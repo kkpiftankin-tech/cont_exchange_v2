@@ -1492,29 +1492,32 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   // коэффициент, что и skew (ce_inv_skew_gamma), НЕ поле gamma (capital-cap). 1.8 —
   // плоский прокси 1/Γ при фиксир. σ,τ (D2); per-asset Γ=γσ²τ — целевой D1 (см. #7).
   const double def_k = env_d("CE_BAND_FEE_K", 1.8);                // 1/Γ (k-USDT на bps)
+  const double def_gamma = env_d("CE_BAND_GAMMA", 1.0);  // γ риск-неприятия (Γ=γσ²τ, ADR-066)
   {
     std::lock_guard<std::mutex> lk(band_cfg_mu_);
     const auto now = std::chrono::steady_clock::now();
     if (band_cfg_have_ &&
         std::chrono::duration_cast<std::chrono::milliseconds>(now - band_cfg_last_).count() < 1000)
-      return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_};
+      return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_, band_cfg_gamma_};
   }
-  double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k;
+  double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k, gamma = def_gamma;
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!postgres_dsn_.empty()) {
     try {
       pqxx::connection c(postgres_dsn_);
       pqxx::work tx(c);
       const pqxx::row r = tx.exec1(
-          "SELECT ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k "
+          "SELECT ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k, gamma "
           "FROM f05a_clearing_config WHERE id=1");
       const double cfg_taker = r[0].as<double>();
       const double cfg_maker = r[1].as<double>();
       const double cfg_k = r[2].as<double>();
+      const double cfg_gamma = r[3].as<double>();
       // ce_taker_fee_bps ≤0 = «нет полки-комиссии» → env-референс.
       if (cfg_taker > 0.0) cmkt_bps = cfg_taker;
       if (cfg_maker > 0.0) clim_bps = cfg_maker;
       k_band = cfg_k;  // 0 ⇒ линк выключен (флаг в detect вернёт плоский порог)
+      if (cfg_gamma > 0.0) gamma = cfg_gamma;  // γ для Γ=γσ²τ (D1)
       tx.commit();
     } catch (const std::exception&) { /* нет колонок/БД — env/дефолты */ }
   }
@@ -1523,9 +1526,62 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_clim_bps_ = clim_bps;
   band_cfg_cmkt_bps_ = cmkt_bps;
   band_cfg_k_ = k_band;
+  band_cfg_gamma_ = gamma;
   band_cfg_last_ = std::chrono::steady_clock::now();
   band_cfg_have_ = true;
-  return {clim_bps, cmkt_bps, k_band};
+  return {clim_bps, cmkt_bps, k_band, gamma};
+}
+
+// F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
+// market_data). TTL-кэш ~1с per symbol. Возвращает false при пустом DSN / отсутствии
+// строки — вызывающий откатывается на плоский порог.
+bool LedgerUseCases::LoadAssetSigma(const std::string& symbol, double* out_sigma,
+                                    long long* out_samples, long long* out_age_ms) {
+  {
+    std::lock_guard<std::mutex> lk(sigma_mu_);
+    const auto it = sigma_cache_.find(symbol);
+    if (it != sigma_cache_.end() && it->second.have &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - it->second.fetched).count() < 1000) {
+      if (out_sigma) *out_sigma = it->second.sigma;
+      if (out_samples) *out_samples = it->second.samples;
+      if (out_age_ms) *out_age_ms = it->second.age_ms;
+      return true;
+    }
+  }
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (postgres_dsn_.empty()) return false;
+  try {
+    pqxx::connection c(postgres_dsn_);
+    pqxx::work tx(c);
+    const pqxx::result res = tx.exec_params(
+        "SELECT sigma, samples, "
+        "  CAST(EXTRACT(EPOCH FROM (now()-updated_at))*1000 AS BIGINT) "
+        "FROM ce_asset_volatility WHERE asset=$1 AND venue='' LIMIT 1",
+        symbol);
+    tx.commit();
+    if (res.empty()) return false;
+    SigmaEntry e;
+    e.sigma = res[0][0].as<double>(0.0);
+    e.samples = res[0][1].as<long long>(0);
+    e.age_ms = res[0][2].as<long long>(0);
+    e.fetched = std::chrono::steady_clock::now();
+    e.have = true;
+    {
+      std::lock_guard<std::mutex> lk(sigma_mu_);
+      sigma_cache_[symbol] = e;
+    }
+    if (out_sigma) *out_sigma = e.sigma;
+    if (out_samples) *out_samples = e.samples;
+    if (out_age_ms) *out_age_ms = e.age_ms;
+    return true;
+  } catch (const std::exception&) {
+    return false;  // нет колонки/БД — вызывающий на плоский порог
+  }
+#else
+  (void)symbol; (void)out_sigma; (void)out_samples; (void)out_age_ms;
+  return false;
+#endif
 }
 
 void LedgerUseCases::detect_and_emit_band_breach_locked(
@@ -1586,9 +1642,40 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const double rt = is_arbitrageur ? 2.0 : 1.0;
   const bool fee_linked = cfg.k_band > 0.0 && cfg.cmkt_bps > 0.0;
   double z_lim, z_mkt;
+  double band_sigma = 0.0;      // σ, применённая к порогу (0 = плоский), для лога/наблюдаемости
+  bool band_dynamic = false;    // применён ли D1-масштаб
   if (fee_linked) {
     z_lim = std::max(q_floor, cfg.k_band * cfg.clim_bps * rt);
     z_mkt = std::max(z_lim, cfg.k_band * cfg.cmkt_bps * rt);  // Z̄mkt ≥ Z̄lim всегда
+    // F-18 D1+#7 (T-F18-703, ADR-066): динамический масштаб порога по волатильности
+    // актива. Γ=γσ²τ ⇒ z=clim/Γ ∝ 1/(γσ²). Якорим к плоскому при σ_ref, γ_ref=1:
+    // множитель (σ_ref²/σ²)/γ, clamp [min,max]. Выше σ ⇒ уже полоса (хеджируем раньше
+    // — волатильный запас не копим). Флаг CE_BAND_GAMMA_MODE (деф off = плоский).
+    // Устаревшая/малосэмпловая σ ⇒ fallback на плоский порог (обратная совместимость).
+    if (cex::common::Env::get_bool("CE_BAND_GAMMA_MODE", false)) {
+      const std::string symbol = asset + (st.quote.empty() ? numeraire : st.quote);
+      double sigma = 0.0; long long ssamples = 0, sage_ms = 0;
+      const long long stale_ms = cex::common::Env::get_int("CE_BAND_SIGMA_STALE_MS", 120000);
+      const long long min_samp = cex::common::Env::get_int("CE_BAND_SIGMA_MIN_SAMPLES", 20);
+      if (LoadAssetSigma(symbol, &sigma, &ssamples, &sage_ms) && sigma > 0.0 &&
+          ssamples >= min_samp && sage_ms >= 0 && sage_ms < stale_ms) {
+        const double sref = [] { const char* v = std::getenv("CE_BAND_SIGMA_REF"); return v ? std::atof(v) : 0.0005; }();
+        const double vr_min = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
+        const double vr_max = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MAX"); return v ? std::atof(v) : 10.0; }();
+        double ratio = (sref * sref) / (sigma * sigma);
+        ratio = std::min(vr_max, std::max(vr_min, ratio));
+        const double gamma = std::max(1e-6, cfg.gamma);
+        // τ (CE_BAND_TAU_SEC) в множитель НЕ входит намеренно: z=clim/(γσ²τ), а якорь
+        // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в
+        // отношении (σ_ref²/σ²)/γ. Абсолютная τ понадобится только при переходе на
+        // чистый Γ без плоского якоря (ADR-066 D1, дальнейший шаг).
+        const double scale = ratio / gamma;
+        z_lim = std::max(q_floor, z_lim * scale);
+        z_mkt = std::max(z_lim, z_mkt * scale);
+        band_sigma = sigma;
+        band_dynamic = true;
+      }
+    }
   } else {
     z_lim = is_arbitrageur
         ? static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30))
@@ -1658,6 +1745,8 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"z_lim", q.to_string()},                    // порог входа (k-USDT)
                          {"z_mkt", std::to_string(z_mkt)},            // порог агрессии (k-USDT)
                          {"zone", aggressive ? "taker" : "maker"},
+                         {"band_mode", band_dynamic ? "dynamic_gamma" : "flat"},  // D1/D2
+                         {"sigma", std::to_string(band_sigma)},       // σ, применённая (0=плоский)
                          {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
 

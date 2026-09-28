@@ -309,8 +309,20 @@ class LedgerUseCases {
   double band_cfg_clim_bps_ = 0.0;   // мейкер-комиссия (пассивная зона), bps
   double band_cfg_cmkt_bps_ = 0.0;   // тейкер+½спред (агрессивная зона), bps
   double band_cfg_k_ = 0.0;          // 1/Γ — калибровка порога (k-USDT на bps)
+  double band_cfg_gamma_ = 1.0;      // риск-неприятие γ (Γ=γσ²τ, ADR-066 D1)
   std::chrono::steady_clock::time_point band_cfg_last_{};
   bool band_cfg_have_ = false;
+
+  // F-18 D1+#7 (T-F18-703): кэш σ per symbol из ce_asset_volatility (TTL ~1с).
+  struct SigmaEntry {
+    double sigma = 0.0;
+    long long samples = 0;
+    long long age_ms = 0;  // возраст строки на момент чтения (staleness)
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex sigma_mu_;
+  std::map<std::string, SigmaEntry> sigma_cache_;
   std::unordered_map<std::string, UserBalances> balances_; // user -> currency -> balance
   std::unordered_map<std::string, UserPositions> positions_; // user -> instrument -> position
   std::unordered_map<std::string, Reservation> reservations_; // reservation_id -> reservation
@@ -366,8 +378,14 @@ class LedgerUseCases {
   // {clim_bps, cmkt_bps, k_band}: clim=мейкер (пассив), cmkt=тейкер+½спред (агрессив),
   // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (rt=2 арбитражёр).
   // Из f05a_clearing_config (TTL-кэш ~1с; при отсутствии DSN/колонок — env/дефолты).
-  struct BandFeeCfg { double clim_bps; double cmkt_bps; double k_band; };
+  struct BandFeeCfg { double clim_bps; double cmkt_bps; double k_band; double gamma; };
   BandFeeCfg LoadBandFeeConfig();
+
+  // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
+  // market_data, T-F18-702). Возвращает true + *out_sigma/*out_samples/*out_age_ms при
+  // наличии строки. TTL-кэш ~1с per symbol (как band_cfg). Пустой DSN/нет строки → false.
+  bool LoadAssetSigma(const std::string& symbol, double* out_sigma,
+                      long long* out_samples, long long* out_age_ms);
   // Регистрирует band-заявку в band_hedges_ по её intent_id (RememberExecutionIntent)
   // для последующего дренажа по исполнению. in_flight НЕ трогает (уже помечен при
   // пробое — detect_and_emit_band_breach_locked). Вызывается под mu_.
