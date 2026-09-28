@@ -1069,7 +1069,7 @@ CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
 -- fallback на плоский ce_band_fee_k. Контракт: docs/07-data/ce-asset-volatility.md.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ce_asset_volatility (
-    asset       TEXT NOT NULL,                       -- 'BTC' | 'ETH' | 'SOL' ...
+    asset       TEXT NOT NULL,                       -- ИНСТРУМЕНТ-СИМВОЛ без слэша: 'BTCUSDT'|'ETHBTC'|'SOLUSDT' (snap.asset writer'а; ledger строит ключ agent.asset+quote)
     venue       TEXT NOT NULL DEFAULT '',            -- '' = агрегат по площадкам
     sigma       NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- σ лог-доходности mid (доля), EWMA
     window_sec  INT NOT NULL DEFAULT 60,             -- окно/полупериод EWMA (диагностика)

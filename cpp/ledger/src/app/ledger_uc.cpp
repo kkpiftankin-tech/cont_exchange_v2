@@ -1662,14 +1662,17 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
         const double sref = [] { const char* v = std::getenv("CE_BAND_SIGMA_REF"); return v ? std::atof(v) : 0.0005; }();
         const double vr_min = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
         const double vr_max = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MAX"); return v ? std::atof(v) : 10.0; }();
-        double ratio = (sref * sref) / (sigma * sigma);
-        ratio = std::min(vr_max, std::max(vr_min, ratio));
+        const double ratio = (sref * sref) / (sigma * sigma);
         const double gamma = std::max(1e-6, cfg.gamma);
         // τ (CE_BAND_TAU_SEC) в множитель НЕ входит намеренно: z=clim/(γσ²τ), а якорь
         // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в
         // отношении (σ_ref²/σ²)/γ. Абсолютная τ понадобится только при переходе на
         // чистый Γ без плоского якоря (ADR-066 D1, дальнейший шаг).
-        const double scale = ratio / gamma;
+        // Клэмпим ИТОГОВЫЙ множитель (не только ratio): γ — общее поле (capital-cap,
+        // matching), при γ<1 scale=ratio/γ ушёл бы за предел 10× (до 10/γ, →∞ при γ→0).
+        // Гарантируем документированный диапазон [vr_min,vr_max] для всего масштаба.
+        double scale = ratio / gamma;
+        scale = std::min(vr_max, std::max(vr_min, scale));
         z_lim = std::max(q_floor, z_lim * scale);
         z_mkt = std::max(z_lim, z_mkt * scale);
         band_sigma = sigma;
