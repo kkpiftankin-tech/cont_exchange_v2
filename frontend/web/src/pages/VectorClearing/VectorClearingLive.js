@@ -318,6 +318,7 @@ function AgentDrillDown({ detail }) {
   const a = detail.agent || {};
   const sk = detail.skew || {};
   const b = detail.band || {};
+  const vol = detail.volatility || null;  // F-18 D1+#7 (704): σ + превью динамического порога
   const h = detail.hedge;
   const isT = a.agent_kind === 'translator';
   const c = Number(a.c_position) || 0;               // неотправленный остаток (A7)
@@ -369,6 +370,22 @@ function AgentDrillDown({ detail }) {
           </div>
         )}
       </div>
+      {vol && (
+        <div style={box}>
+          <div style={head}>Волатильность σ актива → динамический порог Γ=γσ²τ (T-F18-704)</div>
+          <div>σ ({vol.symbol}) = <b>{Number(vol.sigma).toExponential(3)}</b> · выборок <b>{vol.samples}</b> ·{' '}
+            свежесть <b style={{ color: vol.ageMs > 120000 ? '#e6a15a' : '#8fe0b0' }}>{(vol.ageMs / 1000).toFixed(1)} с назад</b></div>
+          <div style={{ fontSize: 12, color: MUTE, marginTop: 3 }}>
+            множитель scale = clamp((σ_ref/σ)²/γ, 0.1, 10) = <b>{Number(vol.scale).toFixed(2)}×</b>{' '}
+            (σ_ref={Number(vol.sigmaRef).toExponential(2)}, γ={vol.gammaCap}) · выше σ ⇒ уже полоса (§6.4)
+          </div>
+          <div style={{ fontSize: 12, marginTop: 3 }}>
+            порог при включённом флаге: Z̄lim <b>{kusd(vol.zLimDynamic)}</b> / Z̄mkt <b>{kusd(vol.zMktDynamic)}</b>
+            <span style={{ color: MUTE }}> vs текущий плоский {kusd(b.zLim)} / {kusd(b.zMkt)}</span>
+          </div>
+          <div style={{ fontSize: 11, color: MUTE, marginTop: 3 }}>{vol.note}</div>
+        </div>
+      )}
       {b.breached && (
         <div style={box}>
           <div style={head}>Хедж-заявка → публичные сделки → имитируемое исполнение</div>

@@ -7501,16 +7501,18 @@ async function handleVectorClearing(req, res, pathname, query) {
     // band от комиссии (Кривые §6.4). Дефолты = env-дефолты ledger/matching.
     let gamma = 0.005, clamp = 8;
     let cmktBps = 10, climBps = 2, kBand = 1.8;  // = CE_BAND_REF_FEE_BPS/MAKER_FEE_BPS/FEE_K
+    let gammaCap = 1;  // capital-cap γ (поле gamma) — входит в Γ=γσ²τ динамического порога (ADR-066)
     const pool = getPgPool();
     if (pool) {
       try {
-        const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm, ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k FROM f05a_clearing_config WHERE id=1");
+        const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm, ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k, gamma FROM f05a_clearing_config WHERE id=1");
         if (r.rows[0]) {
           const row = r.rows[0];
           gamma = Number(row.ce_inv_skew_gamma) || 0; clamp = Number(row.ce_inv_skew_max_pm) || 0;
           if (Number(row.ce_taker_fee_bps) > 0) cmktBps = Number(row.ce_taker_fee_bps);
           if (Number(row.ce_maker_fee_bps) > 0) climBps = Number(row.ce_maker_fee_bps);
           if (row.ce_band_fee_k != null) kBand = Number(row.ce_band_fee_k);
+          if (Number(row.gamma) > 0) gammaCap = Number(row.gamma);
         }
       } catch (e) { /* дефолты */ }
     }
@@ -7532,6 +7534,39 @@ async function handleVectorClearing(req, res, pathname, query) {
     const excess = absC - q;
     const breached = excess > 0;   // хеджируются оба типа (переводчик и арбитражёр)
     const aggressive = absC > zMkt;  // зона: taker (>Z̄mkt) | maker
+    // F-18 D1+#7 (T-F18-704, наблюдаемость): σ актива из ce_asset_volatility (writer —
+    // market_data) + ПРЕВЬЮ динамического порога Γ=γσ²τ. Формула = ledger VolScaleFactor
+    // (ADR-066): scale=clamp((σ_ref²/σ²)/γ, 0.1, 10). Флаг CE_BAND_GAMMA_MODE живёт в
+    // ledger — здесь ПРЕВЬЮ («при включённом флаге»); активные пороги = flat zLim/zMkt
+    // пока флаг off. σ — реальное значение из БД (не фейк), не доменное вычисление в React.
+    let volatility = null;
+    if (pool) {
+      try {
+        const symbol = (agent.base || '') + (agent.quote && agent.quote.length ? agent.quote : 'USDT');
+        const vr = await pool.query(
+          "SELECT sigma::float8 AS sigma, samples, (EXTRACT(EPOCH FROM (now()-updated_at))*1000)::bigint AS age_ms FROM ce_asset_volatility WHERE asset=$1 AND venue='' LIMIT 1",
+          [symbol]);
+        if (vr.rows[0]) {
+          const sigma = Number(vr.rows[0].sigma) || 0;
+          const samples = Number(vr.rows[0].samples) || 0;
+          const ageMs = Number(vr.rows[0].age_ms) || 0;
+          const sigmaRef = Number(process.env.CE_BAND_SIGMA_REF) || 0.0005;
+          const vrMin = 0.1, vrMax = 10;
+          let scale = 1;
+          if (sigma > 0 && sigmaRef > 0) {
+            const ratio = (sigmaRef * sigmaRef) / (sigma * sigma);
+            scale = Math.min(vrMax, Math.max(vrMin, ratio / Math.max(1e-6, gammaCap)));
+          }
+          const zLimDyn = Math.max(qFloor, zLim * scale);
+          volatility = {
+            symbol, sigma, samples, ageMs, sigmaRef, gammaCap, scale,
+            zLimDynamic: zLimDyn,
+            zMktDynamic: Math.max(zLimDyn, zMkt * scale),
+            note: 'превью Γ=γσ²τ; активно при CE_BAND_GAMMA_MODE=1 (флаг в ledger)',
+          };
+        }
+      } catch (e) { /* нет таблицы/строки — превью недоступно */ }
+    }
     // Хедж-диагностика этого агента (последняя): заявка + публичные сделки + исполнение.
     let hedge = null;
     if (pool) {
@@ -7577,6 +7612,7 @@ async function handleVectorClearing(req, res, pathname, query) {
     return writeJson(res, 200, {
       agent, skew: { gamma, clamp, skewPm, priceShiftPm },
       band: { q, zLim, zMkt, aggressive, applies: true, absC, excess, breached },
+      volatility,  // F-18 D1+#7 (704): σ актива + превью динамического порога Γ=γσ²τ (null = нет σ)
       hedge, generatedAt: new Date().toISOString()
     });
   }
