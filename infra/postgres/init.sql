@@ -1053,3 +1053,29 @@ CREATE TABLE IF NOT EXISTS ce_agent_position (
 -- Запросы «все переводчики/арбитражёры вне полосы» + staleness-мониторинг.
 CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
     ON ce_agent_position (agent_kind, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- ce_asset_volatility: F-18 D1+#7 (ADR-066, T-F18-701) — оценка волатильности σ
+-- актива для ДИНАМИЧЕСКОГО порога band. По базовым докам Γ=ρ=γσ²τ (Кривые §6.1
+-- ρ≈γσ²τ, §6.4 Z̄=clim/Γ): порог хеджа масштабируется волатильностью площадки.
+--
+-- Owner writer: market_data (EWMA реализованной волатильности лог-доходностей
+-- mid-цены). Reader: ledger (detect_and_emit_band_breach_locked, TTL-кэш как у
+-- f05a_clearing_config) — считает Γ=γσ²τ, z_lim=clim/Γ за флагом CE_BAND_GAMMA_MODE=1.
+--
+-- sigma — БЕЗРАЗМЕРНАЯ доля (σ лог-доходности за окно; масштаб к τ — на стороне
+-- ledger). venue='' = агрегат по площадкам (первый срез per-asset; per-venue —
+-- расширение, отдельная строка). staleness: updated_at старше порога → ledger
+-- fallback на плоский ce_band_fee_k. Контракт: docs/07-data/ce-asset-volatility.md.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_asset_volatility (
+    asset       TEXT NOT NULL,                       -- 'BTC' | 'ETH' | 'SOL' ...
+    venue       TEXT NOT NULL DEFAULT '',            -- '' = агрегат по площадкам
+    sigma       NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- σ лог-доходности mid (доля), EWMA
+    window_sec  INT NOT NULL DEFAULT 60,             -- окно/полупериод EWMA (диагностика)
+    samples     INT NOT NULL DEFAULT 0,              -- сколько тиков вошло (доверие к σ)
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asset, venue)
+);
+CREATE INDEX IF NOT EXISTS ce_asset_volatility_updated_idx
+    ON ce_asset_volatility (updated_at DESC);
