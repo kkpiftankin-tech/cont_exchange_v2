@@ -43,6 +43,9 @@ services:
       CE_HEDGE_THRESHOLD_BTC: ${CE_HEDGE_THRESHOLD_BTC:-0.25}
       CE_HEDGE_THRESHOLD_ETH: ${CE_HEDGE_THRESHOLD_ETH:-2}
       CE_HEDGE_THRESHOLD_SOL: ${CE_HEDGE_THRESHOLD_SOL:-10}
+      # F-18 D1+#7 (T-F18-705): σ_ref для ПРЕВЬЮ динамического порога в agent-detail —
+      # должен совпадать с ledger CE_BAND_SIGMA_REF, иначе превью разойдётся с активным порогом.
+      CE_BAND_SIGMA_REF: ${CE_BAND_SIGMA_REF:-0.00015}
     ports:
       - "8090:8090"
     networks: [default, cex_net]
