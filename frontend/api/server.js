@@ -4492,8 +4492,9 @@ function toHedgeFlowsApiRow(row) {
     targetNotional: row.target_notional,
     referenceMid: row.reference_mid,
     avgFillPrice: row.avg_fill_price,
-    totFee: row.tot_fee,
-    hedgePnl: row.hedge_pnl,
+    totFee: row.tot_fee,                       // реальная venue-комиссия (taker-only)
+    bandFeeEstimated: row.band_fee_estimated,  // F-18 #6: расчётная band-комиссия зоны (maker/taker), НЕ путать с totFee
+    hedgePnl: row.hedge_pnl,                    // gross; net = hedgePnl − totFee − bandFeeEstimated
     urgency: row.urgency,
     timeoutMs: row.timeout_ms,
     status: row.status,
@@ -4555,6 +4556,7 @@ async function handleHedgeFlowsV1(req, res, pathname, query) {
            reference_mid::text AS reference_mid,
            avg_fill_price::text AS avg_fill_price,
            tot_fee::text AS tot_fee,
+           COALESCE(band_fee_estimated, 0)::text AS band_fee_estimated,
            hedge_pnl::text AS hedge_pnl,
            urgency, timeout_ms, status, error_code, error_message,
            created_at, updated_at, completed_at

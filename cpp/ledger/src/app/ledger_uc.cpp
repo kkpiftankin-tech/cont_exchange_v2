@@ -1849,6 +1849,14 @@ bool LedgerUseCases::apply_agent_band_report_locked(
       const Decimal fee_incr = Decimal::div(
           Decimal::mul(abs_notional, hedge.fee_bps_snapshot), Decimal{10000, 0}, 8);
       hedge.band_fee_estimated = Decimal::add(hedge.band_fee_estimated, fee_incr);
+      // F-18 #6 пропагация: аккумулируем дельту в PG hedgeflows.band_fee_estimated
+      // (отдельно от tot_fee). hedge_flow_id стабилен (ce|band|agent|asset|venue);
+      // fallback на intent_id как в UpdateHedgePnlDelta (defense-in-depth, code-review).
+      const std::string fee_flow_id = !report.hedge_flow_id().empty()
+          ? report.hedge_flow_id() : report.intent_id();
+      if (hedgeflow_pnl_sink_ != nullptr && !fee_flow_id.empty() && fee_incr.units != 0) {
+        hedgeflow_pnl_sink_->UpdateBandFeeDelta(fee_flow_id, fee_incr.to_string());
+      }
     }
   }
 

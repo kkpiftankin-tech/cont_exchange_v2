@@ -149,6 +149,11 @@ class HedgeflowPnlSinkPort {
   virtual void UpdateHedgePnlDelta(const std::string& hedge_flow_id,
                                    const std::string& pnl_delta,
                                    const std::string& fee_delta) = 0;
+  // F-18 #6 (T-F18-804): аккумулировать РАСЧЁТНУЮ band-комиссию зоны в
+  // hedgeflows.band_fee_estimated (отдельно от tot_fee — реальной venue-fee).
+  // Дефолтное тело (не pure) — не ломает mock-реализации в тестах.
+  virtual void UpdateBandFeeDelta(const std::string& /*hedge_flow_id*/,
+                                  const std::string& /*band_fee_delta*/) {}
 };
 
 // ---------------------------------------------------------------------------

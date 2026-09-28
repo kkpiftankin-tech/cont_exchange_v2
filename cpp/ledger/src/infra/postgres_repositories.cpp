@@ -478,6 +478,34 @@ UPDATE hedgeflows
 #endif
 }
 
+// F-18 #6 (T-F18-804): аккумулятор РАСЧЁТНОЙ band-комиссии зоны в
+// hedgeflows.band_fee_estimated (отдельно от tot_fee — реальной venue-fee).
+void PostgresHedgeflowPnlSink::UpdateBandFeeDelta(
+    const std::string& hedge_flow_id, const std::string& band_fee_delta) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (hedge_flow_id.empty() || !pool_) return;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    tx.exec_params(
+        R"SQL(
+UPDATE hedgeflows
+   SET band_fee_estimated = COALESCE(band_fee_estimated, 0) + COALESCE(NULLIF($2, '')::NUMERIC, 0),
+       updated_at = now()
+ WHERE hedge_flow_id = $1
+)SQL",
+        hedge_flow_id, band_fee_delta);
+    tx.commit();
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Failed to update hedgeflow band_fee_estimated",
+                          {{"hedge_flow_id", hedge_flow_id}, {"error", ex.what()}});
+  }
+#else
+  (void)hedge_flow_id;
+  (void)band_fee_delta;
+#endif
+}
+
 // ============================================================================
 // F-06 (T-F06-020) — PostgresPositionRepository / PostgresAccountRepository /
 // PostgresPositionAccountTx for the F-06 `positions` / `accounts` tables.

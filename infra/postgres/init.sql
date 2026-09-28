@@ -139,8 +139,9 @@ CREATE TABLE IF NOT EXISTS hedgeflows (
   target_notional  NUMERIC(38, 18),
   reference_mid    NUMERIC(38, 18),
   avg_fill_price   NUMERIC(38, 18),
-  tot_fee          NUMERIC(38, 18) NOT NULL DEFAULT 0,
-  hedge_pnl        NUMERIC(38, 18),             -- computed by Settlement Ledger
+  tot_fee          NUMERIC(38, 18) NOT NULL DEFAULT 0,   -- РЕАЛЬНАЯ venue-комиссия (report.fee_total, сейчас taker-only)
+  band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- F-18 #6: РАСЧЁТНАЯ band-комиссия зоны (maker=clim/taker=cmkt), ledger; НЕ путать с tot_fee (CALC-F12-HEDGE-PNL §7.1)
+  hedge_pnl        NUMERIC(38, 18),             -- computed by Settlement Ledger (gross)
   urgency          TEXT NOT NULL CHECK (urgency IN ('LOW', 'MEDIUM', 'HIGH')),
   timeout_ms       INTEGER NOT NULL CHECK (timeout_ms > 0),
   status           TEXT NOT NULL CHECK (status IN ('OPEN', 'COMPLETED', 'UNDERFILLED', 'REJECTED', 'RISK_REJECTED', 'CANCELLED')),
@@ -156,6 +157,8 @@ CREATE INDEX IF NOT EXISTS idx_hedgeflows_provider_symbol ON hedgeflows (provide
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_batch_id ON hedgeflows (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_open ON hedgeflows (status, updated_at) WHERE status IN ('OPEN');
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_underfilled ON hedgeflows (status, created_at) WHERE status IN ('UNDERFILLED', 'REJECTED');
+-- F-18 #6 (T-F18-804): расчётная band-комиссия зоны для существующих БД.
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0;
 
 -- child_orders: one row per actual order placed on a venue (CEX/DEX/AMM).
 -- Multi-venue routing decomposes single HedgeFlow into N child_orders.
