@@ -126,10 +126,18 @@ bool is_terminal_status(const fob::execution::v1::ExecutionReportStatus status) 
 ///   prev == next  — no-op, всегда OK.
 ///   terminal → ничто (no transitions out).
 ///   NEW → PARTIAL/FILLED/CANCELLED/REJECTED/EXPIRED.
-///   PARTIAL → FILLED/CANCELLED/PARTIAL.
+///   PARTIAL → FILLED/CANCELLED/EXPIRED/PARTIAL.
 ///
 /// Используется в apply_execution_report_locked для защиты от out-of-order
 /// rebroadcast (например, venue прислал FILLED, потом NEW по тому же order).
+///
+/// ADR-067 / T-F18-802..804 fix: PARTIAL → EXPIRED ДОБАВЛЕН (раньше отсутствовал —
+/// был недостижим, пока band-хедж был всегда single-shot IOC). Резидентный
+/// GTC-лимит (мейкер-зона) может накопить partial fill за несколько read-циклов
+/// и затем истечь по дедлайну (venues emits EXPIRED после PARTIALLY_FILLED) —
+/// без этого перехода ledger отвергал бы terminal-отчёт (status_regression_reports++,
+/// apply_agent_band_report_locked НЕ вызывается), residual завис бы в in_flight
+/// навсегда (та же утечка, которую ADR-067 должен был устранить).
 bool is_allowed_status_transition(const fob::execution::v1::ExecutionReportStatus prev,
                                   const fob::execution::v1::ExecutionReportStatus next) {
   if (prev == fob::execution::v1::EXECUTION_REPORT_STATUS_UNSPECIFIED) return true;
@@ -145,6 +153,7 @@ bool is_allowed_status_transition(const fob::execution::v1::ExecutionReportStatu
   if (prev == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED) {
     return next == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED ||
         next == fob::execution::v1::EXECUTION_REPORT_STATUS_CANCELLED ||
+        next == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED ||
         next == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED;
   }
   return false;

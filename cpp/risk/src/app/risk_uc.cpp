@@ -1369,12 +1369,27 @@ void RiskUseCases::EmitBandHedgeFromBreach(
   // иначе пассивный лимит-мейкер (LIMIT, дешевле, исполнение не гарантировано).
   // TIF_IOC в обеих зонах: single-shot на такт — неисполненный остаток по таймауту
   // возвращается в позицию (ledger освобождает in_flight), повтор на след. такте.
+  //
+  // ADR-067 / T-F18-802 (за флагом CE_BAND_MAKER_RESERVE_ENABLED, default off):
+  // мейкер-зона (aggressive=false) вместо single-shot IOC получает резидентный
+  // лимит TIF_GTC с явным дедлайном (CE_BAND_MAKER_DEADLINE_MS) — venues держит
+  // заявку между read-циклами (T-F18-803), а по истечении дедлайна эскалирует
+  // остаток в тейкер-сброс на следующем такте (breach.aggressive() пересчитывает
+  // ledger). Тейкер-зона (aggressive=true) не меняется — MARKET+IOC, как раньше.
+  // Флаг off ⇒ поведение byte-for-byte как до ADR-067 (TIF_IOC в обеих зонах).
   const bool aggressive = breach.aggressive();
+  const bool maker_reserve_enabled =
+      cex::common::Env::get_bool("CE_BAND_MAKER_RESERVE_ENABLED", false);
   intent.set_strategy(aggressive ? fob::execution::v1::EXEC_STRATEGY_MARKET
                                   : fob::execution::v1::EXEC_STRATEGY_LIMIT);
   intent.set_urgency(aggressive ? fob::execution::v1::URGENCY_HIGH
                                  : fob::execution::v1::URGENCY_LOW);
-  intent.set_tif(fob::common::v1::TIF_IOC);
+  const bool maker_resting = maker_reserve_enabled && !aggressive;
+  intent.set_tif(maker_resting ? fob::common::v1::TIF_GTC : fob::common::v1::TIF_IOC);
+  if (maker_resting) {
+    const int deadline_ms = cex::common::Env::get_int("CE_BAND_MAKER_DEADLINE_MS", 30000);
+    intent.set_timeout_ms(static_cast<int64_t>(deadline_ms));
+  }
   intent.add_allowed_venues(breach.venue());
 
   intents_producer_->produce("execution.intents", flow_id, cex::common::to_bytes(intent));
@@ -1386,6 +1401,7 @@ void RiskUseCases::EmitBandHedgeFromBreach(
                          {"qty", qty.to_string()},
                          {"limit", pair_price.to_string()},
                          {"zone", aggressive ? "taker" : "maker"},
+                         {"tif", maker_resting ? "GTC" : "IOC"},
                          {"hedge_flow_id", flow_id}});
 }
 
