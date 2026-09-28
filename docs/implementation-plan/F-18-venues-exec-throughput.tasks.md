@@ -33,6 +33,11 @@ auth-хендшейк):
 ## Задачи
 
 ### T-F18-601 — Переиспользуемое PG-соединение в синхронных репозиториях консьюмера
+✅ **СДЕЛАНО (2026-09-28, коммит `41c64914`).** Долгоживущее `pqxx::connection` под
+`conn_mu_` + helper `WithConn` (reconnect-once по `broken_connection`); pqxx вынесен из
+заголовков (forward-decl под guard + out-of-line `~`). Проверено на dev: стресс `cooldown=500`
+→ эмиссия ~9.6/с, `venues_exec` LAG держится **0–4** (прежний потолок ~2.8/с → backlog 37k).
+PG-соединений от venues стабильно ~9, без churn.
 **Приоритет:** Высокий. **Файлы:** `postgres_child_order_repository.{hpp,cpp}`,
 `postgres_hedgeflow_repository.{hpp,cpp}`.
 - Хранить одно долгоживущее `pqxx::connection` как член репозитория (создаётся в конструкторе /
