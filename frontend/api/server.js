@@ -4494,6 +4494,8 @@ function toHedgeFlowsApiRow(row) {
     avgFillPrice: row.avg_fill_price,
     totFee: row.tot_fee,                       // реальная venue-комиссия (taker-only)
     bandFeeEstimated: row.band_fee_estimated,  // F-18 #6: расчётная band-комиссия зоны (maker/taker), НЕ путать с totFee
+    houseRealizedPnl: row.house_realized_pnl,  // F-18 #8 (ADR-068, observation-only): прибыль дома по факту к марке (mid клиринга)
+    planFactGap: row.plan_fact_gap,            // F-18 #8 (ADR-068): накопленный разрыв план/факт (качество исполнения)
     hedgePnl: row.hedge_pnl,                    // gross; net = hedgePnl − totFee − bandFeeEstimated
     urgency: row.urgency,
     timeoutMs: row.timeout_ms,
@@ -4557,6 +4559,8 @@ async function handleHedgeFlowsV1(req, res, pathname, query) {
            avg_fill_price::text AS avg_fill_price,
            tot_fee::text AS tot_fee,
            COALESCE(band_fee_estimated, 0)::text AS band_fee_estimated,
+           COALESCE(house_realized_pnl, 0)::text AS house_realized_pnl,
+           COALESCE(plan_fact_gap, 0)::text AS plan_fact_gap,
            hedge_pnl::text AS hedge_pnl,
            urgency, timeout_ms, status, error_code, error_message,
            created_at, updated_at, completed_at
@@ -5475,6 +5479,8 @@ async function handleHedgeFlowV1ById(req, res, pathname) {
              avg_fill_price::text AS avg_fill_price,
              tot_fee::text AS tot_fee,
              COALESCE(band_fee_estimated, 0)::text AS band_fee_estimated,
+             COALESCE(house_realized_pnl, 0)::text AS house_realized_pnl,
+             COALESCE(plan_fact_gap, 0)::text AS plan_fact_gap,
              hedge_pnl::text AS hedge_pnl,
              urgency, timeout_ms, status, error_code, error_message,
              created_at, updated_at, completed_at

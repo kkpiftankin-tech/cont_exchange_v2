@@ -281,6 +281,8 @@ const HedgeFlowMonitorLive = () => {
                     <th>Avg fill</th>
                     <th title="Реальная venue-комиссия (сим: taker)">Fee</th>
                     <th title="Расчётная band-комиссия зоны (maker/taker), отдельно от real fee">Band fee</th>
+                    <th title="F-18 #8: прибыль дома по факту к марке (mid клиринга), observation-only — баланс не двигается">House PnL</th>
+                    <th title="F-18 #8: накопленный разрыв план/факт (качество исполнения)">План/факт</th>
                     <th>HedgePnL</th>
                     <th>Status</th>
                   </tr>
@@ -309,6 +311,8 @@ const HedgeFlowMonitorLive = () => {
                       <td>{formatNumber(flow.avgFillPrice, 4)}</td>
                       <td>{formatNumber(flow.totFee, 4)}</td>
                       <td title="band_fee_estimated (расчётная зонная комиссия)">{formatNumber(flow.bandFeeEstimated, 4)}</td>
+                      <td className={Number(flow.houseRealizedPnl) >= 0 ? 'pnl-pos' : 'pnl-neg'} title="house_realized_pnl (observation-only)">{formatNumber(flow.houseRealizedPnl, 4)}</td>
+                      <td title="plan_fact_gap (качество исполнения)">{formatNumber(flow.planFactGap, 4)}</td>
                       <td className={Number(flow.hedgePnl) >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                         {formatPnl(flow.hedgePnl)}
                       </td>

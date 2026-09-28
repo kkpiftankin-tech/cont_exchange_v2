@@ -149,6 +149,9 @@ const HedgeFlowDrillPanel = ({ hedgeFlowId, onClose }) => {
                   </dd>
                   <dt title="Реальная venue-комиссия (сим: taker)">Total fee</dt><dd>{fmt(flow.totFee, 4)}</dd>
                   <dt title="Расчётная band-комиссия зоны (maker/taker), отдельно от real fee">Band fee (est.)</dt><dd>{fmt(flow.bandFeeEstimated, 4)}</dd>
+                  <dt title="F-18 #8: прибыль дома по факту к марке (mid клиринга), observation-only">House realized (obs.)</dt>
+                  <dd className={Number(flow.houseRealizedPnl) >= 0 ? 'pnl-pos' : 'pnl-neg'}>{fmt(flow.houseRealizedPnl, 4)}</dd>
+                  <dt title="F-18 #8: накопленный разрыв план/факт (качество исполнения)">План/факт-gap</dt><dd>{fmt(flow.planFactGap, 4)}</dd>
                 </dl>
               </section>
 

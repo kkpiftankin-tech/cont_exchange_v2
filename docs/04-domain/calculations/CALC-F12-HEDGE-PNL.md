@@ -146,6 +146,9 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
      НЕ двигается** (observation-only); фактическое кредитование дома — owner-gated шаг после
      разрешения знака `sgn`. Отдельно от `hedge_pnl` (к `internal_price`) и `band_fee_estimated`
      (комиссия) — три независимые величины. Тест `ce_band_house_realized_test`.
+     **Ограничение единиц:** k-USDT только для `quote == USDT`; для кросс-пар (`quote != USDT`)
+     признание пропускается с WARN (mark/px в валюте пары, не USDT — память
+     `ledger-band-fill-crosspair-value`). Конверсия через `st.base_price` — addendum к ADR-068.
 2. **Именование опорной цены.** Три имени для одной величины: `internal_price`
    (код/proto), `referenceMid` (`business-rules.md`), `reference_mid`
    (колонка PostgreSQL). Не переименовывать без ADR — просто держать в уме

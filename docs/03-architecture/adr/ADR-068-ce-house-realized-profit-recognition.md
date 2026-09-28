@@ -92,6 +92,12 @@ px_факт)` — отдельная величина «качество исп�
 - **Observation-only фаза** (до разрешения открытого вопроса): вычислять и публиковать
   `house_realized_pnl` и план/факт-gap как **наблюдаемые** величины, БЕЗ движения `__ce_house__`
   баланса — безопасно и обратимо, позволяет сверить с прототипным разрывом 6611 USD эмпирически.
+- **Ограничение единиц (cross-pair)**: `house_realized_pnl`/`plan_fact_gap` считаются в k-USDT
+  **только для quote == нумерарий (USDT)**. Для кросс-пар (`quote != USDT`, напр. ETH/BTC) mark и
+  px_факт выражены в валюте пары, не в USDT (тот же класс, что память `ledger-band-fill-crosspair-value`);
+  признание **пропускается** с WARN, чтобы не публиковать величину в неверных единицах
+  (code-review money-path, 2026-09-28). Корректная конверсия через `st.base_price` (P(base) USDT) —
+  **addendum к этому ADR** + `trading-domain-specialist` (меняет формулу, не просто гейт).
 - Аддитивно: не меняет `hedge_pnl` / `band_fee_estimated` / существующую PG-схему (только новая
   колонка `hedgeflows.house_realized_pnl` + опционально `plan_fact_gap`).
 - `code-reviewer` (money invariants) обязателен на ledger-правках (agent-routing §2).
