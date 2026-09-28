@@ -125,20 +125,26 @@ void PostgresFillDiagnosticsRepository::worker_loop() {
 void PostgresFillDiagnosticsRepository::write_one(const app::FillDiagnostic& diag) {
 #ifdef CEX_VENUES_HAS_LIBPQXX
   if (diag.intent_id.empty()) return;
-  try {
-    // considered_trades → JSON-массив: цены/объёмы строками (без потери точности).
-    nlohmann::json arr = nlohmann::json::array();
-    for (const auto& t : diag.considered_trades) {
-      arr.push_back({{"price", t.price},
-                     {"qty", t.qty},
-                     {"age_ms", t.age_ms},
-                     {"exchange_ms", t.exchange_ms},  // абсолют — фронт считает возраст живьём
-                     {"crosses", t.crosses}});
-    }
-    const std::string considered_json = arr.dump();
+  // considered_trades → JSON-массив: цены/объёмы строками (без потери точности).
+  // Строим ДО соединения — сериализация не нуждается в PG.
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& t : diag.considered_trades) {
+    arr.push_back({{"price", t.price},
+                   {"qty", t.qty},
+                   {"age_ms", t.age_ms},
+                   {"exchange_ms", t.exchange_ms},  // абсолют — фронт считает возраст живьём
+                   {"crosses", t.crosses}});
+  }
+  const std::string considered_json = arr.dump();
 
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
+  // T-F18-602: переиспользуем долгоживущее conn_ (только этот воркер-тред) вместо
+  // открытия соединения на каждую запись; reconnect РОВНО один раз по broken_connection.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+   try {
+    if (!conn_ || !conn_->is_open()) {
+      conn_ = std::make_unique<pqxx::connection>(connection_string_);
+    }
+    pqxx::work tx(*conn_);
     // NULLIF($n,'')::NUMERIC — этот билд pqxx не линкует nullable-параметры.
     tx.exec_params(
         R"SQL(
@@ -179,9 +185,19 @@ ON CONFLICT (intent_id) DO UPDATE SET
         diag.impact_v, diag.impact_dt_sec,
         diag.read_request_ms, diag.read_response_ms);
     tx.commit();
-  } catch (const std::exception& ex) {
+    return;
+   } catch (const pqxx::broken_connection&) {
+    conn_.reset();               // уронить — пересоздадим на повторе
+    if (attempt == 0) continue;  // один прозрачный reconnect
+    cex::common::log_json("WARN", "venue_fill_diagnostics write failed",
+                          {{"intent_id", diag.intent_id},
+                           {"error", "broken_connection"}});
+    return;
+   } catch (const std::exception& ex) {
     cex::common::log_json("WARN", "venue_fill_diagnostics write failed",
                           {{"intent_id", diag.intent_id}, {"error", ex.what()}});
+    return;
+   }
   }
 #else
   (void)diag;

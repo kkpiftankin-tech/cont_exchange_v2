@@ -3,11 +3,18 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 
 #include "app/fill_diagnostics_sink.hpp"
+
+#ifdef CEX_VENUES_HAS_LIBPQXX
+namespace pqxx {
+class connection;
+}
+#endif
 
 namespace cex::venues::infra {
 
@@ -38,6 +45,13 @@ class PostgresFillDiagnosticsRepository final : public app::FillDiagnosticsSink 
   void write_one(const app::FillDiagnostic& diag);  // синхронный PG UPSERT (в worker)
 
   std::string connection_string_;
+#ifdef CEX_VENUES_HAS_LIBPQXX
+  // Долгоживущее соединение (T-F18-602): используется ТОЛЬКО воркер-тредом в
+  // write_one, поэтому без мьютекса (thread-confined). Раньше write_one открывал
+  // pqxx::connection на КАЖДУЮ запись; batch из N диагностик = N хендшейков.
+  // EnsureSchema (разовый, старт, другой тред) держит СВОЁ локальное соединение.
+  std::unique_ptr<pqxx::connection> conn_;
+#endif
 
   static constexpr std::size_t kMaxQueue = 5000;  // потолок очереди (drop-oldest сверх)
   std::deque<app::FillDiagnostic> queue_;
