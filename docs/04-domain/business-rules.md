@@ -248,6 +248,41 @@ $$
 
 ---
 
+## F-18 — CE band-хедж: трёхзонное правило (Кривые §6.4)
+
+CE-агент (переводчик / арбитражёр) копит знаковую позицию `c_j` (k-USDT) клирингом; наружу
+хеджируется по **трёхзонному правилу** от порога `Γ` ([Кривые §6.4](../../incoming-docs/2026-08-06-Кривые_котирования_внутренних_маркет-мейкеров_CE_биржевое_из-e70752d0.md),
+[ADR-065](../03-architecture/adr/ADR-065-ce-commission-placement-and-arbitrageur-hedge.md),
+[ADR-066](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md)):
+
+$$
+\bar{Z}_{lim} = \frac{c_{lim}}{\Gamma},\qquad \bar{Z}_{mkt} = \frac{c_{mkt}}{\Gamma},\qquad \Gamma = \rho = \gamma\,\sigma^2\,\tau
+$$
+
+- **`|c_j| ≤ Z̄lim`** — no-action: наружу ничего, запас смещает якорь (inventory-skew) и помогает
+  внутренней разгрузке.
+- **`Z̄lim < |c_j| ≤ Z̄mkt`** — **пассивный мейкер-лимит** до цели `Ztarg`: заявка «стоит» несколько
+  тактов, накапливает частичное исполнение по мере пересекающих сделок, платит **мейкер-комиссию
+  `clim`**; исполнение НЕ гарантировано; при устойчивом неисполнении — эскалация в тейкер **по
+  таймауту** (резидентный лимит, [ADR-067](../03-architecture/adr/ADR-067-ce-maker-resting-limit-hedge.md)).
+- **`|c_j| > Z̄mkt`** — **агрессивный тейкер-сброс** до цели немедленно (спред + **тейкер-комиссия
+  `cmkt`**).
+
+где `clim = ce_maker_fee_bps`, `cmkt = ce_taker_fee_bps`, `Γ` — предельная стоимость риска запаса
+(= коэффициент inventory-skew `ρ = γσ²τ`, [ADR-066](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md)),
+`rt` = round-trip (арбитражёр ×2). Учёт позиции при эмиссии/исполнении — модель **A7/A8**
+([ADR-061](../03-architecture/adr/ADR-061-ce-v2-agent-position-band-hedge.md)): на эмиссии
+`c -= excess`, `in_flight += excess`; fill двигает только `in_flight`; таймаут/EXPIRED возвращает
+неисполненный residual в `c`.
+
+Числовой пример (§6.4): `Γ = 0.5‰/тыс`, `clim = 0.25‰`, `cmkt = 0.75‰` ⇒ `Z̄lim = 0.5 тыс`,
+`Z̄mkt = 1.5 тыс` USDT. Запас 0.33к после 1 такта — зона ожидания; 0.99к после 3 тактов — лимит
+на 0.49к; при упорном разрыве — рыночный сброс по тайм-ауту.
+
+Источники: Кривые §6.4, CE_algorithm_v2 §A1/§A7/§A8, ADR-061/065/066/067.
+
+---
+
 ## F-15 — Backtest / Replay
 
 См. [features/F-15-backtest-replay/](../02-system/features/F-15-backtest-replay/).
