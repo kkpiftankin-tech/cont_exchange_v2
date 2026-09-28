@@ -5474,6 +5474,7 @@ async function handleHedgeFlowV1ById(req, res, pathname) {
              reference_mid::text AS reference_mid,
              avg_fill_price::text AS avg_fill_price,
              tot_fee::text AS tot_fee,
+             COALESCE(band_fee_estimated, 0)::text AS band_fee_estimated,
              hedge_pnl::text AS hedge_pnl,
              urgency, timeout_ms, status, error_code, error_message,
              created_at, updated_at, completed_at

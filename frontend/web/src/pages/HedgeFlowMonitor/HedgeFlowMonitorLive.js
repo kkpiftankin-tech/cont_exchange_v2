@@ -279,7 +279,8 @@ const HedgeFlowMonitorLive = () => {
                     <th>Ratio</th>
                     <th>Ref mid</th>
                     <th>Avg fill</th>
-                    <th>Fee</th>
+                    <th title="Реальная venue-комиссия (сим: taker)">Fee</th>
+                    <th title="Расчётная band-комиссия зоны (maker/taker), отдельно от real fee">Band fee</th>
                     <th>HedgePnL</th>
                     <th>Status</th>
                   </tr>
@@ -307,6 +308,7 @@ const HedgeFlowMonitorLive = () => {
                       <td>{formatNumber(flow.referenceMid, 4)}</td>
                       <td>{formatNumber(flow.avgFillPrice, 4)}</td>
                       <td>{formatNumber(flow.totFee, 4)}</td>
+                      <td title="band_fee_estimated (расчётная зонная комиссия)">{formatNumber(flow.bandFeeEstimated, 4)}</td>
                       <td className={Number(flow.hedgePnl) >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                         {formatPnl(flow.hedgePnl)}
                       </td>
