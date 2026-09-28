@@ -1,9 +1,10 @@
 ---
 name: system-analyst
-description: Use this agent after business requirements exist to create detailed feature.yaml, use cases, system-level and service-level sequence diagrams (Mermaid), functional and non-functional requirements, and acceptance criteria for cont_exchange_v2.0. Do not use this agent for coding or proto contract design.
+description: Writes or updates feature.yaml, use cases, system/service sequence diagrams (Mermaid), FR/NFR and acceptance criteria. Use when a feature's behaviour or acceptance criteria change (class L) or a new feature is specified (class XL). Not for UI cosmetics, refactoring, or code. Returns spec fragments with target paths.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: cyan
 ---
 

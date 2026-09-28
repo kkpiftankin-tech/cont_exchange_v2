@@ -1,9 +1,10 @@
 ---
 name: proto-contract-designer
-description: Use this agent to design Protobuf messages (gRPC services + Kafka event envelopes) in `contracts/proto/fob/`, propagate them into `docs/06-api/`, register Kafka topics in `infra/kafka/create_topics.sh`, and ensure backward compatibility before any C++ implementation. Do not use this agent for application logic or database schema design.
+description: Designs Protobuf/gRPC/Kafka contracts in contracts/proto/fob/ and checks backward compatibility. Use when a .proto file, gRPC method, Kafka topic, or REST route contract is added or changed (triggers "money/contract" rows in .claude/rules/agent-routing.md). Not for UI, SQL schema, or business logic. Returns proto change plan, compatibility verdict, docs/06-api targets.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: yellow
 ---
 

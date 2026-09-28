@@ -1,9 +1,10 @@
 ---
 name: data-schema-designer
-description: Use this agent to design PostgreSQL OLTP schemas (in `infra/postgres/init.sql`) and ClickHouse OLAP schemas, write migrations, and document data flows for cont_exchange_v2.0. Covers `flow_orders`, `hedgeflows`, `child_orders`, `ledger_*`, `batchresults`, `fills`, `execution_reports`, `hedge_pnl_agg`, etc. Do not use this agent for proto contracts or application logic.
+description: Designs PostgreSQL OLTP (infra/postgres/init.sql) and ClickHouse OLAP schemas, writes migrations, documents data flow. Use when a table, index, retention rule, or OLAP view must change (class L, triggered by .claude/rules/agent-routing.md). Not for proto contracts or application logic. Returns DDL plan, migration steps for the existing dev volume, docs/07-data targets.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: orange
 ---
 

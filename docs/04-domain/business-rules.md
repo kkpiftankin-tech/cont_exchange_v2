@@ -176,6 +176,16 @@ $$
 
 ### HedgePnL
 
+> **Conflict Note (2026-09-28).** Карточка вычисления
+> [`CALC-F12-HEDGE-PNL`](calculations/CALC-F12-HEDGE-PNL.md) сверила эту
+> формулу с реализацией: `calculate_hedge_pnl` в `cpp/ledger/src/app/ledger_uc.cpp`
+> **не вычитает** `feesTotal` (это gross hedge PnL); net-метрика с учётом
+> комиссий существует отдельно как `summary.netAfterFees` на
+> `/hedge-pnl` (SQL-агрегат в `frontend/api/server.js`). Формула ниже и
+> вывод "реализация планируется" были неточны на момент правки — код и тест
+> (`cpp/ledger/tests/ledger_hedge_pnl_test.cpp`) уже существуют. Не менять
+> самостоятельно без `trading-domain-specialist` — см. §7 карточки CALC.
+
 Realized PnL на момент завершения HedgeFlow.
 
 **SELL** (продали на venue, получили quote):
@@ -192,7 +202,10 @@ $$
 
 Интерпретация: положительный hedgePnL значит, что биржа исполнила хедж лучше, чем внутренний clearingPrice (зашли с положительным capture).
 
-Реализация: целевая в [`cpp/ledger/src/app/ledger_uc.cpp`](../../cpp/ledger/src/app/ledger_uc.cpp) `ApplyExecutionReport` (планируется).
+Реализация (фактическая, gross, без вычитания комиссий): [`cpp/ledger/src/app/ledger_uc.cpp`](../../cpp/ledger/src/app/ledger_uc.cpp)
+`calculate_hedge_pnl` + `RecordHedgeExecution` / `apply_execution_report_locked`.
+Подробности, числовой пример и путь числа до экрана — в
+[`CALC-F12-HEDGE-PNL`](calculations/CALC-F12-HEDGE-PNL.md).
 
 ### FillRatio
 

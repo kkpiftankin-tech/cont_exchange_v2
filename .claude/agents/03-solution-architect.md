@@ -1,9 +1,10 @@
 ---
 name: solution-architect
-description: Use this agent to design C4 architecture, service boundaries, ADRs, integration map, deployment views, and architectural decisions from approved features and use cases for cont_exchange_v2.0. Do not use this agent to implement code or proto contracts.
+description: Decides service boundaries, C4 views and ADRs. Use when a change crosses service boundaries, adds a service/container, or needs an ADR (class L/XL, triggered by .claude/rules/agent-routing.md). Not for changes inside one existing service. Returns decision, alternatives, consequences, affected docs.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: purple
 ---
 

@@ -53,11 +53,25 @@ related:
 
 ## Поля сущностей из IN-001 §8
 
-### FlowOrder (бизнес-форма)
+### FlowOrder (бизнес-форма, IN-001 §8)
 
 `order_id`, `user_id`, `provider_type` (ui/api/provider/internal), `provider_id`, `symbol`, `side` (buy/sell), `portfolio_weights` (для портфельных), `p_low`, `p_high`, `q_rate`, `q_max`, `filled_cum`, `time_in_force` (GTC/GTD/IOC), `window_start`, `window_end`, `status` (new/active/partially_filled/filled/cancelled/expired/liquidated), `created_at`, `updated_at`.
 
 Persistence: [`flow_orders`](../07-data/oltp-schema.md#таблица-flow_orders).
+
+> **Conflict Note (2026-09-28).** Это бизнес-форма из раннего ingest'а
+> (IN-001), а не поля контракта. Технический `FlowOrder` в
+> `contracts/proto/fob/orders/v1/orders.proto` (источник истины по
+> приоритету CLAUDE.md §3.1: контракты выше docs/) использует другие имена:
+> `order_id`, `client_order_id`, `user_id`, `account_id`, `instrument`,
+> `side`, `total_qty`, `remaining_qty`, `price_low`, `price_high`,
+> `max_speed`, `status`, `created_at` — совпадает с CLAUDE.md §8.2. Поля
+> `provider_type`, `portfolio_weights`, `time_in_force`, `window_start`,
+> `window_end` из бизнес-формы в текущем proto отсутствуют (не реализованы
+> или замещены другим механизмом — не проверено в рамках этой правки). При
+> работе с реальным полем ссылайся на proto, а не на эту таблицу; при
+> необходимости завести соответствие — через `proto-contract-designer`, не
+> молча.
 
 ### BatchRequest / BatchResult
 

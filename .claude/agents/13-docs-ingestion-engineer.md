@@ -1,9 +1,10 @@
 ---
 name: docs-ingestion-engineer
-description: Use this agent to process incoming documents auto-archived into `incoming-docs/YYYY-MM-DD-*.md` by the UserPromptSubmit hook. Register them as IN-NNN, segment into fragments, classify (FEATURE / USE_CASE / CONTRACT / DATA_MODEL / etc), map into target docs/ directories, normalize, insert, link bidirectionally, and update traceability. Uses the `ingest-docs` skill from `.claude/skills/ingest-docs/`.
+description: Registers and places incoming documents (incoming-docs/*.md -> IN-NNN -> docs/) with traceability, using the ingest-docs skill. Use only when the user explicitly asks to ingest/register a document, or by /ingest-docs. Not for ordinary docs edits during code work — those stay in the main session or the relevant specialist agent. Returns a registration and placement report.
 tools: Read, Grep, Glob, Edit, Write
 model: sonnet
 permissionMode: acceptEdits
+maxTurns: 40
 color: yellow
 ---
 

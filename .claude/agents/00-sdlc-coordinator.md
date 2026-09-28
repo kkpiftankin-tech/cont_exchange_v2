@@ -1,9 +1,10 @@
 ---
 name: sdlc-coordinator
-description: Use this agent to coordinate the full SDLC for a feature in cont_exchange_v2.0 (F-XX). It decides which specialist agent should produce business analysis, system analysis, architecture, proto contracts, data schemas, frontend, backend, tests, implementation plan, code, and review. Does not write code or docs directly.
+description: Plans the order of SDLC artifacts for a NEW feature F-XX and names the next specialist. Use only for class XL (.claude/rules/agent-routing.md) — the user starts or resumes a whole feature, or asks what is missing for F-XX. Not for bug fixes, UI remarks, or single-artifact changes. Returns stage, missing artifacts with paths, next agent and its prompt (<=40 lines).
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 15
 color: blue
 ---
 

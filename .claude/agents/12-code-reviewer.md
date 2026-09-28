@@ -1,10 +1,11 @@
 ---
 name: code-reviewer
-description: Use this agent after code changes (a diff or PR-FXX-NNN commit) to review correctness, layering, traceability to feature docs, tests, security, money invariants (Decimal vs double), Kafka topic compatibility, proto backward compat, and adherence to cont_exchange_v2.0 project rules. Prefer read-only; cannot Edit/Write.
+description: Reviews a diff for correctness, money invariants (Decimal vs double), layering, contract compatibility, traceability. Use proactively after changes to money paths, contracts, matching/risk/ledger code, or more than three files (mandatory trigger in .claude/rules/agent-routing.md; a money-path Stop-hook enforces this at the end of the turn). Skip doc-only and cosmetic edits. Returns only defects that affect correctness or requirements, each with file:line and a fix (<=30 lines).
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: purple
 ---
 

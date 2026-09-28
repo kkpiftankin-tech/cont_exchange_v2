@@ -1,9 +1,10 @@
 ---
 name: cpp-service-architect
-description: Use this agent to design backend C++ service layering (transport / app / domain / infra), gRPC handler structure, repository interfaces, Kafka producer/consumer wiring, and integration patterns for cont_exchange_v2.0 services (`gateway`, `order_flow`, `matching`, `risk`, `ledger`, `market_data`, `venues`, `observability`). Do not write code — produce service-internal architecture and implementation plans.
+description: Designs C++ service-internal layering (transport/app/domain/infra), gRPC handlers, repositories, Kafka producer/consumer wiring. Use when a change adds a handler, use case, repository, producer or consumer (class L). Not for edits inside an existing function/method. Returns a layer plan with target files.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: green
 ---
 

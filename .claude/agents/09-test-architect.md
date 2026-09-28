@@ -1,9 +1,10 @@
 ---
 name: test-architect
-description: Use this agent to design unit, integration, E2E, contract, replay, and SLA performance tests for cont_exchange_v2.0 features before code is implemented. Covers C++ tests (GTest/CTest under `cpp/<service>/tests/`), Testing/ E2E scripts, and frontend tests. Do not write code — produce test plans.
+description: Designs unit/integration/E2E/contract/replay/SLA test plans. Use for class L/XL changes, or when a remark reveals a defect that has no regression test yet. Not for running tests. Returns test cases with inputs, expected outputs, target files.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: cyan
 ---
 
