@@ -2,18 +2,17 @@
 // ce_band_house_realized_test.cpp — F-18 #8 (ADR-068, observation-only).
 // Регрессия признания прибыли по факту (§A8.2):
 //   Δhouse = fq·(марка − px_факт)/1000·sgn,  gap = fq·(марка − px_факт)/1000.
-// «Марка» = mid клиринга (clear price) символа — кэш last_clear_price_,
-// наполняется ApplyBatchResult (BatchResult.clear_prices). sgn = знак
-// сокращаемой позиции (провизорный, ADR-068). Баланс __ce_house__ НЕ двигаем.
+// «Марка» = mid клиринга = st.last_price (ЦЕНА ПАРЫ последней CE-дельты, задаётся
+// AgentDelta.price_used). sgn = знак сокращаемой позиции (провизорный, ADR-068).
+// Баланс __ce_house__ НЕ двигаем.
 //
 // Наблюдение через stub HedgeflowPnlSinkPort::UpdateHouseRealizedDelta (та же
 // точка, что пишет PG hedgeflows.house_realized_pnl/plan_fact_gap).
 //
 // Случаи:
-//   A) SELL, марка=100050 > px_факт=100000, fq=0.1 → house=+0.005, gap=+0.005;
+//   A) SELL, марка(price_used)=100050 > px_факт=100000, fq=0.1 → house=+0.005, gap=+0.005;
 //   B) два частичных отчёта → аккумуляция (0.005 + 0.0075 = 0.0125);
-//   C) НЕТ clear price (ApplyBatchResult не вызывали) → величины остаются 0
-//      (guard: марка недоступна — признание пропускается).
+//   C) марка == px_факт (клиринг = исполнение) → gap 0, sink НЕ вызывается;
 // ============================================================================
 #include <cassert>
 #include <cmath>
@@ -128,16 +127,6 @@ fob::execution::v1::ExecutionReport MkReport(const std::string& agent,
   return r;
 }
 
-// Кэшируем clear price (марку) символа через ApplyBatchResult (без fills).
-void seed_clear_price(LedgerUseCases& uc, const std::string& symbol, double price,
-                      const std::string& batch_id) {
-  fob::ledger::v1::ApplyBatchResultRequest req;
-  req.mutable_batch()->set_batch_id(batch_id);
-  (*req.mutable_batch()->mutable_clear_prices())[symbol] =
-      Decimal{static_cast<int64_t>(std::llround(price * 1e2)), 2}.to_proto();
-  uc.ApplyBatchResult(req);
-}
-
 void apply_report(LedgerUseCases& uc, const fob::execution::v1::ExecutionReport& rep) {
   fob::ledger::v1::ApplyExecutionReportRequest req;
   *req.mutable_report() = rep;
@@ -157,14 +146,15 @@ int main() {
   cex::common::KafkaProducer prod(cex::common::KafkaConfig{"localhost:9092", "ce-house-test"});
   const std::string flow = "ce|band|T_BTC_binance|BTC|binance";
 
-  // --- A) SELL, марка=100050 > px_факт=100000, fq=0.1: gap=+0.005, house=+0.005 ----
+  // --- A) SELL, марка(price_used)=100050 > px_факт=100000, fq=0.1: gap=house=+0.005 ---
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
     auto sink = std::make_shared<RecordingSink>();
     uc.SetHedgeflowPnlSink(sink);
-    seed_clear_price(uc, "BTC/USDT", 100050.0, "b-mark-1");   // МАРКА
-    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    // МАРКА (st.last_price) = price_used дельты = 100050; target-сайзинг интента = 100000
+    // (target=0.25, чтобы filled не превысил) — расцеплено. report avg=100000 (px_факт).
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100050.0)});
     uc.RememberExecutionIntent(MkBandIntent("T_BTC_binance", "BTC", "binance", 25.0, 100000.0, fob::common::v1::SIDE_SELL));
     apply_report(uc, MkReport("T_BTC_binance", "BTC", "binance",
                               fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED,
@@ -179,8 +169,7 @@ int main() {
     uc.SetBandBreachProducer(&prod);
     auto sink = std::make_shared<RecordingSink>();
     uc.SetHedgeflowPnlSink(sink);
-    seed_clear_price(uc, "BTC/USDT", 100050.0, "b-mark-2");
-    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100050.0)});
     uc.RememberExecutionIntent(MkBandIntent("T_BTC_binance", "BTC", "binance", 25.0, 100000.0, fob::common::v1::SIDE_SELL));
     apply_report(uc, MkReport("T_BTC_binance", "BTC", "binance",
                               fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED,
@@ -192,19 +181,18 @@ int main() {
     expect_near(sink->house(flow), 0.0125, 1e-6, "B: аккумуляция house = 0.0125");
   }
 
-  // --- C) Нет clear price → признание пропускается (величины 0) --------------------
+  // --- C) Марка == px_факт (клиринг = исполнение): gap 0, sink НЕ вызывается --------
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
     auto sink = std::make_shared<RecordingSink>();
     uc.SetHedgeflowPnlSink(sink);
-    // seed_clear_price НЕ вызываем — марки нет.
     uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
     uc.RememberExecutionIntent(MkBandIntent("T_BTC_binance", "BTC", "binance", 25.0, 100000.0, fob::common::v1::SIDE_SELL));
     apply_report(uc, MkReport("T_BTC_binance", "BTC", "binance",
                               fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED,
-                              0.1, 0.0, 100000.0, "C-rep-1"));
-    expect_near(sink->calls(), 0.0, 0.5, "C: без марки UpdateHouseRealizedDelta не вызывается");
+                              0.1, 0.0, 100000.0, "C-rep-1"));    // марка=100000=avg → gap 0
+    expect_near(sink->calls(), 0.0, 0.5, "C: gap 0 (клиринг=исполнение) → sink не вызывается");
   }
 
   // --- D) Кросс-пара (quote=BTC != нумерарий): признание ПРОПУСКАЕТСЯ (calls=0) -----
@@ -215,7 +203,7 @@ int main() {
     uc.SetBandBreachProducer(&prod);
     auto sink = std::make_shared<RecordingSink>();
     uc.SetHedgeflowPnlSink(sink);
-    seed_clear_price(uc, "ETH/BTC", 0.05, "d-mark-1");  // марка ЕСТЬ, но quote!=USDT
+    // st.last_price(price_used)=0.05 задаёт марку, но quote=BTC != нумерарий → skip.
     uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_ETH_coinbase", "translator", "ETH", "coinbase", 30.0, 0.05, "BTC")});
     uc.RememberExecutionIntent(MkBandIntent("T_ETH_coinbase", "ETH", "coinbase", 25.0, 0.05, fob::common::v1::SIDE_SELL, "BTC"));
     apply_report(uc, MkReport("T_ETH_coinbase", "ETH", "coinbase",

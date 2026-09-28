@@ -21,11 +21,11 @@ domain-review: `trading-domain-specialist`.
 - **`fq`** — инкремент исполненного объёма заявки хеджа (base, партиальный fill) = `incr_filled_qty`
   в `apply_agent_band_report_locked`.
 - **`px_факт`** — цена реального исполнения на площадке (`executed_price` = `average_price` отчёта).
-- **Марка** — **mid клиринга (clear price)** батча, в котором произошло исполнение (решение
-  владельца 2026-09-28). Источник — `BatchResult.clear_prices[symbol]` (proto `batch.proto:10`),
-  который ledger получает в `ApplyBatchResult` (batch.outputs). НЕ равна `internal_price` в текущем
-  `calculate_hedge_pnl` (тот привязан к клиентской сделке). Снимок на эмиссии A7 НЕ требуется —
-  берём последнюю clear price символа на момент fill (кэш `last_clear_price_[symbol]`).
+- **Марка** — **mid клиринга** (решение владельца 2026-09-28). Источник — `st.last_price`
+  (`AgentPositionState.last_price` = цена ПАРЫ последней CE-дельты позиции, путь
+  `ledger-ce-pos-delta`/`ApplyPositionDelta`; та же цена, что идёт в `pair_price` лимита хеджа
+  при эмиссии). НЕ `BatchResult.clear_prices` (batch.outputs — общий клиринг клиентов, у CE-агентов
+  своя клиринговая цена на позиции). НЕ равна `internal_price` в `calculate_hedge_pnl`.
 - **`sgn`** — знак направления. **Точная семантика — открытый вопрос** (см. ниже).
 - **`/1000`** — тот же k-USD масштаб, что уже в коде (`ledger_uc.cpp` A7-путь, `Decimal::div(…, 1000)`).
 - **Счёт дома `__ce_house__`** — узел собственного капитала биржи (не агент, «переменная-невязка»,
@@ -59,9 +59,10 @@ px_факт)` — отдельная величина «качество исп�
 1. **Момент признания** — A8-подтверждение (`apply_agent_band_report_locked`, по `incr_filled_qty`),
    тот же хук, что пишет `band_fee_estimated`. НЕ в A7-эмиссии (позиция клиента там уже уменьшена,
    «Позицию агента НЕ трогаем»), НЕ в клиринге (F-04), НЕ в накоплении (A6), НЕ в перевозах.
-2. **Источник марки** — кэш `last_clear_price_[symbol]` в ledger, наполняемый из
-   `BatchResult.clear_prices` в `ApplyBatchResult` (под `mu_`). На fill берётся последняя clear
-   price символа хеджа. Снимок на эмиссии НЕ нужен (марка = clear price, решение владельца).
+2. **Источник марки** — `st.last_price` (цена пары последней CE-дельты, обновляется каждый
+   клиринговый такт через `ApplyPositionDelta`). Снимок на эмиссии НЕ нужен. НЕ `BatchResult.
+   clear_prices`: у CE-агентов своя клиринговая цена на позиции (путь `ledger-ce-pos-delta`),
+   а не общий batch.outputs.
 3. **Формула на инкремент** — `Δhouse = fq·(марка − px_факт)/1000·sgn` (Decimal-only, §1 п.1),
    аккумулируется до терминала; план/факт-gap = `Σ (марка − px_факт)·fq` публикуется **отдельным
    полем** рядом с `band_fee_estimated` (PG `hedgeflows` + BFF DTO + фронт).

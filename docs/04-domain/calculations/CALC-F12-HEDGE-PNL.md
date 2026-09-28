@@ -137,8 +137,9 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
    ClickHouse-агрегат — осознанно отложен. Реальная maker-fee в venues — смежный backlog.
    - **`house_realized_pnl`** (F-18 #8, ADR-068, **observation-only**) — ТРЕТЬЯ независимая
      величина: признание прибыли по факту расчёта (§A8.2 CE_algorithm_v2):
-     `Σ fq·(марка − px_факт)/1000·sgn`, где **марка = mid клиринга** (`clear price` символа,
-     кэш `last_clear_price_` из `BatchResult`), `px_факт` = `average_price` отчёта, `sgn` —
+     `Σ fq·(марка − px_факт)/1000·sgn`, где **марка = mid клиринга** = `st.last_price`
+     (цена пары последней CE-дельты, путь `ledger-ce-pos-delta`; та же цена, что идёт в
+     `pair_price` лимита хеджа при эмиссии), `px_факт` = `average_price` отчёта, `sgn` —
      знак сокращаемой позиции (**провизорный** — открытый вопрос ADR-068). Разрыв план/факт
      `plan_fact_gap = Σ fq·(марка − px_факт)/1000` — отдельная величина «качество исполнения».
      Считается в `apply_agent_band_report_locked`, публикуется в PG (`hedgeflows.house_realized_pnl`

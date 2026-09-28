@@ -396,6 +396,7 @@ class LedgerUseCases {
     // house_realized_pnl — накопленная прибыль дома к МАРКЕ (mid клиринга, решение
     // владельца): Σ fq·(марка−px_факт)/1000·sgn. plan_fact_gap — накопленный разрыв
     // план/факт (качество исполнения): Σ fq·(марка−px_факт)/1000.
+    // МАРКА = st.last_price (mid клиринга, цена пары последней CE-дельты).
     // ЕДИНИЦЫ: k-USDT ТОЛЬКО для quote==нумерарий (USDT). Для кросс-пар (quote!=USDT)
     // признание ПРОПУСКАЕТСЯ (WARN) — mark/px в валюте пары, не USDT (см. apply_agent_
     // band_report_locked, память ledger-band-fill-crosspair-value). Конверсия — addendum ADR-068.
@@ -405,10 +406,6 @@ class LedgerUseCases {
     cex::common::Decimal plan_fact_gap{0, 0};
   };
   std::map<std::string, AgentBandHedge> band_hedges_;
-  // F-18 #8 (ADR-068): кэш последней clear price по символу из BatchResult
-  // (batch.outputs) — «марка» для признания прибыли по факту. Наполняется в
-  // ApplyBatchResult под mu_; читается в apply_agent_band_report_locked на fill.
-  std::unordered_map<std::string, cex::common::Decimal> last_clear_price_;
   // Вариант 2 (2026-09-17): продюсер топика ce.agent.band.breach. Не владеет.
   // При null событие пробоя не эмитится (band выключен / нет продюсера).
   cex::common::KafkaProducer* band_breach_producer_{nullptr};

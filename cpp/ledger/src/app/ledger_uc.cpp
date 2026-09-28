@@ -1217,14 +1217,6 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     // Большой lock-scope для всех balance/position mutations.
     std::lock_guard<std::mutex> lg(mu_);
 
-    // F-18 #8 (ADR-068): кэшируем clear price по символу — «марка» (mid клиринга)
-    // для признания прибыли по факту в apply_agent_band_report_locked. Только чтение
-    // из batch; баланс не трогаем.
-    for (const auto& [symbol, price] : req.batch().clear_prices()) {
-      const Decimal p = Decimal::from_proto(price);
-      if (p.units != 0) last_clear_price_[symbol] = p;
-    }
-
     // For each internal fill:
     // BUY: spend quote (reserved), receive base (available).
     // SELL: spend base (reserved), receive quote (available).
@@ -1880,6 +1872,10 @@ bool LedgerUseCases::apply_agent_band_report_locked(
     // За observation-only ПРОПУСКАЕМ признание для не-USDT quote (WARN), чтобы не показывать
     // величину в неверных единицах. Принципиальный фикс (конверсия через st.base_price) —
     // отдельный шаг через trading-domain-specialist + addendum к ADR-068 (меняет формулу).
+    // Марка = mid клиринга = `st.last_price` (ЦЕНА ПАРЫ последней CE-дельты; та же цена,
+    // что идёт в pair_price лимита хеджа при эмиссии, см. detect_and_emit_band_breach_locked).
+    // Источник — путь ledger-ce-pos-delta (ApplyPositionDelta), НЕ batch.outputs: у CE-агентов
+    // своя клиринговая цена на позиции, а не общий BatchResult.clear_prices.
     const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
     const bool quote_is_numeraire = st.quote.empty() || st.quote == numeraire;
     if (average_price.units != 0 && !quote_is_numeraire) {
@@ -1887,27 +1883,23 @@ bool LedgerUseCases::apply_agent_band_report_locked(
           "F-18 #8 house-realized skipped: non-numeraire quote unsupported (observation-only)",
           {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue}, {"quote", st.quote}});
     }
-    if (average_price.units != 0 && quote_is_numeraire) {
-      const std::string mark_symbol = report.instrument().symbol();
-      auto clear_it = last_clear_price_.find(mark_symbol);
-      if (clear_it != last_clear_price_.end() && clear_it->second.units != 0) {
-        const Decimal mark = clear_it->second;
-        // gap (k-USDT, знаковый: марка−факт) = fq·(mark−px_факт)/1000.
-        const Decimal gap_incr = Decimal::div(
-            Decimal::mul(incr_filled_qty, Decimal::sub(mark, average_price)),
-            Decimal{1000, 0}, 8);
-        // Δhouse = gap·sgn (sgn = знак сокращаемой позиции, провизорный).
-        const Decimal house_incr = sent_positive
-            ? gap_incr : Decimal::sub(Decimal::zero(), gap_incr);
-        hedge.plan_fact_gap = Decimal::add(hedge.plan_fact_gap, gap_incr);
-        hedge.house_realized_pnl = Decimal::add(hedge.house_realized_pnl, house_incr);
-        const std::string house_flow_id = !report.hedge_flow_id().empty()
-            ? report.hedge_flow_id() : report.intent_id();
-        if (hedgeflow_pnl_sink_ != nullptr && !house_flow_id.empty() &&
-            (house_incr.units != 0 || gap_incr.units != 0)) {
-          hedgeflow_pnl_sink_->UpdateHouseRealizedDelta(
-              house_flow_id, house_incr.to_string(), gap_incr.to_string());
-        }
+    if (average_price.units != 0 && quote_is_numeraire && st.last_price.units != 0) {
+      const Decimal mark = st.last_price;  // mid клиринга (цена пары)
+      // gap (k-USDT, знаковый: марка−факт) = fq·(mark−px_факт)/1000.
+      const Decimal gap_incr = Decimal::div(
+          Decimal::mul(incr_filled_qty, Decimal::sub(mark, average_price)),
+          Decimal{1000, 0}, 8);
+      // Δhouse = gap·sgn (sgn = знак сокращаемой позиции, провизорный).
+      const Decimal house_incr = sent_positive
+          ? gap_incr : Decimal::sub(Decimal::zero(), gap_incr);
+      hedge.plan_fact_gap = Decimal::add(hedge.plan_fact_gap, gap_incr);
+      hedge.house_realized_pnl = Decimal::add(hedge.house_realized_pnl, house_incr);
+      const std::string house_flow_id = !report.hedge_flow_id().empty()
+          ? report.hedge_flow_id() : report.intent_id();
+      if (hedgeflow_pnl_sink_ != nullptr && !house_flow_id.empty() &&
+          (house_incr.units != 0 || gap_incr.units != 0)) {
+        hedgeflow_pnl_sink_->UpdateHouseRealizedDelta(
+            house_flow_id, house_incr.to_string(), gap_incr.to_string());
       }
     }
   }
