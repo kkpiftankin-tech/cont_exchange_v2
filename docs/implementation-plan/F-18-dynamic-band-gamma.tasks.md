@@ -50,10 +50,16 @@ ledger `VolScaleFactor` — превью «при CE_BAND_GAMMA_MODE=1»). Drill
 **Приоритет:** Средний. **Файлы:** BFF `frontend/api/server.js`, drill-down.
 
 ### T-F18-705 — Проверка масштабирования + калибровка
+✅ **СДЕЛАНО (2026-09-28, коммит `2eae9731`, owner-approved вариант B).** `CE_BAND_GAMMA_MODE=1`,
+`CE_BAND_SIGMA_REF=0.00015` на dev. Проверено: band_mode=dynamic_gamma, дифференциация по σ (BTC
+σ~0.0008 → z_mkt=5 floor; ETH σ~0.00025 → z_mkt до 10.4 — §6.4 «выше σ → уже полоса»); lag 0,
+sum|in_flight|=0, |oblig| медиана 5.2. Guard samples≥20 корректно держал flat, пока market_data
+после force-recreate набирал EWMA (см. `ce-pipeline-freeze` — потребовался force-recreate цепочки).
+**Калибровочная заметка (follow-up):** dev-sim σ волатильна и сейчас >> σ_ref → большинство активов
+жмётся к floor 5, а калмовые кросс-пары (ETHBTC) упираются в clamp 10× → полоса ~180 (max|oblig|
+182). Не дивергенция (позиция у своей широкой полосы, in_flight=0), но при желании сузить хвост —
+поднять σ_ref или снизить `CE_BAND_VOL_RATIO_MAX`. Live-тюнинг env (recreate ledger).
 **Приоритет:** Высокий. **Файлы:** `Testing/` probe или расширение существующего.
-- На dev с `CE_BAND_GAMMA_MODE=1`: пороги активов различаются по волатильности; при σ_ref совпадают с
-  D2; позиции сходятся к band; lag 0 (throughput не задет).
-- **Приёмка:** высоковолатильный актив имеет больший порог, чем спокойный; калибровка при σ_ref держит прежний ~18.
 
 **Пререквизиты включения флага (из code-review + 3 профильных ревью T-F18-703, 2026-09-28):**
 - **Unit-тест** ветки динамического масштаба (по образцу `ce_band_hedge_a7_test.cpp`): flag-off
