@@ -132,9 +132,20 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
      потому, что для мейкер-зоны реальная `tot_fee` (taker) занижает/искажает издержку.
    Net band-хеджа = `gross − band_fee_estimated`. НЕ путать `band_fee_estimated` (расчётная,
    ledger-config) с `tot_fee` (реальная, venue) — разные поля, разный источник.
-   Пропагация `band_fee_estimated` в PG/ClickHouse/BFF — следующий слой #6 (пока: расчёт
-   в ledger + лог «F-18 band hedge fee (estimated)»). Реальная maker-fee в venues —
-   отдельный смежный backlog.
+   Пропагация `band_fee_estimated` в PG (`hedgeflows.band_fee_estimated`) + BFF
+   (`bandFeeEstimated`) + фронт — **СДЕЛАНО** (F-18 #6, `4e38f4e7`/`e26ff047`/`3af876d6`).
+   ClickHouse-агрегат — осознанно отложен. Реальная maker-fee в venues — смежный backlog.
+   - **`house_realized_pnl`** (F-18 #8, ADR-068, **observation-only**) — ТРЕТЬЯ независимая
+     величина: признание прибыли по факту расчёта (§A8.2 CE_algorithm_v2):
+     `Σ fq·(марка − px_факт)/1000·sgn`, где **марка = mid клиринга** (`clear price` символа,
+     кэш `last_clear_price_` из `BatchResult`), `px_факт` = `average_price` отчёта, `sgn` —
+     знак сокращаемой позиции (**провизорный** — открытый вопрос ADR-068). Разрыв план/факт
+     `plan_fact_gap = Σ fq·(марка − px_факт)/1000` — отдельная величина «качество исполнения».
+     Считается в `apply_agent_band_report_locked`, публикуется в PG (`hedgeflows.house_realized_pnl`
+     /`plan_fact_gap`) + BFF (`houseRealizedPnl`/`planFactGap`) + фронт. **Баланс `__ce_house__`
+     НЕ двигается** (observation-only); фактическое кредитование дома — owner-gated шаг после
+     разрешения знака `sgn`. Отдельно от `hedge_pnl` (к `internal_price`) и `band_fee_estimated`
+     (комиссия) — три независимые величины. Тест `ce_band_house_realized_test`.
 2. **Именование опорной цены.** Три имени для одной величины: `internal_price`
    (код/proto), `referenceMid` (`business-rules.md`), `reference_mid`
    (колонка PostgreSQL). Не переименовывать без ADR — просто держать в уме
