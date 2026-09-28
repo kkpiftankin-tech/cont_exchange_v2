@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS hedgeflows (
   avg_fill_price   NUMERIC(38, 18),
   tot_fee          NUMERIC(38, 18) NOT NULL DEFAULT 0,   -- РЕАЛЬНАЯ venue-комиссия (report.fee_total, сейчас taker-only)
   band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- F-18 #6: РАСЧЁТНАЯ band-комиссия зоны (maker=clim/taker=cmkt), ledger; НЕ путать с tot_fee (CALC-F12-HEDGE-PNL §7.1)
+  house_realized_pnl NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- F-18 #8 (ADR-068, observation-only): признание прибыли по факту к марке (mid клиринга); НЕ двигает баланс __ce_house__
+  plan_fact_gap    NUMERIC(38, 18) NOT NULL DEFAULT 0,    -- F-18 #8 (ADR-068): накопленный разрыв план/факт (качество исполнения)
   hedge_pnl        NUMERIC(38, 18),             -- computed by Settlement Ledger (gross)
   urgency          TEXT NOT NULL CHECK (urgency IN ('LOW', 'MEDIUM', 'HIGH')),
   timeout_ms       INTEGER NOT NULL CHECK (timeout_ms > 0),
@@ -159,6 +161,9 @@ CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_open ON hedgeflows (status, upd
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_underfilled ON hedgeflows (status, created_at) WHERE status IN ('UNDERFILLED', 'REJECTED');
 -- F-18 #6 (T-F18-804): расчётная band-комиссия зоны для существующих БД.
 ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0;
+-- F-18 #8 (ADR-068, observation-only): признание прибыли по факту + разрыв план/факт для существующих БД.
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS house_realized_pnl NUMERIC(38, 18) NOT NULL DEFAULT 0;
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS plan_fact_gap NUMERIC(38, 18) NOT NULL DEFAULT 0;
 
 -- child_orders: one row per actual order placed on a venue (CEX/DEX/AMM).
 -- Multi-venue routing decomposes single HedgeFlow into N child_orders.

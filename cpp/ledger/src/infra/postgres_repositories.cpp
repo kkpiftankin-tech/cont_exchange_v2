@@ -506,6 +506,37 @@ UPDATE hedgeflows
 #endif
 }
 
+void PostgresHedgeflowPnlSink::UpdateHouseRealizedDelta(
+    const std::string& hedge_flow_id, const std::string& house_realized_delta,
+    const std::string& plan_fact_gap_delta) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (hedge_flow_id.empty() || !pool_) return;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    // F-18 #8 (ADR-068, observation-only): аккумулируем наблюдаемые величины признания
+    // прибыли по факту. Баланс __ce_house__ здесь НЕ трогаем (только hedgeflows).
+    tx.exec_params(
+        R"SQL(
+UPDATE hedgeflows
+   SET house_realized_pnl = COALESCE(house_realized_pnl, 0) + COALESCE(NULLIF($2, '')::NUMERIC, 0),
+       plan_fact_gap = COALESCE(plan_fact_gap, 0) + COALESCE(NULLIF($3, '')::NUMERIC, 0),
+       updated_at = now()
+ WHERE hedge_flow_id = $1
+)SQL",
+        hedge_flow_id, house_realized_delta, plan_fact_gap_delta);
+    tx.commit();
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Failed to update hedgeflow house_realized_pnl",
+                          {{"hedge_flow_id", hedge_flow_id}, {"error", ex.what()}});
+  }
+#else
+  (void)hedge_flow_id;
+  (void)house_realized_delta;
+  (void)plan_fact_gap_delta;
+#endif
+}
+
 // ============================================================================
 // F-06 (T-F06-020) — PostgresPositionRepository / PostgresAccountRepository /
 // PostgresPositionAccountTx for the F-06 `positions` / `accounts` tables.

@@ -1217,6 +1217,14 @@ fob::ledger::v1::ApplyBatchResultResponse LedgerUseCases::ApplyBatchResult(
     // Большой lock-scope для всех balance/position mutations.
     std::lock_guard<std::mutex> lg(mu_);
 
+    // F-18 #8 (ADR-068): кэшируем clear price по символу — «марка» (mid клиринга)
+    // для признания прибыли по факту в apply_agent_band_report_locked. Только чтение
+    // из batch; баланс не трогаем.
+    for (const auto& [symbol, price] : req.batch().clear_prices()) {
+      const Decimal p = Decimal::from_proto(price);
+      if (p.units != 0) last_clear_price_[symbol] = p;
+    }
+
     // For each internal fill:
     // BUY: spend quote (reserved), receive base (available).
     // SELL: spend base (reserved), receive quote (available).
@@ -1858,6 +1866,50 @@ bool LedgerUseCases::apply_agent_band_report_locked(
         hedgeflow_pnl_sink_->UpdateBandFeeDelta(fee_flow_id, fee_incr.to_string());
       }
     }
+    // F-18 #8 (ADR-068, OBSERVATION-ONLY): признание прибыли по факту (§A8.2).
+    // Δrealized = fq·(марка − px_факт)/1000·sgn; план/факт-gap = fq·(марка − px_факт)/1000.
+    // «Марка» = mid клиринга (clear price) символа хеджа (решение владельца) — кэш
+    // last_clear_price_, наполняется в ApplyBatchResult. px_факт = average_price.
+    // sgn ПРОВИЗОРНЫЙ = знак сокращаемой позиции (sent_positive) — открытый вопрос §A8.2
+    // (ADR-068). ВАЖНО: баланс __ce_house__ НЕ двигаем (observation-only) — только
+    // накапливаем наблюдаемые величины и публикуем в PG/BFF; фактическое кредитование
+    // дома — отдельный owner-gated шаг после разрешения знака. Отдельно от band_fee и
+    // от calculate_hedge_pnl (три независимые величины, принцип #6).
+    // Кросс-пары (quote != нумерарий): mark и average_price выражены в валюте ПАРЫ
+    // (напр. BTC per ETH), не в USDT — тот же класс бага, что «ledger-band-fill-crosspair-value».
+    // За observation-only ПРОПУСКАЕМ признание для не-USDT quote (WARN), чтобы не показывать
+    // величину в неверных единицах. Принципиальный фикс (конверсия через st.base_price) —
+    // отдельный шаг через trading-domain-specialist + addendum к ADR-068 (меняет формулу).
+    const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+    const bool quote_is_numeraire = st.quote.empty() || st.quote == numeraire;
+    if (average_price.units != 0 && !quote_is_numeraire) {
+      cex::common::log_json("WARN",
+          "F-18 #8 house-realized skipped: non-numeraire quote unsupported (observation-only)",
+          {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue}, {"quote", st.quote}});
+    }
+    if (average_price.units != 0 && quote_is_numeraire) {
+      const std::string mark_symbol = report.instrument().symbol();
+      auto clear_it = last_clear_price_.find(mark_symbol);
+      if (clear_it != last_clear_price_.end() && clear_it->second.units != 0) {
+        const Decimal mark = clear_it->second;
+        // gap (k-USDT, знаковый: марка−факт) = fq·(mark−px_факт)/1000.
+        const Decimal gap_incr = Decimal::div(
+            Decimal::mul(incr_filled_qty, Decimal::sub(mark, average_price)),
+            Decimal{1000, 0}, 8);
+        // Δhouse = gap·sgn (sgn = знак сокращаемой позиции, провизорный).
+        const Decimal house_incr = sent_positive
+            ? gap_incr : Decimal::sub(Decimal::zero(), gap_incr);
+        hedge.plan_fact_gap = Decimal::add(hedge.plan_fact_gap, gap_incr);
+        hedge.house_realized_pnl = Decimal::add(hedge.house_realized_pnl, house_incr);
+        const std::string house_flow_id = !report.hedge_flow_id().empty()
+            ? report.hedge_flow_id() : report.intent_id();
+        if (hedgeflow_pnl_sink_ != nullptr && !house_flow_id.empty() &&
+            (house_incr.units != 0 || gap_incr.units != 0)) {
+          hedgeflow_pnl_sink_->UpdateHouseRealizedDelta(
+              house_flow_id, house_incr.to_string(), gap_incr.to_string());
+        }
+      }
+    }
   }
 
   // Терминальный статус (§A8.3): неисполненный остаток ВОЗВРАЩАЕТСЯ в позицию (был
@@ -1880,6 +1932,14 @@ bool LedgerUseCases::apply_agent_band_report_locked(
                            {"zone", hedge.maker ? "maker" : "taker"},
                            {"fee_bps", hedge.fee_bps_snapshot.to_string()},
                            {"band_fee_estimated", hedge.band_fee_estimated.to_string()},
+                           {"filled_value", hedge.filled_value.to_string()}});
+    // F-18 #8 (ADR-068, observation-only): итоговое признание прибыли по факту за жизнь
+    // заявки — наблюдаемость. house_realized к марке (mid клиринга); plan_fact_gap —
+    // качество исполнения. Баланс дома НЕ двигали. sgn провизорный (ADR-068).
+    cex::common::log_json("INFO", "F-18 house realized (observation-only)",
+                          {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
+                           {"house_realized_pnl", hedge.house_realized_pnl.to_string()},
+                           {"plan_fact_gap", hedge.plan_fact_gap.to_string()},
                            {"filled_value", hedge.filled_value.to_string()}});
     band_hedges_.erase(it);
   }

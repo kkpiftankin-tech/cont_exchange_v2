@@ -80,6 +80,9 @@ class PostgresHedgeflowPnlSink final : public app::HedgeflowPnlSinkPort {
                            const std::string& fee_delta) override;
   void UpdateBandFeeDelta(const std::string& hedge_flow_id,
                           const std::string& band_fee_delta) override;
+  void UpdateHouseRealizedDelta(const std::string& hedge_flow_id,
+                                const std::string& house_realized_delta,
+                                const std::string& plan_fact_gap_delta) override;
 
  private:
   std::shared_ptr<LedgerPgPool> pool_;

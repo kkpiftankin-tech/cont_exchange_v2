@@ -154,6 +154,13 @@ class HedgeflowPnlSinkPort {
   // Дефолтное тело (не pure) — не ломает mock-реализации в тестах.
   virtual void UpdateBandFeeDelta(const std::string& /*hedge_flow_id*/,
                                   const std::string& /*band_fee_delta*/) {}
+  // F-18 #8 (ADR-068, observation-only): аккумулировать признание прибыли по факту к
+  // марке (mid клиринга) в hedgeflows.house_realized_pnl и разрыв план/факт в
+  // hedgeflows.plan_fact_gap — НАБЛЮДАЕМЫЕ величины, баланс __ce_house__ НЕ двигается.
+  // Дефолтное тело (не pure) — не ломает mock-реализации в тестах.
+  virtual void UpdateHouseRealizedDelta(const std::string& /*hedge_flow_id*/,
+                                        const std::string& /*house_realized_delta*/,
+                                        const std::string& /*plan_fact_gap_delta*/) {}
 };
 
 // ---------------------------------------------------------------------------
