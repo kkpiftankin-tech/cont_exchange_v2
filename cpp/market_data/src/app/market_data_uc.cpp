@@ -16,6 +16,7 @@
 #include <set>
 
 #include "app/curve_to_levels.hpp"
+#include "infra/postgres/postgres_asset_volatility_repository.hpp"  // F-18 D1+#7 (T-F18-702)
 #include "app/ports/i_ce_clearing_publisher.hpp"  // F-05A CE (вариант A)
 #include "app/ports/i_vectorized_publisher.hpp"
 #include "domain/agent_builder.hpp"  // F-05A CE §A1
@@ -393,6 +394,28 @@ void MarketDataUseCases::ProcessSnapshot(domain::MarketDataSnapshot snap) {
   {
     std::lock_guard<std::mutex> lg(mu_);
     last_snapshot_[snap.asset] = snap;
+  }
+
+  // 1b. F-18 D1+#7 (T-F18-702): EWMA-σ волатильности mid → ce_asset_volatility.
+  //     EWMA считаем под mu_, PG-запись (троттлинг) — ВНЕ лока. Активно только
+  //     если repo подключён (env CE_VOL_ENABLED в main). ledger читает σ для Γ=γσ²τ.
+  if (vol_repo_) {
+    const double mid = static_cast<double>(snap.mid);
+    const long long now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    double sigma = 0.0;
+    long long samples = 0;
+    bool write_vol = false;
+    {
+      std::lock_guard<std::mutex> lg(mu_);
+      write_vol = UpdateAssetVolatilityLocked(snap.asset, mid, now_ms, &sigma, &samples);
+    }
+    if (write_vol) {
+      vol_repo_->Upsert(snap.asset, /*venue=*/"", sigma,
+                        static_cast<int>(vol_halflife_sec_), samples);
+    }
   }
 
   // 2. volume24h + персист в ClickHouse — ТРОТТЛИНГ на asset (не чаще раза в 15с).
@@ -845,6 +868,42 @@ std::optional<common::Decimal> MarketDataUseCases::GetCurrentMid(
   const auto it = last_snapshot_.find(asset);
   if (it == last_snapshot_.end()) return std::nullopt;
   return it->second.mid;
+}
+
+// F-18 D1+#7 (T-F18-702): time-aware EWMA дисперсии лог-доходностей mid per актив.
+// Вызывается ПОД mu_. r = ln(mid/prev); var_persec = r²/Δt; ewma_var убывает с
+// весом w=exp(−Δt/halflife). σ=sqrt(ewma_var). Возвращает true, если пора писать
+// в PG (троттлинг vol_write_period_sec) — тогда out_sigma/out_samples заполнены.
+bool MarketDataUseCases::UpdateAssetVolatilityLocked(const std::string& asset,
+                                                     double mid, long long now_ms,
+                                                     double* out_sigma,
+                                                     long long* out_samples) {
+  if (!(mid > 0.0)) return false;
+  VolState& st = vol_state_[asset];
+  if (!st.init) {
+    st.init = true;
+    st.prev_mid = mid;
+    st.last_ms = now_ms;
+    return false;  // первая точка — доходности ещё нет
+  }
+  const double dt_sec = std::max(0.05, (now_ms - st.last_ms) / 1000.0);
+  const double r = std::log(mid / st.prev_mid);
+  const double var_persec = (r * r) / dt_sec;  // дисперсия доходности за секунду
+  const double w = std::exp(-dt_sec / std::max(1e-6, vol_halflife_sec_));
+  st.ewma_var = st.init && st.samples > 0
+                    ? (w * st.ewma_var + (1.0 - w) * var_persec)
+                    : var_persec;  // первый апдейт — seed без сглаживания
+  st.prev_mid = mid;
+  st.last_ms = now_ms;
+  st.samples += 1;
+
+  if (now_ms - st.last_write_ms < static_cast<long long>(vol_write_period_sec_ * 1000.0)) {
+    return false;  // троттлинг — писать рано
+  }
+  st.last_write_ms = now_ms;
+  if (out_sigma) *out_sigma = std::sqrt(std::max(0.0, st.ewma_var));
+  if (out_samples) *out_samples = st.samples;
+  return true;
 }
 
 std::optional<fob::marketdata::v1::Ticker> MarketDataUseCases::GetLastTicker(

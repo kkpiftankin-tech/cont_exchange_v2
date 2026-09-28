@@ -62,6 +62,7 @@ add_executable(market_data
         src/app/curve_to_levels.cpp
         # infra/postgres
         src/infra/postgres/pg_market_data_config.cpp
+        src/infra/postgres/postgres_asset_volatility_repository.cpp
         # transport
         src/transport/grpc_market_data_service.cpp
         src/transport/mappers/order_book.cpp
@@ -114,6 +115,7 @@ if (BUILD_TESTING)
             src/domain/entities/order_book.cpp
             src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
             src/infra/postgres/pg_market_data_config.cpp
+            src/infra/postgres/postgres_asset_volatility_repository.cpp
     )
 
     target_include_directories(market_data_uc_test PRIVATE
@@ -211,6 +213,7 @@ if (BUILD_TESTING)
                 src/transport/mappers/vectorized_liquidity.cpp    # F-05A
                 src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
                 src/infra/postgres/pg_market_data_config.cpp
+                src/infra/postgres/postgres_asset_volatility_repository.cpp
         )
         target_include_directories(market_data_integration_test PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src

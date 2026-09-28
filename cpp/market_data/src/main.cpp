@@ -31,6 +31,7 @@
 #include "infra/market_data_stream_hub.hpp"
 #include "infra/order_book_channel.hpp"
 #include "infra/postgres/pg_market_data_config.hpp"
+#include "infra/postgres/postgres_asset_volatility_repository.hpp"  // F-18 D1+#7 (T-F18-702)
 #include "transport/grpc_market_data_service.hpp"
 
 int main() {
@@ -130,6 +131,22 @@ int main() {
       vector_clearing_storage(ch_cfg);
   vector_clearing_storage.EnsureSchema();
   uc.SetVectorClearingResultStorage(&vector_clearing_storage);
+
+  // ── F-18 D1+#7 (T-F18-702): σ волатильности актива → ce_asset_volatility ──
+  // market_data считает EWMA σ лог-доходностей mid, пишет в PG (троттлинг).
+  // ledger читает σ для динамического порога band Γ=γσ²τ (ADR-066, за флагом
+  // CE_BAND_GAMMA_MODE). CE_VOL_ENABLED=0 отключает σ-слой целиком.
+  cex::market_data::infra::PostgresAssetVolatilityRepository vol_repo(pg_conn);
+  if (cex::common::Env::get_string("CE_VOL_ENABLED", "1") == "1") {
+    vol_repo.EnsureSchema();
+    const int hl = cex::common::Env::get_int("CE_VOL_EWMA_HALFLIFE_SEC", 60);
+    const int wp = cex::common::Env::get_int("CE_VOL_WRITE_PERIOD_SEC", 15);
+    uc.SetAssetVolatilityRepository(&vol_repo, static_cast<double>(hl),
+                                    static_cast<double>(wp));
+    cex::common::log_json("INFO", "CE asset-volatility σ enabled (T-F18-702)",
+                          {{"halflife_sec", std::to_string(hl)},
+                           {"write_period_sec", std::to_string(wp)}});
+  }
 
   // ── F-05: стартуем stale sweeper ─────────────────────────────────────────
   uc.StartStaleSweeper();

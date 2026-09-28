@@ -34,6 +34,11 @@ namespace cex::market_data::infra::clickhouse {
 class ClickHouseLiquidityCurveStorage;
 }
 
+// F-18 D1+#7 (T-F18-702): writer σ в ce_asset_volatility.
+namespace cex::market_data::infra {
+class PostgresAssetVolatilityRepository;
+}
+
 namespace cex::market_data::app {
 
 // F-05A (T-F05A-205/206/305): порты публикации + персиста векторной ликвидности.
@@ -101,6 +106,16 @@ class MarketDataUseCases {
   // F-05A (T-F05A-305 persister): consume matching.vector_clearing → CH.
   void SetVectorClearingResultStorage(IVectorClearingResultStorage* storage) {
     vector_clearing_result_storage_ = storage;
+  }
+
+  // F-18 D1+#7 (T-F18-702): включить оценку σ (EWMA волатильности mid) + запись в
+  // ce_asset_volatility. halflife_sec — полупериод time-aware EWMA. write_period_sec
+  // — троттлинг записи в PG на актив.
+  void SetAssetVolatilityRepository(infra::PostgresAssetVolatilityRepository* repo,
+                                    double halflife_sec, double write_period_sec) {
+    vol_repo_ = repo;
+    if (halflife_sec > 0.0) vol_halflife_sec_ = halflife_sec;
+    if (write_period_sec > 0.0) vol_write_period_sec_ = write_period_sec;
   }
   void OnVectorClearingResult(
       const fob::marketdata::v1::VectorClearingResult& result);
@@ -214,6 +229,29 @@ class MarketDataUseCases {
 
   // F-05: последний MarketDataSnapshot per asset (fast path для REST и GetReferencePrices)
   std::unordered_map<std::string, domain::MarketDataSnapshot> last_snapshot_;
+
+  // F-18 D1+#7 (T-F18-702): time-aware EWMA дисперсии лог-доходностей mid per актив.
+  // σ = sqrt(ewma_var) [за √сек]; ledger считает Γ=γσ²τ. var_persec = r²/Δt_sec,
+  // ewma_var = w·ewma_var + (1−w)·var_persec, w = exp(−Δt/halflife). Запись в PG
+  // троттлится vol_write_period_sec на актив. Обновляется под mu_ в ProcessSnapshot.
+  struct VolState {
+    double prev_mid{0.0};
+    double ewma_var{0.0};       // EWMA дисперсии лог-доходности за сек
+    long long samples{0};
+    long long last_ms{0};        // t предыдущего mid (для Δt)
+    long long last_write_ms{0};  // троттлинг записи в PG
+    bool init{false};
+  };
+  std::unordered_map<std::string, VolState> vol_state_;
+  infra::PostgresAssetVolatilityRepository* vol_repo_{nullptr};
+  double vol_halflife_sec_{60.0};
+  double vol_write_period_sec_{15.0};
+  // Обновляет EWMA-σ по новому mid (ПОД mu_). Возвращает true, если по троттлингу
+  // пора записать в PG; тогда *out_sigma/*out_samples заполнены. Саму запись
+  // ProcessSnapshot делает ВНЕ лока (PG не держит mu_).
+  bool UpdateAssetVolatilityLocked(const std::string& asset, double mid,
+                                   long long now_ms, double* out_sigma,
+                                   long long* out_samples);
 
   // F-05 perf: троттлинг ClickHouse в hot-path консьюмера. На каждый снапшот
   // (включая высокочастотные venue.snapshots) синхронный CH-запрос перегружал
