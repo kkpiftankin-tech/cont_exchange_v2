@@ -385,6 +385,13 @@ class LedgerUseCases {
     AgentPositionKey key;
     cex::common::Decimal sent_value{0, 0};    // отправлено, k-USDT, ЗНАКОВАЯ (знак позиции)
     cex::common::Decimal filled_value{0, 0};  // исполнено, k-USDT, ЗНАКОВАЯ
+    // F-18 #6 (T-F18-804): РАСЧЁТНАЯ комиссия зоны, зафиксированная на ЭМИССИИ (не
+    // real venue fee — та всегда taker). maker=пассивный лимит (clim), иначе тейкер
+    // (cmkt). fee_bps_snapshot — bps на момент эмиссии (устраняет гонку live-реконфига
+    // clim/cmkt между эмиссией и fill). band_fee_estimated — накопленная оценка (quote).
+    bool maker{false};
+    cex::common::Decimal fee_bps_snapshot{0, 0};
+    cex::common::Decimal band_fee_estimated{0, 0};
   };
   std::map<std::string, AgentBandHedge> band_hedges_;
   // Вариант 2 (2026-09-17): продюсер топика ce.agent.band.breach. Не владеет.

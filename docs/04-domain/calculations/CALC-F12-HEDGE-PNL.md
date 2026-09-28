@@ -118,6 +118,23 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
    названиями — но `business-rules.md` называл только net-формулу и
    приписывал её той же функции. Обновлено ниже (§ Conflict Note в
    `business-rules.md`); финальное решение — за `trading-domain-specialist`.
+
+   **РЕШЕНО (2026-09-28, F-18 #6, trading-domain-specialist):** `calculate_hedge_pnl`
+   ОСТАЁТСЯ gross (тесты `ledger_hedge_pnl_test` не ломаются). Комиссия учитывается
+   ДВУМЯ раздельными величинами, НЕ смешиваемыми:
+   - **`tot_fee`** — РЕАЛЬНАЯ комиссия venue (`report.fee_total()`), сейчас всегда
+     taker (в venues нет концепции maker-ставки даже после T-F18-803). `netAfterFees`
+     на `/hedge-pnl` = `hedge_pnl − tot_fee`.
+   - **`band_fee_estimated`** (F-18 #6, T-F18-804) — РАСЧЁТНАЯ комиссия зоны band-хеджа:
+     `Σ |Δq·P|·bps/1e4`, где `bps` = снимок `clim` (мейкер, `EXEC_STRATEGY_LIMIT`) или
+     `cmkt` (тейкер) на момент ЭМИССИИ (`AgentBandHedge.fee_bps_snapshot`,
+     `ledger_uc.cpp register_band_hedge_locked`/`apply_agent_band_report_locked`). Нужна
+     потому, что для мейкер-зоны реальная `tot_fee` (taker) занижает/искажает издержку.
+   Net band-хеджа = `gross − band_fee_estimated`. НЕ путать `band_fee_estimated` (расчётная,
+   ledger-config) с `tot_fee` (реальная, venue) — разные поля, разный источник.
+   Пропагация `band_fee_estimated` в PG/ClickHouse/BFF — следующий слой #6 (пока: расчёт
+   в ledger + лог «F-18 band hedge fee (estimated)»). Реальная maker-fee в venues —
+   отдельный смежный backlog.
 2. **Именование опорной цены.** Три имени для одной величины: `internal_price`
    (код/proto), `referenceMid` (`business-rules.md`), `reference_mid`
    (колонка PostgreSQL). Не переименовывать без ADR — просто держать в уме

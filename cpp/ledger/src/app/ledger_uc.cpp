@@ -1505,8 +1505,21 @@ void LedgerUseCases::register_band_hedge_locked(
   Decimal sent = Decimal::div(notional, Decimal{1000, 0}, 8);  // magnitude
   if (intent.side() != fob::common::v1::SIDE_SELL)
     sent = Decimal::sub(Decimal::zero(), sent);  // знак = знак позиции
-  band_hedges_[intent.intent_id()] =
-      AgentBandHedge{AgentPositionKey{agent_id, asset, venue}, sent, Decimal::zero()};
+  // F-18 #6 (T-F18-804): фиксируем зону и bps-снимок комиссии НА ЭМИССИИ. Мейкер =
+  // пассивный лимит (EXEC_STRATEGY_LIMIT, платит clim); иначе тейкер (cmkt). Снимок
+  // bps в момент эмиссии — чтобы live-реконфиг clim/cmkt не «подвинул» комиссию в
+  // полёте заявки (расчётная band-fee, НЕ real venue fee — та всегда taker).
+  // Мейкер = пассивный лимит. Сейчас band-хедж эмитит только LIMIT (мейкер) / MARKET
+  // (тейкер) — POST_ONLY (тоже мейкер-стратегия в proto) этим потоком НЕ используется;
+  // если его подключат позже — добавить в проверку (code-review #6).
+  const bool maker =
+      intent.strategy() == fob::execution::v1::EXEC_STRATEGY_LIMIT;
+  const auto fee_cfg = LoadBandFeeConfig();
+  const double fee_bps_val = maker ? fee_cfg.clim_bps : fee_cfg.cmkt_bps;
+  AgentBandHedge hedge{AgentPositionKey{agent_id, asset, venue}, sent, Decimal::zero()};
+  hedge.maker = maker;
+  hedge.fee_bps_snapshot = Decimal{static_cast<int64_t>(std::llround(fee_bps_val * 1e6)), 6};
+  band_hedges_[intent.intent_id()] = hedge;
 }
 
 // F-18: порог band как функция комиссии внешних бирж. Экономический смысл — «мёртвая
@@ -1824,6 +1837,19 @@ bool LedgerUseCases::apply_agent_band_report_locked(
     hedge.filled_value = Decimal::add(hedge.filled_value, filled_incr);
     if (agent_position_repo_)
       agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta, ts_ms);
+    // F-18 #6 (T-F18-804): РАСЧЁТНАЯ band-комиссия зоны на инкремент (quote):
+    // |Δq·P|·bps/1e4. bps зафиксирован на эмиссии (hedge.fee_bps_snapshot, maker=clim/
+    // taker=cmkt) — не зависит от live-реконфига. ОТДЕЛЬНО от real venue fee (tot_fee,
+    // всегда taker): в venues нет maker-ставки, поэтому мейкер-комиссию считаем здесь.
+    // gross hedge PnL (calculate_hedge_pnl) НЕ трогаем — net = gross − band_fee_estimated.
+    if (hedge.fee_bps_snapshot.units != 0 && average_price.units != 0) {
+      const Decimal notional = Decimal::mul(incr_filled_qty, average_price);
+      const Decimal abs_notional = Decimal::cmp(notional, Decimal::zero()) >= 0
+          ? notional : Decimal::sub(Decimal::zero(), notional);
+      const Decimal fee_incr = Decimal::div(
+          Decimal::mul(abs_notional, hedge.fee_bps_snapshot), Decimal{10000, 0}, 8);
+      hedge.band_fee_estimated = Decimal::add(hedge.band_fee_estimated, fee_incr);
+    }
   }
 
   // Терминальный статус (§A8.3): неисполненный остаток ВОЗВРАЩАЕТСЯ в позицию (был
@@ -1838,6 +1864,15 @@ bool LedgerUseCases::apply_agent_band_report_locked(
         agent_position_repo_->ApplyHedge(agent_id, asset, venue, residual,
                                          Decimal::sub(Decimal::zero(), residual), ts_ms);
     }
+    // F-18 #6 (T-F18-804): итоговая расчётная band-комиссия зоны за жизнь заявки —
+    // наблюдаемость (net = gross hedge PnL − band_fee_estimated). Отдельно от real
+    // venue fee (tot_fee, taker-only). Пропагация в PG/BFF — следующий слой #6.
+    cex::common::log_json("INFO", "F-18 band hedge fee (estimated)",
+                          {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
+                           {"zone", hedge.maker ? "maker" : "taker"},
+                           {"fee_bps", hedge.fee_bps_snapshot.to_string()},
+                           {"band_fee_estimated", hedge.band_fee_estimated.to_string()},
+                           {"filled_value", hedge.filled_value.to_string()}});
     band_hedges_.erase(it);
   }
   st.updated_at_ms = ts_ms;
