@@ -85,6 +85,35 @@ std::string DeriveChildOrderId(
   return cex::common::uuid_v4();
 }
 
+// Выполняет body(tx) в транзакции на переиспользуемом соединении conn (T-F18-601).
+// Лениво (пере)создаёт соединение; при broken_connection сбрасывает и повторяет
+// РОВНО один раз (PG рестарт/idle-таймаут). Прочие исключения → log_err + false.
+// commit — внутри, тело только формирует запрос.
+template <class Body, class LogErr>
+bool WithConn(std::unique_ptr<pqxx::connection>& conn, const std::string& dsn,
+              Body&& body, LogErr&& log_err) {
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    try {
+      if (!conn || !conn->is_open()) {
+        conn = std::make_unique<pqxx::connection>(dsn);
+      }
+      pqxx::work tx(*conn);
+      body(tx);
+      tx.commit();
+      return true;
+    } catch (const pqxx::broken_connection& ex) {
+      conn.reset();               // уронить — WithConn пересоздаст на повторе
+      if (attempt == 0) continue;  // один прозрачный reconnect
+      log_err(ex);
+      return false;
+    } catch (const std::exception& ex) {
+      log_err(ex);
+      return false;
+    }
+  }
+  return false;
+}
+
 #endif  // CEX_VENUES_HAS_LIBPQXX
 
 }  // namespace
@@ -93,12 +122,15 @@ PostgresChildOrderRepository::PostgresChildOrderRepository(
     std::string connection_string)
     : connection_string_(std::move(connection_string)) {}
 
+PostgresChildOrderRepository::~PostgresChildOrderRepository() = default;
+
 bool PostgresChildOrderRepository::EnsureSchema() {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    tx.exec(R"SQL(
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [](pqxx::work& tx) {
+        tx.exec(R"SQL(
 CREATE TABLE IF NOT EXISTS child_orders (
   child_order_id   TEXT PRIMARY KEY,
   hedge_flow_id    TEXT NOT NULL,
@@ -122,16 +154,14 @@ CREATE TABLE IF NOT EXISTS child_orders (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 )SQL");
-    tx.exec(
-        "CREATE UNIQUE INDEX IF NOT EXISTS child_orders_idem "
-        "ON child_orders (hedge_flow_id, client_order_id)");
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to ensure child_orders schema",
-                          {{"error", ex.what()}});
-    return false;
-  }
+        tx.exec(
+            "CREATE UNIQUE INDEX IF NOT EXISTS child_orders_idem "
+            "ON child_orders (hedge_flow_id, client_order_id)");
+      },
+      [](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to ensure child_orders schema",
+                              {{"error", ex.what()}});
+      });
 #else
   cex::common::log_json("WARN",
                         "PostgresChildOrderRepository disabled "
@@ -151,16 +181,17 @@ bool PostgresChildOrderRepository::InsertPending(
   const std::string hedge_flow_id =
       intent.hedge_flow_id().empty() ? intent.intent_id()
                                      : intent.hedge_flow_id();
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    // See hedgeflow_repository: pqxx version lacks std::optional helpers,
-    // use NULLIF($N, '')::NUMERIC for nullable Decimal.
-    const std::string price_str =
-        intent.has_limit_price() ? DecimalToString(intent.limit_price())
-                                 : std::string{};
-    tx.exec_params(
-        R"SQL(
+  // See hedgeflow_repository: pqxx version lacks std::optional helpers,
+  // use NULLIF($N, '')::NUMERIC for nullable Decimal.
+  const std::string price_str =
+      intent.has_limit_price() ? DecimalToString(intent.limit_price())
+                               : std::string{};
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [&](pqxx::work& tx) {
+        tx.exec_params(
+            R"SQL(
 INSERT INTO child_orders (
   child_order_id, hedge_flow_id, venue_id, symbol, side, order_type,
   qty, price, tif, client_order_id, status
@@ -171,26 +202,24 @@ INSERT INTO child_orders (
   $9, $10, 'PENDING')
 ON CONFLICT (child_order_id) DO NOTHING
 )SQL",
-        DeriveChildOrderId(intent),
-        hedge_flow_id,
-        intent.venue(),
-        intent.venue_symbol().empty() ? intent.instrument().symbol()
-                                      : intent.venue_symbol(),
-        SideToText(intent.side()),
-        StrategyToOrderType(intent.strategy()),
-        DecimalToString(intent.target_qty()),
-        price_str,
-        TifToText(intent.tif()),
-        intent.client_order_id());
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to insert child_order",
-                          {{"hedge_flow_id", intent.hedge_flow_id()},
-                           {"client_order_id", intent.client_order_id()},
-                           {"error", ex.what()}});
-    return false;
-  }
+            DeriveChildOrderId(intent),
+            hedge_flow_id,
+            intent.venue(),
+            intent.venue_symbol().empty() ? intent.instrument().symbol()
+                                          : intent.venue_symbol(),
+            SideToText(intent.side()),
+            StrategyToOrderType(intent.strategy()),
+            DecimalToString(intent.target_qty()),
+            price_str,
+            TifToText(intent.tif()),
+            intent.client_order_id());
+      },
+      [&](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to insert child_order",
+                              {{"hedge_flow_id", intent.hedge_flow_id()},
+                               {"client_order_id", intent.client_order_id()},
+                               {"error", ex.what()}});
+      });
 #else
   (void)intent;
   return false;
@@ -210,13 +239,14 @@ bool PostgresChildOrderRepository::ApplyReport(
   if (hedge_flow_id.empty()) {
     return false;
   }
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    const std::string new_status =
-        ReportStatusToChildOrderStatus(report.status());
-    tx.exec_params(
-        R"SQL(
+  const std::string new_status =
+      ReportStatusToChildOrderStatus(report.status());
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [&](pqxx::work& tx) {
+        tx.exec_params(
+            R"SQL(
 UPDATE child_orders
    SET filled_qty    = $3::NUMERIC,
        avg_price     = $4::NUMERIC,
@@ -228,25 +258,23 @@ UPDATE child_orders
  WHERE hedge_flow_id  = $1
    AND client_order_id = $2
 )SQL",
-        hedge_flow_id,
-        report.client_order_id(),
-        report.has_filled_qty() ? DecimalToString(report.filled_qty())
-                                : std::string{"0"},
-        report.has_average_price() ? DecimalToString(report.average_price())
-                                   : std::string{"0"},
-        report.venue_order_id(),
-        new_status,
-        report.has_error() ? report.error().code() : std::string{},
-        report.has_error() ? report.error().message() : std::string{});
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to apply report to child_order",
-                          {{"hedge_flow_id", report.hedge_flow_id()},
-                           {"client_order_id", report.client_order_id()},
-                           {"error", ex.what()}});
-    return false;
-  }
+            hedge_flow_id,
+            report.client_order_id(),
+            report.has_filled_qty() ? DecimalToString(report.filled_qty())
+                                    : std::string{"0"},
+            report.has_average_price() ? DecimalToString(report.average_price())
+                                       : std::string{"0"},
+            report.venue_order_id(),
+            new_status,
+            report.has_error() ? report.error().code() : std::string{},
+            report.has_error() ? report.error().message() : std::string{});
+      },
+      [&](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to apply report to child_order",
+                              {{"hedge_flow_id", report.hedge_flow_id()},
+                               {"client_order_id", report.client_order_id()},
+                               {"error", ex.what()}});
+      });
 #else
   (void)report;
   return false;

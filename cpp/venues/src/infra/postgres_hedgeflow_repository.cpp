@@ -79,6 +79,34 @@ std::string DecimalToString(const fob::common::v1::Decimal& d) {
   return cex::common::Decimal::from_proto(d).to_string();
 }
 
+// Выполняет body(tx) в транзакции на переиспользуемом соединении conn (T-F18-601).
+// Лениво (пере)создаёт соединение; при broken_connection сбрасывает и повторяет
+// РОВНО один раз. Прочие исключения → log_err + false. commit — внутри.
+template <class Body, class LogErr>
+bool WithConn(std::unique_ptr<pqxx::connection>& conn, const std::string& dsn,
+              Body&& body, LogErr&& log_err) {
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    try {
+      if (!conn || !conn->is_open()) {
+        conn = std::make_unique<pqxx::connection>(dsn);
+      }
+      pqxx::work tx(*conn);
+      body(tx);
+      tx.commit();
+      return true;
+    } catch (const pqxx::broken_connection& ex) {
+      conn.reset();
+      if (attempt == 0) continue;  // один прозрачный reconnect
+      log_err(ex);
+      return false;
+    } catch (const std::exception& ex) {
+      log_err(ex);
+      return false;
+    }
+  }
+  return false;
+}
+
 #endif  // CEX_VENUES_HAS_LIBPQXX
 
 }  // namespace
@@ -87,14 +115,17 @@ PostgresHedgeflowRepository::PostgresHedgeflowRepository(
     std::string connection_string)
     : connection_string_(std::move(connection_string)) {}
 
+PostgresHedgeflowRepository::~PostgresHedgeflowRepository() = default;
+
 bool PostgresHedgeflowRepository::EnsureSchema() {
 #ifdef CEX_VENUES_HAS_LIBPQXX
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    // Mirror of infra/postgres/init.sql DDL — keeps the C++ side
-    // self-healing if init.sql wasn't applied.
-    tx.exec(R"SQL(
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [](pqxx::work& tx) {
+        // Mirror of infra/postgres/init.sql DDL — keeps the C++ side
+        // self-healing if init.sql wasn't applied.
+        tx.exec(R"SQL(
 CREATE TABLE IF NOT EXISTS hedgeflows (
   hedge_flow_id    TEXT PRIMARY KEY,
   intent_id        TEXT NOT NULL,
@@ -119,13 +150,11 @@ CREATE TABLE IF NOT EXISTS hedgeflows (
   completed_at     TIMESTAMPTZ
 )
 )SQL");
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to ensure hedgeflows schema",
-                          {{"error", ex.what()}});
-    return false;
-  }
+      },
+      [](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to ensure hedgeflows schema",
+                              {{"error", ex.what()}});
+      });
 #else
   cex::common::log_json("WARN",
                         "PostgresHedgeflowRepository disabled "
@@ -150,21 +179,22 @@ bool PostgresHedgeflowRepository::InsertOpen(
   const std::string hedge_flow_id =
       intent.hedge_flow_id().empty() ? intent.intent_id()
                                      : intent.hedge_flow_id();
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    // pqxx of this build does not link std::optional<string> conversion
-    // helpers (undefined ref to source_location ctor). Use empty-string →
-    // NULL via NULLIF($N, '') and NULLIF($N::numeric, 'NaN') tricks
-    // instead of nullable parameters.
-    const std::string target_notional_str =
-        intent.has_target_notional() ? DecimalToString(intent.target_notional())
-                                     : std::string{};
-    const std::string reference_mid_str =
-        intent.has_reference_mid() ? DecimalToString(intent.reference_mid())
+  // pqxx of this build does not link std::optional<string> conversion
+  // helpers (undefined ref to source_location ctor). Use empty-string →
+  // NULL via NULLIF($N, '') and NULLIF($N::numeric, 'NaN') tricks
+  // instead of nullable parameters.
+  const std::string target_notional_str =
+      intent.has_target_notional() ? DecimalToString(intent.target_notional())
                                    : std::string{};
-    tx.exec_params(
-        R"SQL(
+  const std::string reference_mid_str =
+      intent.has_reference_mid() ? DecimalToString(intent.reference_mid())
+                                 : std::string{};
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [&](pqxx::work& tx) {
+        tx.exec_params(
+            R"SQL(
 INSERT INTO hedgeflows (
   hedge_flow_id, intent_id, batch_id, provider_id,
   symbol, side, target_qty, target_notional, reference_mid,
@@ -196,25 +226,23 @@ ON CONFLICT (hedge_flow_id) DO UPDATE SET
   updated_at      = now(),
   completed_at    = NULL
 )SQL",
-        hedge_flow_id,
-        intent.intent_id(),
-        intent.batch_id(),
-        intent.provider_id(),
-        intent.instrument().symbol(),
-        SideToText(intent.side()),
-        DecimalToString(intent.target_qty()),
-        target_notional_str,
-        reference_mid_str,
-        UrgencyToText(intent.urgency()),
-        intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000);
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to insert hedgeflow",
-                          {{"hedge_flow_id", intent.hedge_flow_id()},
-                           {"error", ex.what()}});
-    return false;
-  }
+            hedge_flow_id,
+            intent.intent_id(),
+            intent.batch_id(),
+            intent.provider_id(),
+            intent.instrument().symbol(),
+            SideToText(intent.side()),
+            DecimalToString(intent.target_qty()),
+            target_notional_str,
+            reference_mid_str,
+            UrgencyToText(intent.urgency()),
+            intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000);
+      },
+      [&](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to insert hedgeflow",
+                              {{"hedge_flow_id", intent.hedge_flow_id()},
+                               {"error", ex.what()}});
+      });
 #else
   (void)intent;
   return false;
@@ -232,22 +260,22 @@ bool PostgresHedgeflowRepository::ApplyReport(
   if (hedge_flow_id.empty()) {
     return false;
   }
-  try {
-    pqxx::connection connection(connection_string_);
-    pqxx::work tx(connection);
-    const std::string new_status = ReportStatusToHedgeFlowStatus(report.status());
-    const bool terminal = IsTerminalStatus(new_status);
-    const std::string filled_qty_str =
-        report.has_filled_qty() ? DecimalToString(report.filled_qty()) : "0";
-    const std::string avg_price_str =
-        report.has_average_price() ? DecimalToString(report.average_price())
-                                   : std::string{"0"};
-
-    // Recompute weighted avg_fill_price on the fly. Note: this approximates
-    // when filled_qty=0 (uses incoming avg). Sufficient for MVP; a proper
-    // weighted accumulator across multiple reports lands in PR-F12-5.
-    tx.exec_params(
-        R"SQL(
+  const std::string new_status = ReportStatusToHedgeFlowStatus(report.status());
+  const bool terminal = IsTerminalStatus(new_status);
+  const std::string filled_qty_str =
+      report.has_filled_qty() ? DecimalToString(report.filled_qty()) : "0";
+  const std::string avg_price_str =
+      report.has_average_price() ? DecimalToString(report.average_price())
+                                 : std::string{"0"};
+  std::lock_guard<std::mutex> lk(conn_mu_);
+  return WithConn(
+      conn_, connection_string_,
+      [&](pqxx::work& tx) {
+        // Recompute weighted avg_fill_price on the fly. Note: this approximates
+        // when filled_qty=0 (uses incoming avg). Sufficient for MVP; a proper
+        // weighted accumulator across multiple reports lands in PR-F12-5.
+        tx.exec_params(
+            R"SQL(
 UPDATE hedgeflows
    SET filled_qty     = filled_qty + $2::NUMERIC,
        avg_fill_price = CASE
@@ -267,21 +295,19 @@ UPDATE hedgeflows
        completed_at   = CASE WHEN $7 THEN now() ELSE completed_at END
  WHERE hedge_flow_id  = $1
 )SQL",
-        hedge_flow_id,
-        filled_qty_str,
-        avg_price_str,
-        new_status,
-        report.has_error() ? report.error().code() : std::string{},
-        report.has_error() ? report.error().message() : std::string{},
-        terminal);
-    tx.commit();
-    return true;
-  } catch (const std::exception& ex) {
-    cex::common::log_json("ERROR", "Failed to apply report to hedgeflow",
-                          {{"hedge_flow_id", report.hedge_flow_id()},
-                           {"error", ex.what()}});
-    return false;
-  }
+            hedge_flow_id,
+            filled_qty_str,
+            avg_price_str,
+            new_status,
+            report.has_error() ? report.error().code() : std::string{},
+            report.has_error() ? report.error().message() : std::string{},
+            terminal);
+      },
+      [&](const std::exception& ex) {
+        cex::common::log_json("ERROR", "Failed to apply report to hedgeflow",
+                              {{"hedge_flow_id", report.hedge_flow_id()},
+                               {"error", ex.what()}});
+      });
 #else
   (void)report;
   return false;
