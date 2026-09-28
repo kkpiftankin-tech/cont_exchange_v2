@@ -23,6 +23,10 @@
 
 namespace cex::common { class KafkaProducer; }  // fwd: только указатель в члене
 
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+namespace pqxx { class connection; }  // fwd: переиспользуемое poll-соединение (T-F18-706)
+#endif
+
 namespace cex::ledger::app {
 
 // In-memory "ledger" for MVP.
@@ -91,6 +95,16 @@ class LedgerUseCases {
                  std::shared_ptr<PositionsRepositoryPort> positions_repo,
                  std::shared_ptr<LedgerEntriesRepositoryPort> entries_repo,
                  std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo);
+
+  // = default в .cpp (там pqxx::connection полный — для деструкции poll_conn_, T-F18-706).
+  ~LedgerUseCases();
+
+  // F-18 D1+#7 (ADR-066): множитель динамического порога band по волатильности.
+  // scale = clamp((σ_ref²/σ²)/γ, vr_min, vr_max). Клэмпится ИТОГОВЫЙ scale (не только
+  // ratio) — γ-канал (общее поле capital-cap) не должен вывести порог за диапазон
+  // (domain-review HIGH). σ≤0 ⇒ 1.0 (нет масштаба). Pure/static — юнит-тестируема.
+  static double VolScaleFactor(double sigma, double sigma_ref, double gamma,
+                               double vr_min, double vr_max);
 
   // Existing methods
   fob::ledger::v1::GetBalancesResponse GetBalances(const fob::ledger::v1::GetBalancesRequest& req);
@@ -323,6 +337,16 @@ class LedgerUseCases {
   };
   std::mutex sigma_mu_;
   std::map<std::string, SigmaEntry> sigma_cache_;
+
+  // T-F18-706: переиспользуемое соединение для poll'ов LoadBandFeeConfig/LoadAssetSigma
+  // (раньше открывали свежее pqxx::connection на каждый cache-miss под mu_ батча —
+  // паттерн T-F18-601). poll_conn() (пере)создаёт под poll_conn_mu_; caller держит
+  // мьютекс на время запроса и reset'ит соединение при broken_connection.
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  std::mutex poll_conn_mu_;
+  std::unique_ptr<pqxx::connection> poll_conn_;
+  pqxx::connection& poll_conn();  // требует захваченный poll_conn_mu_
+#endif
   std::unordered_map<std::string, UserBalances> balances_; // user -> currency -> balance
   std::unordered_map<std::string, UserPositions> positions_; // user -> instrument -> position
   std::unordered_map<std::string, Reservation> reservations_; // reservation_id -> reservation

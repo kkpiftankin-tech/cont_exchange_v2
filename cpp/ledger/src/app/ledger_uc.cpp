@@ -322,6 +322,32 @@ LedgerUseCases::LedgerUseCases(
   positions_["demo-user"]["BTC/USDT"].realised_pnl = Decimal{0, 2};
 }
 
+// Определён здесь (не =default в hpp): pqxx::connection полный только в этом TU,
+// нужно для деструкции poll_conn_ (T-F18-706).
+LedgerUseCases::~LedgerUseCases() = default;
+
+// T-F18-706: множитель динамического порога band (pure, юнит-тестируем).
+double LedgerUseCases::VolScaleFactor(double sigma, double sigma_ref, double gamma,
+                                      double vr_min, double vr_max) {
+  if (!(sigma > 0.0) || !(sigma_ref > 0.0)) return 1.0;  // нет σ — без масштаба
+  const double g = std::max(1e-6, gamma);                // защита от деления на 0
+  const double ratio = (sigma_ref * sigma_ref) / (sigma * sigma);
+  double scale = ratio / g;
+  // Клэмпим ИТОГОВЫЙ scale (γ-канал тоже) — см. domain-review HIGH.
+  return std::min(vr_max, std::max(vr_min, scale));
+}
+
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+// T-F18-706: (пере)создаёт переиспользуемое poll-соединение. Требует захваченный
+// poll_conn_mu_. Reconnect при broken выполняет caller (reset + повтор на след. вызове).
+pqxx::connection& LedgerUseCases::poll_conn() {
+  if (!poll_conn_ || !poll_conn_->is_open()) {
+    poll_conn_ = std::make_unique<pqxx::connection>(postgres_dsn_);
+  }
+  return *poll_conn_;
+}
+#endif
+
 /// Прямая установка balance — для тестов и dev-инициализации.
 void LedgerUseCases::SeedBalance(const std::string& user_id,
                                  const std::string& currency,
@@ -1503,9 +1529,9 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k, gamma = def_gamma;
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!postgres_dsn_.empty()) {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);  // T-F18-706: переиспользуемое соединение
     try {
-      pqxx::connection c(postgres_dsn_);
-      pqxx::work tx(c);
+      pqxx::work tx(poll_conn());
       const pqxx::row r = tx.exec1(
           "SELECT ce_taker_fee_bps, ce_maker_fee_bps, ce_band_fee_k, gamma "
           "FROM f05a_clearing_config WHERE id=1");
@@ -1519,7 +1545,9 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
       k_band = cfg_k;  // 0 ⇒ линк выключен (флаг в detect вернёт плоский порог)
       if (cfg_gamma > 0.0) gamma = cfg_gamma;  // γ для Γ=γσ²τ (D1)
       tx.commit();
-    } catch (const std::exception&) { /* нет колонок/БД — env/дефолты */ }
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // broken/нет колонок — переподключимся на след. вызове; env/дефолты
+    }
   }
 #endif
   std::lock_guard<std::mutex> lk(band_cfg_mu_);
@@ -1551,33 +1579,38 @@ bool LedgerUseCases::LoadAssetSigma(const std::string& symbol, double* out_sigma
   }
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (postgres_dsn_.empty()) return false;
-  try {
-    pqxx::connection c(postgres_dsn_);
-    pqxx::work tx(c);
-    const pqxx::result res = tx.exec_params(
-        "SELECT sigma, samples, "
-        "  CAST(EXTRACT(EPOCH FROM (now()-updated_at))*1000 AS BIGINT) "
-        "FROM ce_asset_volatility WHERE asset=$1 AND venue='' LIMIT 1",
-        symbol);
-    tx.commit();
-    if (res.empty()) return false;
-    SigmaEntry e;
-    e.sigma = res[0][0].as<double>(0.0);
-    e.samples = res[0][1].as<long long>(0);
-    e.age_ms = res[0][2].as<long long>(0);
-    e.fetched = std::chrono::steady_clock::now();
-    e.have = true;
-    {
-      std::lock_guard<std::mutex> lk(sigma_mu_);
-      sigma_cache_[symbol] = e;
+  // poll_conn_mu_ держим ТОЛЬКО на время PG-запроса; sigma_cache_ пишем ПОСЛЕ его
+  // отпускания (как в LoadBandFeeConfig — локи не вложены; code-review T-F18-706 #1).
+  SigmaEntry e;
+  {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);  // T-F18-706: переиспользуемое соединение
+    try {
+      pqxx::work tx(poll_conn());
+      const pqxx::result res = tx.exec_params(
+          "SELECT sigma, samples, "
+          "  CAST(EXTRACT(EPOCH FROM (now()-updated_at))*1000 AS BIGINT) "
+          "FROM ce_asset_volatility WHERE asset=$1 AND venue='' LIMIT 1",
+          symbol);
+      tx.commit();
+      if (res.empty()) return false;
+      e.sigma = res[0][0].as<double>(0.0);
+      e.samples = res[0][1].as<long long>(0);
+      e.age_ms = res[0][2].as<long long>(0);
+      e.fetched = std::chrono::steady_clock::now();
+      e.have = true;
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // broken/нет колонки — переподключимся на след. вызове
+      return false;        // вызывающий на плоский порог
     }
-    if (out_sigma) *out_sigma = e.sigma;
-    if (out_samples) *out_samples = e.samples;
-    if (out_age_ms) *out_age_ms = e.age_ms;
-    return true;
-  } catch (const std::exception&) {
-    return false;  // нет колонки/БД — вызывающий на плоский порог
+  }  // poll_conn_mu_ отпущен
+  {
+    std::lock_guard<std::mutex> lk(sigma_mu_);
+    sigma_cache_[symbol] = e;
   }
+  if (out_sigma) *out_sigma = e.sigma;
+  if (out_samples) *out_samples = e.samples;
+  if (out_age_ms) *out_age_ms = e.age_ms;
+  return true;
 #else
   (void)symbol; (void)out_sigma; (void)out_samples; (void)out_age_ms;
   return false;
@@ -1662,17 +1695,12 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
         const double sref = [] { const char* v = std::getenv("CE_BAND_SIGMA_REF"); return v ? std::atof(v) : 0.0005; }();
         const double vr_min = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
         const double vr_max = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MAX"); return v ? std::atof(v) : 10.0; }();
-        const double ratio = (sref * sref) / (sigma * sigma);
-        const double gamma = std::max(1e-6, cfg.gamma);
         // τ (CE_BAND_TAU_SEC) в множитель НЕ входит намеренно: z=clim/(γσ²τ), а якорь
         // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в
         // отношении (σ_ref²/σ²)/γ. Абсолютная τ понадобится только при переходе на
-        // чистый Γ без плоского якоря (ADR-066 D1, дальнейший шаг).
-        // Клэмпим ИТОГОВЫЙ множитель (не только ratio): γ — общее поле (capital-cap,
-        // matching), при γ<1 scale=ratio/γ ушёл бы за предел 10× (до 10/γ, →∞ при γ→0).
-        // Гарантируем документированный диапазон [vr_min,vr_max] для всего масштаба.
-        double scale = ratio / gamma;
-        scale = std::min(vr_max, std::max(vr_min, scale));
+        // чистый Γ без плоского якоря (ADR-066 D1, дальнейший шаг). Клэмп ИТОГОВОГО
+        // scale (γ-канал тоже) — внутри VolScaleFactor (юнит-тест ce_band_vol_scale_test).
+        const double scale = VolScaleFactor(sigma, sref, cfg.gamma, vr_min, vr_max);
         z_lim = std::max(q_floor, z_lim * scale);
         z_mkt = std::max(z_lim, z_mkt * scale);
         band_sigma = sigma;

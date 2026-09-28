@@ -68,6 +68,21 @@ if (BUILD_TESTING)
   target_compile_options(ce_band_hedge_a7_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ce_band_hedge_a7_test COMMAND ce_band_hedge_a7_test)
 
+  # F-18 D1+#7 (T-F18-703/706): чистая функция VolScaleFactor (динамический порог).
+  add_executable(ce_band_vol_scale_test
+    tests/ce_band_vol_scale_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_vol_scale_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_vol_scale_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_vol_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_vol_scale_test COMMAND ce_band_vol_scale_test)
+
   # F-20 DoD-7 sim-book applier (pure; no PG, no Kafka).
   add_executable(ledger_sim_book_applier_test
     tests/sim_book_applier_test.cpp
