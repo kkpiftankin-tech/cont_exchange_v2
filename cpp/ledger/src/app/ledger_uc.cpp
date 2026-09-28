@@ -1488,6 +1488,9 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   };
   const double ref_cmkt = env_d("CE_BAND_REF_FEE_BPS", 10.0);      // тейкер+½спред fallback
   const double def_clim = env_d("CE_BAND_MAKER_FEE_BPS", 2.0);     // мейкер-комиссия fallback
+  // ADR-066: k_band = 1/Γ, Γ=ρ=γσ²τ (Кривые §6.4 Z̄=clim/Γ, §6.1 ρ≈γσ²τ) — тот же
+  // коэффициент, что и skew (ce_inv_skew_gamma), НЕ поле gamma (capital-cap). 1.8 —
+  // плоский прокси 1/Γ при фиксир. σ,τ (D2); per-asset Γ=γσ²τ — целевой D1 (см. #7).
   const double def_k = env_d("CE_BAND_FEE_K", 1.8);                // 1/Γ (k-USDT на bps)
   {
     std::lock_guard<std::mutex> lk(band_cfg_mu_);

@@ -994,6 +994,10 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- — покупка+продажа на двух биржах). fee_bps = ce_taker_fee_bps (fallback env).
     -- k_band в k-USDT на bps; 1.8 калибрует переводчика к ~18 при 10 bps. 0 = линк
     -- выключен (плоский env-порог). ledger поллит эту строку (живая настройка).
+    -- ADR-066: k_band = 1/Γ, где по Кривые §6.4 `Z̄=clim/Γ` и §6.1 `Γ=ρ=γσ²τ` —
+    -- ТОТ ЖЕ коэффициент риск-неприятия, что и snос якоря (skew, ce_inv_skew_gamma),
+    -- а НЕ поле `gamma` (оно — capital-cap `α=W/(γσ²τ)`). Здесь 1.8 — плоский прокси
+    -- 1/Γ при фиксированных σ,τ (D2); унификация per-asset Γ=γσ²τ — целевой D1 (см. #7).
     ce_band_fee_k      NUMERIC(38,18) NOT NULL DEFAULT 1.8,
     -- Мейкер-комиссия clim (bps) для ПАССИВНОЙ зоны трёхзонного правила (Кривые §6.4):
     -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
