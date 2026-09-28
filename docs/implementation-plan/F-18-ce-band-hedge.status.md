@@ -78,6 +78,28 @@ CE — виртуальные контрагенты двух типов: **пе
   сходится. Проверено: c+in_flight 314→~5 (у band).
 - Наблюдаемость: фронт показывает **обязательство = c_j + in_flight** (истинная позиция);
   BFF `c_total`; фильтры по c_total.
+- **A7 double-subtraction fix** (2026-09-27): `excess = |c| − z_lim` (было `− |in_flight|` —
+  остаток от Variant-B, двойное вычитание парковало c ~314). После фикса c пиннится к band.
+
+### 2.9 Throughput консьюмера venues_exec + cooldown эмиссии (2026-09-27, коммит `2e8b84cb`)
+Память: `ce-band-hedge-throughput-drift` (Update 2026-09-27).
+- Под A7 c пиннится к band → поток каждый такт пробивает → эмиссия взлетела до ~6.6/с vs
+  консьюмер ~2.8/с → бэклог `execution.intents` отрос до 37k, `in_flight` «утекал».
+- **Cooldown эмиссии** (паллиатив): per-agent `last_band_emit_ms`, не переэмитим пока прошлый
+  хедж в полёте; `CE_BAND_HEDGE_COOLDOWN_MS=8000` → эмиссия ~1.7/с < консьюмер → lag держится 0.
+- **Дренаж бэклога**: `stop venues` → >45с (группа Empty) → `rpk group seek venues_exec --to end` →
+  `start venues` → **обязательный** `reset-positions` (seek осиротит in_flight). Проверено:
+  37k→0, sum|in_flight| 348→0, |oblig| медиана 0.0/max 2.0, сквозной emit→fill→reconcile.
+
+### 2.10 Price-impact из стакана + живой разбор времён (2026-09-27)
+- **Price-impact `k ~ τ/ρ`**: k выводится из плотности стакана ρ (лоты/цена, top-10 уровней) и
+  времени восстановления τ (`CE_IMPACT_TAU_SEC=5`), `k_eff = CE_PRICE_IMPACT_K·τ/ρ`. Убирает
+  физически неверный плоский k (SOL 240bps→~0.01–0.1bps; BTC глубокий→малый). §3 спеца price-impact.
+- **Возраст ленты от биржевого времени**: `TradePrint.exchange_ms` (Unix ms, парсинг per-venue),
+  возраст = now − exchange_ms; окно матчинга остаётся на read-time.
+- **Живой разбор времён** в drill-down: `read_request_ms`/`read_response_ms` (wall-clock REST
+  запрос/ответ), `exchange_ms` (на сделку), `created_ms` — BFF отдаёт, фронт тикает `nowMs` (1с)
+  и пересчитывает возрасты вживую.
 
 ## 3. Надо сделать (follow-ups по сверке с доками)
 
