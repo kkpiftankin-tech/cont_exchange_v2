@@ -9,9 +9,11 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "infra/cex_local_lob_assembler.hpp"
+#include "app/execution_report_sink.hpp"
 #include "app/fill_diagnostics_sink.hpp"
 #include "domain/venue_adapter.hpp"
 
@@ -171,6 +173,14 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   // Опционален (nullptr ⇒ не пишем). Устанавливается в venues main. Не владеет.
   void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) { diag_sink_ = sink; }
 
+  // F-18 #5/ADR-067 (T-F18-803): приёмник follow-up ExecutionReport от
+  // резидентного (GTC) мейкер-лимита, доматчиваемого между read-циклами
+  // (progress_resting_orders_locked). Опционален (nullptr ⇒ резидентные лимиты
+  // не публикуют follow-up отчёты — эквивалент выключенного резервирования).
+  // Устанавливается в VenuesLoop (владелец Kafka-продюсеров/PG-репозиториев).
+  // Не владеет.
+  void SetExecutionReportSink(app::ExecutionReportSink* sink) { report_sink_ = sink; }
+
   // Ingest external WS events from transport driver.
   bool OnWsTextMessage(const std::string& payload);
   void OnWsPong();
@@ -221,6 +231,20 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     SteadyClock::time_point last_ce_fill_at{};
     // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.
     int64_t last_trade_key{0};
+  };
+
+  // F-18 #5/ADR-067 (T-F18-803): резидентная (GTC) мейкер-заявка band-хеджа,
+  // живущая между read-циклами RequestSnapshot. Регистрируется в
+  // ApplyRealTradeFillLocked, когда первый tick не терминален (NEW/
+  // PARTIALLY_FILLED, не marketable, TIF_GTC); доматчивается на каждом
+  // следующем снапшоте символа в progress_resting_orders_locked до цели или
+  // дедлайна (intent.timeout_ms(), выставлен risk'ом — ADR-067 §1).
+  struct RestingBandOrder {
+    fob::execution::v1::ExecutionIntent intent;
+    std::string canon_key;                 // canon_trade_key(venue_symbol) — привязка к ленте
+    cex::common::Decimal target{0, 0};      // intent.target_qty()
+    cex::common::Decimal cumulative_filled{0, 0};  // накопленный filled (КУМУЛЯТИВНО, не delta)
+    SteadyClock::time_point deadline{};     // now(при регистрации) + intent.timeout_ms()
   };
 
   struct TokenBucket {
@@ -303,6 +327,20 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
                                 domain::VenueOrderResult* out,
                                 SteadyClock::time_point now);
 
+  // F-18 #5/ADR-067 (T-F18-803): доматчивание резидентных (GTC) мейкер-лимитов
+  // символа venue_symbol против НОВЫХ (ещё не потреблённых) сделок его ленты.
+  // Вызывается из RequestSnapshot ПОСЛЕ parse_rest_trades_locked (mu_ удержан).
+  // СОБИРАЕТ (не публикует!) follow-up отчёты (кумулятивный filled_qty) при
+  // инкременте fill'а/терминализации в out_followups — публикация делается
+  // ВНЕ mu_ вызывающим (code-review: блокирующий Kafka/PG под mu_ застопорил бы
+  // SendOrder/RequestSnapshot всех символов адаптера). Терминальные заявки
+  // удаляются из resting_band_orders_.
+  using FollowUpReport = std::pair<fob::execution::v1::ExecutionIntent,
+                                   fob::execution::v1::ExecutionReport>;
+  void progress_resting_orders_locked(const std::string& venue_symbol,
+                                      SteadyClock::time_point now,
+                                      std::vector<FollowUpReport>* out_followups);
+
   std::vector<std::string> auth_headers() const;
   std::string rest_depth_url(const domain::VenueSnapshotRequest& request) const;
   std::string rest_ticker_url(const domain::VenueSnapshotRequest& request) const;
@@ -332,6 +370,9 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   std::vector<domain::VenueSubscription> subscriptions_;
   std::unordered_map<std::string, SymbolBookState> books_;
   app::FillDiagnosticsSink* diag_sink_{nullptr};  // ADR-060 sim-fill диагностика, не владеет
+  // F-18 #5/ADR-067: резидентные (GTC) мейкер-заявки band-хеджа, ключ = intent_id.
+  std::unordered_map<std::string, RestingBandOrder> resting_band_orders_;
+  app::ExecutionReportSink* report_sink_{nullptr};  // follow-up отчёты, не владеет
 
   TokenBucket rest_bucket_;
   TokenBucket ws_bucket_;

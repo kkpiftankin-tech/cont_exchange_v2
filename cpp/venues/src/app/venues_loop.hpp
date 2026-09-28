@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "app/execute_on_venue.hpp"
+#include "app/execution_report_sink.hpp"
 #include "app/fill_diagnostics_sink.hpp"
 #include "app/liquidity_curve_producer.hpp"
 #include "app/sim_execution_assembler.hpp"
@@ -66,7 +67,11 @@ struct VenueRuntimeMetrics {
 // - adapters to external venues (CCXT in other language; here MVP simulator).
 // - publish marketdata.raw
 // - consume execution.intents and publish execution.venue (+ legacy execution.reports)
-class VenuesLoop {
+// F-18 #5/ADR-067 (T-F18-803): VenuesLoop реализует ExecutionReportSink, чтобы
+// CexWsRestAdapter мог публиковать follow-up ExecutionReport резидентного
+// (GTC) мейкер-лимита ТЕМ ЖЕ кодпутём (PublishExecutionReport), что и
+// first-shot отчёт из exec_consume_loop — без расхождения Kafka/PG.
+class VenuesLoop : public ExecutionReportSink {
  public:
   explicit VenuesLoop(const std::string& brokers,
                       ISnapshotStorage* snapshot_storage = nullptr);
@@ -110,6 +115,13 @@ class VenuesLoop {
   // покрывается. nullptr допустим (диагностика отключена).
   void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink);
 
+  // F-18 #5/ADR-067 (T-F18-803) — реализация ExecutionReportSink: публикует
+  // follow-up отчёт резидентного (GTC) мейкер-лимита ТЕМ ЖЕ кодпутём
+  // (PublishExecutionReport), что и first-shot отчёт из exec_consume_loop.
+  void PublishFollowUpReport(
+      const fob::execution::v1::ExecutionIntent& intent,
+      const fob::execution::v1::ExecutionReport& report) override;
+
   // F-20 Phase 4 — live registry of active SimSessions, populated by the
   // sim.config consume loop (hot reload). Exposed so the VenueSimRouter
   // (next wiring step) can read routing decisions from it.
@@ -128,6 +140,12 @@ class VenuesLoop {
   // as a (capped) delay before publishing.
   void PublishSimExecution(const fob::execution::v1::ExecutionIntent& intent,
                            const RouteDecision& decision);
+  // F-18 #5/ADR-067 (T-F18-803) — единый код-путь публикации ExecutionReport
+  // (Normalize → liquidity_curve.ObserveExecution → execution_report_producer.Publish
+  // → child_orders.ApplyReport → hedgeflows.ApplyReport → PublishTraffic → лог).
+  // Вызывается из exec_consume_loop (first-shot) и PublishFollowUpReport (resting).
+  void PublishExecutionReport(const fob::execution::v1::ExecutionIntent& intent,
+                              const fob::execution::v1::ExecutionReport& rep);
   void connect_and_subscribe_defaults();
   domain::VenueAdapter* find_adapter(const std::string& venue_id);
   void reload_producers_locked();

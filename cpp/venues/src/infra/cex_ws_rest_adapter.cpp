@@ -51,6 +51,7 @@
 
 #include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
+#include "cex/common/uuid.hpp"
 
 namespace cex::venues::infra {
 
@@ -1041,7 +1042,10 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
       }
     }
 
-    std::lock_guard<std::mutex> lock(mu_);
+    // unique_lock (не lock_guard): follow-up отчёты resting-заявок публикуются
+    // ВНЕ mu_ — освобождаем лок перед блокирующим Kafka/PG (code-review T-F18-803).
+    std::unique_lock<std::mutex> lock(mu_);
+    std::vector<FollowUpReport> followups;
     auto parsed = parse_rest_snapshot_locked(body, normalized, now);
     if (parsed.has_value()) {
       if (ticker_ok && ticker_http_code >= 200 && ticker_http_code < 300) {
@@ -1060,6 +1064,11 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
           ts_it->second.last_trades_response_ms = trades_resp_ms;
         }
       }
+      // F-18 #5/ADR-067 (T-F18-803): доматчиваем резидентные (GTC) мейкер-лимиты
+      // band-хеджа этого символа против НОВЫХ сделок ленты, только что обновлённой
+      // parse_rest_trades_locked выше. Вызываем безусловно (не только при
+      // trades_ok), чтобы дедлайн-эскалация (EXPIRED) сработала и без новых сделок.
+      progress_resting_orders_locked(parsed->venue_symbol, now, &followups);
       last_pong_at_ = now;
       record_external_success_locked();
       cex::common::log_json("INFO", "Fetched raw CEX snapshot",
@@ -1085,6 +1094,13 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
                              {"ticker_http_code", std::to_string(ticker_http_code)},
                              {"source_file",
                               "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+      // Публикуем follow-up отчёты resting-заявок ВНЕ mu_ (блокирующий Kafka/PG).
+      lock.unlock();
+      if (report_sink_ != nullptr) {
+        for (auto& f : followups) {
+          report_sink_->PublishFollowUpReport(f.first, f.second);
+        }
+      }
       return parsed;
     }
     record_external_error_locked(now, "snapshot_parse_failed");
@@ -2174,7 +2190,11 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
                       : (single_shot
                              ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
                              : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED);
-    if (cfg_.sim_price_impact_k > 0.0 && have_book) {
+    // ADR-067 п.4 (T-F18-803 багфикс): price-impact — только для marketable
+    // (тейкер/агрессивный сброс). Пассивный резидентный лимит (мейкер-зона)
+    // своим появлением/частичным исполнением рынок не двигает (физически
+    // некорректно было начислять импакт на любой fill, включая пассивный).
+    if (cfg_.sim_price_impact_k > 0.0 && have_book && marketable) {
       auto& st = it->second;
       double dt_sec = cfg_.sim_price_impact_default_dt_sec;  // первый fill символа
       if (st.last_ce_fill_at.time_since_epoch().count() != 0)
@@ -2227,6 +2247,27 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
       st.last_ce_fill_at = now;
     }
   }
+
+  // F-18 #5/ADR-067 (T-F18-803): мейкер-зона band-хеджа (EXEC_STRATEGY_LIMIT +
+  // TIF_GTC) не терминализуется за один read-цикл, если не исполнена целиком —
+  // регистрируем/обновляем резидентную заявку, чтобы доматчить её на следующих
+  // снапшотах (progress_resting_orders_locked). marketable (тейкер, MARKET) и
+  // TIF_IOC уже терминальны выше (single_shot) и сюда не попадают.
+  if (!marketable && intent.tif() == fob::common::v1::TIF_GTC &&
+      (out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_NEW ||
+       out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED)) {
+    RestingBandOrder& entry = resting_band_orders_[intent.intent_id()];
+    entry.intent = intent;
+    entry.canon_key = key;
+    entry.target = target;
+    // Повторная регистрация того же intent_id (напр. redelivery) не должна
+    // откатить уже накопленный прогресс — берём max, не перезаписываем.
+    entry.cumulative_filled = Decimal::cmp(filled, entry.cumulative_filled) > 0
+        ? filled : entry.cumulative_filled;
+    const int64_t timeout_ms = intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000;
+    entry.deadline = now + std::chrono::milliseconds(timeout_ms);
+  }
+
   cex::common::log_json("INFO", "Sim fill vs real trades",
                         {{"service", "venues"},
                          {"venue", cfg_.venue_id},
@@ -2281,6 +2322,143 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     }
     diag.considered_trades = std::move(considered);
     try { diag_sink_->WriteFillDiagnostic(diag); } catch (...) { /* диагностика не критична */ }
+  }
+}
+
+// ============================================================================
+// progress_resting_orders_locked — F-18 #5/ADR-067 (T-F18-803).
+//
+// Доматчивает резидентные (GTC) мейкер-лимиты band-хеджа символа venue_symbol
+// против НОВЫХ (ещё не потреблённых) сделок его ленты recent_trades — тем же
+// consume-циклом (crosses_price + мутация tr.qty), что и в
+// ApplyRealTradeFillLocked, чтобы не переучитывать уже потреблённый объём.
+//
+// Вызывается из RequestSnapshot ПОСЛЕ parse_rest_trades_locked (mu_ удержан).
+//
+// filled_qty follow-up отчёта — КУМУЛЯТИВНЫЙ (не delta): ledger
+// (execution_states_[execution_state_key]) сам вычисляет delta_qty как
+// filled_qty − prev.filled_qty (ledger_uc.cpp apply_execution_report_locked).
+// venue_order_id ДЕТЕРМИНИРОВАН (simulated_order_id_prefix+client_order_id,
+// как в MakeSimulatedOrderResult) — execution_state_key стабилен между тиками,
+// иначе каждый follow-up создал бы новую FSM-запись и ledger задвоил бы fill.
+// ============================================================================
+void CexWsRestAdapter::progress_resting_orders_locked(
+    const std::string& venue_symbol, const SteadyClock::time_point now,
+    std::vector<FollowUpReport>* out_followups) {
+  using cex::common::Decimal;
+  if (resting_band_orders_.empty()) return;
+
+  const std::string canon = canon_trade_key(venue_symbol);
+  auto book_it = books_.find(canon);
+
+  for (auto it = resting_band_orders_.begin(); it != resting_band_orders_.end();) {
+    RestingBandOrder& entry = it->second;
+    if (entry.canon_key != canon) {
+      ++it;
+      continue;
+    }
+
+    const auto& intent = entry.intent;
+    const bool is_sell = intent.side() == fob::common::v1::SIDE_SELL;
+    const Decimal limit = intent.has_limit_price()
+        ? Decimal::from_proto(intent.limit_price())
+        : Decimal{0, cfg_.market_price_scale};
+    const Decimal zero_q{0, cfg_.market_qty_scale};
+    // Тот же crosses_price, что в ApplyRealTradeFillLocked (пассивный лимит:
+    // SELL исполняют сделки price>=limit, BUY — price<=limit).
+    const auto crosses_price = [&](const Decimal& price) -> bool {
+      return is_sell ? Decimal::cmp(price, limit) >= 0
+                     : Decimal::cmp(price, limit) <= 0;
+    };
+
+    const Decimal remaining = Decimal::sub(entry.target, entry.cumulative_filled);
+    Decimal tick_filled{0, cfg_.market_qty_scale};
+    Decimal tick_notional{0, cfg_.market_price_scale + cfg_.market_qty_scale};
+    if (book_it != books_.end() && Decimal::cmp(remaining, zero_q) > 0) {
+      // Тот же consume-цикл, что ApplyRealTradeFillLocked: мутирует tr.qty
+      // (потребляет реальный объём) — НЕ переучитывать уже потреблённое.
+      for (auto& tr : book_it->second.recent_trades) {
+        if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
+        if (!crosses_price(tr.price)) continue;
+        const Decimal want = Decimal::sub(remaining, tick_filled);
+        if (Decimal::cmp(want, zero_q) <= 0) break;
+        const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
+        tick_filled = Decimal::add(tick_filled, take);
+        tick_notional = Decimal::add(tick_notional, Decimal::mul(take, tr.price));
+        tr.qty = Decimal::sub(tr.qty, take);
+      }
+    }
+    if (Decimal::cmp(tick_filled, zero_q) > 0) {
+      entry.cumulative_filled = Decimal::add(entry.cumulative_filled, tick_filled);
+    }
+
+    const bool target_reached = Decimal::cmp(entry.cumulative_filled, entry.target) >= 0;
+    const bool deadline_passed = now >= entry.deadline;
+    const bool terminal = target_reached || deadline_passed;
+    const bool has_new_fill = Decimal::cmp(tick_filled, zero_q) > 0;
+
+    if (has_new_fill || terminal) {
+      fob::execution::v1::ExecutionReport report;
+      auto* meta = report.mutable_meta();
+      meta->set_event_id(cex::common::uuid_v4());
+      *meta->mutable_ts_event() = cex::common::now_ts();
+      meta->set_source("venues");
+      meta->set_correlation_id(intent.meta().correlation_id().empty()
+                                    ? intent.intent_id()
+                                    : intent.meta().correlation_id());
+      meta->set_partition_key(intent.intent_id());
+
+      report.set_report_id(cex::common::uuid_v4());
+      report.set_intent_id(intent.intent_id());
+      report.set_hedge_flow_id(intent.hedge_flow_id());
+      report.set_venue(cfg_.venue_id);
+      *report.mutable_instrument() = intent.instrument();
+      report.set_venue_symbol(intent.venue_symbol());
+      // Стабильный venue_order_id (см. MakeSimulatedOrderResult) — иначе
+      // execution_state_key(report) в ledger меняется каждый тик и filled_qty
+      // (кумулятивный) читается как новый ордер ⇒ двойной fill.
+      report.set_venue_order_id(
+          cfg_.simulated_order_id_prefix +
+          (intent.client_order_id().empty() ? intent.intent_id()
+                                             : intent.client_order_id()));
+      report.set_client_order_id(intent.client_order_id());
+      report.set_side(intent.side());
+
+      const Decimal remaining_after =
+          Decimal::sub(entry.target, entry.cumulative_filled);
+      *report.mutable_filled_qty() = entry.cumulative_filled.to_proto();
+      *report.mutable_remaining_qty() =
+          (Decimal::cmp(remaining_after, zero_q) > 0 ? remaining_after : zero_q).to_proto();
+      if (has_new_fill) {
+        // Тик-локальный VWAP (ADR-067: "average_price тик-локальный vwap ок") —
+        // ledger использует average_price только для delta-инкремента этого тика.
+        *report.mutable_average_price() =
+            Decimal::div(tick_notional, tick_filled, cfg_.market_price_scale).to_proto();
+      }
+      report.set_status(
+          target_reached ? fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED
+          : deadline_passed ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                             : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED);
+
+      cex::common::log_json(
+          "INFO", "Resting band-hedge follow-up fill",
+          {{"service", "venues"},
+           {"venue", cfg_.venue_id},
+           {"symbol", canon},
+           {"intent_id", intent.intent_id()},
+           {"tick_filled", DecimalText(tick_filled)},
+           {"cumulative_filled", DecimalText(entry.cumulative_filled)},
+           {"target", DecimalText(entry.target)},
+           {"status", std::to_string(static_cast<int>(report.status()))},
+           {"terminal", BoolText(terminal)},
+           {"source_file", "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+
+      // Собираем для публикации ВНЕ mu_ (code-review: блокирующий Kafka/PG под
+      // локом застопорил бы SendOrder/RequestSnapshot всех символов адаптера).
+      if (out_followups) out_followups->emplace_back(intent, report);
+    }
+
+    it = terminal ? resting_band_orders_.erase(it) : std::next(it);
   }
 }
 

@@ -1664,11 +1664,109 @@ void VenuesLoop::SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) {
   for (auto& adapter : adapters_) {
     if (auto* cex = dynamic_cast<infra::CexWsRestAdapter*>(adapter.get())) {
       cex->SetFillDiagnosticsSink(sink);
+      // F-18 #5/ADR-067 (T-F18-803): тот же момент — навешиваем приёмник follow-up
+      // отчётов резидентных мейкер-лимитов (VenuesLoop реализует ExecutionReportSink).
+      cex->SetExecutionReportSink(this);
       ++attached;
     }
   }
-  cex::common::log_json("INFO", "ADR-060 fill-diagnostics sink attached",
+  cex::common::log_json("INFO", "ADR-060 fill-diagnostics + resting-report sinks attached",
                         {{"cex_adapters", std::to_string(attached)}});
+}
+
+// F-18 #5/ADR-067 (T-F18-803): единый код-путь публикации ExecutionReport (вынесен
+// из exec_consume_loop). Normalize → liquidity_curve → Kafka Publish → PG child_orders
+// → PG hedgeflows (порядок важен) → traffic → лог. Вызывается для first-shot отчёта и
+// для follow-up resting-отчётов (через PublishFollowUpReport) — один путь, без
+// расхождения Kafka/PG side-effects.
+void VenuesLoop::PublishExecutionReport(
+    const fob::execution::v1::ExecutionIntent& intent,
+    const fob::execution::v1::ExecutionReport& rep_in) {
+  fob::execution::v1::ExecutionReport rep = rep_in;  // мутируем hedge_flow_id ниже
+  const std::string venue_for_event =
+      !rep.venue().empty() ? rep.venue() : intent.venue();
+
+  // F-12 / PR-F12-5: propagate hedge_flow_id from intent to report so
+  // PostgresHedgeflowRepository::ApplyReport finds the row inserted by InsertOpen.
+  if (rep.hedge_flow_id().empty() && !intent.hedge_flow_id().empty()) {
+    rep.set_hedge_flow_id(intent.hedge_flow_id());
+  }
+
+  if (rep.has_error()) {
+    (void)observability_.PublishError(
+        rep.venue().empty() ? venue_for_event : rep.venue(),
+        rep.error().message().empty() ? "ExecuteOnVenue failed"
+                                      : rep.error().message(),
+        {{"intent_id", intent.intent_id()},
+         {"code", rep.error().code()}});
+  }
+
+  try {
+    const fob::execution::v1::ExecutionReport out =
+        infra::ExecutionReportProducer::Normalize(rep);
+    if (liquidity_curve_producer_ != nullptr) {
+      liquidity_curve_producer_->ObserveExecution(intent, out);
+    }
+    const std::string rep_payload = cex::common::to_bytes(out);
+    if (execution_report_producer_ != nullptr) {
+      (void)execution_report_producer_->Publish(out);
+    }
+
+    // F-12 / IN-008 DoD-4 (PR-F12-3a): apply terminal state to PG.
+    // Order matters: child_orders FIRST (per-row update), then
+    // hedgeflows (aggregate accumulator + status promotion).
+    if (child_order_repo_ != nullptr) {
+      (void)child_order_repo_->ApplyReport(out);
+    }
+    if (hedgeflow_repo_ != nullptr) {
+      (void)hedgeflow_repo_->ApplyReport(out);
+    }
+
+    (void)observability_.PublishTraffic(
+        out.venue(), "execution.venue", rep_payload.size(), true, "outbound",
+        out.intent_id());
+
+    cex::common::log_json("INFO", "Produced execution report",
+                          {{"service", "venues"},
+                           {"component", "venue_execution_adapter"},
+                           {"participant", "Venue Execution Adapter"},
+                           {"stage", "publish_execution_report"},
+                           {"topic", "execution.venue"},
+                           {"intent_id", intent.intent_id()},
+                           {"report_id", out.report_id()},
+                           {"venue", out.venue()},
+                           {"symbol", out.instrument().symbol()},
+                           {"status", std::to_string(out.status())},
+                           {"filled_qty",
+                            out.has_filled_qty()
+                                ? cex::common::Decimal::from_proto(out.filled_qty()).to_string()
+                                : "0"},
+                           {"remaining_qty",
+                            out.has_remaining_qty()
+                                ? cex::common::Decimal::from_proto(out.remaining_qty()).to_string()
+                                : "0"},
+                           {"average_price",
+                            out.has_average_price()
+                                ? cex::common::Decimal::from_proto(out.average_price()).to_string()
+                                : "0"},
+                           {"error_code", out.has_error() ? out.error().code() : ""},
+                           {"source_file", "cpp/venues/src/app/venues_loop.cpp"}});
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Execution report post-processing threw std::exception",
+                          {{"intent_id", intent.intent_id()},
+                           {"venue", venue_for_event}, {"error", ex.what()}});
+  } catch (...) {
+    cex::common::log_json("ERROR", "Execution report post-processing threw unknown exception",
+                          {{"intent_id", intent.intent_id()}, {"venue", venue_for_event}});
+  }
+}
+
+// F-18 #5/ADR-067 (T-F18-803): ExecutionReportSink — follow-up отчёт resting-заявки
+// публикуется тем же путём, что first-shot.
+void VenuesLoop::PublishFollowUpReport(
+    const fob::execution::v1::ExecutionIntent& intent,
+    const fob::execution::v1::ExecutionReport& report) {
+  PublishExecutionReport(intent, report);
 }
 
 domain::VenueAdapter* VenuesLoop::find_adapter(const std::string& venue_id) {
@@ -2185,91 +2283,10 @@ void VenuesLoop::exec_consume_loop() {
              {"venue", venue_for_event}});
       }
 
-      // F-12 / PR-F12-5: propagate hedge_flow_id from intent to report so
-      // PostgresHedgeflowRepository::ApplyReport finds the row inserted by
-      // InsertOpen. Without this, real F-12 hedge intents fall through to
-      // intent_id-fallback which has a "|intent" suffix mismatch.
-      if (rep.hedge_flow_id().empty() && !intent.hedge_flow_id().empty()) {
-        rep.set_hedge_flow_id(intent.hedge_flow_id());
-      }
-
-      if (rep.has_error()) {
-        (void)observability_.PublishError(
-            rep.venue().empty() ? venue_for_event : rep.venue(),
-            rep.error().message().empty() ? "ExecuteOnVenue failed"
-                                          : rep.error().message(),
-            {{"intent_id", intent.intent_id()},
-             {"code", rep.error().code()}});
-      }
-
-      try {
-        const fob::execution::v1::ExecutionReport out =
-            infra::ExecutionReportProducer::Normalize(rep);
-        if (liquidity_curve_producer_ != nullptr) {
-          liquidity_curve_producer_->ObserveExecution(intent, out);
-        }
-        const std::string rep_payload = cex::common::to_bytes(out);
-        if (execution_report_producer_ != nullptr) {
-          (void)execution_report_producer_->Publish(out);
-        }
-
-        // F-12 / IN-008 DoD-4 (PR-F12-3a): apply terminal state to PG.
-        // Order matters: child_orders FIRST (per-row update), then
-        // hedgeflows (aggregate accumulator + status promotion).
-        if (child_order_repo_ != nullptr) {
-          (void)child_order_repo_->ApplyReport(out);
-        }
-        if (hedgeflow_repo_ != nullptr) {
-          (void)hedgeflow_repo_->ApplyReport(out);
-        }
-
-        (void)observability_.PublishTraffic(
-            out.venue(),
-            "execution.venue",
-            rep_payload.size(),
-            true,
-            "outbound",
-            out.intent_id());
-
-        cex::common::log_json("INFO", "Produced execution report",
-                              {{"service", "venues"},
-                               {"component", "venue_execution_adapter"},
-                               {"participant", "Venue Execution Adapter"},
-                               {"stage", "publish_execution_report"},
-                               {"topic", "execution.venue"},
-                               {"intent_id", intent.intent_id()},
-                               {"report_id", out.report_id()},
-                               {"venue", out.venue()},
-                               {"symbol", out.instrument().symbol()},
-                               {"status", std::to_string(out.status())},
-                               {"filled_qty",
-                                out.has_filled_qty()
-                                    ? cex::common::Decimal::from_proto(out.filled_qty()).to_string()
-                                    : "0"},
-                               {"remaining_qty",
-                                out.has_remaining_qty()
-                                    ? cex::common::Decimal::from_proto(out.remaining_qty()).to_string()
-                                    : "0"},
-                               {"average_price",
-                                out.has_average_price()
-                                    ? cex::common::Decimal::from_proto(out.average_price()).to_string()
-                                    : "0"},
-                               {"error_code", out.has_error() ? out.error().code() : ""},
-                               {"source_file", "cpp/venues/src/app/venues_loop.cpp"}});
-      } catch (const std::exception& ex) {
-        cex::common::log_json(
-            "ERROR",
-            "Execution report post-processing threw std::exception",
-            {{"intent_id", intent.intent_id()},
-             {"venue", rep.venue().empty() ? venue_for_event : rep.venue()},
-             {"error", ex.what()}});
-      } catch (...) {
-        cex::common::log_json(
-            "ERROR",
-            "Execution report post-processing threw unknown exception",
-            {{"intent_id", intent.intent_id()},
-             {"venue", rep.venue().empty() ? venue_for_event : rep.venue()}});
-      }
+      // F-18 #5/ADR-067 (T-F18-803): единый код-путь публикации отчёта — тот же,
+      // что для follow-up resting-отчётов (PublishFollowUpReport → PublishExecutionReport),
+      // чтобы Kafka/PG side-effects first-shot и resting-тиков не расходились.
+      PublishExecutionReport(intent, rep);
 
       // F-20 SHADOW — after the LIVE send completed above, also run the
       // simulation and publish to the isolated sim.* topics (paired with the
