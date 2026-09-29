@@ -25,6 +25,7 @@ CALC — это единица, которую можно проверить з�
 | id | величина | статус | код | экран |
 |---|---|---|---|---|
 | [CALC-F12-HEDGE-PNL](CALC-F12-HEDGE-PNL.md) | Hedge PnL (результат внешнего хеджа) | `drift` — см. карточку | `cpp/ledger/src/app/ledger_uc.cpp#calculate_hedge_pnl` | `/hedge-flows-live`, `/hedge-pnl` |
+| [CALC-CE-ANCHOR](CALC-CE-ANCHOR.md) | Общий якорь дилера `a*` и порог хеджа `Q_i` (эталон IN-017) | `partial` — структура совпадает, коэффициенты расходятся (§7) | `cpp/matching/src/app/matching_loop.cpp` (anchor_eff), `cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked` | `/ce-agents` (косвенно, Γ-порог) |
 
 `status`: `implemented` (код и документ согласованы) / `planned` (формула
 описана, кода ещё нет) / `drift` (документ и код/несколько мест кода
