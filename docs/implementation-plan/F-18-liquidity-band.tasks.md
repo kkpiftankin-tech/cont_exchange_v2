@@ -14,7 +14,7 @@
 | T-F18-L03 | ledger: `LoadAssetDepth(asset,venue)` (копия `LoadAssetSigma`, TTL-кэш, `poll_conn_`, staleness→1.0) + static `LiqScaleFactor` + static `BandTotalScale` (композиция, двойной клэмп) в `detect_and_emit_band_breach_locked` | `cpp/ledger/src/app/ledger_uc.{hpp,cpp}` | `CE_BAND_LIQ_MODE` | ✅ done |
 | T-F18-L04 | unit-тест: `LiqScaleFactor` (монотонность, clamp, `p=0.5` √2) + `BandTotalScale` (LIQ-2 двойной клэмп, LIQ-3 обе off→1.0, vol/liq-only) | `cpp/ledger/tests/ce_band_liq_scale_test.cpp` + CMake | — | ✅ done (17/17) |
 | T-F18-L05 | docs: `CALC-CE-ANCHOR` §5/§7 (ось реализована scoped), business-rules §F-18, `ce-asset-liquidity.md`, `feature.yaml`, status #7 | `docs/**` | — | ✅ done |
-| T-F18-L06 | dev-деплой (matching + ledger, ~30 мин) + force-recreate + e2e: `ce_asset_liquidity` наполняется, per-venue дифференциация band; `code-reviewer` money-path (APPROVE после блокеров) | — | — | 🔨 в работе |
+| T-F18-L06 | dev-деплой + e2e: **✅ ПОДТВЕРЖДЕНО (2026-09-30)** — `ce_asset_liquidity` наполняется matching'ом (α per-venue: BTC/uniswap 0.64…ETH/okx 1140), ledger дифференцирует band точно по формуле: SOL/okx depth346→z_mkt 36 (×2 clamp), ETH/coinbase 0.82→11.497 (×0.639), cross-pair 0.0002→9 (×0.5 clamp), нет строки→×1.0 (LIQ-4). code-review money-path пройден (блокеры закрыты). Флаги на dev ON для верификации — постоянное включение owner-gate | — | — | ✅ done |
 
 ## Инварианты (проверить в тесте + review)
 
