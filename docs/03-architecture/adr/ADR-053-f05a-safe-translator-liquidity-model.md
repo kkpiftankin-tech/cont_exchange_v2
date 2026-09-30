@@ -131,3 +131,44 @@ FOB-деградации. Тег сегмента `translator_model`: `safe_vwap
 **Высокая.** Переключение модели — env-флаг `F05A_TRANSLATOR_MODEL`; прежний
 endpoint-путь сохранён. Контрактные поля additive (можно игнорировать). Откат —
 без миграции данных.
+
+## Addendum (2026-09-30): калибровка наклона под VWAP (windowing по Q_char)
+
+**Статус addendum:** Proposed (меняет клиринговые цены ⇒ code-review money-path + owner sign-off).
+domain-review: `trading-domain-specialist`.
+
+**Проблема.** `α_ext = min_k(D_k/δ_k)` — ГЛОБАЛЬНЫЙ минимум секанса-от-mid по ВСЕЙ глубине
+стакана (`RawSideAlpha`), а не локальная величина у рабочего объёма CE-потока. Толстая
+ликвидность у touch держит VWAP близко к mid дольше по объёму ⇒ ratio раздувается ⇒ `min`
+находит огромное значение, заданное «лёгким» ближним куском книги. Итог (BTC/USDT dev):
+`α_T=27M`, `β_T=anchor²/(1e4·α_T)=0.026` — почти плоско, тогда как marginal-наклон у cliff
+(q 4.47→4.53) ≈ 22.3 quote/base (~858× круче). Линейная кривая ликвидности визуально сильно
+расходится с VWAP (жалоба владельца).
+
+**Решение (windowing + секанс).** Привязать оценку наклона к характерному объёму `Q_char`
+(= существующий cap сегмента `q_i=min(Q_i, rateCap_i)`, R-F05A-003), а не ко всей глубине:
+$$
+\beta_T^{side} = \max\!\Big(\frac{|VWAP_{side}(Q_{char})-\text{mid}|}{Q_{char}},\ \theta\cdot\frac{\text{mid}^2}{10^4\,\alpha_{ext}^{win}}\Big),\quad
+\alpha_{ext}^{win} = \min_{k:\,Q_k\le Q_{char}}\frac{D_k}{\delta_k}.
+$$
+`max` — более крутая (консервативная) из секанса VWAP и θ-haircut'нутого windowed-α; затем как
+раньше берём более тонкую сторону (bid/ask). θ-haircut сохранён как risk-conservatism.
+
+**Инварианты.** CAL-1: `β_T(Q_char)` неубывающая по `Q_char`. CAL-2: `β_T^{win} ≥ β_T^{global}`
+при равном θ (windowing только увеличивает/сохраняет наклон). CAL-3: `dead_zone_pm` (полка)
+НЕ зависит от `Q_char`/`α_ext` (считается из best_bid/ask + комиссии) — не меняется.
+
+**Числовой пример.** На данных выше: секанс на `Q_char≈4.5` ⇒ `β_T≈0.156` (~6× круче); при
+`Q_char=8` ~0.15–0.7 (~6–27×). Полное совпадение с cliff (858×) линейная Model A не даёт —
+для этого Model B (per-level, R-F05A-002), отдельное решение.
+
+**Где менять.** `cpp/venues/src/app/liquidity_curve_producer.cpp` (`RawSideAlpha` cutoff по
+`Q_char` + `SetSafeTranslator` секанс) — результат идёт в `VectorFlowSegment` → matching QP
+`P=diag(m)` ⇒ **меняет клиринговые цены**. Синхронно: `docs/04-domain/business-rules.md`
+R-F05A-008, и BFF `frontend/api/server.js` (параллельная JS-реализация наклона — либо
+продублировать windowing, либо брать `betaT` из `engine`/ClickHouse `vector_flow_segments_history`,
+устранив drift). `cpp/market_data/agent_builder.hpp` (CE-агент depth α) — та же болезнь, но
+ОТДЕЛЬНАЯ фича/тикет, в этой задаче не трогаем.
+
+**Обратимость.** За флагом (`F05A_ALPHA_WINDOW_ENABLED` или через `F05A_TRANSLATOR_MODEL`);
+off ⇒ прежний глобальный `α_ext`. Клиринг-эффект ⇒ включение только по owner sign-off.
