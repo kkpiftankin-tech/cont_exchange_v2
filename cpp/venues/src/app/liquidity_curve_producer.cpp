@@ -114,6 +114,49 @@ double RawSideAlpha(
   return alpha;
 }
 
+// F-05A #2 (ADR-053 addendum, 2026-09-30): для одной стороны стакана — СЕКАНС VWAP на
+// характерном объёме q_char (|vwap(q_char)−mid|/q_char, quote/base) + WINDOWED α (min D/δ
+// ТОЛЬКО в пределах q_char). Секанс отражает локальный наклон VWAP на рабочем объёме и не
+// разбавляется дальней «лёгкой» ликвидностью (диагноз: глобальный min ⇒ плоский β_T).
+void RawSideWindowed(
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& prices,
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& qtys,
+    double mid, bool is_bid, double q_char,
+    double* out_secant, double* out_alpha_win) {
+  double secant = 0.0, alpha_win = std::numeric_limits<double>::infinity();
+  const int n = std::min(prices.size(), qtys.size());
+  std::vector<std::pair<double, double>> lv;
+  lv.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const double p = ProtoDecimalAsDouble(prices.Get(i));
+    const double q = ProtoDecimalAsDouble(qtys.Get(i));
+    if (std::isfinite(p) && std::isfinite(q) && p > 0.0 && q > 0.0) lv.emplace_back(p, q);
+  }
+  std::sort(lv.begin(), lv.end(), [is_bid](const std::pair<double, double>& a,
+                                           const std::pair<double, double>& b) {
+    return is_bid ? (a.first > b.first) : (a.first < b.first);
+  });
+  double cum_q = 0.0, cum_n = 0.0; bool sec_set = false;
+  for (const auto& [p, q] : lv) {
+    cum_q += q; cum_n += p * q;
+    if (cum_q <= 0.0) continue;
+    const double vwap = cum_n / cum_q;
+    if (!(vwap > 0.0) || !(mid > 0.0)) continue;
+    const double delta_bps = 10000.0 * std::fabs(std::log(vwap / mid));
+    if (delta_bps > 1e-9 && cum_q <= q_char + 1e-12) {
+      const double a = cum_n / delta_bps;
+      if (std::isfinite(a) && a > 0.0 && a < alpha_win) alpha_win = a;
+    }
+    if (!sec_set && cum_q >= q_char - 1e-12) { secant = std::fabs(vwap - mid) / cum_q; sec_set = true; }
+  }
+  if (!sec_set && cum_q > 0.0) {  // q_char глубже всей книги — секанс на всей глубине
+    const double vwap = cum_n / cum_q;
+    if (vwap > 0.0 && mid > 0.0) secant = std::fabs(vwap - mid) / cum_q;
+  }
+  if (out_secant) *out_secant = secant;
+  if (out_alpha_win) *out_alpha_win = alpha_win;
+}
+
 // ADR-053: посчитать safe-translator ИЗ СЫРОГО стакана и записать в кривую.
 // Конвейер «стакан → кривая → клиринг»: наклон/anchor кладём в кривую, клиринг
 // (market_data → matching) берёт их отсюда, НЕ трогая сырой стакан.
@@ -137,12 +180,33 @@ void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
   const double a_bid = RawSideAlpha(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true, &qb);
   const double a_ask = RawSideAlpha(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false, &qa);
   if (!(qb > 0.0) || !(qa > 0.0)) return;
-  const double alpha_ext = std::min(a_bid, a_ask);
+  double alpha_ext = std::min(a_bid, a_ask);
   double alpha_t = 0.0, m = 1e-12, beta_t = 0.0;
   if (std::isfinite(alpha_ext) && alpha_ext > 0.0) {
     alpha_t = theta * alpha_ext;
     m = mid / (10000.0 * alpha_t);
     beta_t = (mid * mid) / (10000.0 * alpha_t);
+  }
+  // F-05A #2 (ADR-053 addendum): калибровка наклона под ЛОКАЛЬНЫЙ VWAP (windowing по
+  // Q_char=min(qb,qa)). β_T = max(секанс VWAP по круче стороне, θ-haircut windowed-α) —
+  // берём круче (консервативно). МЕНЯЕТ КЛИРИНГОВЫЕ ЦЕНЫ (idёт в VectorFlowSegment→QP) ⇒
+  // за флагом F05A_SLOPE_WINDOW (деф off = прежний глобальный α_ext, обратимо).
+  if (cex::common::Env::get_bool("F05A_SLOPE_WINDOW", false) && qb > 0.0 && qa > 0.0) {
+    const double q_char = std::min(qb, qa);
+    double sec_b = 0.0, aw_b = std::numeric_limits<double>::infinity();
+    double sec_a = 0.0, aw_a = std::numeric_limits<double>::infinity();
+    RawSideWindowed(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true, q_char, &sec_b, &aw_b);
+    RawSideWindowed(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false, q_char, &sec_a, &aw_a);
+    const double alpha_win = std::min(aw_b, aw_a);
+    const double beta_haircut = (std::isfinite(alpha_win) && alpha_win > 0.0 && theta > 0.0)
+                                    ? (mid * mid) / (10000.0 * theta * alpha_win) : 0.0;
+    const double beta_win = std::max(std::max(sec_b, sec_a), beta_haircut);  // круче
+    if (beta_win > 0.0) {
+      beta_t = beta_win;
+      m = beta_t / mid;
+      alpha_t = (mid * mid) / (10000.0 * beta_t);
+      if (theta > 0.0) alpha_ext = alpha_t / theta;
+    }
   }
   auto* st = curve->mutable_safe_translator();
   *st->mutable_mid() = MakeDecimal(mid, 8);

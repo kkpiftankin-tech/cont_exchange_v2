@@ -7235,10 +7235,31 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     }
   });
   const alphaT = Number.isFinite(alphaExt) ? theta * alphaExt : null;
-  const betaT = (alphaT && alphaT > 0) ? (anchor * anchor) / (10000 * alphaT) : null;
+  const betaGlobal = (alphaT && alphaT > 0) ? (anchor * anchor) / (10000 * alphaT) : null;
 
   const maxBuy = askPts.length ? Math.abs(askPts[askPts.length - 1].q) : 0;
   const maxSell = bidPts.length ? Math.abs(bidPts[bidPts.length - 1].q) : 0;
+
+  // F-05A #2 (ADR-053 addendum, 2026-09-30): наклон под ЛОКАЛЬНЫЙ VWAP. Глобальный
+  // alphaExt=min(D/δ) по всей глубине даёт слишком плоский β_T (толстая ближняя
+  // ликвидность). β_T = max(секанс VWAP на Q_char по круче стороне, θ-haircut globalβ).
+  // ЗЕРКАЛО клирингового движка (cpp/venues SetSafeTranslator) — ОБА за флагом
+  // F05A_SLOPE_WINDOW (иначе дисплей≠клиринг). Off ⇒ прежний глобальный β_T. TODO
+  // (drift, specialist): перевести дисплей на engine.betaT из ClickHouse (single source).
+  let betaT = betaGlobal;
+  const slopeWindow = String(process.env.F05A_SLOPE_WINDOW || "").toLowerCase();
+  if (slopeWindow === "1" || slopeWindow === "true" || slopeWindow === "yes") {
+    const Qchar = (maxBuy > 0 && maxSell > 0) ? Math.min(maxBuy, maxSell) : Math.max(maxBuy, maxSell);
+    const vwapSecant = (pts) => {
+      let chosen = null;
+      for (const p of pts) { if (Math.abs(p.q) >= Qchar - 1e-12) { chosen = p; break; } }
+      if (!chosen && pts.length) chosen = pts[pts.length - 1];
+      if (!chosen || !(Math.abs(chosen.q) > 0) || !(chosen.priceVwap > 0)) return 0;
+      return Math.abs(chosen.priceVwap - anchor) / Math.abs(chosen.q);  // quote/base
+    };
+    const secBeta = Math.max(vwapSecant(bidPts), vwapSecant(askPts));
+    betaT = Math.max(secBeta, betaGlobal || 0) || betaGlobal;
+  }
   const safe = [];
   if (betaT && betaT > 0 && (maxBuy + maxSell) > 0) {
     for (let i = 0; i <= 40; i++) {

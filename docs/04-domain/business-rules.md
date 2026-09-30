@@ -863,6 +863,19 @@ D_k=\sum_{i\le k}p_i v_i,\quad
 `F05A_TRANSLATOR_MODEL=log_endpoint` возвращает прежнюю формулу `Δlog(p)/Δq`.
 UI показывает `α_ext/α_T/β_T` из сегмента движка (единый источник истины).
 
+**Калибровка под локальный VWAP (windowing, ADR-053 §Addendum, F-05A #2).** Глобальный
+`α_ext=min_k D_k/|δ_k|` по ВСЕЙ глубине даёт слишком плоский `β_T` (толстая ближняя
+ликвидность разбавляет min). За флагом **`F05A_SLOPE_WINDOW`** наклон калибруется по
+рабочему объёму `Q_char=min(q_bid, q_ask)`:
+\[
+\beta_T=\max\Bigl(\max_{side}\tfrac{|VWAP_{side}(Q_{char})-\text{mid}|}{Q_{char}},\ \theta\tfrac{\text{mid}^2}{10^4\,\alpha_{ext}^{win}}\Bigr),\quad
+\alpha_{ext}^{win}=\min_{k:\,Q_k\le Q_{char}}\tfrac{D_k}{|\delta_k|}.
+\]
+Берём КРУЧЕ из секанса VWAP и θ-haircut'нутого windowed-α (консервативно). **Меняет
+клиринговые цены** (β_T → `VectorFlowSegment` → matching QP) ⇒ owner sign-off. Off (деф) ⇒
+прежний глобальный `α_ext`. Инварианты CAL-1/2/3 — [ADR-053 §Addendum](../03-architecture/adr/ADR-053-f05a-safe-translator-liquidity-model.md).
+BFF-дисплей зеркалит формулу за тем же флагом (TODO: перевести на `engine.betaT`, устранив drift).
+
 ### R-F05A-004 Clearing condition (asset balance)
 
 Клиринг требует баланса активов:
