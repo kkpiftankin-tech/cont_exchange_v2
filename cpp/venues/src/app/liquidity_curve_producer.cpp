@@ -200,7 +200,10 @@ void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
     const double alpha_win = std::min(aw_b, aw_a);
     const double beta_haircut = (std::isfinite(alpha_win) && alpha_win > 0.0 && theta > 0.0)
                                     ? (mid * mid) / (10000.0 * theta * alpha_win) : 0.0;
-    const double beta_win = std::max(std::max(sec_b, sec_a), beta_haircut);  // круче
+    // CAL-2 (β_T^win ≥ β_T^global): ПОЛ на глобальный beta_t. windowed-haircut доказуемо
+    // ≤ global (окно уже ⇒ α_win ≥ α_global ⇒ haircut ≤ β_global), поэтому без beta_t в
+    // max() секанс мог бы НЕ вытянуть наклон и клиринг стал бы ПЛОЩЕ (code-review блокер).
+    const double beta_win = std::max({sec_b, sec_a, beta_haircut, beta_t});  // круче, ≥ global
     if (beta_win > 0.0) {
       beta_t = beta_win;
       m = beta_t / mid;

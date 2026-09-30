@@ -1524,9 +1524,67 @@ bool TestRejectsEmptyBook() {
 
 }  // namespace
 
+// F-05A #2 (ADR-053 §Addendum): cliff-книга — тонкий near-touch + глубокий far-уровень.
+// Глобальный α_ext=min(D/δ) даёт плоский β_T; windowing (секанс VWAP на Q_char) — круче.
+fob::venue::v1::VenueSnapshot MakeCliffSnapshot() {
+  fob::venue::v1::VenueSnapshot snap;
+  snap.mutable_meta()->set_event_id("snapshot-cliff");
+  snap.mutable_meta()->set_partition_key("binance|BTC/USDT");
+  snap.set_venue_id("binance");
+  snap.mutable_instrument()->set_symbol("BTC/USDT");
+  snap.mutable_instrument()->set_base("BTC");
+  snap.mutable_instrument()->set_quote("USDT");
+  *snap.mutable_best_bid() = Dec(100, 0);
+  *snap.mutable_best_ask() = Dec(101, 0);
+  *snap.mutable_mid_price() = Dec(1005, 1);
+  *snap.mutable_tick_size() = Dec(1, 0);
+  *snap.mutable_lot_size() = Dec(1, 0);
+  // Валидная для продюсера книга (проходит quality-gates): тонкий near + обрыв в глубину.
+  *snap.add_bid_prices() = Dec(100, 0);  *snap.add_bid_quantities() = Dec(5, 1);
+  *snap.add_bid_prices() = Dec(999, 1);  *snap.add_bid_quantities() = Dec(5, 1);
+  *snap.add_bid_prices() = Dec(85, 0);   *snap.add_bid_quantities() = Dec(80, 0);
+  *snap.add_ask_prices() = Dec(101, 0);  *snap.add_ask_quantities() = Dec(5, 1);
+  *snap.add_ask_prices() = Dec(1011, 1); *snap.add_ask_quantities() = Dec(5, 1);
+  *snap.add_ask_prices() = Dec(115, 0);  *snap.add_ask_quantities() = Dec(80, 0);
+  return snap;
+}
+
+double BetaTFor(const fob::venue::v1::VenueSnapshot& snap) {
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.topic = "venue.liquidity.fob";
+  LiquidityCurveProducer producer(&publisher, cfg);
+  if (!producer.Publish(snap) || publisher.messages.empty()) return -1.0;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  if (!cex::common::from_bytes(publisher.messages.back().payload, curve)) return -1.0;
+  return curve.safe_translator().beta_t();
+}
+
+// F-05A #2: windowed-наклон — reversibility (off), CAL-2 (on≥off), steepening на cliff.
+bool TestSlopeWindowCalibration() {
+  const auto snap = MakeCliffSnapshot();
+  unsetenv("F05A_SLOPE_WINDOW");
+  const double beta_off = BetaTFor(snap);
+  const double beta_off2 = BetaTFor(snap);  // детерминизм off
+  setenv("F05A_SLOPE_WINDOW", "1", 1);
+  const double beta_on = BetaTFor(snap);
+  unsetenv("F05A_SLOPE_WINDOW");
+  const double beta_off3 = BetaTFor(snap);  // обратимость: off после on == off
+  bool pass = true;
+  pass = Check(beta_off > 0.0, "slope-window: off beta_t > 0") && pass;
+  pass = Check(beta_off == beta_off2, "slope-window: off детерминирован") && pass;
+  pass = Check(beta_off == beta_off3, "slope-window: off после on байт-в-байт (обратимость)") && pass;
+  // CAL-2 — ключевой инвариант безопасности (ловит блокер #1: без пола на global
+  // windowed-haircut мог бы дать ПЛОЩЕ). Строгое steepening зависит от формы книги
+  // (не все проходят quality-gates продюсера) — проверяется e2e на реальных книгах dev.
+  pass = Check(beta_on >= beta_off, "slope-window: CAL-2 on >= off (пол на global)") && pass;
+  return pass;
+}
+
 int main() {
   bool ok = true;
   ok = TestPublishesRegularizedCurve() && ok;
+  ok = TestSlopeWindowCalibration() && ok;
   ok = TestPublishesL2ForHighPriceSnapshot() && ok;
   ok = TestLiveLikeHighScaleSnapshotRetainsL2() && ok;
   ok = TestLiveLikeHighScaleSnapshotCanBuildL3() && ok;

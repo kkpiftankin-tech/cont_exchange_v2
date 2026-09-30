@@ -146,7 +146,8 @@ domain-review: `trading-domain-specialist`.
 расходится с VWAP (жалоба владельца).
 
 **Решение (windowing + секанс).** Привязать оценку наклона к характерному объёму `Q_char`
-(= существующий cap сегмента `q_i=min(Q_i, rateCap_i)`, R-F05A-003), а не ко всей глубине:
+(`Q_char = min(q_bid, q_ask)` — суммарная глубина тонкой стороны стакана; авторитетна формула
+ниже и код, не rate-cap R-F05A-003), а не ко всей глубине:
 $$
 \beta_T^{side} = \max\!\Big(\frac{|VWAP_{side}(Q_{char})-\text{mid}|}{Q_{char}},\ \theta\cdot\frac{\text{mid}^2}{10^4\,\alpha_{ext}^{win}}\Big),\quad
 \alpha_{ext}^{win} = \min_{k:\,Q_k\le Q_{char}}\frac{D_k}{\delta_k}.
@@ -170,5 +171,7 @@ R-F05A-008, и BFF `frontend/api/server.js` (параллельная JS-реа�
 устранив drift). `cpp/market_data/agent_builder.hpp` (CE-агент depth α) — та же болезнь, но
 ОТДЕЛЬНАЯ фича/тикет, в этой задаче не трогаем.
 
-**Обратимость.** За флагом (`F05A_ALPHA_WINDOW_ENABLED` или через `F05A_TRANSLATOR_MODEL`);
-off ⇒ прежний глобальный `α_ext`. Клиринг-эффект ⇒ включение только по owner sign-off.
+**Обратимость.** За флагом **`F05A_SLOPE_WINDOW`** (деф off); off ⇒ прежний глобальный `α_ext`
+байт-в-байт. Клиринг-эффект ⇒ включение только по owner sign-off. Реализация флорит `β_T` на
+глобальном `β_T` (`max({sec_b, sec_a, haircut, β_global})`) ⇒ инвариант CAL-2 (`β_T^win ≥ β_global`)
+выполняется КОНСТРУКТИВНО (code-review блокер закрыт). Unit-тесты — `liquidity_curve_producer_test.cpp`.
