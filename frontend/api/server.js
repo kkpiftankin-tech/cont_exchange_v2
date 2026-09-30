@@ -7328,6 +7328,65 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
   };
 }
 
+// F-05A #3: агрегатные линейные кривые ликвидности по ВСЕМ площадкам пары.
+// Для каждой площадки строим знаковый q(p) (buy при p>deadHigh, sell при p<deadLow,
+// 0 внутри разрыва), суммируем по площадкам на общей ценовой сетке. Возвращаем две
+// агрегатные кривые: all (все площадки) и ex (все, КРОМЕ отображаемой thisVenue).
+// Backend-агрегация (память frontend-no-domain-compute: сумма кривых — не на фронте).
+async function fetchAggregateCurves(symbol, thisVenue, ts, opts) {
+  const s = String(symbol || "").replace(/'/g, "");
+  const tnum = Number(ts);
+  const tsClause = Number.isFinite(tnum) ? " AND event_time_ms <= " + tnum : "";
+  // Список площадок с недавней кривой по паре (кап 10).
+  let venues = [];
+  try {
+    const vr = await chJsonEachRow(
+      "SELECT DISTINCT venue_id FROM " + CLICKHOUSE_DB + ".venue_liquidity_curves"
+      + " WHERE symbol = '" + s + "'" + tsClause + " LIMIT 10 FORMAT JSONEachRow");
+    venues = vr.map((x) => x.venue_id).filter(Boolean);
+  } catch (_) { return null; }
+  if (venues.length < 2) return null;  // агрегат осмыслен от 2+ площадок
+  // Дескриптор каждой площадки (переиспользуем полный расчёт кривой).
+  const descs = [];
+  for (const v of venues) {
+    try {
+      const c = await fetchVenueCurve(v, symbol, ts, opts);
+      if (c && c.betaT > 0 && c.anchor > 0 && (c.maxBuy + c.maxSell) > 0) {
+        descs.push({ venue: v, betaT: c.betaT, deadLow: c.deadLow, deadHigh: c.deadHigh,
+                     maxBuy: c.maxBuy, maxSell: c.maxSell });
+      }
+    } catch (_) { /* площадку пропускаем */ }
+  }
+  if (descs.length < 2) return null;
+  // Знаковый объём одной площадки при цене p (base): + покупка из ask, − продажа в bid.
+  const qOf = (d, p) => {
+    if (p > d.deadHigh) return Math.min(d.maxBuy, (p - d.deadHigh) / d.betaT);
+    if (p < d.deadLow) return Math.max(-d.maxSell, (p - d.deadLow) / d.betaT);
+    return 0;
+  };
+  // Общая ценовая сетка: объединение диапазонов площадок.
+  let pLo = Infinity, pHi = -Infinity;
+  for (const d of descs) {
+    pLo = Math.min(pLo, d.deadLow + (-d.maxSell) * d.betaT);
+    pHi = Math.max(pHi, d.deadHigh + d.maxBuy * d.betaT);
+  }
+  if (!(pHi > pLo)) return null;
+  const N = 80;
+  const build = (subset) => {
+    const pts = [];
+    for (let i = 0; i <= N; i++) {
+      const p = pLo + (pHi - pLo) * (i / N);
+      let q = 0;
+      for (const d of subset) q += qOf(d, p);
+      pts.push({ q, price: p });
+    }
+    return pts;
+  };
+  const all = build(descs);
+  const ex = build(descs.filter((d) => d.venue !== thisVenue));
+  return { aggAll: all, aggEx: ex, aggVenues: descs.map((d) => d.venue), aggExVenue: thisVenue };
+}
+
 const VECTOR_CLEARING_VIEW_HTML = [
   "<!doctype html><html lang='ru'><head><meta charset='utf-8'>",
   "<meta name='viewport' content='width=device-width,initial-scale=1'>",
@@ -7664,6 +7723,12 @@ async function handleVectorClearing(req, res, pathname, query) {
       };
       const curve = await fetchVenueCurve(venue, symbol, query && query.ts, opts);
       if (!curve) return writeJson(res, 404, { error: "not_found" });
+      // F-05A #3: агрегатные кривые всех площадок пары (all + all-кроме-этой). Best-effort:
+      // при ошибке/одной площадке — просто не добавляем (фронт скроет тумблеры).
+      try {
+        const agg = await fetchAggregateCurves(symbol, venue, query && query.ts, opts);
+        if (agg) Object.assign(curve, agg);
+      } catch (_) { /* агрегат опционален */ }
       return writeJson(res, 200, curve);
     } catch (err) {
       console.error("[vector-clearing] curve failed:", err.message || err);

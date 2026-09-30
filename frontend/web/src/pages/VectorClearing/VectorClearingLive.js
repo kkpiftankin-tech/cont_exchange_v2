@@ -51,6 +51,8 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showSafe, setShowSafe] = useState(true);
   const [showCe, setShowCe] = useState(true);   // CE-кривая: зона комиссии/бездействия
   const [showFob, setShowFob] = useState(false);
+  const [showAggAll, setShowAggAll] = useState(false);  // #3a: агрегат всех площадок пары
+  const [showAggEx, setShowAggEx] = useState(false);    // #3b: все площадки КРОМЕ этой
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -86,11 +88,14 @@ function LiquidityChart({ venue, symbol, ts }) {
   const deadZonePm = Number(data.deadZonePm);
   const fobBid = showFob ? (data.fobBid || []) : [];
   const fobAsk = showFob ? (data.fobAsk || []) : [];
+  // #3: агрегатные линейные кривые ликвидности (backend считает сумму по площадкам).
+  const aggAll = showAggAll ? (data.aggAll || []) : [];
+  const aggEx = showAggEx ? (data.aggEx || []) : [];
   const anchor = Number(data.anchor);
   const bestBid = Number(data.bestBid), bestAsk = Number(data.bestAsk);
   const eng = data.engine || null;
 
-  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk];
+  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk, ...aggAll, ...aggEx];
   if (!all.length) return <div className="vc-note">нет точек для графика</div>;
 
   // Масштабирование осей — это ОТРИСОВКА (не вычисление кривой).
@@ -152,6 +157,12 @@ function LiquidityChart({ venue, symbol, ts }) {
         <label className="vc-cc-field vc-cc-raw"><input type="checkbox" checked={showFob}
           disabled={!(data.fobBid || []).length && !(data.fobAsk || []).length}
           onChange={(e) => setShowFob(e.target.checked)} /> FOB</label>
+        <label className="vc-cc-field vc-cc-raw" title="Агрегатная линейная кривая ликвидности всех площадок этой пары"><input type="checkbox" checked={showAggAll}
+          disabled={!(data.aggAll || []).length}
+          onChange={(e) => setShowAggAll(e.target.checked)} /> Σ все площадки</label>
+        <label className="vc-cc-field vc-cc-raw" title="Все площадки КРОМЕ отображаемой (этой venue)"><input type="checkbox" checked={showAggEx}
+          disabled={!(data.aggEx || []).length}
+          onChange={(e) => setShowAggEx(e.target.checked)} /> Σ без этой</label>
         <span className="vc-slope-badge">β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
       </div>
       <svg width={W} height={H} className="vc-chart">
@@ -170,6 +181,8 @@ function LiquidityChart({ venue, symbol, ts }) {
         {safe.length > 0 && <polyline points={line(safe)} fill="none" stroke="#c9a0ff" strokeWidth="2.4" />}
         {ceSell.length > 0 && <polyline points={line(ceSell)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {ceBuy.length > 0 && <polyline points={line(ceBuy)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
+        {aggAll.length > 0 && <polyline points={line(aggAll)} fill="none" stroke="#7fe0e0" strokeWidth="2.2" strokeDasharray="7 3" />}
+        {aggEx.length > 0 && <polyline points={line(aggEx)} fill="none" stroke="#e08fe0" strokeWidth="2" strokeDasharray="2 3" />}
         {vwapBid.length > 0 && <polyline points={line(vwapBid)} fill="none" stroke="#2f8f66" strokeWidth="2" />}
         {vwapAsk.length > 0 && <polyline points={line(vwapAsk)} fill="none" stroke="#c07a2f" strokeWidth="2" />}
         {rawBid.length > 0 && <polyline points={line(rawBid)} fill="none" stroke="#5fd08a" strokeWidth="1.2" strokeDasharray="4 3" />}
@@ -191,6 +204,8 @@ function LiquidityChart({ venue, symbol, ts }) {
         {safe.length > 0 && <span className="vc-lg vc-lg-safe">— safe translator P(q)=anchor+β_T·q</span>}
         {(ceSell.length > 0 || ceBuy.length > 0) && <span className="vc-lg" style={{ color: '#e8c14a' }}>— CE ликвидность (2 стороны, разрыв = спред+комиссия c={fmtSig(deadZonePm)}‰, биржа не торгует)</span>}
         {(fobBid.length > 0 || fobAsk.length > 0) && <span className="vc-lg vc-lg-fob">- - FOB-кривая venue</span>}
+        {aggAll.length > 0 && <span className="vc-lg" style={{ color: '#7fe0e0' }}>— Σ ликвидность всех площадок пары ({(data.aggVenues || []).length})</span>}
+        {aggEx.length > 0 && <span className="vc-lg" style={{ color: '#e08fe0' }}>·· Σ все кроме {data.aggExVenue || 'этой'}</span>}
         <span className="vc-lg vc-lg-anchor">- - anchor ({anchorMode}) {fmt(anchor)} · спред {Number(data.spreadBps).toFixed(2)} bps</span>
         {eng && <span className="vc-lg vc-lg-safe" title="то, что реально клирится (движок market_data)">движок: β_T={fmtSig(eng.betaT)} α_T={fmtSig(eng.alphaT)} [{eng.model}]</span>}
       </div>
