@@ -7363,11 +7363,19 @@ async function fetchAggregateCurves(symbol, thisVenue, ts, opts) {
   // q_i(p) = (p − anchor_i)/β_T_i (без dead-zone, без кэпа maxBuy/maxSell). Сумма прямых
   // = прямая: q_agg(p) = (Σ 1/β_T_i)·p − Σ(anchor_i/β_T_i).
   const qOf = (d, p) => (p - d.anchor) / d.betaT;
-  // Ценовая сетка: рабочий диапазон площадок (anchor ± объём·β_T), объединение.
-  let pLo = Infinity, pHi = -Infinity;
-  for (const d of descs) {
-    pLo = Math.min(pLo, d.anchor - d.maxSell * d.betaT);
-    pHi = Math.max(pHi, d.anchor + d.maxBuy * d.betaT);
+  // Ценовая сетка = окно ОТОБРАЖАЕМОЙ площадки (чтобы агрегат был сопоставим по цене
+  // с её кривой и не растягивал ось). Fallback — объединение, если этой нет в descs.
+  const self = descs.find((d) => d.venue === thisVenue);
+  let pLo, pHi;
+  if (self) {
+    pLo = self.anchor - self.maxSell * self.betaT;
+    pHi = self.anchor + self.maxBuy * self.betaT;
+  } else {
+    pLo = Infinity; pHi = -Infinity;
+    for (const d of descs) {
+      pLo = Math.min(pLo, d.anchor - d.maxSell * d.betaT);
+      pHi = Math.max(pHi, d.anchor + d.maxBuy * d.betaT);
+    }
   }
   if (!(pHi > pLo)) return null;
   const N = 2;  // линейная кривая — достаточно двух точек (прямая)
