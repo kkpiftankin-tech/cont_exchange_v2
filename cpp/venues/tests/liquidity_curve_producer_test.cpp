@@ -1574,10 +1574,11 @@ bool TestSlopeWindowCalibration() {
   pass = Check(beta_off > 0.0, "slope-window: off beta_t > 0") && pass;
   pass = Check(beta_off == beta_off2, "slope-window: off детерминирован") && pass;
   pass = Check(beta_off == beta_off3, "slope-window: off после on байт-в-байт (обратимость)") && pass;
-  // CAL-2 — ключевой инвариант безопасности (ловит блокер #1: без пола на global
-  // windowed-haircut мог бы дать ПЛОЩЕ). Строгое steepening зависит от формы книги
-  // (не все проходят quality-gates продюсера) — проверяется e2e на реальных книгах dev.
-  pass = Check(beta_on >= beta_off, "slope-window: CAL-2 on >= off (пол на global)") && pass;
+  // on = СЕКАНС VWAP к концу глубины (трекает VWAP, НЕ пол на global). Для MakeCliffSnapshot:
+  // sec_bid=|85.185−100.5|/81≈0.189, sec_ask≈0.177 ⇒ β_on=max≈0.189. Диапазон [0.17,0.21].
+  // (прежний CAL-2 on≥off отклонён: при глубоком near-touch наклон должен быть МАЛЫМ = VWAP.)
+  pass = Check(beta_on > 0.17 && beta_on < 0.21, "slope-window: on трекает VWAP-секанс (~0.189)") && pass;
+  pass = Check(beta_on != beta_off, "slope-window: on отличается от off (калибровка применена)") && pass;
   return pass;
 }
 

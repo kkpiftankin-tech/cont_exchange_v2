@@ -145,23 +145,24 @@ domain-review: `trading-domain-specialist`.
 (q 4.47→4.53) ≈ 22.3 quote/base (~858× круче). Линейная кривая ликвидности визуально сильно
 расходится с VWAP (жалоба владельца).
 
-**Решение (windowing + секанс).** Привязать оценку наклона к характерному объёму `Q_char`
-(`Q_char = min(q_bid, q_ask)` — суммарная глубина тонкой стороны стакана; авторитетна формула
-ниже и код, не rate-cap R-F05A-003), а не ко всей глубине:
+**Решение (секанс VWAP к концу рабочего объёма).** Наклон = секанс VWAP каждой стороны к
+концу её глубины (`safe(q_max)≈VWAP(q_max)` ⇒ линия трекает VWAP), берём круче сторону:
 $$
-\beta_T^{side} = \max\!\Big(\frac{|VWAP_{side}(Q_{char})-\text{mid}|}{Q_{char}},\ \theta\cdot\frac{\text{mid}^2}{10^4\,\alpha_{ext}^{win}}\Big),\quad
-\alpha_{ext}^{win} = \min_{k:\,Q_k\le Q_{char}}\frac{D_k}{\delta_k}.
+\beta_T = \max_{side}\frac{|VWAP_{side}(q_{side})-\text{mid}|}{q_{side}},\qquad q_{bid}=q_b,\ q_{ask}=q_a.
 $$
-`max` — более крутая (консервативная) из секанса VWAP и θ-haircut'нутого windowed-α; затем как
-раньше берём более тонкую сторону (bid/ask). θ-haircut сохранён как risk-conservatism.
+БЕЗ пола на глобальный `β_T` и без θ-haircut: при ГЛУБОКОМ near-touch VWAP плоский ⇒ секанс
+малый ⇒ наклон малый (линия не растёт над плоским VWAP). Fallback на глобальный `α_ext` только
+если секанс вырожден (0). Прежний пол (CAL-2) ОТКЛОНЁН — он держал наклон круче плоского VWAP
+(фидбэк владельца: «линейная кривая сильно отличается от VWAP» при глубоком стакане).
 
-**Инварианты.** CAL-1: `β_T(Q_char)` неубывающая по `Q_char`. CAL-2: `β_T^{win} ≥ β_T^{global}`
-при равном θ (windowing только увеличивает/сохраняет наклон). CAL-3: `dead_zone_pm` (полка)
-НЕ зависит от `Q_char`/`α_ext` (считается из best_bid/ask + комиссии) — не меняется.
+**Инварианты.** CAL-3: `dead_zone_pm` (полка) НЕ зависит от наклона (из best_bid/ask + комиссии).
+**CAL-VWAP:** `β_T` = секанс VWAP ⇒ `safe(q_max) = VWAP(q_max)` на круче стороне (совпадение в
+концевой точке рабочего объёма). CAL-1/CAL-2 прежней версии сняты (пол на global противоречил
+цели «трекать VWAP»).
 
-**Числовой пример.** На данных выше: секанс на `Q_char≈4.5` ⇒ `β_T≈0.156` (~6× круче); при
-`Q_char=8` ~0.15–0.7 (~6–27×). Полное совпадение с cliff (858×) линейная Model A не даёт —
-для этого Model B (per-level, R-F05A-002), отдельное решение.
+**Числовой пример.** Глубокий near-touch (dev BTC): VWAP плоский до q≈17, затем VWAP(17)≈mid+0.94
+⇒ секанс `β_T≈0.94/17≈0.055`, `safe(17)=VWAP(17)` (было `β_T=0.144` из пола на global —
+кривая росла над плоским VWAP, gap ~1.5). Cliff-книга (тонкий near + обрыв): секанс ≈ 0.19.
 
 **Где менять.** `cpp/venues/src/app/liquidity_curve_producer.cpp` (`RawSideAlpha` cutoff по
 `Q_char` + `SetSafeTranslator` секанс) — результат идёт в `VectorFlowSegment` → matching QP
@@ -172,6 +173,7 @@ R-F05A-008, и BFF `frontend/api/server.js` (параллельная JS-реа�
 ОТДЕЛЬНАЯ фича/тикет, в этой задаче не трогаем.
 
 **Обратимость.** За флагом **`F05A_SLOPE_WINDOW`** (деф off); off ⇒ прежний глобальный `α_ext`
-байт-в-байт. Клиринг-эффект ⇒ включение только по owner sign-off. Реализация флорит `β_T` на
-глобальном `β_T` (`max({sec_b, sec_a, haircut, β_global})`) ⇒ инвариант CAL-2 (`β_T^win ≥ β_global`)
-выполняется КОНСТРУКТИВНО (code-review блокер закрыт). Unit-тесты — `liquidity_curve_producer_test.cpp`.
+байт-в-байт. Клиринг-эффект ⇒ включение только по owner sign-off. `β_T = max(sec_bid, sec_ask)`
+(секанс VWAP, без пола). BFF-дисплей берёт `β_T` из `engine`/ClickHouse (не пересчитывает —
+устранён drift). Unit-тесты (`liquidity_curve_producer_test.cpp`): обратимость off + `β_T`
+трекает VWAP-секанс (cliff-книга ≈0.19).

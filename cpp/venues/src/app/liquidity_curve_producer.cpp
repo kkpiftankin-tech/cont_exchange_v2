@@ -187,23 +187,20 @@ void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
     m = mid / (10000.0 * alpha_t);
     beta_t = (mid * mid) / (10000.0 * alpha_t);
   }
-  // F-05A #2 (ADR-053 addendum): калибровка наклона под ЛОКАЛЬНЫЙ VWAP (windowing по
-  // Q_char=min(qb,qa)). β_T = max(секанс VWAP по круче стороне, θ-haircut windowed-α) —
-  // берём круче (консервативно). МЕНЯЕТ КЛИРИНГОВЫЕ ЦЕНЫ (idёт в VectorFlowSegment→QP) ⇒
-  // за флагом F05A_SLOPE_WINDOW (деф off = прежний глобальный α_ext, обратимо).
+  // F-05A #2 (ADR-053 addendum): наклон = СЕКАНС VWAP к концу рабочего объёма каждой
+  // стороны, чтобы линейная кривая ТРЕКАЛА VWAP: β_T=max(sec_bid, sec_ask), где
+  // sec=|VWAP(q_side)−mid|/q_side по СВОЕЙ глубине ⇒ safe(q_max)≈VWAP(q_max).
+  // БЕЗ пола на global (прежний CAL-2 отклонён — владелец: при ГЛУБОКОМ near-touch VWAP
+  // плоский, значит наклон должен быть МАЛЫМ; пол на global держал кривую круче плоского
+  // VWAP). Fallback на global только если секанс вырожден (0). Глобальный α_ext=min(D/δ)
+  // по всей глубине даёт плоскую/произвольную кривую, не VWAP. МЕНЯЕТ КЛИРИНГОВЫЕ ЦЕНЫ
+  // (β_T→VectorFlowSegment→QP) ⇒ за флагом F05A_SLOPE_WINDOW (деф off, обратимо).
   if (cex::common::Env::get_bool("F05A_SLOPE_WINDOW", false) && qb > 0.0 && qa > 0.0) {
-    const double q_char = std::min(qb, qa);
     double sec_b = 0.0, aw_b = std::numeric_limits<double>::infinity();
     double sec_a = 0.0, aw_a = std::numeric_limits<double>::infinity();
-    RawSideWindowed(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true, q_char, &sec_b, &aw_b);
-    RawSideWindowed(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false, q_char, &sec_a, &aw_a);
-    const double alpha_win = std::min(aw_b, aw_a);
-    const double beta_haircut = (std::isfinite(alpha_win) && alpha_win > 0.0 && theta > 0.0)
-                                    ? (mid * mid) / (10000.0 * theta * alpha_win) : 0.0;
-    // CAL-2 (β_T^win ≥ β_T^global): ПОЛ на глобальный beta_t. windowed-haircut доказуемо
-    // ≤ global (окно уже ⇒ α_win ≥ α_global ⇒ haircut ≤ β_global), поэтому без beta_t в
-    // max() секанс мог бы НЕ вытянуть наклон и клиринг стал бы ПЛОЩЕ (code-review блокер).
-    const double beta_win = std::max({sec_b, sec_a, beta_haircut, beta_t});  // круче, ≥ global
+    RawSideWindowed(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true, qb, &sec_b, &aw_b);
+    RawSideWindowed(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false, qa, &sec_a, &aw_a);
+    const double beta_win = std::max(sec_b, sec_a);  // круче сторона; секанс = наклон VWAP
     if (beta_win > 0.0) {
       beta_t = beta_win;
       m = beta_t / mid;
