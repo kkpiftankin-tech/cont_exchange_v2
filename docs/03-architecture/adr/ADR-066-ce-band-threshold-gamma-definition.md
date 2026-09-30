@@ -233,3 +233,51 @@ F-18 #7 «ликвидностная ось band» как условие пер�
 + код-путь `LoadBandFeeConfig`/`VolScaleFactor`) — новым решением владельца.
 
 **Обратимость addendum.** Документная; O1 ничего не меняет; O2/O3 — за owner-sign-off + флагом.
+
+## D3: ликвидностная ось band (F-18 #7, scoped) — дизайн (accepted design, за флагом)
+
+Владелец выбрал (2026-09-30) scoped-вариант #7: масштабировать band по **глубине стакана**,
+поверх принятого O1 (`Γ=γσ²τ`) и волатильностной оси D1. **НЕ O2** (та требует внешней
+`Λ=λ1+λ2` из книг обеих площадок — отдельный слой). domain-review: `trading-domain-specialist`.
+
+**Формула.** Ликвидностный множитель:
+$$
+\text{LiqScale}(\text{depth}) = \mathrm{clamp}\!\left(\left(\tfrac{\text{depth}}{\text{depth}_{ref}}\right)^{p},\ lr_{min},\ lr_{max}\right),\quad p = 0.5.
+$$
+Степень `p=0.5` — по аналогии IN-017 `A∝1/√Λ ⇒ Q_i∝√Λ` (глубже ⇒ ШИРЕ band; направление
+ПРЯМОЕ, в отличие от `VolScaleFactor`, где выше σ ⇒ у́же). Композиция с волой — независимая
+мультипликативная ось + ОДИН финальный клэмп:
+$$
+\text{total\_scale} = \mathrm{clamp}\big(\text{VolScaleFactor}(\sigma,\dots)\cdot\text{LiqScale}(\text{depth}),\ tr_{min},\ tr_{max}\big),\quad z_{lim} = \max(q_{floor},\ z_{lim}^{flat}\cdot\text{total\_scale}).
+$$
+`z_mkt` аналогично; инвариант `z_mkt ≥ z_lim` сохраняется.
+
+**Переменные / env.** `depth` = `CurveEdge.depth` (α_e, тыс.USDT/‰, per `(asset,venue)` —
+совпадает с ключом band-breach); `depth_ref` = `CE_BAND_DEPTH_REF`; `lr_min/lr_max` =
+`CE_BAND_LIQ_RATIO_MIN/MAX` (реком. `[0.5, 2.0]` — у́же, чем вола `[0.1,10]`: depth — конфиг, не
+шумный EWMA); `tr_min/tr_max` = `CE_BAND_TOTAL_RATIO_MIN/MAX` (реком. `[0.1, 15]`, шире каждой оси).
+
+**Источник сигнала (вариант A′).** Владелец `depth` — **matching** (α_e — конфиг matching
+`CE_TRANSFER_ALPHA_*`/`CE_STOCK_ALPHA_*`, НЕ рыночный сигнал market_data). matching throttled-UPSERT
+пишет **новую** таблицу `ce_asset_liquidity(asset, venue, depth, updated_at)` (НЕ колонка в
+`ce_asset_volatility` — два писателя на строку = гонка UPSERT). Ledger читает `LoadAssetDepth` —
+копия паттерна `LoadAssetSigma` (TTL-кэш, переиспользуемое `poll_conn_`, staleness-fallback).
+Ноль нового транспорта (PG-poll как у σ) — тот же аргумент, что ADR-066 привёл против Kafka/gRPC.
+
+**Стабильность.** depth — конфиг, min-samples guard не нужен (в отличие от σ). Staleness-fallback:
+строки нет / `updated_at` устарел ⇒ `LiqScale=1.0` (нейтрально, поведение как до фичи). Двойной
+клэмп: (а) `LiqScale` в `[lr_min,lr_max]`; (б) итоговый `total_scale` (Vol×Liq) в `[tr_min,tr_max]`
+— не даёт двум осям, толкающим в одну сторону (низкая σ + большой α), разогнать порог за диапазон.
+
+**Инвариант LIQ-1.** `LiqScale ∈ [lr_min, lr_max]` всегда; монотонна не убывает по depth.
+Пример: `depth=2·depth_ref ⇒ raw=√2≈1.41` (порог шире на 41%); `depth=0.25·depth_ref ⇒ raw=0.5`
+(порог у́же вдвое — тонкий рынок хеджируем раньше).
+
+**Флаги / обратимость.** Читатель — `CE_BAND_LIQ_MODE` (0 деф/1), независим от `CE_BAND_GAMMA_MODE`,
+композируется с ним. Писатель — `CE_LIQ_SIGNAL_ENABLED` (паттерн `CE_VOL_ENABLED`), независим.
+Полностью обратимо: `CE_BAND_LIQ_MODE=0` ⇒ `LiqScale≡1.0`, ноль изменений поведения.
+
+**Связь с O2.** Частичная (`√`-зависимость согласована), но НЕ O2: сигнал — внутренний прокси
+(α_e, capital-depth CE-агента), не внешняя книга `Λ`. O2 (`A=σ√(2γ/Λ)` с реальной `Λ` из F-11
+`SideLiquidityCurve`) остаётся owner-gate. План реализации —
+[`F-18-liquidity-band.tasks.md`](../../implementation-plan/F-18-liquidity-band.tasks.md).
