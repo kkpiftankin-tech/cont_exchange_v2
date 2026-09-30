@@ -7352,26 +7352,25 @@ async function fetchAggregateCurves(symbol, thisVenue, ts, opts) {
     try {
       const c = await fetchVenueCurve(v, symbol, ts, opts);
       if (c && c.betaT > 0 && c.anchor > 0 && (c.maxBuy + c.maxSell) > 0) {
-        descs.push({ venue: v, betaT: c.betaT, deadLow: c.deadLow, deadHigh: c.deadHigh,
+        descs.push({ venue: v, anchor: c.anchor, betaT: c.betaT,
                      maxBuy: c.maxBuy, maxSell: c.maxSell });
       }
     } catch (_) { /* площадку пропускаем */ }
   }
   if (descs.length < 2) return null;
-  // Знаковый объём одной площадки при цене p (base): + покупка из ask, − продажа в bid.
-  const qOf = (d, p) => {
-    if (p > d.deadHigh) return Math.min(d.maxBuy, (p - d.deadHigh) / d.betaT);
-    if (p < d.deadLow) return Math.max(-d.maxSell, (p - d.deadLow) / d.betaT);
-    return 0;
-  };
-  // Общая ценовая сетка: объединение диапазонов площадок.
+  // Агрегат = сумма ЧИСТО ЛИНЕЙНЫХ функций ликвидности (фидбэк владельца: складываем
+  // линейные ликвидности БЕЗ полок ⇒ агрегат тоже линейный). Знаковый объём площадки:
+  // q_i(p) = (p − anchor_i)/β_T_i (без dead-zone, без кэпа maxBuy/maxSell). Сумма прямых
+  // = прямая: q_agg(p) = (Σ 1/β_T_i)·p − Σ(anchor_i/β_T_i).
+  const qOf = (d, p) => (p - d.anchor) / d.betaT;
+  // Ценовая сетка: рабочий диапазон площадок (anchor ± объём·β_T), объединение.
   let pLo = Infinity, pHi = -Infinity;
   for (const d of descs) {
-    pLo = Math.min(pLo, d.deadLow + (-d.maxSell) * d.betaT);
-    pHi = Math.max(pHi, d.deadHigh + d.maxBuy * d.betaT);
+    pLo = Math.min(pLo, d.anchor - d.maxSell * d.betaT);
+    pHi = Math.max(pHi, d.anchor + d.maxBuy * d.betaT);
   }
   if (!(pHi > pLo)) return null;
-  const N = 80;
+  const N = 2;  // линейная кривая — достаточно двух точек (прямая)
   const build = (subset) => {
     const pts = [];
     for (let i = 0; i <= N; i++) {
