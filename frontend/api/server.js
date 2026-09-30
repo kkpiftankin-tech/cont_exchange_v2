@@ -7285,24 +7285,26 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
   const deadZonePm = takerFeePm + halfSpreadPm;                               // c, ‰
   const deadLow = anchor > 0 ? anchor * Math.exp(-deadZonePm / 1000) : null;  // нижняя граница, цена
   const deadHigh = anchor > 0 ? anchor * Math.exp(+deadZonePm / 1000) : null; // верхняя граница, цена
-  // CE-кривая в тех же осях (signed q, price): продажа (q<0) идёт вниз от нижней
-  // границы полосы, покупка (q>0) — вверх от верхней; между ними при q=0 —
-  // вертикальный отрезок [deadLow, deadHigh] (зона бездействия, f=0).
-  const ceCurve = [];
+  // CE-кривая = ДВЕ линейные стороны ликвидности с РАЗРЫВОМ (no-trade зона), в осях
+  // (signed q, price). Разрыв = интервал цен [deadLow, deadHigh] = спред + комиссия, где
+  // биржа не торгует (объём=0): продажа (q≤0) начинается на deadLow и идёт вниз-влево;
+  // покупка (q≥0) начинается на deadHigh и идёт вверх-вправо. БЕЗ вертикали при q=0
+  // (прежний рендер «полки» вертикальным отрезком «одинаковый объём при разных ценах»
+  // был неверен — фидбэк владельца: no-trade зона — это ПРОБЕЛ между двумя кривыми).
+  const ceSell = [];  // сторона продажи, q от −maxSell до 0 (последняя точка — deadLow)
+  const ceBuy = [];   // сторона покупки, q от 0 до +maxBuy (первая точка — deadHigh)
   if (betaT && betaT > 0 && anchor > 0 && (maxBuy + maxSell) > 0) {
-    const deadBandAbs = anchor * (Math.exp(deadZonePm / 1000) - 1);  // ½-ширина полосы, цена
+    const deadBandAbs = anchor * (Math.exp(deadZonePm / 1000) - 1);  // ½-ширина зоны, цена
     const NS = 30, NB = 30;
-    for (let i = NS; i >= 1; i--) {                 // сторона продажи q<0 (дальняя→ближняя)
+    for (let i = NS; i >= 0; i--) {                 // сторона продажи q≤0 (дальняя→q=0)
       const q = -maxSell * (i / NS);
       const price = anchor - deadBandAbs + betaT * q;
-      if (price > 0) ceCurve.push({ q, price });
+      if (price > 0) ceSell.push({ q, price });
     }
-    ceCurve.push({ q: 0, price: deadLow });         // вертикаль зоны бездействия
-    ceCurve.push({ q: 0, price: deadHigh });
-    for (let i = 1; i <= NB; i++) {                 // сторона покупки q>0
+    for (let i = 0; i <= NB; i++) {                 // сторона покупки q≥0 (q=0→дальняя)
       const q = maxBuy * (i / NB);
       const price = anchor + deadBandAbs + betaT * q;
-      if (price > 0) ceCurve.push({ q, price });
+      if (price > 0) ceBuy.push({ q, price });
     }
   }
 
@@ -7320,8 +7322,8 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     vwapBid: bidPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     vwapAsk: askPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     safe, fobBid, fobAsk,
-    // CE-алгоритм: зона комиссии/бездействия (ADR-055/056)
-    deadZonePm, takerFeePm, halfSpreadPm, deadLow, deadHigh, ceCurve,
+    // CE-алгоритм: зона комиссии/бездействия (ADR-055/056) — две стороны + разрыв
+    deadZonePm, takerFeePm, halfSpreadPm, deadLow, deadHigh, ceSell, ceBuy,
     engine,   // { alphaExt, alphaT, betaT, theta, model, slope, mid } — то, что клирится
   };
 }

@@ -79,7 +79,9 @@ function LiquidityChart({ venue, symbol, ts }) {
   const vwapBid = showVwap ? (data.vwapBid || []) : [];
   const vwapAsk = showVwap ? (data.vwapAsk || []) : [];
   const safe = showSafe ? (data.safe || []) : [];   // safe-кривая в ОБЕИХ ориентациях
-  const ceCurve = showCe ? (data.ceCurve || []) : []; // CE f(σ): плоская зона |σ−σ*|≤c
+  // CE-кривая = две линейные стороны с разрывом (no-trade зона спред+комиссия), без вертикали.
+  const ceSell = showCe ? (data.ceSell || []) : [];
+  const ceBuy = showCe ? (data.ceBuy || []) : [];
   const deadLow = Number(data.deadLow), deadHigh = Number(data.deadHigh);
   const deadZonePm = Number(data.deadZonePm);
   const fobBid = showFob ? (data.fobBid || []) : [];
@@ -88,7 +90,7 @@ function LiquidityChart({ venue, symbol, ts }) {
   const bestBid = Number(data.bestBid), bestAsk = Number(data.bestAsk);
   const eng = data.engine || null;
 
-  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceCurve, ...fobBid, ...fobAsk];
+  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk];
   if (!all.length) return <div className="vc-note">нет точек для графика</div>;
 
   // Масштабирование осей — это ОТРИСОВКА (не вычисление кривой).
@@ -166,7 +168,8 @@ function LiquidityChart({ venue, symbol, ts }) {
         {fobBid.length > 0 && <polyline points={line(fobBid)} fill="none" stroke="#4fb0d8" strokeWidth="1.1" strokeDasharray="5 3" />}
         {fobAsk.length > 0 && <polyline points={line(fobAsk)} fill="none" stroke="#d88fb0" strokeWidth="1.1" strokeDasharray="5 3" />}
         {safe.length > 0 && <polyline points={line(safe)} fill="none" stroke="#c9a0ff" strokeWidth="2.4" />}
-        {ceCurve.length > 0 && <polyline points={line(ceCurve)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
+        {ceSell.length > 0 && <polyline points={line(ceSell)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
+        {ceBuy.length > 0 && <polyline points={line(ceBuy)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {vwapBid.length > 0 && <polyline points={line(vwapBid)} fill="none" stroke="#2f8f66" strokeWidth="2" />}
         {vwapAsk.length > 0 && <polyline points={line(vwapAsk)} fill="none" stroke="#c07a2f" strokeWidth="2" />}
         {rawBid.length > 0 && <polyline points={line(rawBid)} fill="none" stroke="#5fd08a" strokeWidth="1.2" strokeDasharray="4 3" />}
@@ -186,7 +189,7 @@ function LiquidityChart({ venue, symbol, ts }) {
         {vwapBid.length > 0 && <span className="vc-lg vc-lg-vwapsell">— VWAP продажа</span>}
         {vwapAsk.length > 0 && <span className="vc-lg vc-lg-vwapbuy">— VWAP покупка</span>}
         {safe.length > 0 && <span className="vc-lg vc-lg-safe">— safe translator P(q)=anchor+β_T·q</span>}
-        {ceCurve.length > 0 && <span className="vc-lg" style={{ color: '#e8c14a' }}>▨ CE зона комиссии/бездействия (|σ−σ*|≤c, c={fmtSig(deadZonePm)}‰)</span>}
+        {(ceSell.length > 0 || ceBuy.length > 0) && <span className="vc-lg" style={{ color: '#e8c14a' }}>— CE ликвидность (2 стороны, разрыв = спред+комиссия c={fmtSig(deadZonePm)}‰, биржа не торгует)</span>}
         {(fobBid.length > 0 || fobAsk.length > 0) && <span className="vc-lg vc-lg-fob">- - FOB-кривая venue</span>}
         <span className="vc-lg vc-lg-anchor">- - anchor ({anchorMode}) {fmt(anchor)} · спред {Number(data.spreadBps).toFixed(2)} bps</span>
         {eng && <span className="vc-lg vc-lg-safe" title="то, что реально клирится (движок market_data)">движок: β_T={fmtSig(eng.betaT)} α_T={fmtSig(eng.alphaT)} [{eng.model}]</span>}
