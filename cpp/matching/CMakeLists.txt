@@ -100,6 +100,7 @@ add_executable(matching
   src/infra/postgres/decimal_conversion.cpp
   src/infra/postgres/postgres_flow_order_repository.cpp
   src/infra/postgres/postgres_solver_config_repository.cpp
+  src/infra/postgres/postgres_asset_liquidity_repository.cpp
   src/infra/postgres_execution_groups_repository.cpp
   src/infra/active_grouped_orders_loader.cpp
   src/infra/postgres_child_graph_repository.cpp

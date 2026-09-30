@@ -83,6 +83,7 @@
 #include "fob/venue/v1/venue.pb.h"
 #include "infra/kafka/batch_outputs_producer.hpp"
 #include "infra/kafka/execution_intents_producer.hpp"
+#include "infra/postgres/postgres_asset_liquidity_repository.hpp"  // F-18 #7 (T-F18-L02)
 
 namespace cex::matching::app {
 
@@ -951,6 +952,20 @@ std::pair<double, double> MatchingLoop::LoadInvSkewConfig() {
   return {gamma, clamp};
 }
 
+// F-18 #7 scoped (T-F18-L02): throttle записи depth в ce_asset_liquidity. true ⇒ пора
+// писать (и обновляет last). Период CE_LIQ_WRITE_MS (деф 5с) — depth меняется редко.
+bool MatchingLoop::ShouldWriteLiquidity() {
+  const long long period_ms = cex::common::Env::get_int("CE_LIQ_WRITE_MS", 5000);
+  std::lock_guard<std::mutex> lk(liq_write_mu_);
+  const auto now = std::chrono::steady_clock::now();
+  if (liq_write_have_ &&
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - liq_write_last_).count() < period_ms)
+    return false;
+  liq_write_last_ = now;
+  liq_write_have_ = true;
+  return true;
+}
+
 // Inventory-skew: c_j всех агентов из ledger, кэш на CE_INVENTORY_SKEW_REFRESH_MS
 // (клиринг идёт часто — не дёргаем ledger каждый такт). Сбой RPC ⇒ прошлый кэш.
 std::map<std::string, double> MatchingLoop::FetchAgentPositionsCached() {
@@ -1056,6 +1071,20 @@ void MatchingLoop::on_ce_clearing_input(
     }
     quotes.push_back({q.asset(), q.venue(), anchor, d2(q.depth()), d2(q.dead_zone()),
                        q.quote()});
+  }
+
+  // F-18 #7 scoped (T-F18-L02, ADR-066 §D3): пишем depth (α_e) per (asset,venue) в
+  // ce_asset_liquidity для ликвидностной оси band (reader — ledger LoadAssetDepth).
+  // За флагом CE_LIQ_SIGNAL_ENABLED, троттлится (CE_LIQ_WRITE_MS). Best-effort —
+  // сбой БД логируется в репозитории и НЕ влияет на клиринг.
+  if (cex::common::Env::get_bool("CE_LIQ_SIGNAL_ENABLED", false) &&
+      !postgres_dsn_.empty() && ShouldWriteLiquidity()) {
+    std::vector<infra::PostgresAssetLiquidityRepository::DepthRow> rows;
+    rows.reserve(input.quotes().size());
+    for (const auto& q : input.quotes()) {
+      rows.push_back({q.asset(), q.venue(), d2(q.depth())});  // depth = α_e (тыс.USDT/‰)
+    }
+    infra::PostgresAssetLiquidityRepository(postgres_dsn_).UpsertBatch(rows);  // 1 транзакция
   }
 
   // CE_V2_GRAPH (default OFF): выбор сборщика графа. При OFF ветка v1 ниже —

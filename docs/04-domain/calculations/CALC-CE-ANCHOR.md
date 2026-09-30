@@ -92,6 +92,13 @@ $|q_i|-Q_i$ хеджируется с интенсивностью $\lambda_i A/
 `Z̄lim=c_lim/Γ`, `Γ=γσ²τ` по ADR-066) → `hedgeflows`/BFF → фронт `/ce-agents`.
 См. §7 для расхождений формул на каждом шаге.
 
+**Ликвидностная ось порога — реализована scoped (ADR-066 §D3, за флагом `CE_BAND_LIQ_MODE`):**
+`LiqScaleFactor(depth,depth_ref,0.5,…)`=`(depth/depth_ref)^0.5` и композиция
+`BandTotalScale=clamp(VolScaleFactor·LiqScale, tr_min, tr_max)` в `ledger_uc.cpp`;
+сигнал `depth`=α_e: matching `UpsertBatch`→PG `ce_asset_liquidity`→ledger `LoadAssetDepth`.
+Это ЧАСТИЧНАЯ реализация O2 (`√`-зависимость по `Q∝√Λ`), сигнал — внутренний прокси α_e,
+не внешняя `Λ`. Unit-тест `ce_band_liq_scale_test`.
+
 ## 6. Проверка
 
 Формула воспроизводится вручную по §3 (совпадает с числами статьи, теория ↔

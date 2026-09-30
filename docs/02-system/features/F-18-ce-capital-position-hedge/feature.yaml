@@ -124,6 +124,7 @@ acceptanceCriteria:
   - "AC-F18v2-16: party_type=AGENT — отдельный от CLIENT/HOUSE тип участника в ledger; позиция агента знаковая; резерв-чек (неотрицательность, как у CLIENT) к AGENT НЕ применяется."
   - "AC-F18v2-17: Перевоз (арбитражёр) — сущность {asset,src,dst,qty,eta,tariff,status}; приход учитывается на узле назначения при eta≤t; qty≤95% остатка узла-источника перед отправкой, иначе перевоз урезается/откладывается."
   - "AC-F18v2-18: Эффект полосы измерим — при q=18/30 число внешних заявок и издержки хеджа за фиксированный 30-тактовый прогон строго меньше, чем при q=0 (ориентир −63% издержек); НО без встречного клиентского потока полоса результат ухудшает (гасить нечего)."
+  - "AC-F18v2-19 (ADR-066): динамический порог band — две независимые оси масштаба поверх плоского Z̄=c/Γ, обе за флагами, обратимы. (a) Волатильностная (D1, CE_BAND_GAMMA_MODE): выше σ ⇒ уже band (VolScaleFactor, σ из ce_asset_volatility). (b) Ликвидностная (#7 scoped, CE_BAND_LIQ_MODE, ADR-066 §D3): глубже стакан ⇒ шире band (LiqScaleFactor=(depth/depth_ref)^0.5, depth=α_e из ce_asset_liquidity, writer matching). Композиция BandTotalScale=clamp(Vol·Liq, tr_min, tr_max) с финальным клэмпом; обе off ⇒ поведение как до фичи. Решение калибровки Γ=γσ²τ — O1 (ADR-066 §Addendum), НЕ тождество эталону IN-017 A=σ√(2γ/Λ); полный O2 (реальная Λ) owner-gate. Планы: F-18-dynamic-band-gamma.tasks.md, F-18-liquidity-band.tasks.md."
 
 # UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
 uxScreens:

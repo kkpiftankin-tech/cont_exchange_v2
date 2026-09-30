@@ -9,12 +9,12 @@
 
 | ID | Задача | Файлы | Флаг | Статус |
 |---|---|---|---|---|
-| T-F18-L01 | PG-схема `ce_asset_liquidity(asset, venue, depth NUMERIC, updated_at)` + индекс `(asset,venue)` + ALTER на dev | `infra/postgres/init.sql`; doc `docs/07-data/ce-asset-liquidity.md` | — | planned |
-| T-F18-L02 | matching: throttled-UPSERT `depth`=α_e per `(asset,venue)` в `ce_asset_liquidity` (паттерн EWMA-σ writer T-F18-702, но α — конфиг, без EWMA) | `cpp/matching/src/app/matching_loop.cpp` + новый repo `cpp/matching/src/infra/postgres/postgres_asset_liquidity_repository.{hpp,cpp}` | `CE_LIQ_SIGNAL_ENABLED` | planned |
-| T-F18-L03 | ledger: `LoadAssetDepth(asset,venue)` (копия `LoadAssetSigma`, TTL-кэш, `poll_conn_`, staleness→1.0) + static `LiqScaleFactor(depth,depth_ref,p,lr_min,lr_max)` + композиция `total_scale` в `detect_and_emit_band_breach_locked` (двойной клэмп) | `cpp/ledger/src/app/ledger_uc.{hpp,cpp}` | `CE_BAND_LIQ_MODE` | planned |
-| T-F18-L04 | unit-тест: `LiqScaleFactor` (монотонность, clamp `[lr_min,lr_max]`, `p=0.5` √2-пример) + `total_scale` двойной клэмп (Vol×Liq в `[tr_min,tr_max]`) | `cpp/ledger/tests/ce_band_liq_scale_test.cpp` + CMake | — | planned |
-| T-F18-L05 | docs: карточка `CALC-CE-ANCHOR` §5/§7 (ликвидностная ось — частичный O2), business-rules §F-18 (упоминание оси), `docs/07-data/ce-asset-liquidity.md` | `docs/04-domain/**`, `docs/07-data/**` | — | planned |
-| T-F18-L06 | dev-деплой (matching + ledger, ~30 мин) + force-recreate + e2e: `ce_asset_liquidity` наполняется, per-venue дифференциация band (глубокий venue ⇒ шире); `code-reviewer` money-path | — | — | planned |
+| T-F18-L01 | PG-схема `ce_asset_liquidity(asset, venue, depth NUMERIC, updated_at)` + индекс `(asset,venue)` + create на dev | `infra/postgres/init.sql`; doc `docs/07-data/ce-asset-liquidity.md` | — | ✅ done |
+| T-F18-L02 | matching: throttled-UPSERT `depth`=α_e per `(asset,venue)` в `ce_asset_liquidity` (`UpsertBatch` — 1 транзакция на батч, perf-фикс code-review) за `CE_LIQ_SIGNAL_ENABLED` | `cpp/matching/src/app/matching_loop.cpp` + repo `postgres_asset_liquidity_repository.{hpp,cpp}` | `CE_LIQ_SIGNAL_ENABLED` | ✅ done |
+| T-F18-L03 | ledger: `LoadAssetDepth(asset,venue)` (копия `LoadAssetSigma`, TTL-кэш, `poll_conn_`, staleness→1.0) + static `LiqScaleFactor` + static `BandTotalScale` (композиция, двойной клэмп) в `detect_and_emit_band_breach_locked` | `cpp/ledger/src/app/ledger_uc.{hpp,cpp}` | `CE_BAND_LIQ_MODE` | ✅ done |
+| T-F18-L04 | unit-тест: `LiqScaleFactor` (монотонность, clamp, `p=0.5` √2) + `BandTotalScale` (LIQ-2 двойной клэмп, LIQ-3 обе off→1.0, vol/liq-only) | `cpp/ledger/tests/ce_band_liq_scale_test.cpp` + CMake | — | ✅ done (17/17) |
+| T-F18-L05 | docs: `CALC-CE-ANCHOR` §5/§7 (ось реализована scoped), business-rules §F-18, `ce-asset-liquidity.md`, `feature.yaml`, status #7 | `docs/**` | — | ✅ done |
+| T-F18-L06 | dev-деплой (matching + ledger, ~30 мин) + force-recreate + e2e: `ce_asset_liquidity` наполняется, per-venue дифференциация band; `code-reviewer` money-path (APPROVE после блокеров) | — | — | 🔨 в работе |
 
 ## Инварианты (проверить в тесте + review)
 
@@ -36,3 +36,8 @@
 - Это частичная реализация O2 (`√`-зависимость согласована с `Q∝√Λ`), но сигнал — внутренний
   прокси α_e, не внешняя `Λ`. Полный O2 (реальная `Λ` из F-11 `SideLiquidityCurve`) — owner-gate.
 - После L06 обновить `F-18-ce-band-hedge.status.md` #7 (ликвидностная ось done scoped).
+- **Follow-up (perf, code-review non-blocking):** при обеих осях on `detect_and_emit_band_breach_locked`
+  делает ДВА синхронных PG round-trip (`LoadAssetSigma`+`LoadAssetDepth`) на cache-miss под глобальным
+  `mu_` — усиливает существующий D1-паттерн блокировки главного ledger-мьютекса на сетевой I/O.
+  TTL-кэш ~1с смягчает; полный фикс (async-prefetch/вынести из-под `mu_`) — отдельная задача,
+  общая с D1 (не только #7). Не блокирует scoped-фичу (за флагом).

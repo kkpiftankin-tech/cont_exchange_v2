@@ -346,6 +346,21 @@ double LedgerUseCases::VolScaleFactor(double sigma, double sigma_ref, double gam
   return std::min(vr_max, std::max(vr_min, scale));
 }
 
+double LedgerUseCases::LiqScaleFactor(double depth, double depth_ref, double p,
+                                      double lr_min, double lr_max) {
+  if (!(depth > 0.0) || !(depth_ref > 0.0)) return 1.0;  // нет глубины — без масштаба
+  // глубже стакан ⇒ ШИРЕ band; p=0.5 по IN-017 Q∝√Λ (ADR-066 §D3). Клэмп ИТОГОВЫЙ.
+  const double scale = std::pow(depth / depth_ref, p);
+  return std::min(lr_max, std::max(lr_min, scale));
+}
+
+double LedgerUseCases::BandTotalScale(double vol_scale, double liq_scale,
+                                      double tr_min, double tr_max) {
+  // Две независимые оси → один множитель + финальный клэмп (LIQ-2): не даёт двум осям,
+  // толкающим в одну сторону, разогнать порог за диапазон. Обе=1.0 ⇒ total=1.0 (LIQ-3).
+  return std::min(tr_max, std::max(tr_min, vol_scale * liq_scale));
+}
+
 #ifdef CEX_LEDGER_HAS_LIBPQXX
 // T-F18-706: (пере)создаёт переиспользуемое poll-соединение. Требует захваченный
 // poll_conn_mu_. Reconnect при broken выполняет caller (reset + повтор на след. вызове).
@@ -1639,6 +1654,59 @@ bool LedgerUseCases::LoadAssetSigma(const std::string& symbol, double* out_sigma
 #endif
 }
 
+// F-18 #7 scoped (T-F18-L03): читает depth (α_e) из ce_asset_liquidity по (asset,venue).
+// Зеркало LoadAssetSigma: TTL-кэш ~1с, poll_conn_ переиспользуемое, staleness — на стороне
+// вызывающего. Ключ кэша — "asset|venue". Нет строки/пустой DSN → false → LiqScale=1.0.
+bool LedgerUseCases::LoadAssetDepth(const std::string& asset, const std::string& venue,
+                                    double* out_depth, long long* out_age_ms) {
+  const std::string key = asset + "|" + venue;
+  {
+    std::lock_guard<std::mutex> lk(depth_mu_);
+    const auto it = depth_cache_.find(key);
+    if (it != depth_cache_.end() && it->second.have &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - it->second.fetched).count() < 1000) {
+      if (out_depth) *out_depth = it->second.depth;
+      if (out_age_ms) *out_age_ms = it->second.age_ms;
+      return true;
+    }
+  }
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (postgres_dsn_.empty()) return false;
+  DepthEntry e;
+  {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);  // переиспользуемое соединение (T-F18-706)
+    try {
+      pqxx::work tx(poll_conn());
+      const pqxx::result res = tx.exec_params(
+          "SELECT depth, "
+          "  CAST(EXTRACT(EPOCH FROM (now()-updated_at))*1000 AS BIGINT) "
+          "FROM ce_asset_liquidity WHERE asset=$1 AND venue=$2 LIMIT 1",
+          asset, venue);
+      tx.commit();
+      if (res.empty()) return false;
+      e.depth = res[0][0].as<double>(0.0);
+      e.age_ms = res[0][1].as<long long>(0);
+      e.fetched = std::chrono::steady_clock::now();
+      e.have = true;
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // broken/нет таблицы — переподключимся на след. вызове
+      return false;        // вызывающий на LiqScale=1.0
+    }
+  }  // poll_conn_mu_ отпущен
+  {
+    std::lock_guard<std::mutex> lk(depth_mu_);
+    depth_cache_[key] = e;
+  }
+  if (out_depth) *out_depth = e.depth;
+  if (out_age_ms) *out_age_ms = e.age_ms;
+  return true;
+#else
+  (void)asset; (void)venue; (void)out_depth; (void)out_age_ms;
+  return false;
+#endif
+}
+
 void LedgerUseCases::detect_and_emit_band_breach_locked(
     const AgentPositionKey& key, AgentPositionState& st,
     const std::string& batch_id, long long ts_ms) {
@@ -1698,7 +1766,9 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const bool fee_linked = cfg.k_band > 0.0 && cfg.cmkt_bps > 0.0;
   double z_lim, z_mkt;
   double band_sigma = 0.0;      // σ, применённая к порогу (0 = плоский), для лога/наблюдаемости
-  bool band_dynamic = false;    // применён ли D1-масштаб
+  bool band_dynamic = false;    // применён ли D1-масштаб (вола)
+  double band_depth = 0.0;      // depth (α_e), применённая к порогу (F-18 #7), для лога
+  bool band_liq = false;        // применён ли ликвидностный масштаб
   if (fee_linked) {
     z_lim = std::max(q_floor, cfg.k_band * cfg.clim_bps * rt);
     z_mkt = std::max(z_lim, cfg.k_band * cfg.cmkt_bps * rt);  // Z̄mkt ≥ Z̄lim всегда
@@ -1707,6 +1777,11 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     // множитель (σ_ref²/σ²)/γ, clamp [min,max]. Выше σ ⇒ уже полоса (хеджируем раньше
     // — волатильный запас не копим). Флаг CE_BAND_GAMMA_MODE (деф off = плоский).
     // Устаревшая/малосэмпловая σ ⇒ fallback на плоский порог (обратная совместимость).
+    // Две независимые мультипликативные оси масштаба порога: вола (D1) и ликвидность
+    // (#7 scoped, ADR-066 §D3). Считаем множители по отдельности, затем ОДИН финальный
+    // клэмп total_scale (LIQ-2) — не даёт двум осям (низкая σ + большой α) разогнать
+    // порог за диапазон. Обе оси off ⇒ total=1 ⇒ поведение как до фичи (LIQ-3).
+    double vol_scale = 1.0, liq_scale = 1.0;
     if (cex::common::Env::get_bool("CE_BAND_GAMMA_MODE", false)) {
       const std::string symbol = asset + (st.quote.empty() ? numeraire : st.quote);
       double sigma = 0.0; long long ssamples = 0, sage_ms = 0;
@@ -1718,16 +1793,35 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
         const double vr_min = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
         const double vr_max = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MAX"); return v ? std::atof(v) : 10.0; }();
         // τ (CE_BAND_TAU_SEC) в множитель НЕ входит намеренно: z=clim/(γσ²τ), а якорь
-        // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в
-        // отношении (σ_ref²/σ²)/γ. Абсолютная τ понадобится только при переходе на
-        // чистый Γ без плоского якоря (ADR-066 D1, дальнейший шаг). Клэмп ИТОГОВОГО
-        // scale (γ-канал тоже) — внутри VolScaleFactor (юнит-тест ce_band_vol_scale_test).
-        const double scale = VolScaleFactor(sigma, sref, cfg.gamma, vr_min, vr_max);
-        z_lim = std::max(q_floor, z_lim * scale);
-        z_mkt = std::max(z_lim, z_mkt * scale);
+        // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в отношении.
+        // Клэмп scale (γ-канал тоже) — внутри VolScaleFactor (юнит ce_band_vol_scale_test).
+        vol_scale = VolScaleFactor(sigma, sref, cfg.gamma, vr_min, vr_max);
         band_sigma = sigma;
         band_dynamic = true;
       }
+    }
+    // F-18 #7 scoped (T-F18-L03, ADR-066 §D3): ликвидностная ось — глубже стакан ⇒ ШИРЕ
+    // band. depth=α_e из ce_asset_liquidity (writer matching). Staleness/нет строки ⇒
+    // LiqScale=1.0 (нейтрально, LIQ-4). Флаг CE_BAND_LIQ_MODE, независим от γ-моды.
+    if (cex::common::Env::get_bool("CE_BAND_LIQ_MODE", false)) {
+      double depth = 0.0; long long dage_ms = 0;
+      const long long dstale_ms = cex::common::Env::get_int("CE_BAND_DEPTH_STALE_MS", 120000);
+      if (LoadAssetDepth(asset, venue, &depth, &dage_ms) && depth > 0.0 &&
+          dage_ms >= 0 && dage_ms < dstale_ms) {
+        const double dref = [] { const char* v = std::getenv("CE_BAND_DEPTH_REF"); return v ? std::atof(v) : 1.0; }();
+        const double lr_min = [] { const char* v = std::getenv("CE_BAND_LIQ_RATIO_MIN"); return v ? std::atof(v) : 0.5; }();
+        const double lr_max = [] { const char* v = std::getenv("CE_BAND_LIQ_RATIO_MAX"); return v ? std::atof(v) : 2.0; }();
+        liq_scale = LiqScaleFactor(depth, dref, 0.5, lr_min, lr_max);
+        band_depth = depth;
+        band_liq = true;
+      }
+    }
+    if (band_dynamic || band_liq) {
+      const double tr_min = [] { const char* v = std::getenv("CE_BAND_TOTAL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
+      const double tr_max = [] { const char* v = std::getenv("CE_BAND_TOTAL_RATIO_MAX"); return v ? std::atof(v) : 15.0; }();
+      const double total_scale = BandTotalScale(vol_scale, liq_scale, tr_min, tr_max);
+      z_lim = std::max(q_floor, z_lim * total_scale);
+      z_mkt = std::max(z_lim, z_mkt * total_scale);
     }
   } else {
     z_lim = is_arbitrageur
@@ -1800,6 +1894,8 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"zone", aggressive ? "taker" : "maker"},
                          {"band_mode", band_dynamic ? "dynamic_gamma" : "flat"},  // D1/D2
                          {"sigma", std::to_string(band_sigma)},       // σ, применённая (0=плоский)
+                         {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
+                         {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)
                          {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
 

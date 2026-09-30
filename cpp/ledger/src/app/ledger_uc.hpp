@@ -106,6 +106,19 @@ class LedgerUseCases {
   static double VolScaleFactor(double sigma, double sigma_ref, double gamma,
                                double vr_min, double vr_max);
 
+  // F-18 #7 scoped (ADR-066 §D3, T-F18-L03): ликвидностный множитель порога band.
+  // LiqScale=clamp((depth/depth_ref)^p, lr_min, lr_max), p=0.5 (по IN-017 Q∝√Λ):
+  // глубже стакан ⇒ ШИРЕ band (можно держать больший запас). depth≤0 ⇒ 1.0 (нет
+  // масштаба, нейтрально). Pure/static — юнит-тестируема (ce_band_liq_scale_test).
+  static double LiqScaleFactor(double depth, double depth_ref, double p,
+                               double lr_min, double lr_max);
+
+  // F-18 #7 scoped (T-F18-L03/L04): композиция двух осей масштаба порога band в ОДИН
+  // множитель с финальным клэмпом (инвариант LIQ-2): clamp(vol_scale·liq_scale, tr_min,
+  // tr_max). Обе оси нейтральны (1.0) ⇒ total=1.0 (LIQ-3). Pure/static — юнит-тестируема.
+  static double BandTotalScale(double vol_scale, double liq_scale,
+                               double tr_min, double tr_max);
+
   // Existing methods
   fob::ledger::v1::GetBalancesResponse GetBalances(const fob::ledger::v1::GetBalancesRequest& req);
   fob::ledger::v1::ReserveFundsResponse ReserveFunds(const fob::ledger::v1::ReserveFundsRequest& req);
@@ -338,6 +351,17 @@ class LedgerUseCases {
   std::mutex sigma_mu_;
   std::map<std::string, SigmaEntry> sigma_cache_;
 
+  // F-18 #7 scoped (T-F18-L03): кэш глубины стакана depth per (asset,venue) для
+  // ликвидностной оси band (паттерн SigmaEntry; depth — конфиг, без samples-guard).
+  struct DepthEntry {
+    double depth = 0.0;
+    long long age_ms = 0;  // возраст строки на момент чтения (staleness)
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex depth_mu_;
+  std::map<std::string, DepthEntry> depth_cache_;
+
   // T-F18-706: переиспользуемое соединение для poll'ов LoadBandFeeConfig/LoadAssetSigma
   // (раньше открывали свежее pqxx::connection на каждый cache-miss под mu_ батча —
   // паттерн T-F18-601). poll_conn() (пере)создаёт под poll_conn_mu_; caller держит
@@ -429,6 +453,11 @@ class LedgerUseCases {
   // наличии строки. TTL-кэш ~1с per symbol (как band_cfg). Пустой DSN/нет строки → false.
   bool LoadAssetSigma(const std::string& symbol, double* out_sigma,
                       long long* out_samples, long long* out_age_ms);
+  // F-18 #7 scoped (T-F18-L03): читает depth (α_e) из ce_asset_liquidity по (asset,venue)
+  // (writer — matching, T-F18-L02). Возвращает true + *out_depth/*out_age_ms при наличии
+  // строки. TTL-кэш ~1с per (asset|venue). Пустой DSN/нет строки → false (ledger → LiqScale=1.0).
+  bool LoadAssetDepth(const std::string& asset, const std::string& venue,
+                      double* out_depth, long long* out_age_ms);
   // Регистрирует band-заявку в band_hedges_ по её intent_id (RememberExecutionIntent)
   // для последующего дренажа по исполнению. in_flight НЕ трогает (уже помечен при
   // пробое — detect_and_emit_band_breach_locked). Вызывается под mu_.

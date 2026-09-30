@@ -159,6 +159,15 @@ class MatchingLoop {
   bool inv_cfg_have_{false};
   // Читает γ/клэмп из PG (кэш ~1с). Fallback — env, затем дефолты. Возврат: {γ, max_pm}.
   std::pair<double, double> LoadInvSkewConfig();
+
+  // F-18 #7 scoped (T-F18-L02): троттл записи depth (α_e) per (asset,venue) в
+  // ce_asset_liquidity (reader — ledger, ликвидностная ось band). За флагом
+  // CE_LIQ_SIGNAL_ENABLED; период CE_LIQ_WRITE_MS. Запись — inline в matching_loop.cpp
+  // (там есть proto-типы). Возврат true, если пора писать (и обновляет last).
+  std::mutex liq_write_mu_;
+  std::chrono::steady_clock::time_point liq_write_last_{};
+  bool liq_write_have_{false};
+  bool ShouldWriteLiquidity();
 };
 
 }  // namespace cex::matching::app

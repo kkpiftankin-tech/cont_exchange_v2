@@ -1087,3 +1087,27 @@ CREATE TABLE IF NOT EXISTS ce_asset_volatility (
 );
 CREATE INDEX IF NOT EXISTS ce_asset_volatility_updated_idx
     ON ce_asset_volatility (updated_at DESC);
+
+-- ce_asset_liquidity: F-18 #7 scoped (ADR-066 §D3, T-F18-L01) — глубина стакана
+-- depth (α_e, capital-depth CE-агента) для ЛИКВИДНОСТНОЙ оси band поверх O1/D1.
+-- По ADR-066 §D3: LiqScale=clamp((depth/depth_ref)^0.5, lr_min, lr_max) — глубже
+-- рынок ⇒ ШИРЕ band (можно держать больший запас); p=0.5 по IN-017 Q∝√Λ.
+--
+-- Owner writer: MATCHING (α_e — конфиг matching CE_TRANSFER_ALPHA_*/CE_STOCK_ALPHA_*,
+-- НЕ рыночный сигнал market_data), throttled-UPSERT per (asset,venue), за флагом
+-- CE_LIQ_SIGNAL_ENABLED. Reader: ledger (LoadAssetDepth, TTL-кэш как σ) за флагом
+-- CE_BAND_LIQ_MODE=1. Отдельная таблица (НЕ колонка в ce_asset_volatility) —
+-- разные писатели (matching vs market_data), иначе гонка UPSERT.
+--
+-- depth — тыс.USDT на ‰ (α_e). staleness: updated_at старше порога → ledger
+-- fallback LiqScale=1.0 (нейтрально). Контракт: docs/07-data/ce-asset-liquidity.md.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_asset_liquidity (
+    asset       TEXT NOT NULL,                       -- ИНСТРУМЕНТ-СИМВОЛ без слэша (как ce_asset_volatility.asset)
+    venue       TEXT NOT NULL DEFAULT '',            -- площадка; '' = агрегат
+    depth       NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- α_e, тыс.USDT/‰ (capital-depth CE-агента)
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asset, venue)
+);
+CREATE INDEX IF NOT EXISTS ce_asset_liquidity_updated_idx
+    ON ce_asset_liquidity (updated_at DESC);
