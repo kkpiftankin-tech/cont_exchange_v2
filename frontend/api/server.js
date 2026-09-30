@@ -7246,30 +7246,9 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
   // ЗЕРКАЛО клирингового движка (cpp/venues SetSafeTranslator) — ОБА за флагом
   // F05A_SLOPE_WINDOW (иначе дисплей≠клиринг). Off ⇒ прежний глобальный β_T. TODO
   // (drift, specialist): перевести дисплей на engine.betaT из ClickHouse (single source).
-  let betaT = betaGlobal;
-  const slopeWindow = String(process.env.F05A_SLOPE_WINDOW || "").toLowerCase();
-  if (slopeWindow === "1" || slopeWindow === "true" || slopeWindow === "yes") {
-    const Qchar = (maxBuy > 0 && maxSell > 0) ? Math.min(maxBuy, maxSell) : Math.max(maxBuy, maxSell);
-    const vwapSecant = (pts) => {
-      let chosen = null;
-      for (const p of pts) { if (Math.abs(p.q) >= Qchar - 1e-12) { chosen = p; break; } }
-      if (!chosen && pts.length) chosen = pts[pts.length - 1];
-      if (!chosen || !(Math.abs(chosen.q) > 0) || !(chosen.priceVwap > 0)) return 0;
-      return Math.abs(chosen.priceVwap - anchor) / Math.abs(chosen.q);  // quote/base
-    };
-    const secBeta = Math.max(vwapSecant(bidPts), vwapSecant(askPts));
-    betaT = Math.max(secBeta, betaGlobal || 0) || betaGlobal;
-  }
-  const safe = [];
-  if (betaT && betaT > 0 && (maxBuy + maxSell) > 0) {
-    for (let i = 0; i <= 40; i++) {
-      const q = -maxSell + (maxBuy + maxSell) * (i / 40);
-      const price = anchor + betaT * q;
-      if (price > 0) safe.push({ q, price });
-    }
-  }
-
-  // Движок (клиринг): α_T/β_T сегмента из vector_flow_segments_history (single source).
+  // Движок (клиринг): β_T сегмента из vector_flow_segments_history — SINGLE SOURCE истины.
+  // Дисплей БЕРЁТ β_T из движка (устраняет drift BFF-пересчёта vs клиринг — specialist,
+  // e2e: BFF-пересчёт 10.6 ≠ клиринг 0.144). Windowed-калибровка (#2) живёт в движке venues.
   let engine = null;
   try {
     const segRows = await chJsonEachRow(
@@ -7287,6 +7266,17 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
       };
     }
   } catch (_) { /* колонки могут отсутствовать до деплоя market_data */ }
+  // β_T дисплея = β_T движка (клиринг) когда доступен; иначе BFF-пересчёт (fallback).
+  const betaT = (engine && Number.isFinite(engine.betaT) && engine.betaT > 0)
+    ? engine.betaT : betaGlobal;
+  const safe = [];
+  if (betaT && betaT > 0 && (maxBuy + maxSell) > 0) {
+    for (let i = 0; i <= 40; i++) {
+      const q = -maxSell + (maxBuy + maxSell) * (i / 40);
+      const price = anchor + betaT * q;
+      if (price > 0) safe.push({ q, price });
+    }
+  }
 
   const fobBid = ladder(r.bid_q_grid, r.bid_p_of_q).map((x) => ({ q: -x.q, price: x.p }));
   const fobAsk = ladder(r.ask_q_grid, r.ask_p_of_q).map((x) => ({ q: x.q, price: x.p }));
