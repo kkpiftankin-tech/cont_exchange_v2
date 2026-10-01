@@ -7436,7 +7436,12 @@ async function fetchAggregateCurves(symbol, thisVenue, ts, opts) {
   };
   const all = build(descs);
   const ex = build(descs.filter((d) => d.venue !== thisVenue));
-  return { aggAll: all, aggEx: ex, aggVenues: descs.map((d) => d.venue), aggExVenue: thisVenue };
+  // Индивидуальная линейная кривая КАЖДОЙ площадки по этой паре: q_i(p)=(p−anchor_i)/β_T_i
+  // в том же ценовом окне [pLo,pHi] (окно отображаемой площадки), чтобы линии были
+  // сопоставимы. Не агрегат — отдельная прямая на venue.
+  const perVenue = descs.map((d) => ({ venue: d.venue, curve: build([d]) }));
+  return { aggAll: all, aggEx: ex, aggVenues: descs.map((d) => d.venue),
+           aggExVenue: thisVenue, perVenue };
 }
 
 const VECTOR_CLEARING_VIEW_HTML = [

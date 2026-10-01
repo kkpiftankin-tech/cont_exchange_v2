@@ -13,6 +13,14 @@ import './VectorClearingLive.css';
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const POLL_INTERVAL_MS = 3000;
 
+// Стабильная палитра для per-venue кривых ликвидности (известные площадки + фолбэк).
+const VENUE_COLORS = {
+  binance: '#f0b90b', okx: '#7a9cff', kraken: '#8f5be6',
+  coinbase: '#2a7de1', uniswap_v3: '#ff2fa0', bybit: '#ff8a3d',
+};
+const VENUE_PALETTE = ['#f0b90b', '#7a9cff', '#8f5be6', '#2a7de1', '#ff2fa0', '#ff8a3d', '#5fd0a0', '#e06060'];
+const venueColor = (venue, i) => VENUE_COLORS[venue] || VENUE_PALETTE[i % VENUE_PALETTE.length];
+
 // Компактное число: крупные — 2 знака, средние — 4, мелкие — значащие.
 function fmtNum(v) {
   const n = Number(v);
@@ -54,6 +62,7 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showAggAll, setShowAggAll] = useState(false);  // #3a: агрегат всех площадок пары
   const [showAggEx, setShowAggEx] = useState(false);    // #3b: все площадки КРОМЕ этой
   const [showMethods, setShowMethods] = useState(false); // §6.2: 4 кривые наклона M1..M4
+  const [showPerVenue, setShowPerVenue] = useState(false); // кривые ликвидности всех площадок пары
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -100,11 +109,14 @@ function LiquidityChart({ venue, symbol, ts }) {
   const mMinorant = showMethods ? (sm.minorant || []) : [];
   const selMethod = Number(data.selectedSlopeMethod) || 4;
   const hasMethods = !!(sm.tangent || sm.lsq || sm.profit || sm.minorant);
+  // Индивидуальные линейные кривые ликвидности КАЖДОЙ площадки по этой паре (backend).
+  const perVenue = showPerVenue ? (data.perVenue || []) : [];
+  const hasPerVenue = !!((data.perVenue || []).length);
   const anchor = Number(data.anchor);
   const bestBid = Number(data.bestBid), bestAsk = Number(data.bestAsk);
   const eng = data.engine || null;
 
-  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk, ...aggAll, ...aggEx, ...mTangent, ...mLsq, ...mProfit, ...mMinorant];
+  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk, ...aggAll, ...aggEx, ...mTangent, ...mLsq, ...mProfit, ...mMinorant, ...perVenue.flatMap((v) => v.curve || [])];
   if (!all.length) return <div className="vc-note">нет точек для графика</div>;
 
   // Масштабирование осей — это ОТРИСОВКА (не вычисление кривой).
@@ -175,6 +187,9 @@ function LiquidityChart({ venue, symbol, ts }) {
         <label className="vc-cc-field vc-cc-raw" title="§6.2 «Кривые котирования»: 4 способа снять наклон одного стакана (касательная / МНК / выгода / минорант). Отображаются как СЫРЫЕ линии (θ=1), сравнимы с VWAP. Выбор способа для клиринга — глобально во вкладке Clearing (панель конфига)."><input type="checkbox" checked={showMethods}
           disabled={!hasMethods}
           onChange={(e) => setShowMethods(e.target.checked)} /> 4 наклона §6.2</label>
+        <label className="vc-cc-field vc-cc-raw" title="Индивидуальные линейные кривые ликвидности ВСЕХ площадок по этой паре валют (по кривой на биржу), в одном ценовом окне."><input type="checkbox" checked={showPerVenue}
+          disabled={!hasPerVenue}
+          onChange={(e) => setShowPerVenue(e.target.checked)} /> кривые всех площадок</label>
         <span className="vc-slope-badge" title="наклон клиринга (способ §6.2 выбран глобально в панели конфига Clearing)">клиринг M{selMethod}: β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
       </div>
       <svg width={W} height={H} className="vc-chart">
@@ -200,6 +215,10 @@ function LiquidityChart({ venue, symbol, ts }) {
         {ceBuy.length > 0 && <polyline points={line(ceBuy)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {aggAll.length > 0 && <polyline points={line(aggAll)} fill="none" stroke="#7fe0e0" strokeWidth="2.2" strokeDasharray="7 3" />}
         {aggEx.length > 0 && <polyline points={line(aggEx)} fill="none" stroke="#e08fe0" strokeWidth="2" strokeDasharray="2 3" />}
+        {/* Индивидуальная кривая ликвидности КАЖДОЙ площадки по этой паре */}
+        {perVenue.map((v, i) => (v.curve || []).length > 0 &&
+          <polyline key={'pv' + v.venue} points={line(v.curve)} fill="none"
+            stroke={venueColor(v.venue, i)} strokeWidth="1.6" strokeDasharray="6 2" opacity="0.9" />)}
         {vwapBid.length > 0 && <polyline points={line(vwapBid)} fill="none" stroke="#2f8f66" strokeWidth="2" />}
         {vwapAsk.length > 0 && <polyline points={line(vwapAsk)} fill="none" stroke="#c07a2f" strokeWidth="2" />}
         {rawBid.length > 0 && <polyline points={line(rawBid)} fill="none" stroke="#5fd08a" strokeWidth="1.2" strokeDasharray="4 3" />}
@@ -223,6 +242,8 @@ function LiquidityChart({ venue, symbol, ts }) {
         {(fobBid.length > 0 || fobAsk.length > 0) && <span className="vc-lg vc-lg-fob">- - FOB-кривая venue</span>}
         {aggAll.length > 0 && <span className="vc-lg" style={{ color: '#7fe0e0' }}>— Σ ликвидность всех площадок пары ({(data.aggVenues || []).length})</span>}
         {aggEx.length > 0 && <span className="vc-lg" style={{ color: '#e08fe0' }}>·· Σ все кроме {data.aggExVenue || 'этой'}</span>}
+        {perVenue.map((v, i) => (v.curve || []).length > 0 &&
+          <span key={'pvlg' + v.venue} className="vc-lg" style={{ color: venueColor(v.venue, i) }}>- - {v.venue}</span>)}
         {showMethods && mTangent.length > 0 && <span className="vc-lg" style={{ color: '#ff9f40' }}>·· M1 касательная</span>}
         {showMethods && mLsq.length > 0 && <span className="vc-lg" style={{ color: '#40d0ff' }}>·· M2 МНК (трекает VWAP)</span>}
         {showMethods && mProfit.length > 0 && <span className="vc-lg" style={{ color: '#b980ff' }}>·· M3 по выгоде</span>}
