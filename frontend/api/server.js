@@ -8517,7 +8517,8 @@ const server = createServer(async (req, res) => {
       if (handled !== false) return;
     }
 
-    if (pathname === "/api/venues" || pathname.startsWith("/api/venues/")) {
+    if (pathname === "/api/venues" || pathname.startsWith("/api/venues/")
+        || pathname === "/api/clearing/slope-method") {  // §6.2 выбор наклона — в handleVenues
       const handled = await handleVenues(req, res, pathname, query);
       if (handled !== false) return;
     }

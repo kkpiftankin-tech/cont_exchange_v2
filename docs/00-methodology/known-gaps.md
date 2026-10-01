@@ -19,6 +19,16 @@
 - production-grade observability;
 - security hardening.
 
+## Конкретные долги (tracked)
+
+- **Auth + audit на operator-эндпоинтах `f05a_clearing_config`** (CLAUDE.md §1.7 —
+  operator actions под авторизацией и audit trail). Группа BFF POST-эндпоинтов меняет
+  клиринговые параметры без auth/аудита (кто/когда): `POST /api/clearing/slope-method`
+  (способ наклона §6.2), `venue_stale_ms`, `batch_window_ms`, `ce_taker_fee_bps` и др.
+  Пробел **pre-existing** для всей группы (не регресс конкретного изменения); закрывать
+  всей группой разом (auth-guard + запись в audit-топик/таблицу), не поштучно. Выявлено
+  code-review F-05A §6.2 (2026-10-01).
+
 При любой задаче явно указывай, является ли изменение:
 
 - `docs-only`;
