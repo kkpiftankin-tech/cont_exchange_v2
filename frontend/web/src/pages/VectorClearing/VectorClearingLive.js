@@ -54,7 +54,6 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showAggAll, setShowAggAll] = useState(false);  // #3a: агрегат всех площадок пары
   const [showAggEx, setShowAggEx] = useState(false);    // #3b: все площадки КРОМЕ этой
   const [showMethods, setShowMethods] = useState(false); // §6.2: 4 кривые наклона M1..M4
-  const [savingMethod, setSavingMethod] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -72,15 +71,6 @@ function LiquidityChart({ venue, symbol, ts }) {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [venue, symbol, ts, nBuy, nSell, anchorMode, theta]);
-
-  // §6.2: применить выбранный способ снятия наклона для КЛИРИНГА (owner action).
-  // POST → f05a_clearing_config.slope_method; venues поллит и меняет наклон клиринга.
-  const applyClearingMethod = useCallback((m) => {
-    setSavingMethod(true);
-    axios.post(`${API_BASE}/clearing/slope-method`, { slope_method: m }, { timeout: 8000 })
-      .catch(() => {})
-      .finally(() => setSavingMethod(false));
-  }, []);
 
   if (err) return <div className="vc-error">Ошибка: {err}</div>;
   if (!data) return <div className="vc-note">{loading ? 'загрузка кривой…' : 'нет данных кривой'}</div>;
@@ -182,19 +172,10 @@ function LiquidityChart({ venue, symbol, ts }) {
         <label className="vc-cc-field vc-cc-raw" title="Все площадки КРОМЕ отображаемой (этой venue)"><input type="checkbox" checked={showAggEx}
           disabled={!(data.aggEx || []).length}
           onChange={(e) => setShowAggEx(e.target.checked)} /> Σ без этой</label>
-        <label className="vc-cc-field vc-cc-raw" title="§6.2 «Кривые котирования»: 4 способа снять наклон одного стакана (касательная / МНК / выгода / минорант). Отображаются как СЫРЫЕ линии (θ=1), сравнимы с VWAP."><input type="checkbox" checked={showMethods}
+        <label className="vc-cc-field vc-cc-raw" title="§6.2 «Кривые котирования»: 4 способа снять наклон одного стакана (касательная / МНК / выгода / минорант). Отображаются как СЫРЫЕ линии (θ=1), сравнимы с VWAP. Выбор способа для клиринга — глобально во вкладке Clearing (панель конфига)."><input type="checkbox" checked={showMethods}
           disabled={!hasMethods}
           onChange={(e) => setShowMethods(e.target.checked)} /> 4 наклона §6.2</label>
-        <label className="vc-cc-field" title="§6.2: какой способ снятия наклона идёт в КЛИРИНГ. Только минорант §6.3-safe (не переобещает глубину); M1–M3 точнее трекают VWAP, но выбираются осознанно. Меняет клиринговые цены.">клиринг-наклон
-          <select value={selMethod} disabled={savingMethod}
-            onChange={(e) => applyClearingMethod(parseInt(e.target.value, 10))}>
-            <option value={1}>M1 касательная</option>
-            <option value={2}>M2 МНК (VWAP)</option>
-            <option value={3}>M3 по выгоде</option>
-            <option value={4}>M4 минорант (safe)</option>
-          </select>{savingMethod ? ' …' : ''}
-        </label>
-        <span className="vc-slope-badge">β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
+        <span className="vc-slope-badge" title="наклон клиринга (способ §6.2 выбран глобально в панели конфига Clearing)">клиринг M{selMethod}: β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
       </div>
       <svg width={W} height={H} className="vc-chart">
         <line x1={ml} y1={mt} x2={ml} y2={mt + ph} stroke="#2a3a49" />
@@ -775,6 +756,7 @@ function VectorClearingLive() {
   const [cfgFeeBps, setCfgFeeBps] = useState('');   // комиссия тейкера, bps (0 = линейно)
   const [cfgSkewGamma, setCfgSkewGamma] = useState('');   // inventory-skew γ (‰/k-USDT, 0=выкл)
   const [cfgSkewMaxPm, setCfgSkewMaxPm] = useState('');   // клэмп смещения (‰)
+  const [cfgSlopeMethod, setCfgSlopeMethod] = useState('4'); // §6.2 способ наклона (1..4) — глобально
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgSaving, setCfgSaving] = useState(false);
   const [resetMsg, setResetMsg] = useState('');   // #3 фидбек сброса позиций
@@ -788,6 +770,7 @@ function VectorClearingLive() {
       setCfgFeeBps(String(r.data.ce_taker_fee_bps ?? -1));
       setCfgSkewGamma(String(r.data.ce_inv_skew_gamma ?? 0.02));
       setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm ?? 8));
+      setCfgSlopeMethod(String(r.data.slope_method ?? 4));
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
 
@@ -797,18 +780,20 @@ function VectorClearingLive() {
       const r = await axios.post(`${API_BASE}/vector-clearing/config`, {
         batch_window_ms: Number(cfgWindowMs), stale_level_ms: Number(cfgStaleMs),
         ce_taker_fee_bps: Number(cfgFeeBps),
-        ce_inv_skew_gamma: Number(cfgSkewGamma), ce_inv_skew_max_pm: Number(cfgSkewMaxPm)
+        ce_inv_skew_gamma: Number(cfgSkewGamma), ce_inv_skew_max_pm: Number(cfgSkewMaxPm),
+        slope_method: parseInt(cfgSlopeMethod, 10)
       }, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms));
       setCfgStaleMs(String(r.data.stale_level_ms));
       setCfgFeeBps(String(r.data.ce_taker_fee_bps));
       setCfgSkewGamma(String(r.data.ce_inv_skew_gamma));
       setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm));
-      setCfgMsg('применено ✓ (matching/market_data подхватят ≤2с)');
+      setCfgSlopeMethod(String(r.data.slope_method));
+      setCfgMsg('применено ✓ (matching/market_data/venues подхватят ≤3с)');
     } catch (e) {
       setCfgMsg('ошибка: ' + (e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
-  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm]);
+  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -1114,11 +1099,21 @@ function VectorClearingLive() {
             <input type="number" min="0" max="500" step="1" value={cfgSkewMaxPm}
               onChange={(e) => setCfgSkewMaxPm(e.target.value)} />
           </label>
+          <label className="vc-config-field" title="§6.2 «Кривые котирования»: способ снятия наклона α_ext одного стакана. На основе выбранного варианта считаются ВСЕ кривы ликвидности, клиринг и отображение на фронте. M4 минорант — §6.3-safe (не переобещает глубину, дефолт); M2 МНК точнее трекает VWAP; M1/M3 — касательная/по выгоде. Выбор ≠ минорант меняет клиринговые цены.">
+            наклон (§6.2)
+            <select value={cfgSlopeMethod} onChange={(e) => setCfgSlopeMethod(e.target.value)}>
+              <option value="1">M1 касательная</option>
+              <option value="2">M2 МНК (VWAP)</option>
+              <option value="3">M3 по выгоде</option>
+              <option value="4">M4 минорант (safe)</option>
+            </select>
+          </label>
           <button className="vc-config-apply" onClick={saveConfig} disabled={cfgSaving}>
             {cfgSaving ? '…' : 'Применить'}
           </button>
           {cfgMsg && <span className="vc-config-msg">{cfgMsg}</span>}
-          <span className="vc-config-hint">комиссия 0 = линейные кривые; skew γ&gt;0 = обратная связь позиция→цена (позиции не дрейфуют), γ=0 = выкл. Крутить γ/клэмп вживую и смотреть позиции.</span>
+          {cfgSlopeMethod !== '4' && <span className="vc-config-msg" style={{ color: '#e0a04a' }} title="§6.3 «правило транслируемой глубины»: только минорант (M4) гарантированно не обещает больше, чем есть в книге.">⚠ наклон ≠ минорант: возможно локальное переобещание глубины (§6.3)</span>}
+          <span className="vc-config-hint">наклон §6.2 — глобально: выбранный вариант управляет расчётом всех кривых, клирингом и отображением (venues/market_data подхватят ≤3с). Комиссия 0 = линейные кривые; skew γ&gt;0 = обратная связь позиция→цена.</span>
         </div>
 
         {/* ЖИВОЙ просмотр позиций агентов (по кнопке) — динамика, независимо от

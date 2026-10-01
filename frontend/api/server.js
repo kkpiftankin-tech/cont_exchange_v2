@@ -7486,8 +7486,8 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (req.method === "GET") {
       try {
         const r = await pool.query(
-          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, updated_at FROM f05a_clearing_config WHERE id=1");
-        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8 });
+          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4 });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
@@ -7508,15 +7508,19 @@ async function handleVectorClearing(req, res, pathname, query) {
       let skewMaxPm = Number(body.ce_inv_skew_max_pm);
       if (!Number.isFinite(skewMaxPm)) skewMaxPm = 8;
       skewMaxPm = Math.max(0, Math.min(500, skewMaxPm));
+      // §6.2: способ снятия наклона для КЛИРИНГА (1..4, деф 4=MINORANT). Управляет
+      // расчётом всех кривых и клиринга; venues поллит. Если не прислан — не меняем.
+      let slopeMethod = parseInt(body.slope_method, 10);
+      if (!(slopeMethod >= 1 && slopeMethod <= 4)) slopeMethod = 4;
       try {
         await pool.query(
-          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, updated_at)"
-          + " VALUES (1,$1,$2,$3,$4,$5,now()) ON CONFLICT (id) DO UPDATE SET"
+          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, updated_at)"
+          + " VALUES (1,$1,$2,$3,$4,$5,$6,now()) ON CONFLICT (id) DO UPDATE SET"
           + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms,"
           + " ce_taker_fee_bps=EXCLUDED.ce_taker_fee_bps, ce_inv_skew_gamma=EXCLUDED.ce_inv_skew_gamma,"
-          + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, updated_at=now()",
-          [win, stale, fee, skewGamma, skewMaxPm]);
-        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, applied: true });
+          + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, slope_method=EXCLUDED.slope_method, updated_at=now()",
+          [win, stale, fee, skewGamma, skewMaxPm, slopeMethod]);
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, applied: true });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
