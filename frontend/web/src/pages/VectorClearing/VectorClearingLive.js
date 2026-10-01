@@ -817,6 +817,8 @@ function VectorClearingLive() {
   const [cfgSkewGamma, setCfgSkewGamma] = useState('');   // inventory-skew γ (‰/k-USDT, 0=выкл)
   const [cfgSkewMaxPm, setCfgSkewMaxPm] = useState('');   // клэмп смещения (‰)
   const [cfgSlopeMethod, setCfgSlopeMethod] = useState('4'); // §6.2 способ наклона (1..4) — глобально
+  const [cfgBandK, setCfgBandK] = useState('');     // порог хеджа k_band (q = k·φ_rt); 0 = плоский env-порог
+  const [cfgMakerBps, setCfgMakerBps] = useState(''); // мейкер clim (bps) — пассивная зона Z̄lim
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgSaving, setCfgSaving] = useState(false);
   const [resetMsg, setResetMsg] = useState('');   // #3 фидбек сброса позиций
@@ -831,6 +833,8 @@ function VectorClearingLive() {
       setCfgSkewGamma(String(r.data.ce_inv_skew_gamma ?? 0.02));
       setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm ?? 8));
       setCfgSlopeMethod(String(r.data.slope_method ?? 4));
+      setCfgBandK(String(r.data.ce_band_fee_k ?? 1.8));
+      setCfgMakerBps(String(r.data.ce_maker_fee_bps ?? 2));
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
 
@@ -841,7 +845,8 @@ function VectorClearingLive() {
         batch_window_ms: Number(cfgWindowMs), stale_level_ms: Number(cfgStaleMs),
         ce_taker_fee_bps: Number(cfgFeeBps),
         ce_inv_skew_gamma: Number(cfgSkewGamma), ce_inv_skew_max_pm: Number(cfgSkewMaxPm),
-        slope_method: parseInt(cfgSlopeMethod, 10)
+        slope_method: parseInt(cfgSlopeMethod, 10),
+        ce_band_fee_k: Number(cfgBandK), ce_maker_fee_bps: Number(cfgMakerBps)
       }, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms));
       setCfgStaleMs(String(r.data.stale_level_ms));
@@ -849,11 +854,13 @@ function VectorClearingLive() {
       setCfgSkewGamma(String(r.data.ce_inv_skew_gamma));
       setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm));
       setCfgSlopeMethod(String(r.data.slope_method));
-      setCfgMsg('применено ✓ (matching/market_data/venues подхватят ≤3с)');
+      setCfgBandK(String(r.data.ce_band_fee_k));
+      setCfgMakerBps(String(r.data.ce_maker_fee_bps));
+      setCfgMsg('применено ✓ (ledger/matching/market_data/venues подхватят ≤3с)');
     } catch (e) {
       setCfgMsg('ошибка: ' + (e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
-  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod]);
+  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod, cfgBandK, cfgMakerBps]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -1161,6 +1168,23 @@ function VectorClearingLive() {
             <input type="number" min="0" max="500" step="1" value={cfgSkewMaxPm}
               onChange={(e) => setCfgSkewMaxPm(e.target.value)} />
           </label>
+          <label className="vc-config-field" title="Порог хеджирования (band, Кривые §6.4): агент начинает хеджировать при |позиция| > q, где q = k_band·φ_rt (φ_rt — round-trip комиссия внешних бирж в bps; арбитражёр ×2). Больше k ⇒ выше порог ⇒ агент терпит большую позицию до хеджа. 0 = плоский env-порог. ledger поллит (живая настройка).">
+            порог хеджа k_band
+            <input type="number" min="0" max="100" step="0.1" value={cfgBandK}
+              onChange={(e) => setCfgBandK(e.target.value)} />
+          </label>
+          <label className="vc-config-field" title="Мейкер-комиссия clim (bps) — пассивная зона трёхзонного порога (Кривые §6.4): Z̄lim = k_band·clim·rt (вход в хедж пассив-мейкером). Тейкер-зона Z̄mkt = k_band·(комиссия тейкера)·rt.">
+            мейкер clim (bps)
+            <input type="number" min="0" max="1000" step="0.5" value={cfgMakerBps}
+              onChange={(e) => setCfgMakerBps(e.target.value)} />
+          </label>
+          {(() => {  // превью порога входа Z̄lim (переводчик rt=1) и Z̄mkt из текущих полей
+            const k = Number(cfgBandK), clim = Number(cfgMakerBps), cmkt = Number(cfgFeeBps);
+            if (!(k > 0) || !(clim >= 0)) return <span className="vc-config-hint">порог: плоский env (k_band=0)</span>;
+            const zLim = Math.max(5, k * clim);
+            const zMkt = Math.max(zLim, k * (cmkt > 0 ? cmkt : 10));
+            return <span className="vc-config-hint" title="Z̄lim — вход в хедж (пассив); Z̄mkt — агрессив-тейкер. Переводчик rt=1; арбитражёр ×2.">≈ порог входа Z̄lim <b>{zLim.toFixed(1)}</b> k-USDT · Z̄mkt <b>{zMkt.toFixed(1)}</b> (переводчик)</span>;
+          })()}
           <label className="vc-config-field" title="§6.2 «Кривые котирования»: способ снятия наклона α_ext одного стакана. На основе выбранного варианта считаются ВСЕ кривы ликвидности, клиринг и отображение на фронте. M4 минорант — §6.3-safe (не переобещает глубину, дефолт); M2 МНК точнее трекает VWAP; M1/M3 — касательная/по выгоде. Выбор ≠ минорант меняет клиринговые цены.">
             наклон (§6.2)
             <select value={cfgSlopeMethod} onChange={(e) => setCfgSlopeMethod(e.target.value)}>

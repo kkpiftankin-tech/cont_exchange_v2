@@ -7533,8 +7533,8 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (req.method === "GET") {
       try {
         const r = await pool.query(
-          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, updated_at FROM f05a_clearing_config WHERE id=1");
-        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4 });
+          "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8, ce_maker_fee_bps: 2 });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
@@ -7559,15 +7559,25 @@ async function handleVectorClearing(req, res, pathname, query) {
       // расчётом всех кривых и клиринга; venues поллит. Если не прислан — не меняем.
       let slopeMethod = parseInt(body.slope_method, 10);
       if (!(slopeMethod >= 1 && slopeMethod <= 4)) slopeMethod = 4;
+      // Порог хеджирования (band, Кривые §6.4): q = k_band·φ_rt. ce_band_fee_k — главный
+      // тунабл порога (0 = плоский env-порог), ce_maker_fee_bps (clim) задаёт пассивную
+      // зону Z̄lim = k·clim·rt. ledger поллит строку (живая настройка). Клэмпы безопасны.
+      let bandK = Number(body.ce_band_fee_k);
+      if (!Number.isFinite(bandK)) bandK = 1.8;
+      bandK = Math.max(0, Math.min(100, bandK));
+      let makerBps = Number(body.ce_maker_fee_bps);
+      if (!Number.isFinite(makerBps)) makerBps = 2;
+      makerBps = Math.max(0, Math.min(1000, makerBps));
       try {
         await pool.query(
-          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, updated_at)"
-          + " VALUES (1,$1,$2,$3,$4,$5,$6,now()) ON CONFLICT (id) DO UPDATE SET"
+          "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at)"
+          + " VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8,now()) ON CONFLICT (id) DO UPDATE SET"
           + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms,"
           + " ce_taker_fee_bps=EXCLUDED.ce_taker_fee_bps, ce_inv_skew_gamma=EXCLUDED.ce_inv_skew_gamma,"
-          + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, slope_method=EXCLUDED.slope_method, updated_at=now()",
-          [win, stale, fee, skewGamma, skewMaxPm, slopeMethod]);
-        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, applied: true });
+          + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, slope_method=EXCLUDED.slope_method,"
+          + " ce_band_fee_k=EXCLUDED.ce_band_fee_k, ce_maker_fee_bps=EXCLUDED.ce_maker_fee_bps, updated_at=now()",
+          [win, stale, fee, skewGamma, skewMaxPm, slopeMethod, bandK, makerBps]);
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK, ce_maker_fee_bps: makerBps, applied: true });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }
