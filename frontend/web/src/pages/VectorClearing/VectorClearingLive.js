@@ -63,11 +63,16 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showAggEx, setShowAggEx] = useState(false);    // #3b: все площадки КРОМЕ этой
   const [showMethods, setShowMethods] = useState(false); // §6.2: 4 кривые наклона M1..M4
   const [showPerVenue, setShowPerVenue] = useState(false); // кривые ликвидности всех площадок пары
+  const [paused, setPaused] = useState(false);  // СТОП: заморозить данные (без мигания/исчезновения)
+  const [zoom, setZoom] = useState(1);           // масштаб графика (увеличение во время паузы)
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    // Пауза: не перезапрашиваем и не трогаем data — график заморожен, не мигает и не
+    // «дёргается» при смене ts от родителя. Чекбоксы/зум работают от замороженных данных.
+    if (paused) return;
     let alive = true;
     setLoading(true); setErr('');
     const params = { venue, symbol, anchor: anchorMode, theta };
@@ -79,9 +84,11 @@ function LiquidityChart({ venue, symbol, ts }) {
       .catch((e) => { if (alive) setErr(e.message || 'ошибка загрузки кривой'); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [venue, symbol, ts, nBuy, nSell, anchorMode, theta]);
+  }, [venue, symbol, ts, nBuy, nSell, anchorMode, theta, paused]);
 
-  if (err) return <div className="vc-error">Ошибка: {err}</div>;
+  // Ошибку показываем только НЕ на паузе и когда нет замороженных данных (иначе график
+  // не должен исчезать во время паузы из-за разового сбоя запроса).
+  if (err && !paused && !data) return <div className="vc-error">Ошибка: {err}</div>;
   if (!data) return <div className="vc-note">{loading ? 'загрузка кривой…' : 'нет данных кривой'}</div>;
 
   // Готовые серии от backend (signed q, price). Тумблеры только скрывают/показывают.
@@ -129,7 +136,11 @@ function LiquidityChart({ venue, symbol, ts }) {
   const xMin = vp ? vMin : pMin, xMax = vp ? vMax : pMax;
   const yMin = vp ? pMin : vMin, yMax = vp ? pMax : vMax;
 
-  const W = 620, H = 300, ml = 66, mr = 14, mt = 14, mb = 46; const pw = W - ml - mr, ph = H - mt - mb;
+  // Зум: масштабируем полотно (увеличение во время паузы). Поля фиксированы ⇒ растёт
+  // область построения. Клэмп 1..3.5.
+  const zc = Math.max(1, Math.min(3.5, zoom));
+  const W = Math.round(620 * zc), H = Math.round(300 * zc), ml = 66, mr = 14, mt = 14, mb = 46;
+  const pw = W - ml - mr, ph = H - mt - mb;
   const X = (v) => ml + (xMax === xMin ? pw / 2 : (v - xMin) / (xMax - xMin) * pw);
   const Y = (v) => mt + (yMax === yMin ? ph / 2 : (yMax - v) / (yMax - yMin) * ph);
   const xv = vp ? ((p) => p.q) : ((p) => p.price);
@@ -151,6 +162,16 @@ function LiquidityChart({ venue, symbol, ts }) {
   return (
     <div className="vc-chart-wrap">
       <div className="vc-chart-ctrls" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className={paused ? 'vc-pause active' : 'vc-pause'}
+          title={paused ? 'Возобновить живое обновление' : 'Остановить: заморозить график (без мигания); можно увеличивать и включать доп. элементы'}
+          onClick={() => setPaused((p) => !p)}>{paused ? '▶ Старт' : '⏸ Стоп'}</button>
+        {paused && <span className="vc-pause-badge" title="график заморожен">● пауза</span>}
+        <span className="vc-zoom" title="Масштаб графика (увеличение во время паузы)">зум
+          <button type="button" onClick={() => setZoom((z) => Math.max(1, Math.round((z - 0.5) * 10) / 10))} disabled={zc <= 1}>−</button>
+          <span className="vc-zoom-val">{zc.toFixed(1)}×</span>
+          <button type="button" onClick={() => setZoom((z) => Math.min(3.5, Math.round((z + 0.5) * 10) / 10))} disabled={zc >= 3.5}>+</button>
+          {zc !== 1 && <button type="button" onClick={() => setZoom(1)} title="сброс масштаба">⤢</button>}
+        </span>
         <label className="vc-cc-field">уровней покупки (ask)
           <input type="number" min="1" max={data.nAskMax || 1} value={nBuy}
             placeholder={String(data.nAskMax || '')} onChange={(e) => setNBuy(e.target.value)} />
@@ -192,7 +213,7 @@ function LiquidityChart({ venue, symbol, ts }) {
           onChange={(e) => setShowPerVenue(e.target.checked)} /> кривые всех площадок</label>
         <span className="vc-slope-badge" title="наклон клиринга (способ §6.2 выбран глобально в панели конфига Clearing)">клиринг M{selMethod}: β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
       </div>
-      <svg width={W} height={H} className="vc-chart">
+      <svg width={W} height={H} className="vc-chart" style={{ maxWidth: zc > 1 ? 'none' : '100%' }}>
         <line x1={ml} y1={mt} x2={ml} y2={mt + ph} stroke="#2a3a49" />
         <line x1={ml} y1={mt + ph} x2={ml + pw} y2={mt + ph} stroke="#2a3a49" />
         {volGuide(0, '#3a4a5a', '2 4', 'z')}
