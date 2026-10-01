@@ -7254,7 +7254,11 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     const segRows = await chJsonEachRow(
       "SELECT toString(alpha_ext) AS alpha_ext, toString(alpha_t) AS alpha_t,"
       + " toString(beta_t) AS beta_t, toString(theta) AS theta, translator_model,"
-      + " toString(slope) AS slope, toString(effective_price) AS mid"
+      + " toString(slope) AS slope, toString(effective_price) AS mid,"
+      // §6.2: 4 способа наклона + выбранный для клиринга (single source = движок)
+      + " toString(beta_tangent) AS beta_tangent, toString(beta_lsq) AS beta_lsq,"
+      + " toString(beta_profit) AS beta_profit, toString(beta_minorant) AS beta_minorant,"
+      + " selected_slope_method"
       + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
       + " WHERE venue_id = '" + v + "' AND pair = '" + s + "'"
       + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
@@ -7263,6 +7267,11 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
       engine = {
         alphaExt: Number(g.alpha_ext), alphaT: Number(g.alpha_t), betaT: Number(g.beta_t),
         theta: Number(g.theta), model: g.translator_model, slope: Number(g.slope), mid: Number(g.mid),
+        betaMethods: {
+          tangent: Number(g.beta_tangent), lsq: Number(g.beta_lsq),
+          profit: Number(g.beta_profit), minorant: Number(g.beta_minorant),
+        },
+        selectedMethod: Number(g.selected_slope_method) || 4,
       };
     }
   } catch (_) { /* колонки могут отсутствовать до деплоя market_data */ }
@@ -7277,6 +7286,29 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
       if (price > 0) safe.push({ q, price });
     }
   }
+
+  // §6.2 «Кривые котирования»: 4 кривые наклона (M1..M4) из ДВИЖКА (single source,
+  // без браузерного пересчёта). Каждая — прямая anchor + β_method·q на [−maxSell,maxBuy].
+  // β_method — СЫРОЙ (θ=1), сравним с VWAP. selectedSlopeMethod — какой идёт в клиринг.
+  const buildLine = (beta) => {
+    const out = [];
+    if (beta && beta > 0 && (maxBuy + maxSell) > 0) {
+      for (let i = 0; i <= 40; i++) {
+        const q = -maxSell + (maxBuy + maxSell) * (i / 40);
+        const price = anchor + beta * q;
+        if (price > 0) out.push({ q, price });
+      }
+    }
+    return out;
+  };
+  const bm = (engine && engine.betaMethods) ? engine.betaMethods : {};
+  const safeMethods = {
+    tangent: buildLine(bm.tangent),
+    lsq: buildLine(bm.lsq),
+    profit: buildLine(bm.profit),
+    minorant: buildLine(bm.minorant),
+  };
+  const selectedSlopeMethod = (engine && engine.selectedMethod) ? engine.selectedMethod : 4;
 
   const fobBid = ladder(r.bid_q_grid, r.bid_p_of_q).map((x) => ({ q: -x.q, price: x.p }));
   const fobAsk = ladder(r.ask_q_grid, r.ask_p_of_q).map((x) => ({ q: x.q, price: x.p }));
@@ -7333,9 +7365,11 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     vwapBid: bidPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     vwapAsk: askPts.map((p) => ({ q: p.q, price: p.priceVwap })),
     safe, fobBid, fobAsk,
+    // §6.2: 4 кривые наклона (M1..M4) из движка + выбранный для клиринга способ
+    safeMethods, selectedSlopeMethod,
     // CE-алгоритм: зона комиссии/бездействия (ADR-055/056) — две стороны + разрыв
     deadZonePm, takerFeePm, halfSpreadPm, deadLow, deadHigh, ceSell, ceBuy,
-    engine,   // { alphaExt, alphaT, betaT, theta, model, slope, mid } — то, что клирится
+    engine,   // { alphaExt, alphaT, betaT, theta, model, slope, mid, betaMethods } — клиринг
   };
 }
 
@@ -7984,6 +8018,41 @@ async function handleVenues(req, res, pathname, query) {
           + " venue_stale_ms=EXCLUDED.venue_stale_ms, updated_at=now()",
           [stale]);
         return writeJson(res, 200, { venue_stale_ms: stale, applied: true });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    return writeJson(res, 405, { error: "method_not_allowed" });
+  }
+
+  // §6.2 «Кривые котирования»: выбранный способ снятия наклона для КЛИРИНГА.
+  // venues поллит f05a_clearing_config.slope_method (TTL 3с) → SetClearingSlopeMethod.
+  // 1=TANGENT, 2=LSQ_BAND, 3=PROFIT_AREA, 4=MINORANT (§6.3-safe дефолт). Смена ≠4
+  // меняет клиринговые цены (M1–M3 могут локально переобещать глубину — ADR-053).
+  if (pathname === "/api/clearing/slope-method") {
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    if (req.method === "GET") {
+      try {
+        const r = await pool.query(
+          "SELECT slope_method, updated_at FROM f05a_clearing_config WHERE id=1");
+        return writeJson(res, 200, r.rows[0] || { slope_method: 4 });
+      } catch (e) {
+        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+      }
+    }
+    if (req.method === "POST") {
+      let body;
+      try { body = await parseBody(req); } catch (e) { return writeJson(res, 400, { error: "bad_body" }); }
+      const m = parseInt(body.slope_method, 10);
+      if (!(m >= 1 && m <= 4)) return writeJson(res, 400, { error: "slope_method must be 1..4" });
+      try {
+        await pool.query(
+          "INSERT INTO f05a_clearing_config (id, slope_method, updated_at)"
+          + " VALUES (1,$1,now()) ON CONFLICT (id) DO UPDATE SET"
+          + " slope_method=EXCLUDED.slope_method, updated_at=now()",
+          [m]);
+        return writeJson(res, 200, { slope_method: m, applied: true });
       } catch (e) {
         return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
       }

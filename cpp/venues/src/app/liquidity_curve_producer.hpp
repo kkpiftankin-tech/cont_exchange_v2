@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -321,5 +322,28 @@ class LiquidityCurveProducer {
   std::unordered_map<std::string, ImpactModelParams> impact_params_by_side_;
   std::unordered_map<std::string, DegradationState> degradation_state_by_symbol_;
 };
+
+// §6.2 «Кривые котирования»: наклон α_ext, снятый одним способом (в quote за bps).
+struct SideAlphas {
+  double tangent = std::numeric_limits<double>::infinity();   // M1 D_1/δ_1
+  double lsq = std::numeric_limits<double>::infinity();       // M2 МНК на полосе
+  double profit = std::numeric_limits<double>::infinity();    // M3 подгонка по выгоде
+  double minorant = std::numeric_limits<double>::infinity();  // M4 min_k D_k/δ_k
+  double depth = 0.0;                                         // Σ q стороны
+};
+
+// Чистое ядро 4 способов §6.2 на кумулятивной кривой глубины (δ_k bps>0 возр.,
+// D_k кумул. notional возр., D_{-1}=0). Отделено от снятия из стакана для
+// юнит-теста против числового примера §6.2 (100/80.26/60.98/83.33). См. ADR-053.
+SideAlphas AlphasFromCumulative(const std::vector<double>& delta,
+                                const std::vector<double>& cum_notional);
+
+// §6.2: runtime-выбор способа снятия наклона α_ext, идущего в клиринг
+// (1=TANGENT, 2=LSQ_BAND, 3=PROFIT_AREA, 4=MINORANT). venues_loop поллит
+// f05a_clearing_config.slope_method и вызывает сеттер (как venue_stale_ms).
+// Дефолт = 4 (минорант, §6.3-safe); env F05A_SLOPE_METHOD задаёт начальное
+// значение. Меняет клиринговые цены ⇒ owner-controlled.
+void SetClearingSlopeMethod(int method);
+int GetClearingSlopeMethod();
 
 }  // namespace cex::venues::app

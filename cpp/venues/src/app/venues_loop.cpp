@@ -1851,11 +1851,15 @@ void VenuesLoop::RefreshVenueStaleFromPg() {
   try {
     pqxx::connection c(venue_stale_pg_dsn_);
     pqxx::work tx(c);
-    const pqxx::row r =
-        tx.exec1("SELECT venue_stale_ms FROM f05a_clearing_config WHERE id=1");
+    const pqxx::row r = tx.exec1(
+        "SELECT venue_stale_ms, slope_method FROM f05a_clearing_config WHERE id=1");
     tx.commit();
     const int64_t v = r[0].as<int64_t>();
     if (v > 0) runtime_stale_ms_.store(v, std::memory_order_relaxed);
+    // §6.2: выбранный способ снятия наклона для клиринга (1..4). Живая настройка с
+    // фронта (f05a_clearing_config.slope_method) → SetClearingSlopeMethod читает
+    // продюсер кривой на каждом снапшоте. NULL/мусор — сеттер игнорирует.
+    if (!r[1].is_null()) SetClearingSlopeMethod(r[1].as<int>());
   } catch (const std::exception&) {
     // молча оставляем прежнее значение
   }

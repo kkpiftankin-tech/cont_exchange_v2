@@ -244,6 +244,22 @@ domain::VectorizeResult TwoSidedSegmentsFromCurves(
     seg.beta_t = Quantize(beta_t, scale);        // линейный β_T = mid·m
     seg.theta = Quantize(theta, scale);
     seg.translator_model = model_tag;            // safe_vwap_raw|safe_vwap_fob|log_endpoint
+    // §6.2: 4 диагностики наклона из safe_translator (для отображения; СЫРОЙ β_T,
+    // θ=1, сравним с VWAP). selected_slope_method — какой свёрнут в seg.slope выше.
+    if (c.has_safe_translator()) {
+      const auto& sst = c.safe_translator();
+      seg.selected_slope_method = static_cast<std::int32_t>(sst.selected_method());
+      for (const auto& e : sst.slope_methods()) {
+        const double bt = e.beta_t();
+        switch (e.method()) {
+          case fob::common::v1::SLOPE_METHOD_TANGENT: seg.beta_tangent = Quantize(bt, scale); break;
+          case fob::common::v1::SLOPE_METHOD_LSQ_BAND: seg.beta_lsq = Quantize(bt, scale); break;
+          case fob::common::v1::SLOPE_METHOD_PROFIT_AREA: seg.beta_profit = Quantize(bt, scale); break;
+          case fob::common::v1::SLOPE_METHOD_MINORANT: seg.beta_minorant = Quantize(bt, scale); break;
+          default: break;
+        }
+      }
+    }
     seg.q_max = Quantize(q_ask, scale);          // x_max = +Q_ask
     seg.q_min = Quantize(-q_bid, scale);         // x_min = −Q_bid
     // q_rate — суммарная пропускная способность двусторонней кривой (обе стороны).

@@ -150,6 +150,22 @@ message VectorFlowSegment {
   string agent_id = 22;
   fob.common.v1.Decimal dead_zone = 23;   // c, ‰ (мёртвая зона внутри кривой)
   fob.common.v1.Decimal alpha = 24;       // α, глубина агента (тыс. USDT на ‰)
+  // §6.2 «Кривые котирования»: наклон снят всеми 4 способами (диагностика/display).
+  // selected_slope_method указывает, какой из них свёрнут в slope(16)/alpha_ext(17)/
+  // beta_t(19) для клиринга. Только MINORANT §6.3-safe (см. SlopeMethodKind).
+  repeated SegmentSlopeEstimate slope_methods = 25;
+  fob.common.v1.SlopeMethodKind selected_slope_method = 26;
+}
+
+// §6.2: одна оценка наклона одним способом. α_ext считается по стороне книги
+// (bid/ask), combined = как реально свёрнуто в клиринг (текущая семантика
+// min(a_bid,a_ask)). Все — Decimal, т.к. beta_t напрямую формирует P=diag(slope).
+message SegmentSlopeEstimate {
+  fob.common.v1.SlopeMethodKind method = 1;
+  fob.common.v1.Decimal alpha_ext_bid = 2;
+  fob.common.v1.Decimal alpha_ext_ask = 3;
+  fob.common.v1.Decimal alpha_ext = 4;    // combined (идёт в (6.2) ограничитель)
+  fob.common.v1.Decimal beta_t = 5;       // mid²/(10⁴·α_T) для этого способа (диагностика)
 }
 
 // Вход vector clearing: W/pH/dHL/q/D и source_map выводятся из segments.

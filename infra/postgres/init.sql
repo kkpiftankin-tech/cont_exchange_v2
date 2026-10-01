@@ -1011,8 +1011,15 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
     -- (пассив → агрессив-тейкер), cmkt = ce_taker_fee_bps. clim < cmkt (мейкер дешевле).
     ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 2,
+    -- §6.2 «Кривые котирования»: способ снятия наклона α_ext кривой переводчика,
+    -- идущего в КЛИРИНГ. 1=TANGENT (касательная), 2=LSQ_BAND (МНК на полосе),
+    -- 3=PROFIT_AREA (подгонка по выгоде), 4=MINORANT (консервативный минорант,
+    -- §6.3-safe — дефолт). venues поллит эту строку и вызывает SetClearingSlopeMethod.
+    -- M1–M3 точнее трекают VWAP, но могут локально переобещать глубину (см. ADR-053).
+    slope_method     SMALLINT NOT NULL DEFAULT 4,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1)
+    CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1),
+    CONSTRAINT f05a_clearing_config_slope_method CHECK (slope_method BETWEEN 1 AND 4)
 );
 -- Миграция для существующих БД (таблица уже создана без колонки).
 ALTER TABLE f05a_clearing_config
@@ -1025,6 +1032,8 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_fee_k NUMERIC(38,18) NOT NULL DEFAULT 1.8;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS slope_method SMALLINT NOT NULL DEFAULT 4;
 INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;

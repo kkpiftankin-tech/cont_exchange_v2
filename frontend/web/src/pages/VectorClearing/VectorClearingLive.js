@@ -53,6 +53,8 @@ function LiquidityChart({ venue, symbol, ts }) {
   const [showFob, setShowFob] = useState(false);
   const [showAggAll, setShowAggAll] = useState(false);  // #3a: агрегат всех площадок пары
   const [showAggEx, setShowAggEx] = useState(false);    // #3b: все площадки КРОМЕ этой
+  const [showMethods, setShowMethods] = useState(false); // §6.2: 4 кривые наклона M1..M4
+  const [savingMethod, setSavingMethod] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -70,6 +72,15 @@ function LiquidityChart({ venue, symbol, ts }) {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [venue, symbol, ts, nBuy, nSell, anchorMode, theta]);
+
+  // §6.2: применить выбранный способ снятия наклона для КЛИРИНГА (owner action).
+  // POST → f05a_clearing_config.slope_method; venues поллит и меняет наклон клиринга.
+  const applyClearingMethod = useCallback((m) => {
+    setSavingMethod(true);
+    axios.post(`${API_BASE}/clearing/slope-method`, { slope_method: m }, { timeout: 8000 })
+      .catch(() => {})
+      .finally(() => setSavingMethod(false));
+  }, []);
 
   if (err) return <div className="vc-error">Ошибка: {err}</div>;
   if (!data) return <div className="vc-note">{loading ? 'загрузка кривой…' : 'нет данных кривой'}</div>;
@@ -91,11 +102,19 @@ function LiquidityChart({ venue, symbol, ts }) {
   // #3: агрегатные линейные кривые ликвидности (backend считает сумму по площадкам).
   const aggAll = showAggAll ? (data.aggAll || []) : [];
   const aggEx = showAggEx ? (data.aggEx || []) : [];
+  // §6.2: 4 кривые наклона (СЫРОЙ β, θ=1 — сравнимы с VWAP), из движка (single source).
+  const sm = data.safeMethods || {};
+  const mTangent = showMethods ? (sm.tangent || []) : [];
+  const mLsq = showMethods ? (sm.lsq || []) : [];
+  const mProfit = showMethods ? (sm.profit || []) : [];
+  const mMinorant = showMethods ? (sm.minorant || []) : [];
+  const selMethod = Number(data.selectedSlopeMethod) || 4;
+  const hasMethods = !!(sm.tangent || sm.lsq || sm.profit || sm.minorant);
   const anchor = Number(data.anchor);
   const bestBid = Number(data.bestBid), bestAsk = Number(data.bestAsk);
   const eng = data.engine || null;
 
-  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk, ...aggAll, ...aggEx];
+  const all = [...rawBid, ...rawAsk, ...vwapBid, ...vwapAsk, ...safe, ...ceSell, ...ceBuy, ...fobBid, ...fobAsk, ...aggAll, ...aggEx, ...mTangent, ...mLsq, ...mProfit, ...mMinorant];
   if (!all.length) return <div className="vc-note">нет точек для графика</div>;
 
   // Масштабирование осей — это ОТРИСОВКА (не вычисление кривой).
@@ -163,6 +182,18 @@ function LiquidityChart({ venue, symbol, ts }) {
         <label className="vc-cc-field vc-cc-raw" title="Все площадки КРОМЕ отображаемой (этой venue)"><input type="checkbox" checked={showAggEx}
           disabled={!(data.aggEx || []).length}
           onChange={(e) => setShowAggEx(e.target.checked)} /> Σ без этой</label>
+        <label className="vc-cc-field vc-cc-raw" title="§6.2 «Кривые котирования»: 4 способа снять наклон одного стакана (касательная / МНК / выгода / минорант). Отображаются как СЫРЫЕ линии (θ=1), сравнимы с VWAP."><input type="checkbox" checked={showMethods}
+          disabled={!hasMethods}
+          onChange={(e) => setShowMethods(e.target.checked)} /> 4 наклона §6.2</label>
+        <label className="vc-cc-field" title="§6.2: какой способ снятия наклона идёт в КЛИРИНГ. Только минорант §6.3-safe (не переобещает глубину); M1–M3 точнее трекают VWAP, но выбираются осознанно. Меняет клиринговые цены.">клиринг-наклон
+          <select value={selMethod} disabled={savingMethod}
+            onChange={(e) => applyClearingMethod(parseInt(e.target.value, 10))}>
+            <option value={1}>M1 касательная</option>
+            <option value={2}>M2 МНК (VWAP)</option>
+            <option value={3}>M3 по выгоде</option>
+            <option value={4}>M4 минорант (safe)</option>
+          </select>{savingMethod ? ' …' : ''}
+        </label>
         <span className="vc-slope-badge">β_T = <b>{fmtSig(data.betaT)}</b> quote/base · α_T = {fmtSig(data.alphaT)} · α_ext = {fmtSig(data.alphaExt)} (bind {data.bindSide || '—'} L{data.bindLevel || '—'}){loading ? ' …' : ''}</span>
       </div>
       <svg width={W} height={H} className="vc-chart">
@@ -179,6 +210,11 @@ function LiquidityChart({ venue, symbol, ts }) {
         {fobBid.length > 0 && <polyline points={line(fobBid)} fill="none" stroke="#4fb0d8" strokeWidth="1.1" strokeDasharray="5 3" />}
         {fobAsk.length > 0 && <polyline points={line(fobAsk)} fill="none" stroke="#d88fb0" strokeWidth="1.1" strokeDasharray="5 3" />}
         {safe.length > 0 && <polyline points={line(safe)} fill="none" stroke="#c9a0ff" strokeWidth="2.4" />}
+        {/* §6.2: 4 кривые наклона (СЫРЫЕ, θ=1) — для сравнения с VWAP */}
+        {mTangent.length > 0 && <polyline points={line(mTangent)} fill="none" stroke="#ff9f40" strokeWidth="1.3" strokeDasharray="3 2" />}
+        {mLsq.length > 0 && <polyline points={line(mLsq)} fill="none" stroke="#40d0ff" strokeWidth="1.3" strokeDasharray="3 2" />}
+        {mProfit.length > 0 && <polyline points={line(mProfit)} fill="none" stroke="#b980ff" strokeWidth="1.3" strokeDasharray="3 2" />}
+        {mMinorant.length > 0 && <polyline points={line(mMinorant)} fill="none" stroke="#70d080" strokeWidth="1.3" strokeDasharray="3 2" />}
         {ceSell.length > 0 && <polyline points={line(ceSell)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {ceBuy.length > 0 && <polyline points={line(ceBuy)} fill="none" stroke="#e8c14a" strokeWidth="2.4" />}
         {aggAll.length > 0 && <polyline points={line(aggAll)} fill="none" stroke="#7fe0e0" strokeWidth="2.2" strokeDasharray="7 3" />}
@@ -206,8 +242,13 @@ function LiquidityChart({ venue, symbol, ts }) {
         {(fobBid.length > 0 || fobAsk.length > 0) && <span className="vc-lg vc-lg-fob">- - FOB-кривая venue</span>}
         {aggAll.length > 0 && <span className="vc-lg" style={{ color: '#7fe0e0' }}>— Σ ликвидность всех площадок пары ({(data.aggVenues || []).length})</span>}
         {aggEx.length > 0 && <span className="vc-lg" style={{ color: '#e08fe0' }}>·· Σ все кроме {data.aggExVenue || 'этой'}</span>}
+        {showMethods && mTangent.length > 0 && <span className="vc-lg" style={{ color: '#ff9f40' }}>·· M1 касательная</span>}
+        {showMethods && mLsq.length > 0 && <span className="vc-lg" style={{ color: '#40d0ff' }}>·· M2 МНК (трекает VWAP)</span>}
+        {showMethods && mProfit.length > 0 && <span className="vc-lg" style={{ color: '#b980ff' }}>·· M3 по выгоде</span>}
+        {showMethods && mMinorant.length > 0 && <span className="vc-lg" style={{ color: '#70d080' }}>·· M4 минорант (§6.3-safe)</span>}
         <span className="vc-lg vc-lg-anchor">- - anchor ({anchorMode}) {fmt(anchor)} · спред {Number(data.spreadBps).toFixed(2)} bps</span>
-        {eng && <span className="vc-lg vc-lg-safe" title="то, что реально клирится (движок market_data)">движок: β_T={fmtSig(eng.betaT)} α_T={fmtSig(eng.alphaT)} [{eng.model}]</span>}
+        {eng && <span className="vc-lg vc-lg-safe" title="то, что реально клирится (движок market_data)">клиринг: способ M{selMethod} · β_T={fmtSig(eng.betaT)} α_T={fmtSig(eng.alphaT)} [{eng.model}]</span>}
+        {selMethod !== 4 && <span className="vc-lg" style={{ color: '#e0a04a' }} title="§6.3 «правило транслируемой глубины»: только минорант (M4) гарантированно не обещает больше, чем есть в книге. M1–M3 могут локально переобещать глубину.">⚠ клиринг-наклон ≠ минорант: возможно локальное переобещание глубины (§6.3)</span>}
       </div>
     </div>
   );

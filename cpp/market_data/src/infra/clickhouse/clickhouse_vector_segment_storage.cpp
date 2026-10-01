@@ -75,6 +75,11 @@ void ClickHouseVectorSegmentStorage::EnsureSchema() {
     << "beta_t Decimal128(18),"
     << "theta Decimal128(18),"
     << "translator_model LowCardinality(String),"
+    << "beta_tangent Decimal128(18),"   // §6.2 M1 диагностика (СЫРОЙ β_T)
+    << "beta_lsq Decimal128(18),"       // §6.2 M2
+    << "beta_profit Decimal128(18),"    // §6.2 M3
+    << "beta_minorant Decimal128(18),"  // §6.2 M4
+    << "selected_slope_method UInt8,"   // §6.2 выбранный для клиринга (1..4)
     << "event_time_ms Int64,"
     << "ingested_at DateTime DEFAULT now()"
     << ") ENGINE = ReplacingMergeTree(event_time_ms) "
@@ -119,6 +124,19 @@ void ClickHouseVectorSegmentStorage::EnsureSchema() {
                             {{"error", e.what()}});
     }
   }
+  // §6.2: колонки диагностики 4 способов наклона (миграция существующей таблицы).
+  for (const char* col : {"beta_tangent Decimal128(18)", "beta_lsq Decimal128(18)",
+                          "beta_profit Decimal128(18)", "beta_minorant Decimal128(18)",
+                          "selected_slope_method UInt8"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ +
+          " ADD COLUMN IF NOT EXISTS " + col + " AFTER translator_model"));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history add slope-methods col failed",
+                            {{"error", e.what()}});
+    }
+  }
 }
 
 void ClickHouseVectorSegmentStorage::SaveSegments(
@@ -152,6 +170,11 @@ void ClickHouseVectorSegmentStorage::SaveSegments(
       << "\"beta_t\":" << s.beta_t.to_string() << ","
       << "\"theta\":" << s.theta.to_string() << ","
       << "\"translator_model\":\"" << JsonEscape(s.translator_model) << "\","
+      << "\"beta_tangent\":" << s.beta_tangent.to_string() << ","
+      << "\"beta_lsq\":" << s.beta_lsq.to_string() << ","
+      << "\"beta_profit\":" << s.beta_profit.to_string() << ","
+      << "\"beta_minorant\":" << s.beta_minorant.to_string() << ","
+      << "\"selected_slope_method\":" << s.selected_slope_method << ","
       << "\"event_time_ms\":" << event_ts_ms
       << "}\n";
   }

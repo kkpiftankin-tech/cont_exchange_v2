@@ -48,6 +48,16 @@ struct VectorFlowSegment {
   cex::common::Decimal theta{};           ///< safe-share (0..1)
   std::string translator_model;           ///< "safe_vwap" | "log_endpoint"
 
+  // §6.2 «Кривые котирования»: диагностика наклона всеми 4 способами (СЫРОЙ β_T,
+  // θ=1, сравним с VWAP) для отображения. selected_slope_method = какой способ
+  // свёрнут в slope/alpha_ext/beta_t выше (1=TANGENT,2=LSQ_BAND,3=PROFIT_AREA,
+  // 4=MINORANT). См. ADR-053 §Addendum 2026-09-30.
+  cex::common::Decimal beta_tangent{};    ///< M1 касательная
+  cex::common::Decimal beta_lsq{};        ///< M2 МНК на полосе
+  cex::common::Decimal beta_profit{};     ///< M3 подгонка по выгоде
+  cex::common::Decimal beta_minorant{};   ///< M4 минорант (§6.3-safe)
+  std::int32_t selected_slope_method{4};  ///< выбранный для клиринга (деф 4)
+
   std::int64_t source_timestamp_ms{0};
 };
 

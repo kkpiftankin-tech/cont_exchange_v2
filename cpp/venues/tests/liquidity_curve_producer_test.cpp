@@ -1560,32 +1560,81 @@ double BetaTFor(const fob::venue::v1::VenueSnapshot& snap) {
   return curve.safe_translator().beta_t();
 }
 
-// F-05A #2: windowed-наклон — reversibility (off), CAL-2 (on≥off), steepening на cliff.
-bool TestSlopeWindowCalibration() {
-  const auto snap = MakeCliffSnapshot();
-  unsetenv("F05A_SLOPE_WINDOW");
-  const double beta_off = BetaTFor(snap);
-  const double beta_off2 = BetaTFor(snap);  // детерминизм off
-  setenv("F05A_SLOPE_WINDOW", "1", 1);
-  const double beta_on = BetaTFor(snap);
-  unsetenv("F05A_SLOPE_WINDOW");
-  const double beta_off3 = BetaTFor(snap);  // обратимость: off после on == off
+// §6.2 «Кривые котирования»: 4 способа снятия наклона сверены с ПЕЧАТНЫМ числовым
+// примером дока (grounded, не ад-хок). mid=60000, кумул. (δ‰,D тыс.USDT) =
+// (1,100)(3,250)(6,500). Док: касательная=100, МНК≈80, минорант=83.3; M3 числа не
+// даёт (ждём D_n²/(2·Σδ·ΔD)=250000/4100≈60.98).
+bool TestSlopeMethodsGroundExample() {
+  const std::vector<double> delta = {1.0, 3.0, 6.0};
+  const std::vector<double> cum_notional = {100.0, 250.0, 500.0};
+  const auto a = cex::venues::app::AlphasFromCumulative(delta, cum_notional);
   bool pass = true;
-  pass = Check(beta_off > 0.0, "slope-window: off beta_t > 0") && pass;
-  pass = Check(beta_off == beta_off2, "slope-window: off детерминирован") && pass;
-  pass = Check(beta_off == beta_off3, "slope-window: off после on байт-в-байт (обратимость)") && pass;
-  // on = СЕКАНС VWAP к концу глубины (трекает VWAP, НЕ пол на global). Для MakeCliffSnapshot:
-  // sec_bid=|85.185−100.5|/81≈0.189, sec_ask≈0.177 ⇒ β_on=max≈0.189. Диапазон [0.17,0.21].
-  // (прежний CAL-2 on≥off отклонён: при глубоком near-touch наклон должен быть МАЛЫМ = VWAP.)
-  pass = Check(beta_on > 0.17 && beta_on < 0.21, "slope-window: on трекает VWAP-секанс (~0.189)") && pass;
-  pass = Check(beta_on != beta_off, "slope-window: on отличается от off (калибровка применена)") && pass;
+  pass = Check(std::fabs(a.tangent - 100.0) < 1e-6, "M1 касательная = 100 (§6.2)") && pass;
+  pass = Check(std::fabs(a.lsq - 3050.0 / 38.0) < 1e-6, "M2 МНК = 80.263 (§6.2 ≈80)") && pass;
+  pass = Check(std::fabs(a.minorant - 500.0 / 6.0) < 1e-6, "M4 минорант = 83.333 (§6.2)") && pass;
+  pass = Check(std::fabs(a.profit - 250000.0 / 4100.0) < 1e-6, "M3 подгонка = 60.976") && pass;
+  // §6.2: касательная оптимистична (≥ минoranта), минорант ≥ МНК ≥ M3 на выпуклой книге.
+  pass = Check(a.tangent >= a.minorant && a.minorant >= a.lsq && a.lsq >= a.profit,
+               "§6.2 упорядоченность способов на выпуклой книге") && pass;
+  // Вырожденная полоса M2 (все δ_k совпадают ⇒ знаменатель OLS≈0): lsq НЕ должен остаться
+  // +inf (иначе near-zero clearing slope), фолбэк на минорант (code-review money-path).
+  const auto degen = cex::venues::app::AlphasFromCumulative({5.0, 5.0}, {100.0, 200.0});
+  pass = Check(std::isfinite(degen.lsq) && degen.lsq > 0.0,
+               "M2 вырожденная полоса → фолбэк на минорант (не +inf)") && pass;
+  pass = Check(degen.lsq == degen.minorant, "M2 фолбэк = минорант при den≈0") && pass;
+  // Один уровень: M2 деградирует в касательную.
+  const auto one = cex::venues::app::AlphasFromCumulative({3.0}, {90.0});
+  pass = Check(std::isfinite(one.lsq) && one.lsq == one.tangent, "M2 один уровень = касательная") && pass;
+  return pass;
+}
+
+// §6.2: runtime-выбор способа для клиринга. Дефолт (минорант) = прежнее поведение
+// байт-в-байт; выбор другого способа детерминированно меняет β_t; обратим.
+bool TestSlopeMethodSelection() {
+  const auto snap = MakeCliffSnapshot();
+  using cex::venues::app::SetClearingSlopeMethod;
+  SetClearingSlopeMethod(4);
+  const double b4 = BetaTFor(snap);
+  const double b4b = BetaTFor(snap);
+  SetClearingSlopeMethod(1); const double b1 = BetaTFor(snap);
+  SetClearingSlopeMethod(2); const double b2 = BetaTFor(snap);
+  SetClearingSlopeMethod(3); const double b3 = BetaTFor(snap);
+  SetClearingSlopeMethod(4); const double b4c = BetaTFor(snap);  // обратимость
+  bool pass = true;
+  pass = Check(b4 > 0.0, "select: минорант β_t > 0") && pass;
+  pass = Check(b4 == b4b, "select: детерминизм") && pass;
+  pass = Check(b4 == b4c, "select: возврат к минoranту байт-в-байт (обратимость)") && pass;
+  pass = Check(b1 > 0.0 && b2 > 0.0 && b3 > 0.0, "select: все способы дают β_t > 0") && pass;
+  pass = Check(b1 != b4 || b2 != b4 || b3 != b4, "select: способы дают разный наклон") && pass;
+  return pass;
+}
+
+// §6.2: контракт safe_translator несёт все 4 диагностики + выбранный способ.
+bool TestSlopeMethodsContract() {
+  const auto snap = MakeCliffSnapshot();
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.topic = "venue.liquidity.fob";
+  LiquidityCurveProducer producer(&publisher, cfg);
+  cex::venues::app::SetClearingSlopeMethod(2);  // выбираем МНК
+  bool pass = true;
+  pass = Check(producer.Publish(snap) && !publisher.messages.empty(), "contract: опубликовано") && pass;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  pass = Check(cex::common::from_bytes(publisher.messages.back().payload, curve), "contract: декод") && pass;
+  const auto& st = curve.safe_translator();
+  pass = Check(st.slope_methods_size() == 4, "contract: 4 способа в диагностике") && pass;
+  pass = Check(st.selected_method() == fob::common::v1::SLOPE_METHOD_LSQ_BAND,
+               "contract: выбранный способ = M2 (LSQ)") && pass;
+  cex::venues::app::SetClearingSlopeMethod(4);  // вернуть §6.3-safe дефолт
   return pass;
 }
 
 int main() {
   bool ok = true;
   ok = TestPublishesRegularizedCurve() && ok;
-  ok = TestSlopeWindowCalibration() && ok;
+  ok = TestSlopeMethodsGroundExample() && ok;
+  ok = TestSlopeMethodSelection() && ok;
+  ok = TestSlopeMethodsContract() && ok;
   ok = TestPublishesL2ForHighPriceSnapshot() && ok;
   ok = TestLiveLikeHighScaleSnapshotRetainsL2() && ok;
   ok = TestLiveLikeHighScaleSnapshotCanBuildL3() && ok;
