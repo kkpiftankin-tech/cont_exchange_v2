@@ -48,7 +48,7 @@ function fmtTime(ms) {
 // компонент — ЧИСТЫЙ РЕНДЕР: запрашивает готовые массивы {q, price} по venue/symbol
 // и контролам, при смене контролов перезапрашивает, рисует. Никаких вычислений кривой.
 // Ориентация осей: 'vp' объём→цена (график 02), 'pv' цена→объём (график 01).
-function LiquidityChart({ venue, symbol, ts }) {
+function LiquidityChart({ venue, symbol, ts, onPauseChange }) {
   const [nBuy, setNBuy] = useState('');        // '' → backend берёт все уровни
   const [nSell, setNSell] = useState('');
   const [orient, setOrient] = useState('vp');
@@ -85,6 +85,12 @@ function LiquidityChart({ venue, symbol, ts }) {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [venue, symbol, ts, nBuy, nSell, anchorMode, theta, paused]);
+
+  // Сообщаем родителю о паузе: он замораживает опрос списка батчей, чтобы строки не
+  // двигались и открытый батч не исчезал через 20-30с. При размонтировании (закрыли
+  // строку) снимаем заморозку.
+  useEffect(() => { if (onPauseChange) onPauseChange(paused); }, [paused, onPauseChange]);
+  useEffect(() => () => { if (onPauseChange) onPauseChange(false); }, [onPauseChange]);
 
   // Ошибку показываем только НЕ на паузе и когда нет замороженных данных (иначе график
   // не должен исчезать во время паузы из-за разового сбоя запроса).
@@ -552,7 +558,7 @@ function AgentDrillDown({ detail }) {
 }
 
 // (3) диагностика симуляции fill хедж-заявок (реальные заявки + публичные сделки).
-function ClearingDetail({ d }) {
+function ClearingDetail({ d, onChartPauseChange }) {
   const src = Array.isArray(d.source) ? d.source : [];
   const prices = Array.isArray(d.clearingPrices) ? d.clearingPrices : [];
   const rates = Array.isArray(d.clearingRates) ? d.clearingRates : [];
@@ -613,7 +619,7 @@ function ClearingDetail({ d }) {
                       {open && (
                         <tr>
                           <td colSpan={9} className="vc-chart-cell">
-                            <LiquidityChart venue={s.exchange} symbol={s.instrument} ts={d.event_time_ms} />
+                            <LiquidityChart venue={s.exchange} symbol={s.instrument} ts={d.event_time_ms} onPauseChange={onChartPauseChange} />
                           </td>
                         </tr>
                       )}
@@ -790,6 +796,7 @@ function VectorClearingLive() {
   const [selAgent, setSelAgent] = useState(null);    // выбранный агент для drill-down
   const [agentDetail, setAgentDetail] = useState(null); // /agent-detail выбранного агента
   const [openKey, setOpenKey] = useState(null);
+  const [chartPaused, setChartPaused] = useState(false);  // пауза графика ⇒ заморозить и список (строки не двигаются/не исчезают)
   const [detailByKey, setDetailByKey] = useState({});
   const [detailErr, setDetailErr] = useState('');
   // Runtime-конфиг цикла батч-клиринга (окно/staleness).
@@ -941,7 +948,9 @@ function VectorClearingLive() {
   }, [isAuth, load, loadConfig, loadLiveness]);
 
   useInterval(() => {
-    if (isAuth) { load(); loadLiveness(); }
+    // Пауза графика замораживает и список батчей: иначе строки двигаются и открытый
+    // батч через ~20-30с уходит из списка → график исчезает. На паузе не грузим.
+    if (isAuth && !chartPaused) { load(); loadLiveness(); }
   }, POLL_INTERVAL_MS);
 
   // Живая панель обновляется только когда открыта (кнопка). Не трогает статичный батч.
@@ -1242,7 +1251,7 @@ function VectorClearingLive() {
                         <td colSpan={6}>
                           {!d && !detailErr && <div className="vc-detail-loading">загрузка детали…</div>}
                           {detailErr && <div className="vc-error">Ошибка: {detailErr}</div>}
-                          {d && <ClearingDetail d={d} />}
+                          {d && <ClearingDetail d={d} onChartPauseChange={setChartPaused} />}
                         </td>
                       </tr>
                     )}
