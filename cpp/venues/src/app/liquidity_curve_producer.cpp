@@ -890,9 +890,15 @@ bool LiquidityCurveProducer::Publish(
       degrade_reason = "stale";
     }
 
+    // РАСЦЕПЛЕНИЕ (F-11 diag 2026-10-01): деградацию КРИВОЙ (чтение публичного стакана)
+    // гонят ТОЛЬКО ошибки ПУБЛИКАЦИИ кривой, НЕ провалы ХЕДЖА. Раньше здесь суммировались
+    // consecutive_execution_errors, из-за чего REJECTED/EXPIRED CEX-хеджи навсегда выключали
+    // кривую пары (FILLED приходят только на DEX-путь ⇒ счётчик не сбрасывался): 21 стакан→7
+    // кривых. Чтение стакана не зависит от исполнения хеджа. consecutive_execution_errors
+    // по-прежнему трекается (ObserveExecution) для venue_health/observability, но кривую не
+    // глушит. Логируем его отдельным тегом, чтобы здоровье хеджа оставалось видимым.
     const uint32_t operational_errors =
-        degradation_state.consecutive_publish_errors +
-        degradation_state.consecutive_execution_errors;
+        degradation_state.consecutive_publish_errors;
     if (operational_errors >= config_.degradation.max_consecutive_errors_off) {
       cex::common::log_json("WARN", "Venue curve builder degraded to OFF",
                             {{"service", "venues"},
@@ -904,6 +910,8 @@ bool LiquidityCurveProducer::Publish(
                              {"requested_level", LevelToString(requested_level)},
                              {"reason", "too_many_errors"},
                              {"errors", std::to_string(operational_errors)},
+                             {"execution_errors",
+                              std::to_string(degradation_state.consecutive_execution_errors)},
                              {"max_consecutive_errors_off",
                               std::to_string(config_.degradation.max_consecutive_errors_off)},
                              {"source_file", "cpp/venues/src/app/liquidity_curve_producer.cpp"}});

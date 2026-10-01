@@ -68,10 +68,12 @@ struct FakePublisher final : public IMessagePublisher {
   };
 
   std::vector<Message> messages;
+  bool fail{false};  // true ⇒ Publish возвращает false (симуляция ошибки публикации)
 
   bool Publish(const std::string& topic,
                const std::string& key,
                const std::string& payload) override {
+    if (fail) return false;  // не записываем сообщение при провале
     messages.push_back({topic, key, payload});
     return true;
   }
@@ -1231,7 +1233,10 @@ bool TestStaleDegradesToL1WithLowerConfidence() {
   return pass;
 }
 
-bool TestExecutionErrorsDegradeToL1ThenOff() {
+// F-11 (расцепление 2026-10-01): провалы ХЕДЖА (REJECTED/EXPIRED ExecutionReport)
+// НЕ должны гасить КРИВУЮ ликвидности — чтение публичного стакана не зависит от
+// исполнимости хеджа. (Прежде execution-ошибки душили кривую: 21 стакан→7 кривых.)
+bool TestExecutionErrorsDoNotDegradeCurve() {
   FakePublisher publisher;
   LiquidityCurveProducerConfig cfg;
   cfg.level = "L3";
@@ -1243,28 +1248,52 @@ bool TestExecutionErrorsDegradeToL1ThenOff() {
 
   LiquidityCurveProducer producer(&publisher, cfg);
   const auto intent = MakeIntent(fob::common::v1::SIDE_BUY, 2);
-  producer.ObserveExecution(intent, MakeRejectedReport());
-  producer.ObserveExecution(intent, MakeRejectedReport());
+  // 4 подряд провала хеджа (> порога max_consecutive_errors_off=3).
+  for (int i = 0; i < 4; ++i) producer.ObserveExecution(intent, MakeRejectedReport());
 
-  const bool degraded_ok = producer.Publish(MakeSnapshot());
-  if (!Check(degraded_ok, "two execution errors should degrade but still publish")) return false;
-
-  fob::venue::v1::VenueLiquidityCurve degraded_curve;
-  if (!Check(cex::common::from_bytes(publisher.messages.back().payload, degraded_curve),
-             "error-degraded curve parse")) {
-    return false;
-  }
-
+  const std::size_t before = publisher.messages.size();
+  const bool ok = producer.Publish(MakeSnapshot());
   bool pass = true;
-  pass = Check(degraded_curve.level() == "L1",
-               "two consecutive errors must degrade L3 to L1") && pass;
+  pass = Check(ok, "execution errors must NOT block curve publish") && pass;
+  pass = Check(publisher.messages.size() > before, "curve must still be published") && pass;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  if (Check(cex::common::from_bytes(publisher.messages.back().payload, curve), "curve parse")) {
+    pass = Check(curve.level() == "L3",
+                 "execution errors must NOT downgrade curve level (stays L3)") && pass;
+  } else {
+    pass = false;
+  }
+  return pass;
+}
 
-  producer.ObserveExecution(intent, MakeRejectedReport());
-  const std::size_t before_off_messages = publisher.messages.size();
+// Ошибки ПУБЛИКАЦИИ кривой (Kafka publish кривой провалился) инкрементят
+// consecutive_publish_errors и ПО-ПРЕЖНЕМУ деградируют кривую до OFF после порога.
+// Покрывает ветку operational_errors >= max_consecutive_errors_off через publish-путь.
+// (Синтетик-путь для этого не годится: успешная публикация кривой сбрасывает счётчик
+// в 0 до того, как провал синтетика его поднимет — счётчик не копится.)
+bool TestPublishErrorsDegradeToOff() {
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.level = "L3";
+  cfg.l3_impact.enabled = true;
+  cfg.degradation.min_l3_confidence = 0.0;
+  cfg.degradation.min_l2_confidence = 0.0;
+  cfg.degradation.min_l1_confidence = 0.0;
+  cfg.degradation.max_consecutive_errors_off = 3;
+
+  LiquidityCurveProducer producer(&publisher, cfg);
+  bool pass = true;
+  // 3 подряд провала публикации кривой → consecutive_publish_errors достигает 3.
+  publisher.fail = true;
+  for (int i = 0; i < 3; ++i) producer.Publish(MakeSnapshot());
+  // Публикация снова работает, но счётчик=3 ⇒ OFF-гейт срабатывает ДО построения:
+  // ни одной записи, несмотря на рабочий publisher.
+  publisher.fail = false;
+  const std::size_t before_off = publisher.messages.size();  // ожидаем 0
   const bool off_ok = producer.Publish(MakeSnapshot());
-  pass = Check(!off_ok, "three consecutive errors must degrade to OFF") && pass;
-  pass = Check(publisher.messages.size() == before_off_messages,
-               "OFF must not publish a new curve") && pass;
+  pass = Check(!off_ok, "three publish errors must degrade curve to OFF") && pass;
+  pass = Check(publisher.messages.size() == before_off,
+               "OFF must not publish a new curve (gate fires before build)") && pass;
   return pass;
 }
 
@@ -1653,7 +1682,8 @@ int main() {
   ok = TestQualityGatingDisableSkipsPublish() && ok;
   ok = TestQualityDegradesL3ToL2() && ok;
   ok = TestStaleDegradesToL1WithLowerConfidence() && ok;
-  ok = TestExecutionErrorsDegradeToL1ThenOff() && ok;
+  ok = TestExecutionErrorsDoNotDegradeCurve() && ok;
+  ok = TestPublishErrorsDegradeToOff() && ok;
   ok = TestPublishOptionsOverrideLevelAndSyntheticOutput() && ok;
   ok = TestPublishesSyntheticFlowOrdersAndStoresRows() && ok;
   ok = TestVolume24hCapsSyntheticSpeed() && ok;
