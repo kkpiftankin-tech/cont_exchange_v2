@@ -6782,9 +6782,10 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // ADR-060: реальные хедж-заявки + рассматриваемые публичные исполнения venue +
   // причина (заменяет синтетические черновики; см. задачу 2026-09-17).
   const fillDiagnostics = await fetchVenueFillDiagnostics(clr.batch_id);
+  const hedgeMap = await fetchAgentHedgeMap();  // заявки агента: отправлено/исполнено
   // Money-path строки агентов: одна строка на агента, позиция/Δ разложены на ноги
-  // пары (base−/quote+). Мердж и домен-математика — в BFF, не в браузере.
-  const agentRows = buildAgentRows(agentPositions, agentDeltas);
+  // пары (base−/quote+) + заявки (sent/filled). Мердж и домен-математика — в BFF.
+  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap);
 
   return {
     batch_id: clr.batch_id,
@@ -6894,7 +6895,8 @@ async function fetchVenueFillDiagnostics(batchId) {
 // c·1000/цена_пары (единицы base). Одна нога +, другая − (в ОДНОЙ строке).
 // Арбитражёр перевозит ОДИН актив — у него одна нога (актив), пары нет.
 // Домен-математику держим в BFF (не в браузере, [frontend-no-domain-compute]).
-function buildAgentRows(agentPositions, agentDeltas) {
+function buildAgentRows(agentPositions, agentDeltas, hedgeMap) {
+  const hm = hedgeMap instanceof Map ? hedgeMap : new Map();
   const keyOf = (p) => (p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '');
   const delByKey = new Map((agentDeltas || []).map((d) => [keyOf(d), d]));
   const posByKey = new Map((agentPositions || []).map((p) => [keyOf(p), p]));
@@ -6915,6 +6917,10 @@ function buildAgentRows(agentPositions, agentDeltas) {
     // (обе величины одного знака): именно оно сходится к band. Показываем его.
     const cTotal = (cPos == null) ? null : cPos + inFlight;
     const cDel = del ? Number(del.delta) : null;
+    // F-18: было → дельта → стало ЭТОГО такта (ledger GetAgentPositionDeltas). Если
+    // агент не двигался (нет del) — было=стало=текущая позиция, дельта=0.
+    const cBefore = del ? Number(del.position_before) : cPos;
+    const cAfter = del ? Number(del.position_after) : cPos;
     // Разложение стоимости val (k-USDT) на ноги В СВОИХ валютах пары (money-path,
     // ADR-057). value_USDT = val·1000. base_qty = value/P_base, quote_qty = value/P_quote,
     // где P_quote = P_base/reference_price. Переводчик: SELL base ⇒ base−, quote+ (при c>0);
@@ -6935,8 +6941,9 @@ function buildAgentRows(agentPositions, agentDeltas) {
       if (price > 0) return { base: v / price, quote: null };  // арбитражёр
       return { base: null, quote: null };
     };
-    const pl = legs(cPos);
-    const dl = legs(cDel);
+    const pl = legs(cAfter);    // стало (после такта)
+    const bl = legs(cBefore);   // было (до такта)
+    const dl = legs(cDel);      // дельта такта
     // #1/#2 Арбитражёр: маршрут ДВУХ площадок (из agent_id) + позиция по КАЖДОЙ.
     // agent_id = A_<asset>_<src><dst>, dst = поле venue (канонический приёмник),
     // src = остаток. Перевозит актив src→dst ⇒ short на src, long на dst (net≈0).
@@ -6956,11 +6963,12 @@ function buildAgentRows(agentPositions, agentDeltas) {
         if (price > 0) return v / price;    // единицы актива
         return null;
       };
-      const q = qty(cPos), dq = qty(cDel);
+      const qA = qty(cAfter), qB = qty(cBefore), dq = qty(cDel);
       arb = {
         src, dst, unit: b.asset,
-        leg_src: q == null ? null : -q, leg_dst: q == null ? null : q,
-        dleg_src: dq == null ? null : -dq, dleg_dst: dq == null ? null : dq,
+        leg_src: qA == null ? null : -qA, leg_dst: qA == null ? null : qA,          // стало
+        bleg_src: qB == null ? null : -qB, bleg_dst: qB == null ? null : qB,        // было
+        dleg_src: dq == null ? null : -dq, dleg_dst: dq == null ? null : dq,        // дельта
       };
     }
     rows.push({
@@ -6976,13 +6984,17 @@ function buildAgentRows(agentPositions, agentDeltas) {
       quote: isT ? ((pos && pos.quote) || 'USDT') : (b.asset === 'USDT' ? '' : 'USDT'),
       venue: b.venue,
       hasDelta: !!del,
-      // ноги пары (money-path):
-      pos_base: pl.base, pos_quote: pl.quote,      // текущая позиция (сейчас)
-      delta_base: dl.base, delta_quote: dl.quote,  // Δ этого такта
+      // ноги пары (money-path) — было → дельта → стало этого такта:
+      pos_base_before: bl.base, pos_quote_before: bl.quote,  // БЫЛО (до такта)
+      delta_base: dl.base, delta_quote: dl.quote,            // ДЕЛЬТА такта
+      pos_base: pl.base, pos_quote: pl.quote,                // СТАЛО (после такта)
       // c_j — неотправленный остаток (A7); c_total — истинное обязательство (c+in_flight):
       c_position: cPos, c_total: cTotal, in_flight: inFlight, c_delta: cDel,
       pair_price: price,
       arb,  // #1/#2 маршрут+ноги арбитражёра по площадкам (null у переводчика)
+      // Заявки агента (последняя band-хедж-заявка, venue_fill_diagnostics): сколько
+      // отправлено на биржу (target_qty) и сколько исполнилось по симуляции (filled_qty).
+      ...(hm.get(b.agent_id) || {}),
     });
   }
   rows.sort((a, b) => {
@@ -7017,6 +7029,36 @@ async function fetchAgentPositions() {
     console.error("[ledger] GetAgentPositions failed:", e.message || e);
     return [];
   }
+}
+
+// F-18: заявки агентов — последняя band-хедж-заявка каждого агента из
+// venue_fill_diagnostics (hedge_flow_id = "ce|band|<agent_id>|..."): target_qty
+// (сколько отправлено на биржу) + filled_qty (сколько исполнилось по симуляции).
+// Один запрос DISTINCT ON по agent_id (из hedge_flow_id) ⇒ latest per agent.
+async function fetchAgentHedgeMap() {
+  const pool = getPgPool();
+  if (!pool) return new Map();
+  try {
+    const r = await pool.query(
+      `SELECT DISTINCT ON (split_part(hedge_flow_id,'|',3))
+              split_part(hedge_flow_id,'|',3) AS agent_id,
+              symbol, side, target_qty::text AS target_qty, filled_qty::text AS filled_qty,
+              status, reason, (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms
+         FROM venue_fill_diagnostics
+        WHERE hedge_flow_id LIKE 'ce|band|%'
+        ORDER BY split_part(hedge_flow_id,'|',3), created_at DESC`);
+    const m = new Map();
+    for (const row of r.rows) {
+      m.set(row.agent_id, {
+        hedge_symbol: row.symbol, hedge_side: row.side,
+        hedge_sent: Number(row.target_qty) || 0,    // отправлено на биржу (qty заявки)
+        hedge_filled: Number(row.filled_qty) || 0,  // исполнено по симуляции
+        hedge_status: row.status, hedge_reason: row.reason,
+        hedge_ms: Number(row.created_ms) || 0,
+      });
+    }
+    return m;
+  } catch (e) { return new Map(); }  // нет таблицы/строк — заявки просто не покажем
 }
 
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
@@ -7607,11 +7649,12 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/agent-positions") {
     const rows = await fetchVectorClearingRows(1);
     const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas] = await Promise.all([
+    const [agentPositions, agentDeltas, hedgeMap] = await Promise.all([
       fetchAgentPositions(),
-      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([])
+      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
+      fetchAgentHedgeMap()
     ]);
-    const agentRows = buildAgentRows(agentPositions, agentDeltas);
+    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap);
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
   }
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —

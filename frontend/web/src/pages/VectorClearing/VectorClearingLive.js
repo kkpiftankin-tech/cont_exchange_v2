@@ -314,80 +314,91 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
     title: 'клик — разбор агента (цена/порог/хедж/исполнение)'
   } : {};
   const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
-  const leg = (v, cur) => (v == null) ? <span title="ещё нет цены пары в этом такте">—</span> : (
-    <span className={Number(v) > 1e-9 ? 'vc-side-ask' : Number(v) < -1e-9 ? 'vc-side-bid' : ''}>
-      {sgn(v)}<span style={{ opacity: 0.6, fontSize: '0.85em' }}> {cur}</span>
-    </span>
+  const dash = <span title="нет данных" style={{ opacity: 0.4 }}>—</span>;
+  // Ячейка знакового числа (было/дельта/стало) в валюте ноги; null ⇒ прочерк.
+  const numCell = (v) => (v == null) ? dash : (
+    <span className={Number(v) > 1e-9 ? 'vc-side-ask' : Number(v) < -1e-9 ? 'vc-side-bid' : ''}>{sgn(v)}</span>
   );
-  const dash = <span title="ещё нет цены пары для перевода стоимости в объём" style={{ opacity: 0.4 }}>—</span>;
-  const zero = <span title="агент не двигался в этом такте (Δ=0)" style={{ opacity: 0.3 }}>0</span>;
+  const deltaCell = (v, hasDelta) => (!hasDelta || v == null)
+    ? <span title="агент не двигался в этом такте" style={{ opacity: 0.35 }}>0</span>
+    : numCell(v);
+  // Заявка агента: сколько отправлено на биржу (target_qty) и сколько исполнилось по
+  // симуляции (filled_qty). Цвет исполнения: зелёный=полностью, янтарь=частично, красный=0.
+  const hedgeSent = (a) => (a.hedge_status == null) ? dash : (
+    <span title={`заявка: ${a.hedge_symbol || ''} ${a.hedge_side || ''}, статус ${a.hedge_status}`}>{fmtNum(a.hedge_sent)}</span>
+  );
+  const hedgeFilled = (a) => {
+    if (a.hedge_status == null) return dash;
+    const s = Number(a.hedge_sent) || 0, f = Number(a.hedge_filled) || 0;
+    const col = f <= 1e-12 ? '#e06060' : (f + 1e-9 >= s ? '#5fd08a' : '#e0b84a');
+    const lbl = f <= 1e-12 ? 'не исполнено' : (f + 1e-9 >= s ? 'полностью' : 'частично');
+    return <span style={{ color: col }} title={`${lbl} (${a.hedge_status})`}>{fmtNum(f)}</span>;
+  };
+  // Две ноги агента (по валюте): переводчик base/quote; арбитражёр asset@src / asset@dst.
+  const legsOf = (a) => {
+    if (a.agent_kind === 'arbitrageur') {
+      const r = a.arb || {};
+      return [
+        { label: `${a.base}@${r.src || '?'}`, before: r.bleg_src, delta: r.dleg_src, after: r.leg_src },
+        { label: `${a.base}@${r.dst || '?'}`, before: r.bleg_dst, delta: r.dleg_dst, after: r.leg_dst },
+      ];
+    }
+    return [
+      { label: a.base, before: a.pos_base_before, delta: a.delta_base, after: a.pos_base },
+      { label: a.quote || 'USDT', before: a.pos_quote_before, delta: a.delta_quote, after: a.pos_quote },
+    ];
+  };
+  // Агент = ДВЕ строки (по ноге/валюте). agent_id + заявки (отправлено/исполнено) —
+  // rowSpan=2 (общие для агента). было → дельта → стало — по каждой ноге отдельно.
+  const renderAgent = (a, i, tag) => {
+    const L = legsOf(a);
+    return L.map((lg, li) => (
+      <tr key={`${a.agent_id || ''}|${tag}|${i}|${li}`} {...rowProps(a)}>
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{a.agent_id}{a.venue ? <span style={{ opacity: 0.5 }}> · {a.venue}</span> : ''}</td>}
+        <td className="vc-mono">{lg.label}</td>
+        <td className="vc-mono">{numCell(lg.before)}</td>
+        <td className="vc-mono">{deltaCell(lg.delta, a.hasDelta)}</td>
+        <td className="vc-mono"><b>{numCell(lg.after)}</b></td>
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeSent(a)}</td>}
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeFilled(a)}</td>}
+      </tr>
+    ));
+  };
   const tRows = rows.filter((a) => a.agent_kind === 'translator');
   const aRows = rows.filter((a) => a.agent_kind === 'arbitrageur');
+  const head = (
+    <thead><tr>
+      <th>agent_id</th>
+      <th title="валюта/нога агента (отдельная строка на каждую)">нога</th>
+      <th title="позиция ДО этого такта клиринга">было</th>
+      <th title="Δ позиции в ЭТОМ такте">дельта</th>
+      <th title="позиция ПОСЛЕ такта (= было + дельта)">стало</th>
+      <th title="сколько отправлено на биржу (band-хедж заявка, target_qty)">отправлено</th>
+      <th title="сколько исполнилось по результатам симуляции (filled_qty)">исполнено</th>
+    </tr></thead>
+  );
   return (
     <div className="vc-sec">
       <div className="vc-sec-title">{title}</div>
       <div className="vc-sec-body">
         <div className="vc-sub-head">Переводчики (пара base/quote) — <b>{tRows.length}</b></div>
         {tRows.length > 0 ? (
-          <table className="vc-sub-table">
-            <thead><tr>
-              <th>agent_id</th><th>пара</th><th>площадка</th>
-              <th title="Δ ЭТОГО такта в БАЗОВОЙ валюте">Δ база</th>
-              <th title="Δ ЭТОГО такта в КОТИРУЕМОЙ валюте">Δ котир.</th>
-              <th title="ТЕКУЩАЯ позиция в БАЗОВОЙ валюте">позиция база</th>
-              <th title="ТЕКУЩАЯ позиция в КОТИРУЕМОЙ валюте">позиция котир.</th>
-            </tr></thead>
-            <tbody>
-              {tRows.map((a, i) => (
-                <tr key={(a.agent_id || '') + '|t|' + i} {...rowProps(a)}>
-                  <td className="vc-mono">{a.agent_id}</td>
-                  <td className="vc-mono">{a.pair}</td>
-                  <td>{a.venue || '—'}</td>
-                  <td className="vc-mono">{a.hasDelta ? leg(a.delta_base, a.base) : zero}</td>
-                  <td className="vc-mono">{a.hasDelta ? (a.quote ? leg(a.delta_quote, a.quote) : zero) : zero}</td>
-                  <td className="vc-mono"><b>{leg(a.pos_base, a.base)}</b></td>
-                  <td className="vc-mono">{a.quote ? <b>{leg(a.pos_quote, a.quote)}</b> : dash}</td>
-                </tr>
-              ))}
-            </tbody>
+          <table className="vc-sub-table">{head}
+            <tbody>{tRows.map((a, i) => renderAgent(a, i, 't'))}</tbody>
           </table>
         ) : <div className="vc-note vc-note-tight">нет переводчиков с позицией</div>}
 
         <div className="vc-sub-head" style={{ marginTop: 14 }}>Арбитражёры (перевоз актива между площадками) — <b>{aRows.length}</b></div>
         {aRows.length > 0 ? (
-          <table className="vc-sub-table">
-            <thead><tr>
-              <th>agent_id</th><th>актив</th><th>маршрут</th>
-              <th title="Δ ЭТОГО такта на площадке-источнике">Δ источник</th>
-              <th title="Δ ЭТОГО такта на площадке-приёмнике">Δ приёмник</th>
-              <th title="ТЕКУЩАЯ позиция на площадке-источнике">позиция источник</th>
-              <th title="ТЕКУЩАЯ позиция на площадке-приёмнике">позиция приёмник</th>
-            </tr></thead>
-            <tbody>
-              {aRows.map((a, i) => {
-                const r = a.arb || {};
-                const lblS = `${a.base}@${r.src || '?'}`;
-                const lblD = `${a.base}@${r.dst || '?'}`;
-                return (
-                  <tr key={(a.agent_id || '') + '|a|' + i} {...rowProps(a)}>
-                    <td className="vc-mono">{a.agent_id}</td>
-                    <td className="vc-mono">{a.base}</td>
-                    <td className="vc-mono">{(r.src || '?')} ↔ {(r.dst || '?')}</td>
-                    <td className="vc-mono">{a.hasDelta ? leg(r.dleg_src, lblS) : zero}</td>
-                    <td className="vc-mono">{a.hasDelta ? leg(r.dleg_dst, lblD) : zero}</td>
-                    <td className="vc-mono"><b>{leg(r.leg_src, lblS)}</b></td>
-                    <td className="vc-mono"><b>{leg(r.leg_dst, lblD)}</b></td>
-                  </tr>
-                );
-              })}
-            </tbody>
+          <table className="vc-sub-table">{head}
+            <tbody>{aRows.map((a, i) => renderAgent(a, i, 'a'))}</tbody>
           </table>
         ) : <div className="vc-note vc-note-tight">нет арбитражёров с позицией</div>}
 
         <div className="vc-note vc-note-tight">
-          <b>Переводчик</b> держит пару <b>base/quote</b>: одна нога +, другая − (при SELL base он short базовую / long котируемую).
-          <b> Арбитражёр</b> перевозит один актив между двумя площадками: <b>short на источнике / long на приёмнике</b> (напр. −BTC@binance / +BTC@okx). «v3» в id — это площадка <code>uniswap_v3</code>, не версия.
-          <b> Прочерк</b>: в колонке Δ — агент не двигался в этом такте (позиция при этом показана); в позиции — ещё нет цены пары. Ноги считает BFF из <code>c_j</code> и цены пары (money-path, ADR-057).
+          Каждый агент — <b>две строки (по валюте/ноге)</b>: <b>было → дельта → стало</b> этого такта.
+          <b> Переводчик</b> — пара base/quote (одна нога +, другая −). <b>Арбитражёр</b> — актив на источнике (−) и приёмнике (+); «v3» в id — площадка <code>uniswap_v3</code>.
+          <b> Отправлено/исполнено</b> — последняя band-хедж-заявка агента: сколько ушло на биржу и сколько исполнилось по симуляции (<span style={{ color: '#5fd08a' }}>полностью</span> / <span style={{ color: '#e0b84a' }}>частично</span> / <span style={{ color: '#e06060' }}>не исполнено</span>). Ноги/заявки считает BFF (money-path, ADR-057).
         </div>
       </div>
     </div>
