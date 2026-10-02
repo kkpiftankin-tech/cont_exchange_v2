@@ -1354,6 +1354,23 @@ bool CexWsRestAdapter::ApplyRuntimeConfig(
   return true;
 }
 
+// F-11/F-20 (IN-0xx fair trades scheduling): возраст последнего успешного
+// REST-чтения ленты трейдов символа — для справедливого распределения
+// общего per-venue rest_bucket_ между символами (poll_adapter в
+// venues_loop.cpp). Ключ совпадает с тем, что пишет parse_rest_trades_locked
+// (canon_trade_key), а не с "сырым" книжным ключом books_[snapshot.venue_symbol] —
+// они могут расходиться для venue с разделителями в символе (BTC-USDT и т.п.).
+int64_t CexWsRestAdapter::TradesReadAgeMs(const std::string& venue_symbol) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto it = books_.find(canon_trade_key(venue_symbol));
+  if (it == books_.end() || it->second.last_trades_read.time_since_epoch().count() == 0) {
+    return -1;  // ещё не читали — планировщик трактует как максимальный приоритет
+  }
+  const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now_fn_() - it->second.last_trades_read);
+  return std::max<int64_t>(0, age.count());
+}
+
 bool CexWsRestAdapter::OnWsTextMessage(const std::string& payload) {
   const SteadyClock::time_point now = now_fn_();
   std::lock_guard<std::mutex> lock(mu_);

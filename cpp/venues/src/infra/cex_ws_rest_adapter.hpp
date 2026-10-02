@@ -169,6 +169,10 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   bool ApplyRuntimeConfig(const domain::VenueAdapterRuntimeConfig& config) override;
 
+  // F-11/F-20 (IN-0xx fair trades scheduling): см. domain::VenueAdapter.
+  // Читает books_[canon_trade_key(venue_symbol)].last_trades_read под mu_.
+  int64_t TradesReadAgeMs(const std::string& venue_symbol) const override;
+
   // F-18/ADR-060: приёмник диагностики sim-fill (venue_fill_diagnostics → Clearing).
   // Опционален (nullptr ⇒ не пишем). Устанавливается в venues main. Не владеет.
   void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) { diag_sink_ = sink; }

@@ -72,6 +72,7 @@
 
 #include "fob/marketdata/v1/marketdata_raw.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "domain/trades_fetch_scheduler.hpp"
 #include "infra/cex_ws_rest_adapter.hpp"
 #include "infra/dex_amm_rpc_adapter.hpp"
 #include "infra/simulated_venue_adapter.hpp"
@@ -728,7 +729,20 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
            {"topic", "backtest.execution.venue"}});
     }
   } else if (mode == "real_multi_2cex_1dex" || mode == "multi_real") {
-    auto apply_real_cex_defaults = [](infra::CexWsRestAdapterConfig* cfg) {
+    // F-11/F-20 (IN-0xx fair trades scheduling): per-venue RPS/burst.
+    // venue_env_prefix (напр. "BINANCE") имеет приоритет над общим CEX_REST_RPS/
+    // CEX_REST_BURST (если оператор явно их выставил — старое поведение для ВСЕХ
+    // venues не меняется), а default_rps/default_burst применяются ТОЛЬКО когда
+    // ни per-venue, ни общий env не заданы. Толерантные площадки (binance/okx/
+    // coinbase публично держат порядка 20 req/s) получают выше дефолт — иначе
+    // общий per-venue rest_bucket_ (один на все ~5 пар биржи) истощается на
+    // snapshot+ticker первых символов такта, и лента публичных сделок
+    // (recent-trades) голодает для остальных. kraken — строгий публичный лимит,
+    // дефолт оставлен консервативным (риск 429/бан).
+    auto apply_real_cex_defaults = [](infra::CexWsRestAdapterConfig* cfg,
+                                       const std::string& venue_env_prefix,
+                                       double default_rps,
+                                       double default_burst) {
       if (cfg == nullptr) return;
       cfg->reconnect_cooldown_ms = static_cast<uint32_t>(
           std::max(1000, cex::common::Env::get_int("CEX_RECONNECT_COOLDOWN_MS", 300000)));
@@ -740,8 +754,10 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
           std::max(1000, cex::common::Env::get_int("STALE_THRESHOLD_MS", 15000)));
       cfg->rest_timeout_ms = static_cast<uint32_t>(
           std::max(1000, cex::common::Env::get_int("CEX_REST_TIMEOUT_MS", 5000)));
-      cfg->rest_requests_per_sec = env_double("CEX_REST_RPS", 2.0);
-      cfg->rest_burst = env_double("CEX_REST_BURST", 4.0);
+      cfg->rest_requests_per_sec = env_double(
+          venue_env_prefix + "_REST_RPS", env_double("CEX_REST_RPS", default_rps));
+      cfg->rest_burst = env_double(
+          venue_env_prefix + "_REST_BURST", env_double("CEX_REST_BURST", default_burst));
       cfg->rest_ticker_volume_enabled = env_bool("CEX_REST_TICKER_VOLUME_ENABLED", true);
       cfg->simulate_orders = env_bool(
           "CEX_SIMULATE_ORDERS",
@@ -788,7 +804,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "BINANCE_WS_URL", "wss://stream.binance.com:9443/ws");
     binance_cfg.rest_base_url = cex::common::Env::get_string(
         "BINANCE_REST_BASE_URL", "https://api.binance.com");
-    apply_real_cex_defaults(&binance_cfg);
+    apply_real_cex_defaults(&binance_cfg, "BINANCE", 8.0, 16.0);
     // F-09 T-F09-068: symbols this venue (in simulate) returns as REJECTED —
     // моделирует отказ реальной биржи на дискретный ордер (combo external-leg E2E).
     binance_cfg.simulate_reject_symbols =
@@ -801,7 +817,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "COINBASE_WS_URL", "wss://ws-feed.exchange.coinbase.com");
     coinbase_cfg.rest_base_url = cex::common::Env::get_string(
         "COINBASE_REST_BASE_URL", "https://api.exchange.coinbase.com");
-    apply_real_cex_defaults(&coinbase_cfg);
+    apply_real_cex_defaults(&coinbase_cfg, "COINBASE", 8.0, 16.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(coinbase_cfg));
 
     // Kraken (REST /0/public/Depth; символ XBT для BTC).
@@ -810,7 +826,10 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     kraken_cfg.ws_url = cex::common::Env::get_string("KRAKEN_WS_URL", "wss://ws.kraken.com");
     kraken_cfg.rest_base_url =
         cex::common::Env::get_string("KRAKEN_REST_BASE_URL", "https://api.kraken.com");
-    apply_real_cex_defaults(&kraken_cfg);
+    // Kraken — строгий публичный REST rate-limit; дефолт консервативный (риск 429/бан).
+    // Справедливость чтения ленты трейдов на этой площадке обеспечивается ИМЕННО
+    // IsStalestTradesCandidate (round-robin по голоду), а не поднятием RPS.
+    apply_real_cex_defaults(&kraken_cfg, "KRAKEN", 2.0, 4.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(kraken_cfg));
 
     // OKX (REST /api/v5/market/books; instId BASE-QUOTE).
@@ -820,7 +839,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         cex::common::Env::get_string("OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public");
     okx_cfg.rest_base_url =
         cex::common::Env::get_string("OKX_REST_BASE_URL", "https://www.okx.com");
-    apply_real_cex_defaults(&okx_cfg);
+    apply_real_cex_defaults(&okx_cfg, "OKX", 8.0, 16.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(okx_cfg));
 
     infra::DexAmmRpcAdapterConfig uniswap_cfg;
@@ -1979,6 +1998,24 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
             (adapter->Type() == domain::VenueType::kCex)
                 ? sim_instruments_.size()
                 : std::min<std::size_t>(1, sim_instruments_.size());
+
+        // F-11/F-20 (IN-0xx fair trades scheduling): один per-venue REST
+        // token-bucket общий на ВСЕ символы этой биржи (CexWsRestAdapter::
+        // rest_bucket_), поэтому без приоритизации лента публичных сделок
+        // (recent-trades) достаётся практически всегда только первому символу
+        // такта — остальные EXPIRE в CE band-hedge (нет свежих сделок для
+        // sim-матчинга, ADR-060). Снимаем "возраст" последнего успешного
+        // чтения ленты ДЛЯ ВСЕХ символов этого адаптера ОДИН РАЗ до цикла
+        // (не внутри него, иначе сравнение смещалось бы уже обновлённым age
+        // только что обслуженного символа в этом же такте).
+        std::vector<domain::TradesFreshnessEntry> trades_freshness;
+        trades_freshness.reserve(inst_n);
+        for (std::size_t i = 0; i < inst_n; ++i) {
+          std::string vs = sim_instruments_[i].symbol();
+          vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
+          trades_freshness.push_back({vs, adapter->TradesReadAgeMs(vs)});
+        }
+
         for (std::size_t inst_i = 0; inst_i < inst_n; ++inst_i) {
         const auto& sim_inst = sim_instruments_[inst_i];
         request.instrument = sim_inst;
@@ -1986,6 +2023,17 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
           std::string vs = sim_inst.symbol();
           vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
           request.venue_symbol = vs;
+        }
+        {  // Приоритет чтения ленты трейдов — самому "голодному" символу такта
+           // (round-robin: как только он читает трейды, его age обнуляется, и на
+           // следующем такте приоритет естественно переходит к следующему символу).
+          std::vector<domain::TradesFreshnessEntry> others;
+          others.reserve(trades_freshness.size());
+          for (std::size_t j = 0; j < trades_freshness.size(); ++j) {
+            if (j != inst_i) others.push_back(trades_freshness[j]);
+          }
+          request.include_trades =
+              domain::IsStalestTradesCandidate(trades_freshness[inst_i], others);
         }
 
         std::optional<domain::VenueRawSnapshot> snapshot;

@@ -64,6 +64,7 @@ add_executable(venues
   src/domain/amm_pool_extractor.cpp
   src/domain/amm_virtual_lob.cpp
   src/domain/amm_direct_fob.cpp
+  src/domain/trades_fetch_scheduler.cpp
   src/app/snapshot_producer.cpp
   src/infra/snapshot_clickhouse_writer.cpp
 )
@@ -602,4 +603,24 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_amm_virtual_lob_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_amm_virtual_lob_test COMMAND venues_amm_virtual_lob_test)
+
+  # F-11/F-20 (IN-0xx fair trades scheduling): чистая функция выбора самого
+  # "голодного" по чтению ленты трейдов символа venue (round-robin), чинит
+  # starvation recent-trades на символах кроме первого в такте опроса.
+  add_executable(venues_trades_fetch_scheduler_test
+    tests/trades_fetch_scheduler_test.cpp
+    src/domain/trades_fetch_scheduler.cpp
+  )
+
+  target_include_directories(venues_trades_fetch_scheduler_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_trades_fetch_scheduler_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_trades_fetch_scheduler_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_trades_fetch_scheduler_test COMMAND venues_trades_fetch_scheduler_test)
 endif()

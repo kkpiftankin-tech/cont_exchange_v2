@@ -231,6 +231,19 @@ class VenueAdapter {
 
   // Runtime tuning loaded from admin API without service restart.
   virtual bool ApplyRuntimeConfig(const VenueAdapterRuntimeConfig& config) = 0;
+
+  // F-11/F-20 (IN-0xx fair trades scheduling): возраст (мс) последнего
+  // УСПЕШНОГО REST-чтения публичной ленты сделок (recent-trades) для
+  // `venue_symbol`. -1, если адаптер не ведёт отдельный учёт ленты (DEX/AMM,
+  // sim) или символ ещё не читался — планировщик (poll_adapter) трактует
+  // -1 как "максимально устаревший" (наивысший приоритет). Используется
+  // ТОЛЬКО для справедливого распределения общего per-venue REST
+  // token-bucket между символами одной биржи — не влияет на бизнес-решения
+  // о хеджировании.
+  virtual int64_t TradesReadAgeMs(const std::string& venue_symbol) const {
+    (void)venue_symbol;
+    return -1;
+  }
 };
 
 }  // namespace cex::venues::domain
