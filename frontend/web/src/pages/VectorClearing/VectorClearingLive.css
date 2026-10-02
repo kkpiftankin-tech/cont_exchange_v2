@@ -302,6 +302,15 @@
 .vc-chart { background: #0b1219; border: 1px solid #1c2733; border-radius: 6px; max-width: 100%; }
 .vc-chart-lbl { fill: #7f93a4; font-size: 10px; font-family: ui-monospace, Menlo, monospace; }
 .vc-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11.5px; }
+/* Итоги заработка по сделкам (панель «Живые позиции») */
+.vc-trade-totals {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 18px;
+  margin-top: 10px; padding: 9px 12px; background: #101821;
+  border: 1px solid #243244; border-radius: 6px; font-size: 13px; color: #b9c6d2;
+}
+.vc-trade-totals .vc-tt-title { color: #8aa; font-weight: 600; }
+.vc-trade-totals .vc-tt-all { margin-left: auto; font-size: 14px; }
+.vc-trade-totals .vc-tt-all b { font-size: 14.5px; }
 .vc-lg-sell { color: #5fd08a; }
 .vc-lg-buy { color: #e6a15a; }
 .vc-lg-rawsell { color: #4fb0d8; }

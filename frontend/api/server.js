@@ -7099,6 +7099,9 @@ async function fetchAgentTradeStats() {
          FROM venue_fill_diagnostics
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0
               AND avg_price IS NOT NULL AND limit_price IS NOT NULL
+              AND created_at > COALESCE(
+                    (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
+                    to_timestamp(0))
         GROUP BY 1`);
     const m = new Map();
     for (const row of r.rows) m.set(row.agent_id, combineTradeStats(row));
@@ -7641,7 +7644,22 @@ async function handleVectorClearing(req, res, pathname, query) {
     const agentIds = Array.isArray(body && body.agent_ids) ? body.agent_ids : [];
     try {
       const resp = await grpcCall(led, "ResetAgentPositions", { agent_ids: agentIds });
-      return writeJson(res, 200, { cleared: Number(resp && resp.cleared) || 0, scope: agentIds.length ? "filtered" : "all" });
+      // Сброс позиций ⇒ сбросить и накопления по состоявшимся сделкам (панель «Живые
+      // позиции»): метка в f05a_clearing_config, агрегат fetchAgentTradeStats считает
+      // сделки только ПОСЛЕ неё. Глобальная метка (reset-кнопка сбрасывает всех агентов).
+      let statsReset = false;
+      const pool = getPgPool();
+      if (pool) {
+        try {
+          await pool.query(
+            "INSERT INTO f05a_clearing_config (id, trade_stats_reset_at, updated_at)"
+            + " VALUES (1, now(), now()) ON CONFLICT (id) DO UPDATE SET"
+            + " trade_stats_reset_at=now(), updated_at=now()");
+          statsReset = true;
+        } catch (e) { /* метка опциональна — позиции всё равно сброшены */ }
+      }
+      return writeJson(res, 200, { cleared: Number(resp && resp.cleared) || 0,
+        scope: agentIds.length ? "filtered" : "all", trade_stats_reset: statsReset });
     } catch (e) {
       console.error("[ledger] ResetAgentPositions failed:", e.message || e);
       return writeJson(res, 502, { error: "grpc_error", message: String(e.message || e) });

@@ -379,6 +379,14 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
   };
   const tRows = rows.filter((a) => a.agent_kind === 'translator');
   const aRows = rows.filter((a) => a.agent_kind === 'arbitrageur');
+  // Итоги заработка по сделкам (USDT, без комиссий): по группам и вместе.
+  const sumPnl = (arr) => arr.reduce((s, a) =>
+    s + (Number.isFinite(Number(a.pnl_usdt)) ? Number(a.pnl_usdt) : 0), 0);
+  const haveStats = rows.some((a) => a.pnl_usdt != null);
+  const totT = sumPnl(tRows), totA = sumPnl(aRows), totAll = totT + totA;
+  const pnlTotal = (v) => (
+    <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)} USDT</b>
+  );
   const head = (
     <thead><tr>
       <th>agent_id</th>
@@ -410,6 +418,15 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
             <tbody>{aRows.map((a, i) => renderAgent(a, i, 'a'))}</tbody>
           </table>
         ) : <div className="vc-note vc-note-tight">нет арбитражёров с позицией</div>}
+
+        {haveStats && (
+          <div className="vc-trade-totals">
+            <span className="vc-tt-title">Общий заработок по состоявшимся сделкам (USDT, без комиссий):</span>
+            <span>Переводчики ({tRows.length}): {pnlTotal(totT)}</span>
+            <span>Арбитражёры ({aRows.length}): {pnlTotal(totA)}</span>
+            <span className="vc-tt-all">Вместе: {pnlTotal(totAll)}</span>
+          </div>
+        )}
 
         <div className="vc-note vc-note-tight">
           Каждый агент — <b>две строки (по валюте/ноге)</b>: <b>было → дельта → стало</b> этого такта.

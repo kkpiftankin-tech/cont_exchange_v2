@@ -1017,6 +1017,10 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- §6.3-safe — дефолт). venues поллит эту строку и вызывает SetClearingSlopeMethod.
     -- M1–M3 точнее трекают VWAP, но могут локально переобещать глубину (см. ADR-053).
     slope_method     SMALLINT NOT NULL DEFAULT 4,
+    -- Отметка сброса накоплений по состоявшимся сделкам (панель «Живые позиции»):
+    -- статистика base/quote/заработок считается по fills с created_at > этой метки.
+    -- Выставляется при сбросе позиций агентов (reset-positions). NULL = считать всё.
+    trade_stats_reset_at TIMESTAMPTZ,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1),
     CONSTRAINT f05a_clearing_config_slope_method CHECK (slope_method BETWEEN 1 AND 4)
@@ -1034,6 +1038,8 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS slope_method SMALLINT NOT NULL DEFAULT 4;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS trade_stats_reset_at TIMESTAMPTZ;
 INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;
