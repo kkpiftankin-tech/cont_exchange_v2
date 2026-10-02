@@ -11,6 +11,7 @@ RUN npm install
 COPY proto ./proto
 
 COPY server.js .
+COPY trade_stats_math.js .
 COPY data ./data
 
 EXPOSE 8090

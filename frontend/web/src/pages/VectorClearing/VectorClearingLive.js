@@ -334,6 +334,16 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
     const lbl = f <= 1e-12 ? 'не исполнено' : (f + 1e-9 >= s ? 'полностью' : 'частично');
     return <span style={{ color: col }} title={`${lbl} (${a.hedge_status})`}>{fmtNum(f)}</span>;
   };
+  // Статистика по СОСТОЯВШИМСЯ сделкам (без комиссий): кол-во валюты (signed) и заработок USDT.
+  const tradeQty = (v, cur) => (v == null || !Number.isFinite(Number(v))) ? dash : (
+    <span className={Number(v) > 1e-12 ? 'vc-side-ask' : Number(v) < -1e-12 ? 'vc-side-bid' : ''}>
+      {sgn(v)}<span style={{ opacity: 0.6, fontSize: '0.85em' }}> {cur}</span>
+    </span>
+  );
+  const pnlCell = (a) => (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt))) ? dash : (
+    <span style={{ color: Number(a.pnl_usdt) > 1e-9 ? '#5fd08a' : Number(a.pnl_usdt) < -1e-9 ? '#e06060' : '#9fb2c2', fontWeight: 600 }}
+      title={`заработок по ${a.trade_fills || 0} состоявшимся сделкам, USDT (без комиссий); может быть отрицательным`}>{sgn(a.pnl_usdt)}</span>
+  );
   // Две ноги агента (по валюте): переводчик base/quote; арбитражёр asset@src / asset@dst.
   const legsOf = (a) => {
     if (a.agent_kind === 'arbitrageur') {
@@ -361,6 +371,9 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
         <td className="vc-mono"><b>{numCell(lg.after)}</b></td>
         {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeSent(a)}</td>}
         {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeFilled(a)}</td>}
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{tradeQty(a.traded_base, a.base)}</td>}
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{tradeQty(a.traded_quote, a.quote || 'USDT')}</td>}
+        {li === 0 && <td className="vc-mono" rowSpan={2}>{pnlCell(a)}</td>}
       </tr>
     ));
   };
@@ -375,6 +388,9 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
       <th title="позиция ПОСЛЕ такта (= было + дельта)">стало</th>
       <th title="сколько отправлено на биржу (band-хедж заявка, target_qty)">отправлено</th>
       <th title="сколько исполнилось по результатам симуляции (filled_qty)">исполнено</th>
+      <th title="кол-во БАЗОВОЙ валюты по состоявшимся сделкам (signed: BUY +, SELL −); без комиссий">сделки: база</th>
+      <th title="кол-во КОТИРУЕМОЙ валюты по состоявшимся сделкам (signed); без комиссий">сделки: квота</th>
+      <th title="заработок по состоявшимся сделкам в USDT (без комиссий); может быть отрицательным">заработок USDT</th>
     </tr></thead>
   );
   return (
@@ -398,7 +414,8 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
         <div className="vc-note vc-note-tight">
           Каждый агент — <b>две строки (по валюте/ноге)</b>: <b>было → дельта → стало</b> этого такта.
           <b> Переводчик</b> — пара base/quote (одна нога +, другая −). <b>Арбитражёр</b> — актив на источнике (−) и приёмнике (+); «v3» в id — площадка <code>uniswap_v3</code>.
-          <b> Отправлено/исполнено</b> — последняя band-хедж-заявка агента: сколько ушло на биржу и сколько исполнилось по симуляции (<span style={{ color: '#5fd08a' }}>полностью</span> / <span style={{ color: '#e0b84a' }}>частично</span> / <span style={{ color: '#e06060' }}>не исполнено</span>). Ноги/заявки считает BFF (money-path, ADR-057).
+          <b> Отправлено/исполнено</b> — последняя band-хедж-заявка агента: сколько ушло на биржу и сколько исполнилось по симуляции (<span style={{ color: '#5fd08a' }}>полностью</span> / <span style={{ color: '#e0b84a' }}>частично</span> / <span style={{ color: '#e06060' }}>не исполнено</span>).
+          <b> Сделки (база/квота/заработок USDT)</b> — по ВСЕМ состоявшимся сделкам агента (CALC-F12-HEDGE-PNL, без комиссий): кол-во каждой валюты (знаковое) и заработок в USDT (<span style={{ color: '#5fd08a' }}>+</span>/<span style={{ color: '#e06060' }}>−</span>). Ноги/заявки/сделки считает BFF (money-path, ADR-057).
         </div>
       </div>
     </div>

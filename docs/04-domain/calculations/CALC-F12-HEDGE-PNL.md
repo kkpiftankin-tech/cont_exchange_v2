@@ -8,9 +8,12 @@ code:
   - cpp/ledger/src/app/ledger_uc.cpp#calculate_hedge_pnl
   - cpp/ledger/src/app/ledger_uc.cpp#RecordHedgeExecution
   - cpp/market_data/src/app/hedge_pnl_aggregator.cpp#HedgePnLAggregator (агрегат для ClickHouse/дашборда, отдельный путь)
+  - frontend/api/server.js#fetchAgentTradeStats (BFF, 4-й путь — per-agent агрегат по venue_fill_diagnostics, scope ce|band|%; p_int≡limit_price, см. §7.2)
+  - frontend/api/trade_stats_math.js#combineTradeStats/pnlQuoteToUsdt (чистая знаковая математика 4-го пути)
 tests:
   - cpp/ledger/tests/ledger_hedge_pnl_test.cpp
   - frontend/web/src/api/__tests__/hedgeFlowService.pnl.test.js
+  - frontend/api/trade_stats_math.test.js (знаки base/quote/pnl + конверсия USDT, 4-й путь)
 ui:
   - route: /hedge-flows-live
     component: frontend/web/src/pages/HedgeFlowMonitor/HedgeFlowMonitorLive.js
@@ -18,6 +21,9 @@ ui:
   - route: /hedge-pnl
     component: frontend/web/src/api/hedgeFlowService.js#getHedgePnlDashboard
     field: summary.totalPnl / summary.netAfterFees
+  - route: /vector-clearing (панель «Живые позиции»)
+    component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js#AgentPositionsTables
+    field: traded_base / traded_quote / pnl_usdt (per-agent, по состоявшимся сделкам, без комиссий)
 sources:
   - docs/04-domain/business-rules.md#hedgepnl
   - infra/postgres/init.sql (таблица hedgeflows, колонка hedge_pnl — "computed by Settlement Ledger")
@@ -103,6 +109,27 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
 Формула воспроизводится вручную по §2 без запуска сервиса.
 
 ## 7. Открытые вопросы и расхождения
+
+### 7.2 Четвёртый путь: BFF `fetchAgentTradeStats` (панель «Живые позиции»)
+
+Добавлен per-agent агрегат по СОСТОЯВШИМСЯ сделкам для панели «Живые позиции»
+(`/vector-clearing`): по каждому CE-агенту сумма кол-ва base/quote и заработка в USDT
+по всем его исполненным band-хеджам (`venue_fill_diagnostics`, scope `hedge_flow_id
+LIKE 'ce|band|%'`). Та же формула `E = Σ s·(p_exec − p_int)·q`, комиссии НЕ учитываются
+(явное требование владельца). Знаковую комбинацию держит чистая
+`frontend/api/trade_stats_math.js#combineTradeStats` (тест `trade_stats_math.test.js`),
+SQL отдаёт безнаковые per-side суммы.
+
+**Допущение `p_int ≡ venue_fill_diagnostics.limit_price`.** Для CE band-хеджей
+`risk_uc.cpp#EmitBandHedgeFromBreach` ставит `limit_price = breach.pair_price =
+st.last_price` (мид клиринга на момент пробоя полосы) — это и есть внутренняя опорная цена
+агента; `ledger_uc.cpp#calculate_hedge_pnl` в общем F-12-пути тоже берёт
+`internal_price = intent.limit_price`. Т.е. 4-й путь согласован с §2. **Риск дрейфа:** если
+семантика `limit_price` в venues изменится (ADR-060), этот BFF-расчёт разойдётся — при таком
+изменении обновить этот путь. Перевод в USDT для кросс-пар — `E_quote·(base_price/pair_price)`
+(= `P(quote)_USDT`), та же аппроксимация, что в §7.1 (`ledger-band-fill-crosspair-value`).
+**Горизонт:** агрегат кумулятивен с момента старта (переживает reset позиций/рестарт) —
+«общий заработок», не per-session.
 
 1. **Комиссии.** `docs/04-domain/business-rules.md` (раздел «HedgePnL») до
    этой правки описывал формулу с вычитанием `feesTotal`:

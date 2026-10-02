@@ -4,6 +4,7 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
+const { combineTradeStats, pnlQuoteToUsdt } = require("./trade_stats_math");
 
 // gRPC client for ledger
 const grpc = require('@grpc/grpc-js');
@@ -6783,9 +6784,10 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // причина (заменяет синтетические черновики; см. задачу 2026-09-17).
   const fillDiagnostics = await fetchVenueFillDiagnostics(clr.batch_id);
   const hedgeMap = await fetchAgentHedgeMap();  // заявки агента: отправлено/исполнено
+  const tradeStats = await fetchAgentTradeStats();  // статистика по состоявшимся сделкам
   // Money-path строки агентов: одна строка на агента, позиция/Δ разложены на ноги
-  // пары (base−/quote+) + заявки (sent/filled). Мердж и домен-математика — в BFF.
-  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap);
+  // пары (base−/quote+) + заявки (sent/filled) + статистика сделок (base/quote/PnL USDT).
+  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats);
 
   return {
     batch_id: clr.batch_id,
@@ -6895,8 +6897,9 @@ async function fetchVenueFillDiagnostics(batchId) {
 // c·1000/цена_пары (единицы base). Одна нога +, другая − (в ОДНОЙ строке).
 // Арбитражёр перевозит ОДИН актив — у него одна нога (актив), пары нет.
 // Домен-математику держим в BFF (не в браузере, [frontend-no-domain-compute]).
-function buildAgentRows(agentPositions, agentDeltas, hedgeMap) {
+function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
   const hm = hedgeMap instanceof Map ? hedgeMap : new Map();
+  const ts = tradeStats instanceof Map ? tradeStats : new Map();
   const keyOf = (p) => (p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '');
   const delByKey = new Map((agentDeltas || []).map((d) => [keyOf(d), d]));
   const posByKey = new Map((agentPositions || []).map((p) => [keyOf(p), p]));
@@ -6995,6 +6998,20 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap) {
       // Заявки агента (последняя band-хедж-заявка, venue_fill_diagnostics): сколько
       // отправлено на биржу (target_qty) и сколько исполнилось по симуляции (filled_qty).
       ...(hm.get(b.agent_id) || {}),
+      // F-18: статистика по состоявшимся сделкам (CALC-F12-HEDGE-PNL, без комиссий).
+      // traded_base/quote — кол-во валют по fills (signed); pnl_usdt — заработок в USDT
+      // (E_quote·P(quote)_USDT, где P(quote)_USDT=base_price/reference_price; */USDT и
+      // арбитражёр ⇒ ×1). Обе валюты и заработок могут быть отрицательными.
+      ...((() => {
+        const t = ts.get(b.agent_id);
+        if (!t) return {};
+        return {
+          traded_base: t.traded_base,
+          traded_quote: t.traded_quote,
+          pnl_usdt: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),  // P(quote)_USDT=base_price/price
+          trade_fills: t.trade_fills,
+        };
+      })()),
     });
   }
   rows.sort((a, b) => {
@@ -7059,6 +7076,34 @@ async function fetchAgentHedgeMap() {
     }
     return m;
   } catch (e) { return new Map(); }  // нет таблицы/строк — заявки просто не покажем
+}
+
+// F-18: статистика по СОСТОЯВШИМСЯ сделкам агента (ВСЕ исполненные band-хеджи с момента
+// старта — кумулятив, переживает reset позиций/рестарт). Без комиссий (владелец).
+// SQL отдаёт БЕЗЗНАКОВЫЕ per-side суммы (однозначно); знаковую комбинацию (s=+1 SELL/
+// −1 BUY, CALC-F12-HEDGE-PNL, p_int=limit_price) делает combineTradeStats (чистая,
+// покрыта trade_stats_math.test.js). Перевод E_quote→USDT — в buildAgentRows.
+async function fetchAgentTradeStats() {
+  const pool = getPgPool();
+  if (!pool) return new Map();
+  try {
+    const r = await pool.query(
+      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id,
+              SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
+              SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
+              SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
+              SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional,
+              SUM(CASE WHEN side='BUY'  THEN (avg_price-limit_price)*filled_qty ELSE 0 END)::float8 AS buy_pnlbase,
+              SUM(CASE WHEN side='SELL' THEN (avg_price-limit_price)*filled_qty ELSE 0 END)::float8 AS sell_pnlbase,
+              COUNT(*) AS fills
+         FROM venue_fill_diagnostics
+        WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0
+              AND avg_price IS NOT NULL AND limit_price IS NOT NULL
+        GROUP BY 1`);
+    const m = new Map();
+    for (const row of r.rows) m.set(row.agent_id, combineTradeStats(row));
+    return m;
+  } catch (e) { return new Map(); }  // нет таблицы/строк — статистику не покажем
 }
 
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
@@ -7659,12 +7704,13 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/agent-positions") {
     const rows = await fetchVectorClearingRows(1);
     const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas, hedgeMap] = await Promise.all([
+    const [agentPositions, agentDeltas, hedgeMap, tradeStats] = await Promise.all([
       fetchAgentPositions(),
       newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
-      fetchAgentHedgeMap()
+      fetchAgentHedgeMap(),
+      fetchAgentTradeStats()
     ]);
-    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap);
+    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats);
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
   }
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —
