@@ -361,6 +361,7 @@ class LedgerUseCases {
   };
   std::mutex depth_mu_;
   std::map<std::string, DepthEntry> depth_cache_;
+  std::map<std::string, DepthEntry> depth_total_cache_;  // ADR-069: Λ per asset (TTL ~1с)
 
   // T-F18-706: переиспользуемое соединение для poll'ов LoadBandFeeConfig/LoadAssetSigma
   // (раньше открывали свежее pqxx::connection на каждый cache-miss под mu_ батча —
@@ -443,7 +444,7 @@ class LedgerUseCases {
                                           long long ts_ms);
   // F-18: трёхзонное правило хеджа от комиссии (Кривые §6.4). Возвращает
   // {clim_bps, cmkt_bps, k_band}: clim=мейкер (пассив), cmkt=тейкер+½спред (агрессив),
-  // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (rt=2 арбитражёр).
+  // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (ADR-069: rt=1 на ногу).
   // Из f05a_clearing_config (TTL-кэш ~1с; при отсутствии DSN/колонок — env/дефолты).
   struct BandFeeCfg { double clim_bps; double cmkt_bps; double k_band; double gamma; };
   BandFeeCfg LoadBandFeeConfig();
@@ -458,6 +459,13 @@ class LedgerUseCases {
   // строки. TTL-кэш ~1с per (asset|venue). Пустой DSN/нет строки → false (ledger → LiqScale=1.0).
   bool LoadAssetDepth(const std::string& asset, const std::string& venue,
                       double* out_depth, long long* out_age_ms);
+  // ADR-069: суммарная ликвидность актива по сети Λ = Σ_v depth(asset,v) из
+  // ce_asset_liquidity (все площадки актива). Для веса ноги арбитражёра
+  // ω_i = λ_i/Λ (IN-017 §6 / «Кривые» §5). true + *out_total при наличии строк;
+  // пустой DSN/нет строк → false (вызывающий → ω=1, регрессия). TTL-кэш ~1с per asset.
+  // stale_ms: строки старше порога В СУММУ НЕ входят (зеркало per-venue staleness-гарда
+  // LoadAssetDepth) — иначе зависшая площадка вечно раздувает Λ и занижает ω для живых.
+  bool LoadAssetDepthTotal(const std::string& asset, long long stale_ms, double* out_total);
   // Регистрирует band-заявку в band_hedges_ по её intent_id (RememberExecutionIntent)
   // для последующего дренажа по исполнению. in_flight НЕ трогает (уже помечен при
   // пробое — detect_and_emit_band_breach_locked). Вызывается под mu_.

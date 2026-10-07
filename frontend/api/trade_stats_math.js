@@ -31,4 +31,22 @@ function pnlQuoteToUsdt(pnlQuote, basePrice, price) {
   return e * qrate;
 }
 
-module.exports = { combineTradeStats, pnlQuoteToUsdt };
+// Заработок = mark-to-market КОРЗИНЫ состоявшихся сделок по ТЕКУЩИМ клиринговым ценам
+// (правило владельца 2026-10-05): купили одну валюту, продали другую — оценили обе ноги
+// в USDT «сейчас». net_base=traded_base (BUY +base, SELL −base), net_quote=traded_quote
+// (SELL +quote, BUY −quote). P(base)_USDT=basePrice, P(quote)_USDT=basePrice/price
+// (price=цена пары base/quote; */USDT ⇒ price==basePrice ⇒ qrate=1). Включает и
+// реализованный кросс-спред арбитражёра (net_base≈0, net_quote=q·(P_dst−P_src)), и
+// нереализованный P&L инвентаря переводчика (меняется с маркой — отсюда «рост»).
+// Комиссии НЕ входят (owner: пока не учитываем). Может быть отрицательным.
+function tradedBasketUsdt(tradedBase, tradedQuote, basePrice, price) {
+  const nb = Number(tradedBase), nq = Number(tradedQuote);
+  const bp = Number(basePrice), pr = Number(price);
+  if (!Number.isFinite(nb) && !Number.isFinite(nq)) return null;
+  const baseLeg = (Number.isFinite(nb) && bp > 0) ? nb * bp : 0;     // net_base·P(base)_USDT
+  const qrate = (pr > 0 && bp > 0) ? (bp / pr) : 1;                  // P(quote)_USDT
+  const quoteLeg = Number.isFinite(nq) ? nq * qrate : 0;            // net_quote·P(quote)_USDT
+  return baseLeg + quoteLeg;
+}
+
+module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt };

@@ -112,16 +112,24 @@ struct CeAgentDelta {
   double price_used{0.0};
 };
 
-// По одной строке на РЕБРО (агента). kStock не эмитится (deprecated в v2,
+// QUOTE — одна строка на ребро (переводчик). TRANSFER — ДВЕ строки на ребро
+// (арбитражёр, ADR-069: две реальные ноги). kStock не эмитится (deprecated в v2,
 // ADR-061 §1 — плечо запаса и узел-склад убраны; AssembleCeGraphV2 их не строит,
 // но v1-граф ещё может их подать, если функцию вызвать на v1-входе).
 //
-// Правило venue: QUOTE — узел-источник ребра (node_meta[e.u].venue, площадка
-// переводчика); TRANSFER — канонический dst по индексу ребра (node_meta[e.v]
-// .venue — TRANSFER всегда строится i<j, см. AssembleCeGraph{,V2}), не
-// физический dst текущего такта (тот зависит от знака f — см. ProjectOrders).
-// asset — node_meta[e.u].asset (для TRANSFER совпадает с node_meta[e.v].asset,
-// т.к. оба конца — один актив на разных площадках).
+// Правило venue/знака:
+//   QUOTE: venue = узел-источник ребра (node_meta[e.u].venue, площадка
+//     переводчика), delta = f (знак = направление переводчика).
+//   TRANSFER (ADR-069 — две ноги единого арбитражёра A_*): прежде схлопывалось
+//     в ОДНУ строку на каноническом dst (node_meta[e.v].venue) с ценой только
+//     src — это теряло ногу src и противоречило IN-017 §6 / «Кривые» §5 (src и
+//     dst суть разные узлы). Теперь эмитим ОБЕ ноги одного agent_id:
+//       src-нога (node e.u): актив уходит ⇒ delta = −f, цена узла src;
+//       dst-нога (node e.v): актив приходит ⇒ delta = +f, цена узла dst.
+//     f>0 (поток src→dst) ⇒ src short (→BUY-хедж), dst long (→SELL-хедж);
+//     снятый кросс-спред = (P_dst − P_src)·|q|. ledger ключует по
+//     (agent_id, asset, venue) ⇒ две независимые позиции и два breach.
+//     asset одинаков на обоих концах (один актив на разных площадках).
 inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
                                                      const CeClearResult& r,
                                                      const std::map<std::string, double>& ref_price,
@@ -129,38 +137,54 @@ inline std::vector<CeAgentDelta> ProjectAgentDeltas(const CeClearInput& in,
   std::vector<CeAgentDelta> out;
   if (static_cast<int>(in.node_meta.size()) != in.num_nodes) return out;  // нет метаданных
   if (r.f.size() != in.edges.size()) return out;
+  // Цена узла: P_node = P0·exp(x/1000). base_price = P(base@v) в USDT.
+  auto node_price = [&](int node) -> double {
+    const auto& m = in.node_meta[node];
+    auto rp = ref_price.find(m.asset);
+    return (rp != ref_price.end() && rp->second > 0.0)
+               ? rp->second * std::exp(r.x[node] / 1000.0) : 0.0;
+  };
   for (std::size_t i = 0; i < in.edges.size(); ++i) {
     const CeEdge& e = in.edges[i];
     if (e.leg == CeLeg::kStock) continue;      // deprecated в v2 (ADR-061 §1)
     const double f = r.f[i];
     if (std::fabs(f) < eps) continue;          // мёртвая зона — потока нет
-    CeAgentDelta d;
-    d.agent_id = e.name;
-    d.agent_kind = (e.leg == CeLeg::kQuote) ? CeAgentKind::kTranslator
-                                             : CeAgentKind::kArbitrageur;
-    d.asset = in.node_meta[e.u].asset;                       // base (узел e.u)
-    d.venue = (e.leg == CeLeg::kQuote) ? in.node_meta[e.u].venue : in.node_meta[e.v].venue;
-    d.delta = f;
-    // Цены узлов: P_node = P0·exp(x/1000). base_price = P(base@v) в USDT (для
-    // конверсии стоимость→объём). Для QUOTE-ребра quote = node_meta[e.v].asset и
-    // price_used = ЦЕНА ПАРЫ P(base@v)/P(quote@v) (лимит заявки в base/quote).
-    // Номинал: quote=USDT, P(USDT@house)=1 ⇒ price_used=base_price (регрессия).
-    // Для TRANSFER-ребра (арбитражёр) пара не применяется — quote пуст.
-    auto node_price = [&](int node) -> double {
-      const auto& m = in.node_meta[node];
-      auto rp = ref_price.find(m.asset);
-      return (rp != ref_price.end() && rp->second > 0.0)
-                 ? rp->second * std::exp(r.x[node] / 1000.0) : 0.0;
-    };
-    d.base_price = node_price(e.u);
     if (e.leg == CeLeg::kQuote) {
+      CeAgentDelta d;
+      d.agent_id = e.name;
+      d.agent_kind = CeAgentKind::kTranslator;
+      d.asset = in.node_meta[e.u].asset;                     // base (узел e.u)
+      d.venue = in.node_meta[e.u].venue;                     // площадка переводчика
+      d.delta = f;
+      d.base_price = node_price(e.u);
+      // quote = node_meta[e.v].asset; price_used = ЦЕНА ПАРЫ P(base@v)/P(quote@v)
+      // (лимит заявки в base/quote). Номинал: quote=USDT, P(USDT@house)=1 ⇒
+      // price_used=base_price (регрессия).
       d.quote = in.node_meta[e.v].asset;
       const double pq = node_price(e.v);
       d.price_used = (pq > 0.0) ? d.base_price / pq : d.base_price;
-    } else {
-      d.price_used = d.base_price;  // арбитражёр — пары нет
+      out.push_back(d);
+    } else {  // kTransfer — ADR-069: две ноги арбитражёра (пара не применяется)
+      const std::string asset = in.node_meta[e.u].asset;     // один актив на обоих концах
+      CeAgentDelta src;                                       // нога src (узел e.u)
+      src.agent_id = e.name;
+      src.agent_kind = CeAgentKind::kArbitrageur;
+      src.asset = asset;
+      src.venue = in.node_meta[e.u].venue;
+      src.delta = -f;                                         // актив уходит с src
+      src.base_price = node_price(e.u);
+      src.price_used = src.base_price;
+      out.push_back(src);
+      CeAgentDelta dst;                                       // нога dst (узел e.v)
+      dst.agent_id = e.name;
+      dst.agent_kind = CeAgentKind::kArbitrageur;
+      dst.asset = asset;
+      dst.venue = in.node_meta[e.v].venue;
+      dst.delta = f;                                          // актив приходит на dst
+      dst.base_price = node_price(e.v);
+      dst.price_used = dst.base_price;
+      out.push_back(dst);
     }
-    out.push_back(d);
   }
   return out;
 }

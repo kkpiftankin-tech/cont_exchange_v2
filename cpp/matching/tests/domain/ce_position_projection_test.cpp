@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "domain/ce_agent_clearing.hpp"
@@ -39,56 +41,69 @@ int RunAgentDeltasV2Test() {
   CeClearResult r2 = ClearCe(in2);
   check(r2.converged, "v2.converged");
 
-  std::vector<CeAgentDelta> ad = ProjectAgentDeltas(in2, r2, {});
-  // 4 ребра (2 QUOTE + 2 TRANSFER, без STOCK в v2) — все активны (расхождение
-  // цен площадок выводит каждое ребро из мёртвой зоны на этом сетапе).
-  check(ad.size() == 4, "num agent deltas == 4");
+  const std::map<std::string, double> ref2 = {{"BTC", 60000.0}, {"USD", 1.0}};
+  std::vector<CeAgentDelta> ad = ProjectAgentDeltas(in2, r2, ref2);
+  // ADR-069: QUOTE — 1 строка/ребро (переводчик); TRANSFER — ДВЕ строки/ребро
+  // (две ноги арбитражёра). 2 QUOTE + 2 TRANSFER×2 = 6 (STOCK в v2 нет).
+  check(ad.size() == 6, "num agent deltas == 6 (ADR-069: две ноги на TRANSFER)");
 
-  bool saw_translator_b = false, saw_translator_o = false;
-  bool saw_arb_btc = false, saw_arb_usd = false;
+  // Ожидаемые per-ребро: для QUOTE delta==f; для TRANSFER две ноги — src
+  // (node_meta[e.u].venue, −f) и dst (node_meta[e.v].venue, +f).
+  std::map<std::string, double> q_f;            // имя QUOTE-ребра → f
+  struct TLeg { std::string src, dst; double f; };
+  std::map<std::string, TLeg> t_leg;            // имя TRANSFER-ребра → ноги
+  for (std::size_t i = 0; i < in2.edges.size(); ++i) {
+    const CeEdge& e = in2.edges[i];
+    if (e.leg == CeLeg::kQuote) q_f[e.name] = r2.f[i];
+    else if (e.leg == CeLeg::kTransfer)
+      t_leg[e.name] = {in2.node_meta[e.u].venue, in2.node_meta[e.v].venue, r2.f[i]};
+  }
+
+  // Собираем фактические строки по (agent_id, venue).
+  std::map<std::pair<std::string, std::string>, CeAgentDelta> by_key;
   for (const auto& d : ad) {
-    // мёртвая зона: эмитим только реальный поток.
     check(std::fabs(d.delta) > 1e-12, "|delta|>eps (dead-zone excluded)");
-    if (d.agent_id == "T_BTC_B") {
-      saw_translator_b = true;
-      check(d.agent_kind == CeAgentKind::kTranslator, "T_BTC_B kind==TRANSLATOR");
-      check(d.asset == "BTC", "T_BTC_B asset==BTC");
-      check(d.venue == "B", "T_BTC_B venue==B (источник, node_meta[e.u])");
-    } else if (d.agent_id == "T_BTC_O") {
-      saw_translator_o = true;
-      check(d.agent_kind == CeAgentKind::kTranslator, "T_BTC_O kind==TRANSLATOR");
-      check(d.venue == "O", "T_BTC_O venue==O (источник, node_meta[e.u])");
-    } else if (d.agent_id == "A_BTC_BO") {
-      saw_arb_btc = true;
-      check(d.agent_kind == CeAgentKind::kArbitrageur, "A_BTC_BO kind==ARBITRAGEUR");
-      check(d.asset == "BTC", "A_BTC_BO asset==BTC");
-      check(d.venue == "O", "A_BTC_BO venue==O (канонический dst, node_meta[e.v])");
-    } else if (d.agent_id == "A_USD_BO") {
-      saw_arb_usd = true;
-      check(d.agent_kind == CeAgentKind::kArbitrageur, "A_USD_BO kind==ARBITRAGEUR");
-      check(d.asset == "USD", "A_USD_BO asset==USD");
-      check(d.venue == "O", "A_USD_BO venue==O (канонический dst, node_meta[e.v])");
-    } else {
-      std::printf("FAIL: неожиданный agent_id %s\n", d.agent_id.c_str());
-      ++fail;
+    by_key[{d.agent_id, d.venue}] = d;
+  }
+
+  // Переводчики: 1 строка, venue=источник, delta=f (без конвертации/переворота).
+  for (const auto& [name, f] : q_f) {
+    if (std::fabs(f) < 1e-12) continue;
+    // источник QUOTE-ребра = node_meta[e.u].venue; у T_BTC_<V> это <V>.
+    const std::string v = name.substr(name.rfind('_') + 1);
+    auto it = by_key.find({name, v});
+    check(it != by_key.end(), "переводчик присутствует на своей площадке");
+    if (it != by_key.end()) {
+      check(it->second.agent_kind == CeAgentKind::kTranslator, "QUOTE kind==TRANSLATOR");
+      check(std::fabs(it->second.delta - f) < 1e-12, "переводчик delta==f (без конвертации)");
     }
   }
-  check(saw_translator_b && saw_translator_o, "оба переводчика (T_BTC_B, T_BTC_O) присутствуют");
-  check(saw_arb_btc && saw_arb_usd, "оба арбитражёра (A_BTC_BO, A_USD_BO) присутствуют");
 
-  // ЗНАК = направление: сравниваем с сырым потоком клиринга r2.f по индексу
-  // ребра — ProjectAgentDeltas НЕ должна ничего переворачивать/пересчитывать.
-  for (std::size_t i = 0; i < in2.edges.size(); ++i) {
-    const double f = r2.f[i];
-    if (std::fabs(f) < 1e-12) continue;
-    bool found = false;
-    for (const auto& d : ad) {
-      if (d.agent_id == in2.edges[i].name) {
-        found = true;
-        check(std::fabs(d.delta - f) < 1e-12, "delta==f_j (сырой поток, без конвертации)");
-      }
+  // Арбитражёры: ДВЕ ноги, src delta=−f, dst delta=+f, цены узлов (base_price) по
+  // своему узлу. Проверяем A_BTC_BO (цены B≠O) и A_USD_BO (нумерарий).
+  for (const auto& [name, lg] : t_leg) {
+    if (std::fabs(lg.f) < 1e-12) continue;
+    auto src = by_key.find({name, lg.src});
+    auto dst = by_key.find({name, lg.dst});
+    check(src != by_key.end(), "арбитражёр: нога src присутствует");
+    check(dst != by_key.end(), "арбитражёр: нога dst присутствует");
+    if (src != by_key.end() && dst != by_key.end()) {
+      check(src->second.agent_kind == CeAgentKind::kArbitrageur, "TRANSFER src kind==ARBITRAGEUR");
+      check(dst->second.agent_kind == CeAgentKind::kArbitrageur, "TRANSFER dst kind==ARBITRAGEUR");
+      check(std::fabs(src->second.delta - (-lg.f)) < 1e-12, "нога src delta==−f (актив уходит)");
+      check(std::fabs(dst->second.delta - (lg.f)) < 1e-12, "нога dst delta==+f (актив приходит)");
+      check(src->second.quote.empty() && dst->second.quote.empty(), "арбитражёр: пары нет (quote пуст)");
+      check(src->second.base_price > 0.0 && dst->second.base_price > 0.0, "обе ноги имеют цену узла");
     }
-    check(found, "активное ребро присутствует в ProjectAgentDeltas");
+  }
+  // Цены узлов РАЗНЫЕ для BTC-арбитражёра (B≠O) — суть двухногой модели (ADR-069).
+  {
+    auto b = by_key.find({"A_BTC_BO", "B"});
+    auto o = by_key.find({"A_BTC_BO", "O"});
+    check(b != by_key.end() && o != by_key.end(), "A_BTC_BO: обе ноги B и O");
+    if (b != by_key.end() && o != by_key.end())
+      check(std::fabs(b->second.base_price - o->second.base_price) > 1.0,
+            "A_BTC_BO: цены узлов B и O различаются (две реальные ноги)");
   }
 
   // kStock не эмитится (deprecated в v2, ADR-061 §1) — регрессия на v1-графе

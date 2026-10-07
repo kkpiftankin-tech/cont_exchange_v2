@@ -1707,6 +1707,57 @@ bool LedgerUseCases::LoadAssetDepth(const std::string& asset, const std::string&
 #endif
 }
 
+// ADR-069: Λ = Σ_v depth(asset,v) по всем площадкам актива (вес ноги ω_i=λ_i/Λ).
+// Зеркало LoadAssetDepth, но агрегат по активу; кэш depth_total_cache_ (TTL ~1с).
+bool LedgerUseCases::LoadAssetDepthTotal(const std::string& asset, long long stale_ms,
+                                         double* out_total) {
+  {
+    std::lock_guard<std::mutex> lk(depth_mu_);
+    const auto it = depth_total_cache_.find(asset);
+    if (it != depth_total_cache_.end() && it->second.have &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - it->second.fetched).count() < 1000) {
+      if (out_total) *out_total = it->second.depth;
+      return true;
+    }
+  }
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (postgres_dsn_.empty()) return false;
+  DepthEntry e;
+  {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);  // переиспользуемое соединение (T-F18-706)
+    try {
+      pqxx::work tx(poll_conn());
+      // Устаревшие строки (возраст ≥ stale_ms) исключаем из Λ — зеркало per-venue
+      // staleness-гарда LoadAssetDepth. stale_ms ≤ 0 ⇒ фильтр выключен (весь набор).
+      const pqxx::result res = tx.exec_params(
+          "SELECT COALESCE(SUM(depth),0) FROM ce_asset_liquidity "
+          "WHERE asset=$1 AND ($2 <= 0 OR now()-updated_at < make_interval(secs => $2/1000.0))",
+          asset, stale_ms);
+      tx.commit();
+      if (res.empty()) return false;
+      e.depth = res[0][0].as<double>(0.0);
+      e.age_ms = 0;
+      e.fetched = std::chrono::steady_clock::now();
+      e.have = true;
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // broken/нет таблицы — переподключимся на след. вызове
+      return false;        // вызывающий → ω=1
+    }
+  }  // poll_conn_mu_ отпущен
+  if (!(e.depth > 0.0)) return false;  // нет ликвидности по активу — ω=1 (регрессия)
+  {
+    std::lock_guard<std::mutex> lk(depth_mu_);
+    depth_total_cache_[asset] = e;
+  }
+  if (out_total) *out_total = e.depth;
+  return true;
+#else
+  (void)asset; (void)out_total;
+  return false;
+#endif
+}
+
 void LedgerUseCases::detect_and_emit_band_breach_locked(
     const AgentPositionKey& key, AgentPositionState& st,
     const std::string& batch_id, long long ts_ms) {
@@ -1731,7 +1782,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     const auto cfg_n = LoadBandFeeConfig();
     const double floor_n = [] { const char* v = std::getenv("CE_AGENT_BAND_Q_MIN"); return v ? std::atof(v) : 5.0; }();
     const double z_lim_n = (cfg_n.k_band > 0.0)
-        ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 2.0)   // rt=2 (арбитражёр)
+        ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 1.0)   // ADR-069: rt=1 на ногу
         : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
     const Decimal q_n{static_cast<int64_t>(std::llround(z_lim_n * 1e6)), 6};
     const Decimal abs_c_n = Decimal::cmp(st.position, zero) >= 0 ? st.position
@@ -1754,15 +1805,18 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // ТРЁХЗОННОЕ правило хеджа от комиссии внешних бирж (Кривые §6.4). Две границы:
   //   Z̄lim = k_band·clim·rt (no-action → пассивный мейкер-лимит, комиссия clim),
   //   Z̄mkt = k_band·cmkt·rt (пассив → агрессивный тейкер-сброс, cmkt=тейкер+½спред),
-  // k_band=1/Γ (неприятие риска), rt=round-trip (арбитражёр 2 — две биржи). Хедж
-  // стартует за Z̄lim; выше Z̄mkt — агрессивно (taker). Live-настройка из PG.
+  // k_band=1/Γ (неприятие риска), rt=round-trip. ADR-069: арбитражёр теперь держит
+  // ДВЕ ноги (src BUY + dst SELL), каждая — одна биржа с ОДНОЙ taker-комиссией ⇒
+  // rt=1 на ногу для ВСЕХ агентов. Прежний rt=2 (round-trip на свёрнутый агрегат)
+  // задвоил бы порог ноги: round-trip теперь складывается из двух отдельных заявок.
+  // Хедж стартует за Z̄lim; выше Z̄mkt — агрессивно (taker). Live-настройка из PG.
   // k_band ≤ 0 ⇒ линк выключен: плоский env-порог, всегда агрессив (обратная совм.).
   const auto cfg = LoadBandFeeConfig();
   const double q_floor = [] {
     const char* v = std::getenv("CE_AGENT_BAND_Q_MIN");
     return v ? std::atof(v) : 5.0;  // минимум, чтобы порог не схлопнулся при малой комиссии
   }();
-  const double rt = is_arbitrageur ? 2.0 : 1.0;
+  const double rt = 1.0;
   const bool fee_linked = cfg.k_band > 0.0 && cfg.cmkt_bps > 0.0;
   double z_lim, z_mkt;
   double band_sigma = 0.0;      // σ, применённая к порогу (0 = плоский), для лога/наблюдаемости
@@ -1828,6 +1882,28 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
         ? static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30))
         : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_TRANSLATOR", 18));
     z_mkt = z_lim;  // без пассивной зоны — сразу агрессив
+  }
+  // ADR-069: вес ноги арбитражёра ω_i = λ_i/Λ (доля ликвидности площадки в сети
+  // актива; IN-017 §6 Предложение 2 Q_i=ω_i·c_i/A, «Кривые» §5). Глубокая книга
+  // (большая λ_i) ⇒ ω_i→1 ⇒ ШИРЕ порог на этой ноге (инвентарь держать дёшево);
+  // мелкая ⇒ ω_i мал ⇒ хеджируем раньше. ω_i<1 ⇒ порог ноги = ω_i·z_lim ≤ z_lim;
+  // Σ_ног ω=1 ⇒ суммарная «ёмкость» = прежний одноногий z_lim, перераспределена.
+  // Истинные ω_i=φ_j±B (лидерство цены, IN-017 §6) не наблюдаемы ⇒ λ_i/Λ — MVP-
+  // заглушка (симметричный частный случай φ=½,B=0). Флаг CE_BAND_OMEGA_MODE (деф
+  // off ⇒ ω=1, регрессия). Λ/λ недоступны/устарели ⇒ ω=1. Только для арбитражёра.
+  double band_omega = 1.0;  // применённый вес ноги (1 = не применён), для лога
+  if (is_arbitrageur && cex::common::Env::get_bool("CE_BAND_OMEGA_MODE", false)) {
+    double lambda_i = 0.0, lambda_tot = 0.0; long long dage_ms = 0;
+    const long long dstale_ms = cex::common::Env::get_int("CE_BAND_DEPTH_STALE_MS", 120000);
+    if (LoadAssetDepth(asset, venue, &lambda_i, &dage_ms) && lambda_i > 0.0 &&
+        dage_ms >= 0 && dage_ms < dstale_ms &&
+        LoadAssetDepthTotal(asset, dstale_ms, &lambda_tot) && lambda_tot > 0.0) {
+      const double omega = lambda_i / lambda_tot;         // ∈ (0,1]
+      const double om_min = [] { const char* v = std::getenv("CE_BAND_OMEGA_MIN"); return v ? std::atof(v) : 0.05; }();
+      band_omega = std::min(1.0, std::max(om_min, omega));  // не схлопывать порог в ноль
+      z_lim = std::max(q_floor, z_lim * band_omega);
+      z_mkt = std::max(z_lim, z_mkt * band_omega);
+    }
   }
   // Порог входа в хедж = Z̄lim; scale 6 для дробного порога от комиссии.
   const Decimal q{static_cast<int64_t>(std::llround(z_lim * 1e6)), 6};
@@ -1896,6 +1972,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"sigma", std::to_string(band_sigma)},       // σ, применённая (0=плоский)
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)
+                         {"omega", std::to_string(band_omega)},       // ADR-069: ω_i=λ_i/Λ (1=не применён)
                          {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
 

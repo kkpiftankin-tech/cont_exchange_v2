@@ -1,7 +1,7 @@
 // Self-contained node-тест (у frontend/api нет jest): `node trade_stats_math.test.js`.
 // Проверяет знаки base/quote/pnl (CALC-F12-HEDGE-PNL) и перевод pnl в USDT.
 const assert = require('assert');
-const { combineTradeStats, pnlQuoteToUsdt } = require('./trade_stats_math');
+const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require('./trade_stats_math');
 
 let failed = 0;
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
@@ -44,6 +44,24 @@ check('cross ETH/BTC: pnl_usdt = pnl_btc * P_BTC', near(pnlQuoteToUsdt(0.01, 250
 check('no price ⇒ ×1', pnlQuoteToUsdt(6, 0, 0) === 6);
 // Отрицательный заработок проходит как есть
 check('negative pnl сохраняется', pnlQuoteToUsdt(-7, 2500, 2500) === -7);
+
+// Заработок = MTM корзины по текущим клиринговым ценам (tradedBasketUsdt, owner 2026-10-05).
+// Арбитражёр round-trip на */USDT: купил q=0.5 base @60000 (net_base=+0.5, net_quote=−30000),
+// продал q=0.5 @60200 (net_base 0, net_quote +30100) ⇒ net_base=0, net_quote=+100, price=basePrice
+// ⇒ qrate=1 ⇒ прибыль = 0·bp + 100·1 = +100 USDT (кросс-спред 0.5·200).
+check('arb round-trip */USDT: кросс-спред = +100', near(tradedBasketUsdt(0, 100, 60000, 60000), 100));
+// Переводчик */USDT держит инвентарь по цене входа: купил 1 base @2500 (net_base=+1, net_quote=−2500),
+// марка = цена входа ⇒ MTM = 1·2500 + (−2500)·1 = 0 (прибыль только при сдвиге марки).
+check('MM */USDT по марке входа: 0', near(tradedBasketUsdt(1, -2500, 2500, 2500), 0));
+// Та же позиция, марка выросла до 2600 ⇒ MTM = 1·2600 + (−2500)·1 = +100 (нереализованный P&L).
+check('MM */USDT марка 2500→2600: +100', near(tradedBasketUsdt(1, -2500, 2600, 2600), 100));
+// Кросс ETH/BTC: net_base=+1 ETH, net_quote=−0.05 BTC, basePrice=P_ETH=2500, price=ETH/BTC=0.05
+// ⇒ qrate=P_BTC=50000 ⇒ MTM = 1·2500 + (−0.05)·50000 = 2500 − 2500 = 0 (по марке входа).
+check('cross ETH/BTC по марке входа: 0', near(tradedBasketUsdt(1, -0.05, 2500, 0.05), 0));
+// Нет цены ⇒ base-нога не оценивается (0), quote qrate=1 (не искажаем).
+check('no price: только quote ×1', tradedBasketUsdt(1, 7, 0, 0) === 7);
+// Отрицательный заработок сохраняется.
+check('negative basket сохраняется', near(tradedBasketUsdt(0, -100, 60000, 60000), -100));
 
 if (failed > 0) { console.error(`\n${failed} FAILED`); process.exit(1); }
 console.log('\n[OK] trade_stats_math: all passed');
