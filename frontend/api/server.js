@@ -4,7 +4,7 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
-const { combineTradeStats, pnlQuoteToUsdt } = require("./trade_stats_math");
+const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require("./trade_stats_math");
 
 // gRPC client for ledger
 const grpc = require('@grpc/grpc-js');
@@ -41,6 +41,8 @@ const MATCHING_ADDR = process.env.MATCHING_HTTP_ADDR || 'http://matching:8081';
 const VENUES_ADDR = process.env.VENUES_HTTP_ADDR || 'http://venues:8087';
 const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || 'http://clickhouse:8123';
 const CLICKHOUSE_DB = process.env.CLICKHOUSE_DB || 'default';
+// ADR-070: глубокие снимки быстрой полосы venues (опциональная таблица, TTL часы)
+const VENUE_LIVE_BOOK_TABLE = (process.env.VENUES_CLICKHOUSE_LIVE_BOOK_TABLE || "venue_book_live").replace(/[^A-Za-z0-9_]/g, "");
 // venues пишет venue_snapshots в отдельную БД (VENUES_CLICKHOUSE_DB, по умолч. backtest)
 // с точной Decimal-сериализацией — оттуда читаем сырой стакан для графика ликвидности.
 const VENUE_SNAPSHOTS_DB = process.env.VENUE_SNAPSHOTS_DB || 'backtest';
@@ -6843,22 +6845,31 @@ async function fetchVenueFillDiagnostics(batchId) {
     // векторного клиринга (vector_clearing_results), на котором построена вкладка —
     // это разные пайплайны. Поэтому показываем СВЕЖИЕ N диагностик (все хедж-заявки),
     // а строки этого такта (если batch совпал) поднимаем наверх.
-    const { rows } = await pool.query(
-      `SELECT intent_id, hedge_flow_id, batch_id, venue, symbol, side,
-              limit_price::text  AS limit_price,
-              target_qty::text   AS target_qty,
-              filled_qty::text   AS filled_qty,
-              avg_price::text    AS avg_price,
-              base_vwap::text    AS base_vwap,
-              impact_shift::text AS impact_shift,
-              impact_cost::text  AS impact_cost,
-              impact_v, impact_dt_sec,
-              status, reason, window_trades, considered_trades, created_at
-         FROM venue_fill_diagnostics
-        ORDER BY (batch_id = $1) DESC, created_at DESC
-        LIMIT 40`,
-      [batchId || ""]
-    );
+    // ДВА ИНДЕКСНЫХ запроса вместо сортировки по выражению `(batch_id=$1) DESC` над
+    // ВСЕЙ таблицей (seqscan+sort 494MB → секунды, спиннер «загрузка детали»):
+    //   (а) строки ЭТОГО батча — idx batch_id; (б) свежие 40 — idx created_at DESC.
+    // Сливаем: батч-строки наверх, затем свежие, дедуп по intent_id, лимит 40. Батч
+    // CE-хеджа обычно ≠ батч вектор-клиринга ⇒ (а) чаще пусто (эффективно = свежие 40).
+    const cols = `intent_id, hedge_flow_id, batch_id, venue, symbol, side,
+              limit_price::text  AS limit_price, target_qty::text AS target_qty,
+              filled_qty::text   AS filled_qty, avg_price::text AS avg_price,
+              base_vwap::text    AS base_vwap, impact_shift::text AS impact_shift,
+              impact_cost::text  AS impact_cost, impact_v, impact_dt_sec,
+              status, reason, window_trades, considered_trades, created_at`;
+    const [batchRes, recentRes] = await Promise.all([
+      batchId
+        ? pool.query(`SELECT ${cols} FROM venue_fill_diagnostics WHERE batch_id=$1 ORDER BY created_at DESC LIMIT 40`, [batchId])
+        : Promise.resolve({ rows: [] }),
+      pool.query(`SELECT ${cols} FROM venue_fill_diagnostics ORDER BY created_at DESC LIMIT 40`),
+    ]);
+    const seen = new Set();
+    const rows = [];
+    for (const r of [...batchRes.rows, ...recentRes.rows]) {
+      if (seen.has(r.intent_id)) continue;
+      seen.add(r.intent_id);
+      rows.push(r);
+      if (rows.length >= 40) break;
+    }
     return rows.map((r) => ({
       intentId: r.intent_id,
       hedgeFlowId: r.hedge_flow_id,
@@ -6904,6 +6915,15 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
   const delByKey = new Map((agentDeltas || []).map((d) => [keyOf(d), d]));
   const posByKey = new Map((agentPositions || []).map((p) => [keyOf(p), p]));
   const kindOrder = { translator: 0, arbitrageur: 1 };
+  // ADR-069: арбитражёр приходит ДВУМЯ строками ledger (ноги src и dst по venue).
+  // Группируем по agent_id → ниже строим ОДИН agentRow с реальными ногами. Иначе
+  // агент дублируется в панели и задваивается итог заработка (sumPnl по строкам).
+  const arbByAgent = new Map();
+  for (const p of (agentPositions || [])) {
+    if (p.agent_kind !== 'arbitrageur') continue;
+    if (!arbByAgent.has(p.agent_id)) arbByAgent.set(p.agent_id, new Map());
+    arbByAgent.get(p.agent_id).set(p.venue || '', p);
+  }
   const rows = [];
   for (const k of new Set([...posByKey.keys(), ...delByKey.keys()])) {
     const pos = posByKey.get(k);
@@ -6911,6 +6931,7 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
     const b = pos || del;
     const kind = (pos && pos.agent_kind) || (del && del.agent_kind) || '';
     const isT = kind === 'translator';
+    if (kind === 'arbitrageur') continue;  // арбитражёры — отдельным проходом по agent_id (ниже)
     const price = pos ? Number(pos.reference_price) : 0;   // цена пары P_base/P_quote (номинал ⇒ P_base)
     const basePrice = pos ? Number(pos.base_price) : 0;    // P(base) USDT (абсолют)
     const cPos = pos ? Number(pos.position) : null;         // c_j (k-USDT), НЕОТПРАВЛЕННЫЙ остаток (A7)
@@ -6998,17 +7019,89 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
       // Заявки агента (последняя band-хедж-заявка, venue_fill_diagnostics): сколько
       // отправлено на биржу (target_qty) и сколько исполнилось по симуляции (filled_qty).
       ...(hm.get(b.agent_id) || {}),
-      // F-18: статистика по состоявшимся сделкам (CALC-F12-HEDGE-PNL, без комиссий).
-      // traded_base/quote — кол-во валют по fills (signed); pnl_usdt — заработок в USDT
-      // (E_quote·P(quote)_USDT, где P(quote)_USDT=base_price/reference_price; */USDT и
-      // арбитражёр ⇒ ×1). Обе валюты и заработок могут быть отрицательными.
+      // F-18: статистика по состоявшимся сделкам (без комиссий). traded_base/quote —
+      // signed кол-во валют по fills. pnl_usdt — ЗАРАБОТОК = mark-to-market корзины
+      // сделок по ТЕКУЩИМ клиринговым ценам (правило владельца 2026-10-05,
+      // tradedBasketUsdt): net_base·P(base)_USDT + net_quote·P(quote)_USDT. Прежняя
+      // (avg−limit)-slippage метрика (pnlQuoteToUsdt/pnl_quote) была околонулевой по
+      // построению; оставлена как pnl_exec_slip для диагностики исполнения.
       ...((() => {
         const t = ts.get(b.agent_id);
         if (!t) return {};
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
-          pnl_usdt: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),  // P(quote)_USDT=base_price/price
+          pnl_usdt: tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price),
+          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),  // диагностика: fill vs лимит
+          trade_fills: t.trade_fills,
+        };
+      })()),
+    });
+  }
+  // ── ADR-069: арбитражёры — ОДИН agentRow на agent_id, ДВЕ реальные ноги (src/dst). ──
+  // Ноги берём из фактических per-venue позиций ledger (не синтез ±q из одной строки).
+  for (const [agentId, legMap] of arbByAgent) {
+    const venues = [...legMap.keys()];
+    const sample = legMap.get(venues[0]) || {};
+    const asset = sample.asset || '';
+    const prefix = `A_${asset}_`;
+    const mid = agentId.startsWith(prefix) ? agentId.slice(prefix.length) : '';
+    // src = площадка-префикс mid, dst = суффикс (TRANSFER строится i<j ⇒ agent_id=src+dst).
+    let srcV = '', dstV = '';
+    for (const v of venues) { if (v && mid.startsWith(v)) srcV = v; if (v && mid.endsWith(v)) dstV = v; }
+    if (!srcV || !dstV) {  // fallback по знаку позиции: src копит −f (≤0), dst +f (≥0)
+      const sorted = venues.slice().sort((x, y) =>
+        Number((legMap.get(x) || {}).position || 0) - Number((legMap.get(y) || {}).position || 0));
+      if (!srcV) srcV = sorted[0] || '';
+      if (!dstV) dstV = sorted[sorted.length - 1] || '';
+    }
+    const srcPos = legMap.get(srcV) || null;
+    const dstPos = legMap.get(dstV) || null;
+    const delSrc = delByKey.get(`${agentId}|${asset}|${srcV}`) || null;
+    const delDst = delByKey.get(`${agentId}|${asset}|${dstV}`) || null;
+    const qtyOf = (val, price) => {           // value(k-USDT)→единицы актива по цене узла
+      if (val == null) return null;
+      if (val === 0) return 0;
+      const v = val * 1000;
+      if (asset === 'USDT') return v;          // перенос номинала: qty в USDT
+      return price > 0 ? v / price : null;
+    };
+    const legVals = (p, d) => {
+      const price = p ? Number(p.reference_price) : 0;
+      const after = p ? Number(p.position) : (d ? Number(d.position_after) : null);
+      const before = d ? Number(d.position_before) : after;
+      const delta = d ? Number(d.delta) : null;
+      return { after: qtyOf(after, price), before: qtyOf(before, price), delta: qtyOf(delta, price) };
+    };
+    const sL = legVals(srcPos, delSrc), dL = legVals(dstPos, delDst);
+    const hasDelta = !!(delSrc || delDst);
+    // Марка MTM-заработка — цена dst-ноги (площадка выхода); fallback на src.
+    const basePrice = Number((dstPos || srcPos || {}).base_price) || 0;
+    const price = Number((dstPos || srcPos || {}).reference_price) || 0;
+    rows.push({
+      agent_id: agentId,
+      agent_kind: 'arbitrageur',
+      pair: asset === 'USDT' ? 'USDT' : `${asset}/USDT`,
+      base: asset,
+      quote: asset === 'USDT' ? '' : 'USDT',
+      venue: '',           // две площадки — показаны в ногах (arb.src/dst), не в заголовке
+      hasDelta,
+      pair_price: price,
+      arb: {
+        src: srcV, dst: dstV, unit: asset,
+        leg_src: sL.after, leg_dst: dL.after,      // стало (реальные ноги src/dst)
+        bleg_src: sL.before, bleg_dst: dL.before,  // было
+        dleg_src: sL.delta, dleg_dst: dL.delta,    // дельта такта
+      },
+      ...(hm.get(agentId) || {}),  // отправлено/исполнено (последняя band-заявка агента)
+      ...((() => {
+        const t = ts.get(agentId);
+        if (!t) return {};
+        return {
+          traded_base: t.traded_base,
+          traded_quote: t.traded_quote,
+          pnl_usdt: tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price),
+          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),
           trade_fills: t.trade_fills,
         };
       })()),
@@ -7063,6 +7156,9 @@ async function fetchAgentHedgeMap() {
               status, reason, (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms
          FROM venue_fill_diagnostics
         WHERE hedge_flow_id LIKE 'ce|band|%'
+          AND created_at > now() - interval '2 hours'  -- «последняя» заявка живого агента;
+          -- окно делает запрос индексным (idx created_at) вместо seqscan+disk-sort 599K строк
+          -- (5с→25мс). Агента НЕ скрывает: панель строит по позициям (gRPC), это лишь sent/filled.
         ORDER BY split_part(hedge_flow_id,'|',3), created_at DESC`);
     const m = new Map();
     for (const row of r.rows) {
@@ -7223,7 +7319,27 @@ async function handleCeTreasuryV1(req, res, pathname, query) {
 // Кривая ликвидности венью для графика (вкладка Clearing). ВСЕ вычисления
 // (raw cumulative, VWAP, α_ext/α_T/β_T, safe-линия) — здесь, на backend (ADR-053).
 // Frontend получает готовые к отрисовке массивы {q, price} и только рисует.
+// Короткий TTL-кэш готовых кривых (venue|symbol|ts|opts). Кривая обновляется ~1/с,
+// 2с staleness на графике приемлемо. Снимает: (а) двойной расчёт self (handler +
+// агрегат), (б) повторные/поллинговые загрузки той же кривой. Холодную первую загрузку
+// не ускоряет — там узкое место скан 8.5M-строк vector_flow_segments_history (CH).
+const __curveCache = new Map();
 async function fetchVenueCurve(venue, symbol, ts, opts) {
+  const key = String(venue) + "|" + String(symbol) + "|"
+    + (Number.isFinite(Number(ts)) ? ts : "live") + "|" + JSON.stringify(opts || {});
+  const now = Date.now();
+  const hit = __curveCache.get(key);
+  // TTL должен быть > времени загрузки (~5-7с на холодную из-за скана 8.5M строк),
+  // иначе ранние записи кэша истекают ДО конца загрузки и повтор снова холодный.
+  if (hit && (now - hit.t) < 8000) return hit.val;
+  const val = await fetchVenueCurveImpl(venue, symbol, ts, opts);
+  __curveCache.set(key, { t: now, val });
+  if (__curveCache.size > 300) {                 // простая очистка старых ключей
+    for (const k of __curveCache.keys()) { __curveCache.delete(k); if (__curveCache.size <= 150) break; }
+  }
+  return val;
+}
+async function fetchVenueCurveImpl(venue, symbol, ts, opts) {
   const v = String(venue || "").replace(/'/g, "");
   const s = String(symbol || "").replace(/'/g, "");
   const tnum = Number(ts);
@@ -7441,8 +7557,18 @@ async function fetchVenueCurve(venue, symbol, ts, opts) {
     }
   }
 
+  // Лесенка стакана (как на binance): сырые уровни price/size + накопленный объём.
+  // rawBid уже desc по цене (лучший первый), rawAsk — asc (лучший первый). Явные
+  // цена и объём на уровень — для читаемой панели стакана (отдельно от кривой ликвидности).
+  const bookSide = (levels) => {
+    let cum = 0;
+    return levels.map((l) => { cum += l.v; return { price: l.p, size: l.v, cum }; });
+  };
+  const book = { bids: bookSide(rawBid), asks: bookSide(rawAsk) };
+
   return {
     venue: v, symbol: s, event_time_ms: r.event_time_ms,
+    book,   // {bids:[{price,size,cum}], asks:[{price,size,cum}]} — лесенка стакана для панели
     anchor, anchorMode, mid: midPx, bestBid, bestAsk,
     spreadBps: bestBid > 0 ? (bestAsk / bestBid - 1) * 10000 : 0,
     theta, alphaExt: Number.isFinite(alphaExt) ? alphaExt : null, alphaT, betaT,
@@ -7481,17 +7607,16 @@ async function fetchAggregateCurves(symbol, thisVenue, ts, opts) {
     venues = vr.map((x) => x.venue_id).filter(Boolean);
   } catch (_) { return null; }
   if (venues.length < 2) return null;  // агрегат осмыслен от 2+ площадок
-  // Дескриптор каждой площадки (переиспользуем полный расчёт кривой).
-  const descs = [];
-  for (const v of venues) {
-    try {
-      const c = await fetchVenueCurve(v, symbol, ts, opts);
-      if (c && c.betaT > 0 && c.anchor > 0 && (c.maxBuy + c.maxSell) > 0) {
-        descs.push({ venue: v, anchor: c.anchor, betaT: c.betaT,
-                     maxBuy: c.maxBuy, maxSell: c.maxSell });
-      }
-    } catch (_) { /* площадку пропускаем */ }
-  }
+  // Дескриптор каждой площадки (переиспользуем полный расчёт кривой). ПАРАЛЛЕЛЬНО
+  // (Promise.all) — раньше последовательный цикл по ~5 площадкам × 2+ CH-запроса
+  // давал ~10с на загрузку кривой («долго»); порядок не важен (агрегат = сумма).
+  const settled = await Promise.all(venues.map((v) =>
+    fetchVenueCurve(v, symbol, ts, opts).then(
+      (c) => (c && c.betaT > 0 && c.anchor > 0 && (c.maxBuy + c.maxSell) > 0)
+        ? { venue: v, anchor: c.anchor, betaT: c.betaT, maxBuy: c.maxBuy, maxSell: c.maxSell }
+        : null,
+      () => null)));  // площадку с ошибкой пропускаем
+  const descs = settled.filter(Boolean);
   if (descs.length < 2) return null;
   // Агрегат = сумма ЧИСТО ЛИНЕЙНЫХ функций ликвидности (фидбэк владельца: складываем
   // линейные ликвидности БЕЗ полок ⇒ агрегат тоже линейный). Знаковый объём площадки:
@@ -7828,8 +7953,8 @@ async function handleVectorClearing(req, res, pathname, query) {
                   base_vwap::text AS base_vwap, impact_shift::text AS impact_shift,
                   impact_cost::text AS impact_cost, impact_v, impact_dt_sec
              FROM venue_fill_diagnostics
-            WHERE hedge_flow_id LIKE $1 ORDER BY created_at DESC LIMIT 1`,
-          [`ce|band|${agentId}|%`]);
+            WHERE split_part(hedge_flow_id,'|',3) = $1 ORDER BY created_at DESC LIMIT 1`,
+          [agentId]);  // equality по agent_id (functional idx idx_vfd_agent_created) — не LIKE-seqscan
         if (hr.rows[0]) {
           const h = hr.rows[0];
           const considered = Array.isArray(h.considered_trades) ? h.considered_trades : [];
@@ -8114,6 +8239,49 @@ async function handleVenues(req, res, pathname, query) {
         };
       }).sort((a, b) => a.venue_id.localeCompare(b.venue_id));
       return writeJson(res, 200, { window_s: windowSec, venues, generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
+    }
+  }
+
+  // Панель Торговля: сырой стакан биржи/пары (уровни как есть из venue_snapshots,
+  // без пересчётов). bids — по убыванию цены, asks — по возрастанию.
+  if (req.method === "GET" && pathname === "/api/venues/orderbook") {
+    const v = String((query && query.venue) || "").replace(/'/g, "");
+    const s = String((query && query.symbol) || "").replace(/'/g, "");
+    if (!v || !s) return writeJson(res, 400, { error: "venue and symbol are required" });
+    const depth = Math.max(1, Math.min(1000, parseInt((query && query.depth), 10) || 20));
+    try {
+      // Два источника одного и того же стакана: venue_book_live (глубокие снимки быстрой
+      // полосы venues, ADR-070, TTL часы) и venue_snapshots (основной цикл, 20 уровней).
+      // Берём более свежий; live опционален (таблицы может не быть).
+      const q = (table) => chJsonEachRow(
+        "SELECT bid_depth_json, ask_depth_json, event_time_ms FROM " + VENUE_SNAPSHOTS_DB + "." + table
+        + " WHERE venue_id = '" + v + "' AND symbol = '" + s + "'"
+        + " ORDER BY event_time_ms DESC LIMIT 1 FORMAT JSONEachRow");
+      const [liveRows, mainRows] = await Promise.all([
+        q(VENUE_LIVE_BOOK_TABLE).catch(() => []),
+        q("venue_snapshots").catch(() => []),
+      ]);
+      const pick = [liveRows[0], mainRows[0]].filter(Boolean)
+        .sort((a, b) => Number(b.event_time_ms) - Number(a.event_time_ms));
+      if (!pick.length) return writeJson(res, 404, { error: "not_found" });
+      const rows = [pick[0]];
+      const levels = (json, isBid) => {
+        const out = [];
+        for (const l of safeJsonArray(json) || []) {
+          const p = Number(l && l[0]), q = Number(l && l[1]);
+          if (Number.isFinite(p) && Number.isFinite(q) && p > 0 && q > 0) out.push({ p, q });
+        }
+        out.sort((a, b) => (isBid ? b.p - a.p : a.p - b.p));
+        return out.slice(0, depth);
+      };
+      const eventMs = Number(rows[0].event_time_ms);
+      return writeJson(res, 200, {
+        venue: v, symbol: s, event_time_ms: eventMs, age_ms: nowMs - eventMs,
+        bids: levels(rows[0].bid_depth_json, true),
+        asks: levels(rows[0].ask_depth_json, false),
+      });
     } catch (e) {
       return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
     }
