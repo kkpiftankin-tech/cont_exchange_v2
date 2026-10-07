@@ -137,6 +137,25 @@ void ClickHouseVectorSegmentStorage::EnsureSchema() {
                             {{"error", e.what()}});
     }
   }
+  // Perf+retention (2026-10-05): запрос кривой фильтрует (venue_id,pair) ORDER BY
+  // event_time, а ключ таблицы — (batch_id,segment_id) ⇒ скан. Проекция по
+  // (venue_id,pair,event_time_ms) делает его мгновенным; TTL 2д не даёт таблице расти
+  // (была 8.5M строк → скан кривой ~секунды, вкладка Clearing тормозила). Идемпотентно,
+  // best-effort; MATERIALIZE на существующей БД делается разово вручную (на свежей —
+  // проекция заполняется по мере вставки). ReplacingMergeTree+проекция требует rebuild-режима.
+  for (const char* stmt : {
+         "MODIFY SETTING deduplicate_merge_projection_mode='rebuild'",
+         "ADD PROJECTION IF NOT EXISTS proj_venue_pair "
+         "(SELECT * ORDER BY (venue_id, pair, event_time_ms))",
+         "MODIFY TTL ingested_at + INTERVAL 2 DAY"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ + " " + stmt));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history perf/retention migration failed",
+                            {{"stmt", stmt}, {"error", e.what()}});
+    }
+  }
 }
 
 void ClickHouseVectorSegmentStorage::SaveSegments(

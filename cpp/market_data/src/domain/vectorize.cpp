@@ -18,8 +18,13 @@ namespace {
 cex::common::Decimal Quantize(double value, std::int32_t scale) {
   if (!std::isfinite(value)) return cex::common::Decimal{0, scale};
   const double factor = std::pow(10.0, static_cast<double>(scale));
-  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(value * factor)),
-                              scale};
+  double scaled = std::round(value * factor);
+  // Защита от переполнения int64 (иначе static_cast — UB → INT64_MIN → битый
+  // Decimal::to_string, см. curve_to_levels.cpp). Сатурируем в диапазон int64.
+  constexpr double kMax = 9.22e18, kMin = -9.22e18;
+  if (scaled > kMax) scaled = kMax;
+  else if (scaled < kMin) scaled = kMin;
+  return cex::common::Decimal{static_cast<std::int64_t>(scaled), scale};
 }
 
 bool Positive(const cex::common::Decimal& d) {

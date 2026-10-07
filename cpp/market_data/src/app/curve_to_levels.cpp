@@ -21,8 +21,18 @@ namespace {
 cex::common::Decimal Quantize(double value, std::int32_t scale) {
   if (!std::isfinite(value)) return cex::common::Decimal{0, scale};
   const double factor = std::pow(10.0, static_cast<double>(scale));
-  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(value * factor)),
-                              scale};
+  double scaled = std::round(value * factor);
+  // Защита от переполнения int64: без неё static_cast(double > INT64_MAX) — UB,
+  // на практике даёт INT64_MIN, а Decimal::to_string печатает его как
+  // "-9223372.-36854775808" (битое число) → ВЕСЬ INSERT vector_flow_segments_history
+  // отклоняется ClickHouse → батч без сегментов → фронт «0 сегм.». Переполняется
+  // прежде всего alpha_ext=notional/δ_bps при крошечном δ_bps (плоский/глубокий стакан).
+  // Сатурируем в диапазон int64 (диагностика — валидное большое число лучше, чем
+  // потеря всей строки сегмента). Деньги этот путь не трогает (market_data curve/levels).
+  constexpr double kMax = 9.22e18, kMin = -9.22e18;  // < INT64_MAX/MIN с запасом
+  if (scaled > kMax) scaled = kMax;
+  else if (scaled < kMin) scaled = kMin;
+  return cex::common::Decimal{static_cast<std::int64_t>(scaled), scale};
 }
 
 // ADR-053 safe-translator: α = min_k D_k/|δ_k| для одной стороны FOB-кривой.

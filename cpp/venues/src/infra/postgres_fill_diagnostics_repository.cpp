@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
             "ON venue_fill_diagnostics (hedge_flow_id)");
     tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_created "
             "ON venue_fill_diagnostics (created_at DESC)");
+    // BFF drill-down («загрузка детали»): последняя заявка агента по
+    // split_part(hedge_flow_id,'|',3)=agent_id. Functional index делает запрос
+    // equality-index-scan (0.3мс) вместо seqscan 494MB/599K строк (0.7с+). Perf-fix
+    // вкладки Clearing (2026-10-05): без него деталь спиннила.
+    tx.exec("CREATE INDEX IF NOT EXISTS idx_vfd_agent_created "
+            "ON venue_fill_diagnostics (split_part(hedge_flow_id,'|',3), created_at DESC)");
     tx.commit();
     return true;
   } catch (const std::exception& ex) {
