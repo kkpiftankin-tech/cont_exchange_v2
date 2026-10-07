@@ -165,8 +165,123 @@ function LiquidityChart({ venue, symbol, ts, onPauseChange }) {
   const xTitle = vp ? 'объём base (знаковый): − продажа в bid / + покупка из ask' : 'цена (quote за base)';
   const yTitle = vp ? 'цена (quote за base)' : 'объём base (знаковый)';
 
+  // Лесенка стакана «как на binance»: явные цена/объём на уровень + накопленный + полоски
+  // глубины. Отдельно от кривой ликвидности (которая плохо читается при узком спреде).
+  const fmtPrice = (p) => {
+    const a = Math.abs(Number(p));
+    if (!Number.isFinite(a) || a === 0) return '—';
+    if (a >= 1000) return Number(p).toFixed(2);
+    if (a >= 1) return Number(p).toFixed(4);
+    return Number(p).toPrecision(6);
+  };
+  const fmtSize = (v) => {
+    const a = Math.abs(Number(v));
+    if (!Number.isFinite(a) || a === 0) return '0';
+    if (a >= 1) return Number(v).toFixed(3);
+    if (a >= 0.001) return Number(v).toFixed(4);
+    return Number(v).toExponential(1);
+  };
+  const book = data.book || null;
+  const N_LADDER = 15;
+  const ladder = (() => {
+    if (!book || (!(book.asks || []).length && !(book.bids || []).length)) return null;
+    const asks = (book.asks || []);   // asc по цене (лучший первый)
+    const bids = (book.bids || []);   // desc по цене (лучший первый)
+    const maxCum = Math.max(
+      asks.length ? asks[Math.min(asks.length, N_LADDER) - 1].cum : 0,
+      bids.length ? bids[Math.min(bids.length, N_LADDER) - 1].cum : 0, 1e-12);
+    const asksShow = asks.slice(0, N_LADDER).reverse();  // высшая цена сверху, лучший аск снизу у спреда
+    const bidsShow = bids.slice(0, N_LADDER);            // лучший бид сверху у спреда
+    const spreadAbs = (bestAsk > 0 && bestBid > 0) ? (bestAsk - bestBid) : null;
+    const spreadBps = (bestAsk > 0 && bestBid > 0) ? ((bestAsk / bestBid - 1) * 10000) : null;
+    const row = (lvl, side) => (
+      <div className="vc-ob-row" key={side + lvl.price}>
+        <div className={side === 'ask' ? 'vc-ob-bar vc-ob-bar-ask' : 'vc-ob-bar vc-ob-bar-bid'}
+          style={{ width: `${Math.min(100, 100 * lvl.cum / maxCum)}%` }} />
+        <span className={side === 'ask' ? 'vc-ob-price vc-ob-ask' : 'vc-ob-price vc-ob-bid'}>{fmtPrice(lvl.price)}</span>
+        <span className="vc-ob-size">{fmtSize(lvl.size)}</span>
+        <span className="vc-ob-cum">{fmtSize(lvl.cum)}</span>
+      </div>
+    );
+    return (
+      <div className="vc-orderbook" onClick={(e) => e.stopPropagation()}>
+        <div className="vc-ob-head"><span>цена</span><span>объём</span><span>Σ объём</span></div>
+        <div className="vc-ob-asks">{asksShow.map((l) => row(l, 'ask'))}</div>
+        <div className="vc-ob-spread">
+          спред {spreadAbs != null ? fmtPrice(spreadAbs) : '—'}
+          {spreadBps != null ? ` (${spreadBps.toFixed(2)} bps)` : ''}
+          <span className="vc-ob-mid"> · мид {fmtPrice((bestBid + bestAsk) / 2)}</span>
+        </div>
+        <div className="vc-ob-bids">{bidsShow.map((l) => row(l, 'bid'))}</div>
+      </div>
+    );
+  })();
+
+  // Депт-график «как на binance» с НОРМАЛЬНЫМИ шкалами: ось X — цена, ось Y —
+  // накопленный объём. Аски вверх (+), биды ВНИЗ (−, перевёрнуты по оси объёма,
+  // по просьбе владельца). Реальный стакан (не модельная кривая).
+  const depthChart = (() => {
+    if (!book) return null;
+    const asks = book.asks || [], bids = book.bids || [];
+    if (!asks.length || !bids.length) return null;
+    const pLoRaw = bids[bids.length - 1].price, pHiRaw = asks[asks.length - 1].price;
+    const pSpan = (pHiRaw - pLoRaw) || Math.max(1, pHiRaw * 1e-4);
+    const pMin = pLoRaw - pSpan * 0.03, pMax = pHiRaw + pSpan * 0.03;
+    const maxAsk = asks[asks.length - 1].cum, maxBid = bids[bids.length - 1].cum;
+    const vTop = Math.max(maxAsk, 1e-9) * 1.10, vBot = -Math.max(maxBid, 1e-9) * 1.10;
+    const W = 640, H = 320, ml = 70, mr = 14, mt = 14, mb = 34, pw = W - ml - mr, ph = H - mt - mb;
+    const X = (p) => ml + (p - pMin) / (pMax - pMin) * pw;
+    const Y = (v) => mt + (vTop - v) / (vTop - vBot) * ph;
+    const bestAsk = asks[0].price, bestBid = bids[0].price, mid = (bestAsk + bestBid) / 2;
+    // Площадь асков: от (bestAsk,0) ступенями вверх-вправо; биды — вниз-влево (−cum).
+    let aLine = `${X(bestAsk)},${Y(0)}`, pv = 0;
+    for (const l of asks) { aLine += ` ${X(l.price)},${Y(pv)} ${X(l.price)},${Y(l.cum)}`; pv = l.cum; }
+    const aFill = `${aLine} ${X(asks[asks.length - 1].price)},${Y(0)}`;
+    let bLine = `${X(bestBid)},${Y(0)}`; pv = 0;
+    for (const l of bids) { bLine += ` ${X(l.price)},${Y(-pv)} ${X(l.price)},${Y(-l.cum)}`; pv = l.cum; }
+    const bFill = `${bLine} ${X(bids[bids.length - 1].price)},${Y(0)}`;
+    const xticks = [0, 0.25, 0.5, 0.75, 1].map((f) => pMin + (pMax - pMin) * f);
+    const yticks = [];
+    for (const f of [0.5, 1]) { yticks.push(maxAsk * f); yticks.push(-maxBid * f); }
+    return (
+      <div className="vc-depth" onClick={(e) => e.stopPropagation()}>
+        <div className="vc-depth-title">Глубина стакана (binance-style): <span style={{ color: '#e6725a' }}>аски ↑</span> / <span style={{ color: '#5fd08a' }}>биды ↓</span> · X — цена, Y — накопленный объём</div>
+        <svg className="vc-chart" viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet">
+          <rect x={ml} y={mt} width={pw} height={ph} fill="#0b1219" stroke="#1c2733" />
+          {/* горизонтальные линии объёма + подписи оси Y */}
+          {yticks.map((v, i) => (
+            <g key={'y' + i}>
+              <line x1={ml} y1={Y(v)} x2={ml + pw} y2={Y(v)} stroke="#182230" strokeDasharray="3 3" />
+              <text x={ml - 6} y={Y(v) + 3} textAnchor="end" className="vc-chart-lbl">{fmtSize(Math.abs(v))}</text>
+            </g>
+          ))}
+          {/* нулевая линия объёма (стык бид/аск у спреда) */}
+          <line x1={ml} y1={Y(0)} x2={ml + pw} y2={Y(0)} stroke="#3a4a5a" />
+          {/* вертикальные линии цены + подписи оси X */}
+          {xticks.map((p, i) => (
+            <g key={'x' + i}>
+              <line x1={X(p)} y1={mt} x2={X(p)} y2={mt + ph} stroke="#121a23" />
+              <text x={X(p)} y={mt + ph + 14} textAnchor="middle" className="vc-chart-lbl">{fmtPrice(p)}</text>
+            </g>
+          ))}
+          {/* мид */}
+          <line x1={X(mid)} y1={mt} x2={X(mid)} y2={mt + ph} stroke="#5a6a7a" strokeDasharray="2 3" />
+          {/* площади + линии */}
+          <polyline points={aFill} fill="rgba(230,90,90,0.18)" stroke="none" />
+          <polyline points={bFill} fill="rgba(95,208,138,0.18)" stroke="none" />
+          <polyline points={aLine} fill="none" stroke="#e6725a" strokeWidth="1.6" />
+          <polyline points={bLine} fill="none" stroke="#5fd08a" strokeWidth="1.6" />
+          <text x={ml} y={mt - 3} className="vc-chart-lbl">объём (base), аски ↑ / биды ↓</text>
+          <text x={ml + pw} y={mt + ph + 14} textAnchor="end" className="vc-chart-lbl">цена ({symbol})</text>
+        </svg>
+      </div>
+    );
+  })();
+
   return (
     <div className="vc-chart-wrap">
+      {ladder}
+      {depthChart}
       <div className="vc-chart-ctrls" onClick={(e) => e.stopPropagation()}>
         <button type="button" className={paused ? 'vc-pause active' : 'vc-pause'}
           title={paused ? 'Возобновить живое обновление' : 'Остановить: заморозить график (без мигания); можно увеличивать и включать доп. элементы'}

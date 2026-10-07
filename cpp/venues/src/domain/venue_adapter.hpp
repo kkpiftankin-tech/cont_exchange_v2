@@ -225,6 +225,20 @@ class VenueAdapter {
   virtual std::optional<VenueRawSnapshot> RequestSnapshot(
       const VenueSnapshotRequest& request) = 0;
 
+  // ADR-070: один REST-вызов глубины (до `levels` уровней) БЕЗ изменения состояния
+  // адаптера (LOB/books_), без тикера и ленты сделок. Для быстрой полосы сырого
+  // стакана; по умолчанию не поддерживается.
+  virtual std::optional<VenueRawSnapshot> RequestDepthOnly(
+      const VenueSnapshotRequest& request, std::size_t levels) {
+    (void)request;
+    (void)levels;
+    return std::nullopt;
+  }
+  // true — RequestDepthOnly ходит через общий REST-клиент адаптера, и вызывающий
+  // обязан сериализовать его с RequestSnapshot (per-venue мьютекс). false — у
+  // адаптера выделенный клиент для глубины, мьютекс не нужен.
+  virtual bool DepthOnlyUsesSharedClient() const { return true; }
+
   // Send low-level child order to a venue.
   virtual VenueOrderResult SendOrder(
       const fob::execution::v1::ExecutionIntent& intent) = 0;

@@ -496,6 +496,105 @@ bool TestRequestSnapshotAndRateLimit() {
   return true;
 }
 
+// ADR-070: глубокий REST-запрос стакана без изменения состояния адаптера, со своим
+// token bucket (не делит бюджет с основным путём) и без записи в circuit breaker.
+bool TestRequestDepthOnlyUsesOwnBucket() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.rest_requests_per_sec = 1.0;
+  cfg.rest_burst = 1.0;
+  cfg.depth_only_requests_per_sec = 1.0;
+  cfg.depth_only_burst = 1.0;
+  cfg.rest_ticker_volume_enabled = false;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  auto deep = adapter.RequestDepthOnly(BtcReq(), 1000);
+  if (!Check(deep.has_value(), "depth-only must succeed")) return false;
+  if (!Check(rest->last_get_url.find("limit=1000") != std::string::npos,
+             "depth-only must request the deep limit")) return false;
+  if (!Check(rest->get_calls == 1, "exactly one REST call (no ticker/trades)")) return false;
+  if (!Check(deep->bids.size() == 3 && deep->asks.size() == 3, "levels parsed")) return false;
+  if (!Check(deep->best_bid.units == 10010 && deep->best_ask.units == 10020, "best prices")) {
+    return false;
+  }
+
+  // свой бюджет исчерпан → nullopt
+  if (!Check(!adapter.RequestDepthOnly(BtcReq(), 1000).has_value(),
+             "depth-only must be limited by its own bucket")) return false;
+  // но основной бюджет REST НЕ потрачен глубокой полосой: RequestSnapshot проходит
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(),
+             "main REST bucket must be untouched by depth-only")) return false;
+  clock.AdvanceMs(1000);
+  return Check(adapter.RequestDepthOnly(BtcReq(), 1000).has_value(), "recovers after refill");
+}
+
+// Не-объектный JSON в ответе не бросает исключение, а даёт nullopt.
+bool TestRequestDepthOnlyNonObjectJsonIsSafe() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = "[1,2,3]";
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  return Check(!adapter.RequestDepthOnly(BtcReq(), 1000).has_value(), "array root -> nullopt");
+}
+
+bool TestRequestDepthOnlyUsesDedicatedClient() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* depth_rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  depth_rest->get_response = DepthSnapshotJson();
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.DepthOnlyUsesSharedClient(), "shared client by default")) return false;
+  adapter.SetDepthRestClient(std::unique_ptr<ICexRestClient>(depth_rest));
+  if (!Check(!adapter.DepthOnlyUsesSharedClient(), "dedicated client after Set")) return false;
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  if (!Check(adapter.RequestDepthOnly(BtcReq(), 1000).has_value(), "depth-only ok")) return false;
+  if (!Check(depth_rest->get_calls == 1, "dedicated client served the depth request")) return false;
+  return Check(rest->get_calls == 0, "shared client untouched by depth-only");
+}
+
+bool TestRequestDepthOnlyFailureReturnsNullopt() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_ok = false;
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  // без кэша на отказ REST — nullopt (устаревший кэш не отдаём как «свежий» стакан)
+  return Check(!adapter.RequestDepthOnly(BtcReq(), 1000).has_value(), "REST failure -> nullopt");
+}
+
 bool TestRequestSnapshotWithoutCacheReturnsNullOnRestFailure() {
   FakeClock clock;
   auto* rest = new FakeRestClient();
@@ -1600,6 +1699,10 @@ int main() {
   ok = TestSubscribeBuildsDepthAndTradeStreams() && ok;
   ok = TestSubscribeIncludesTickerAndStatusAndSkipsPoolState() && ok;
   ok = TestRequestSnapshotAndRateLimit() && ok;
+  ok = TestRequestDepthOnlyUsesOwnBucket() && ok;
+  ok = TestRequestDepthOnlyNonObjectJsonIsSafe() && ok;
+  ok = TestRequestDepthOnlyFailureReturnsNullopt() && ok;
+  ok = TestRequestDepthOnlyUsesDedicatedClient() && ok;
   ok = TestRequestSnapshotWithoutCacheReturnsNullOnRestFailure() && ok;
   ok = TestRequestSnapshotReturnsEmptyStatusForEmptyBook() && ok;
   ok = TestRequestSnapshotUsesLobMaxLevelsForRestDepthLimit() && ok;

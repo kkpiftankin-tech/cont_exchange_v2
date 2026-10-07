@@ -68,5 +68,7 @@
 | ADR-057 | CE трёхуровневая позиция (агент → узел → актив); Z_a ⊇ NOP | [accepted](ADR-057-ce-three-level-position.md) |
 | ADR-058 | CE committed/in-flight состояние агентов вместо cooldown-таймера хеджа | [accepted](ADR-058-ce-committed-inflight-state.md) |
 | ADR-059 | CE clearing_trace — единый аудит-артефакт такта (агенты/узлы/инварианты/PnL/заявки) | [accepted](ADR-059-ce-clearing-trace-audit.md) |
+| ADR-069 | Две ноги позиции/хеджа CE-арбитражёра (по заявке на каждую биржу) | [accepted](ADR-069-ce-arbitrageur-two-leg-position-hedge.md) |
+| ADR-070 | Быстрая полоса стакана venues — свежий сырой стакан для панели «Торговля» | [proposed](ADR-070-venues-fast-depth-lane-for-raw-book-display.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

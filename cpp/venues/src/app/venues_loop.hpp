@@ -78,6 +78,9 @@ class VenuesLoop : public ExecutionReportSink {
 
   void start();
   void stop();
+  // ADR-070: отдельное хранилище глубоких снимков быстрой полосы (короткий TTL).
+  // Вызывать ДО start(). nullptr — быстрая полоса ничего не пишет.
+  void SetLiveBookStorage(ISnapshotStorage* storage) { live_book_storage_ = storage; }
 
   std::vector<VenueConfigRecord> ListVenueConfigs() const;
   std::optional<VenueConfigRecord> GetVenueConfig(const std::string& venue_id) const;
@@ -134,6 +137,9 @@ class VenuesLoop : public ExecutionReportSink {
   // F-09 UX: лёгкий тикер-фид по доп. символам (VENUES_FEED_SYMBOLS) — отдельно от
   // core md_publish_loop, чтобы не задеть F-11/F-12. Публикует только тикеры.
   void extra_ticker_loop();
+  // ADR-070: быстрая полоса стакана (только REST depth → хранилище снимков) для панели
+  // «Торговля». Выключена, если VENUES_FAST_DEPTH_VENUE пуст.
+  void depth_fast_loop();
   // F-20 Phase 4 — SIM/SHADOW fork: simulate the child order against the
   // cached live LOB and publish the sim ExecutionReport + SimExecutionAnnotation
   // to the isolated sim.* topics (ADR-015). Applies the sampled venue latency
@@ -153,6 +159,7 @@ class VenuesLoop : public ExecutionReportSink {
 
   std::string brokers_;
   ISnapshotStorage* snapshot_storage_{nullptr};
+  ISnapshotStorage* live_book_storage_{nullptr};
   cex::common::KafkaProducer producer_;
   cex::common::KafkaConsumer consumer_;
   infra::VenueObservabilityProducer observability_;
@@ -213,6 +220,7 @@ class VenuesLoop : public ExecutionReportSink {
   std::thread t_exec_;
   std::thread t_sim_config_;
   std::thread t_extra_ticker_;
+  std::thread t_depth_fast_;
   // Сериализует RequestSnapshot между md_publish_loop и extra_ticker_loop
   // (общий binance-адаптер; rest_client_->Get не потокобезопасен на shared handle).
   std::mutex snapshot_mu_;

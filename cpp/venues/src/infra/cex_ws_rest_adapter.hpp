@@ -62,6 +62,10 @@ struct CexWsRestAdapterConfig {
 
   double rest_requests_per_sec{10.0};
   double rest_burst{10.0};
+  // ADR-070: отдельный бюджет REST быстрой полосы стакана (RequestDepthOnly), чтобы она
+  // не голодала основной цикл/ленту сделок и не трогала его circuit breaker.
+  double depth_only_requests_per_sec{5.0};
+  double depth_only_burst{10.0};
   double ws_messages_per_sec{10.0};
   double ws_burst{10.0};
   double connect_attempts_per_sec{2.0};
@@ -163,6 +167,16 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   std::optional<domain::VenueRawSnapshot> RequestSnapshot(
       const domain::VenueSnapshotRequest& request) override;
+
+  std::optional<domain::VenueRawSnapshot> RequestDepthOnly(
+      const domain::VenueSnapshotRequest& request, std::size_t levels) override;
+  // Выделенный REST-клиент для RequestDepthOnly (ADR-070): глубокий запрос не стоит в
+  // очереди за общим клиентом и мьютексом основного цикла. Вызывать до старта потока
+  // быстрой полосы; единственный потребитель — этот поток.
+  void SetDepthRestClient(std::unique_ptr<ICexRestClient> client) {
+    depth_rest_client_ = std::move(client);
+  }
+  bool DepthOnlyUsesSharedClient() const override { return depth_rest_client_ == nullptr; }
 
   domain::VenueOrderResult SendOrder(
       const fob::execution::v1::ExecutionIntent& intent) override;
@@ -354,6 +368,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   mutable std::mutex mu_;
   CexWsRestAdapterConfig cfg_;
   std::unique_ptr<ICexRestClient> rest_client_;
+  std::unique_ptr<ICexRestClient> depth_rest_client_;  // опционально, см. SetDepthRestClient
   std::unique_ptr<ICexWsSession> ws_session_;
   ClockNowFn now_fn_;
 
@@ -379,6 +394,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   app::ExecutionReportSink* report_sink_{nullptr};  // follow-up отчёты, не владеет
 
   TokenBucket rest_bucket_;
+  TokenBucket depth_bucket_;  // только RequestDepthOnly (ADR-070)
   TokenBucket ws_bucket_;
   TokenBucket connect_bucket_;
 

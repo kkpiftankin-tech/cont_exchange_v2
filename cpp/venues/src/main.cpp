@@ -62,9 +62,21 @@ int main() {
     cex::common::log_json("WARN", "Venues ClickHouse schema initialization failed");
   }
 
+  // ADR-070: глубокие снимки быстрой полосы — отдельная таблица с коротким TTL (часы).
+  cex::venues::infra::SnapshotClickHouseConfig live_cfg = ch_cfg;
+  live_cfg.table = cex::common::Env::get_string("VENUES_CLICKHOUSE_LIVE_BOOK_TABLE", "venue_book_live");
+  live_cfg.retention_hours = std::max(1, cex::common::Env::get_int("VENUES_CLICKHOUSE_LIVE_BOOK_RETENTION_HOURS", 2));
+  cex::venues::infra::SnapshotClickHouseWriter live_book_storage(live_cfg);
+  const bool live_book_enabled =
+      !cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "").empty();
+  if (live_book_enabled && !live_book_storage.EnsureSchema()) {
+    cex::common::log_json("WARN", "Venues live-book ClickHouse schema initialization failed");
+  }
+
   cex::common::log_json("INFO", "Venues starting", {{"brokers", brokers}});
 
   cex::venues::app::VenuesLoop loop(brokers, &snapshot_storage);
+  if (live_book_enabled) loop.SetLiveBookStorage(&live_book_storage);
   loop.start();
 
   const auto venues_postgres_dsn = cex::common::Env::try_get_string("VENUES_POSTGRES_DSN");

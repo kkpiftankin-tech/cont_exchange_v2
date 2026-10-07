@@ -160,7 +160,16 @@ std::vector<BookLevel> CanonicalizeBookSide(const std::vector<BookLevel>& levels
       }
     }
 
-    if (lot_units > 0) qty_units = floor_to_step(qty_units, lot_units);
+    // Округление объёма к лоту, но НИКОГДА не обнуляем реальный уровень: для
+    // высокоценовых пар (BTC/USDT) объём уровня крошечный (0.00006 BTC ≈ $5), и
+    // floor к лоту 0.001 стирал бы ~половину реальной глубины стакана (binance
+    // отдаёт 20 уровней → оставалось 5-15). Лот — ограничение РАЗМЕЩЕНИЯ заявки,
+    // а не фильтр рыночной глубины: стакан и кривая должны отражать действительность.
+    // Если floor обнуляет — сохраняем сырой объём (уровень не теряем).
+    if (lot_units > 0) {
+      const int64_t floored = floor_to_step(qty_units, lot_units);
+      if (floored > 0) qty_units = floored;  // иначе сохраняем сырой объём (уровень не теряем)
+    }
 
     if (price_units <= 0 || qty_units <= 0) continue;
     if (min_qty_units > 0 && qty_units < min_qty_units) continue;

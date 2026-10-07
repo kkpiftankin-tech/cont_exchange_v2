@@ -103,6 +103,9 @@ std::string SnapshotClickHouseWriter::FullTableName() const {
 
 bool SnapshotClickHouseWriter::EnsureSchema() {
   const int retention_days = std::max(1, cfg_.retention_days);
+  const std::string ttl_interval = cfg_.retention_hours > 0
+      ? std::to_string(cfg_.retention_hours) + " HOUR"
+      : std::to_string(retention_days) + " DAY";
   const std::string create_db = "CREATE DATABASE IF NOT EXISTS " + cfg_.database;
   const std::string create_table =
       "CREATE TABLE IF NOT EXISTS " + FullTableName() + " ("
@@ -126,11 +129,10 @@ bool SnapshotClickHouseWriter::EnsureSchema() {
       "ingested_at DateTime DEFAULT now()"
       ") ENGINE = MergeTree "
       "ORDER BY (venue_id, symbol, event_time_ms) "
-      "TTL toDateTime(event_time_ms / 1000) + INTERVAL " + std::to_string(retention_days) +
-      " DAY DELETE";
+      "TTL toDateTime(event_time_ms / 1000) + INTERVAL " + ttl_interval + " DELETE";
   const std::string apply_ttl =
       "ALTER TABLE " + FullTableName() + " MODIFY TTL toDateTime(event_time_ms / 1000) + "
-      "INTERVAL " + std::to_string(retention_days) + " DAY DELETE";
+      "INTERVAL " + ttl_interval + " DELETE";
 
   return ExecQuery(create_db) && ExecQuery(create_table) && ExecQuery(apply_ttl);
 }
@@ -174,7 +176,9 @@ bool SnapshotClickHouseWriter::SaveSnapshot(
       "INSERT INTO " + FullTableName() + " FORMAT JSONEachRow";
   const bool ok = ExecQuery(query, row.str());
   if (ok) {
-    cex::common::log_json("INFO", "Stored venue snapshot in ClickHouse",
+    // live-таблица быстрой полосы (retention_hours>0) пишется ~2–3 раза/с — не на INFO
+    cex::common::log_json(cfg_.retention_hours > 0 ? "DEBUG" : "INFO",
+                          "Stored venue snapshot in ClickHouse",
                           {{"service", "venues"},
                            {"component", "snapshot_clickhouse_writer"},
                            {"participant", "ClickHouse"},

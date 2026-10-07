@@ -516,6 +516,10 @@ CexWsRestAdapter::CexWsRestAdapter(
   rest_bucket_.tokens = rest_bucket_.capacity;
   rest_bucket_.refill_per_sec = std::max(0.1, cfg_.rest_requests_per_sec);
 
+  depth_bucket_.capacity = std::max(1.0, cfg_.depth_only_burst);
+  depth_bucket_.tokens = depth_bucket_.capacity;
+  depth_bucket_.refill_per_sec = std::max(0.1, cfg_.depth_only_requests_per_sec);
+
   ws_bucket_.capacity = std::max(1.0, cfg_.ws_burst);
   ws_bucket_.tokens = ws_bucket_.capacity;
   ws_bucket_.refill_per_sec = std::max(0.1, cfg_.ws_messages_per_sec);
@@ -1126,6 +1130,109 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
   return std::nullopt;
 }
 
+namespace {
+// Извлечение bids/asks из тела REST depth: Binance/Coinbase — top-level; Kraken —
+// result.{pair}; OKX — data[0]. Формат уровня [price, qty, ...] у всех совместим с
+// ParseLevelArray. Чистая функция, без состояния адаптера.
+void ExtractRestBookLevels(const json& root, const bool kraken, const bool okx,
+                           json* bids_json, json* asks_json) {
+  if (kraken) {
+    const json result = root.value("result", json::object());
+    if (result.is_object() && !result.empty() && result.begin().value().is_object()) {
+      const json& pair = result.begin().value();  // первый (единственный) ключ пары
+      *bids_json = pair.value("bids", json::array());
+      *asks_json = pair.value("asks", json::array());
+    }
+  } else if (okx) {
+    const json data = root.value("data", json::array());
+    if (data.is_array() && !data.empty() && data[0].is_object()) {
+      *bids_json = data[0].value("bids", json::array());
+      *asks_json = data[0].value("asks", json::array());
+    }
+  } else {
+    *bids_json = root.value("bids", json::array());
+    *asks_json = root.value("asks", json::array());
+  }
+}
+}  // namespace
+
+// ADR-070: один REST-вызов глубины (до `levels` уровней) без записи в состояние
+// адаптера (books_/LOB), без тикера и ленты сделок. Тот же circuit breaker и
+// REST-лимитер, что у RequestSnapshot. nullopt — отказ/ошибка (кэш не отдаём).
+std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestDepthOnly(
+    const domain::VenueSnapshotRequest& request, const std::size_t levels) {
+  const SteadyClock::time_point now = now_fn_();
+  domain::VenueSnapshotRequest normalized = normalize_request(request);
+  normalized.depth_levels = std::max<std::size_t>(1, levels);
+  {
+    // Изоляция от основного пути (ревью ADR-070): свой token bucket и БЕЗ записи в
+    // circuit breaker. Здесь только читаем состояние: если breaker открыт — молчим
+    // (без перехода в half-open), иначе тратим токен собственного бюджета.
+    std::lock_guard<std::mutex> lock(mu_);
+    if (cfg_.circuit_breaker_enabled && circuit_state_ == CircuitBreakerState::kOpen) {
+      return std::nullopt;
+    }
+    if (!consume_token(&depth_bucket_, 1.0, now)) return std::nullopt;
+  }
+
+  std::string body;
+  long http_code = 0;
+  ICexRestClient* client = depth_rest_client_ ? depth_rest_client_.get() : rest_client_.get();
+  const bool ok = client->Get(rest_depth_url(normalized), auth_headers(),
+                              cfg_.rest_timeout_ms, &body, &http_code);
+  if (!ok || http_code < 200 || http_code >= 300) {
+    cex::common::log_json("WARN", "CEX depth-only REST request failed",
+                          {{"venue", cfg_.venue_id}, {"http_code", std::to_string(http_code)}});
+    return std::nullopt;
+  }
+
+  const json root = json::parse(body, nullptr, false);
+  json bids_json = json::array();
+  json asks_json = json::array();
+  // value() бросает type_error на не-объекте — проверяем форму до разбора.
+  if (!root.is_discarded() && root.is_object()) {
+    ExtractRestBookLevels(
+        root, is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url),
+        is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url), &bids_json,
+        &asks_json);
+  }
+  std::vector<domain::VenueBookLevel> bids;
+  std::vector<domain::VenueBookLevel> asks;
+  if (bids_json.is_array() && asks_json.is_array()) {
+    ParseLevelArray(bids_json, cfg_.market_price_scale, cfg_.market_qty_scale, &bids, true);
+    ParseLevelArray(asks_json, cfg_.market_price_scale, cfg_.market_qty_scale, &asks, false);
+  }
+  if (bids.empty() || asks.empty()) {
+    cex::common::log_json("WARN", "CEX depth-only parse produced empty book",
+                          {{"venue", cfg_.venue_id}});
+    return std::nullopt;
+  }
+
+  domain::VenueRawSnapshot snapshot;
+  snapshot.venue_id = cfg_.venue_id;
+  snapshot.venue_type = domain::VenueType::kCex;
+  snapshot.instrument = normalize_instrument(normalized.instrument);
+  snapshot.venue_symbol = symbol_key_from_request(normalized);
+  snapshot.timestamp = cex::common::now_ts();
+  snapshot.sequence = is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)
+                          ? root.value("sequence", 0ULL)
+                          : root.value("lastUpdateId", 0ULL);
+  snapshot.status = domain::VenueConnectionStatus::kConnected;
+  snapshot.fees.maker = cfg_.maker_fee;
+  snapshot.fees.taker = cfg_.taker_fee;
+  snapshot.trading_rules.tick_size = cfg_.tick_size;
+  snapshot.trading_rules.lot_size = cfg_.lot_size;
+  snapshot.volume_24h = cex::common::Decimal{0, cfg_.market_qty_scale};
+  snapshot.bids = std::move(bids);
+  snapshot.asks = std::move(asks);
+  snapshot.best_bid = snapshot.bids.front().price;
+  snapshot.best_ask = snapshot.asks.front().price;
+  snapshot.mid_price = cex::common::Decimal{
+      (snapshot.best_bid.units + snapshot.best_ask.units) / 2, snapshot.best_bid.scale};
+  snapshot.spread = cex::common::Decimal::sub(snapshot.best_ask, snapshot.best_bid);
+  return snapshot;
+}
+
 domain::VenueOrderResult CexWsRestAdapter::SendOrder(
     const fob::execution::v1::ExecutionIntent& intent) {
   const SteadyClock::time_point now = now_fn_();
@@ -1713,27 +1820,11 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded()) return std::nullopt;
 
-  // Извлечение bids/asks: Binance/Coinbase — top-level; Kraken — result.{pair};
-  // OKX — data[0]. Формат уровня [price, qty, ...] у всех совместим с ParseLevelArray.
   json bids_json = json::array();
   json asks_json = json::array();
-  if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
-    const json result = root.value("result", json::object());
-    if (result.is_object() && !result.empty()) {
-      const json& pair = result.begin().value();  // первый (единственный) ключ пары
-      bids_json = pair.value("bids", json::array());
-      asks_json = pair.value("asks", json::array());
-    }
-  } else if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
-    const json data = root.value("data", json::array());
-    if (data.is_array() && !data.empty()) {
-      bids_json = data[0].value("bids", json::array());
-      asks_json = data[0].value("asks", json::array());
-    }
-  } else {
-    bids_json = root.value("bids", json::array());
-    asks_json = root.value("asks", json::array());
-  }
+  ExtractRestBookLevels(
+      root, is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url),
+      is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url), &bids_json, &asks_json);
   if (!bids_json.is_array() || !asks_json.is_array()) return std::nullopt;
 
   std::vector<domain::VenueBookLevel> bids;

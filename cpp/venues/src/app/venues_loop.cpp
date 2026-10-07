@@ -72,6 +72,7 @@
 
 #include "fob/marketdata/v1/marketdata_raw.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "domain/normalize_snapshot.hpp"
 #include "domain/trades_fetch_scheduler.hpp"
 #include "infra/cex_ws_rest_adapter.hpp"
 #include "infra/dex_amm_rpc_adapter.hpp"
@@ -758,6 +759,9 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
           venue_env_prefix + "_REST_RPS", env_double("CEX_REST_RPS", default_rps));
       cfg->rest_burst = env_double(
           venue_env_prefix + "_REST_BURST", env_double("CEX_REST_BURST", default_burst));
+      // ADR-070: отдельный бюджет быстрой полосы стакана (не делит токены с основным).
+      cfg->depth_only_requests_per_sec = env_double("VENUES_FAST_DEPTH_RPS", 5.0);
+      cfg->depth_only_burst = std::max(1.0, 2.0 * cfg->depth_only_requests_per_sec);
       cfg->rest_ticker_volume_enabled = env_bool("CEX_REST_TICKER_VOLUME_ENABLED", true);
       cfg->simulate_orders = env_bool(
           "CEX_SIMULATE_ORDERS",
@@ -1360,6 +1364,7 @@ void VenuesLoop::start() {
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
   t_extra_ticker_ = std::thread([this] { extra_ticker_loop(); });
+  t_depth_fast_ = std::thread([this] { depth_fast_loop(); });
 }
 
 /// Graceful shutdown: clear running_ flag, ждём все threads.
@@ -1370,6 +1375,7 @@ void VenuesLoop::stop() {
   if (t_exec_.joinable()) t_exec_.join();
   if (t_sim_config_.joinable()) t_sim_config_.join();
   if (t_extra_ticker_.joinable()) t_extra_ticker_.join();
+  if (t_depth_fast_.joinable()) t_depth_fast_.join();
 }
 
 // F-20 Phase 4 — consume `sim.config` (SimConfigEvent) and apply each to the
@@ -1507,6 +1513,100 @@ void VenuesLoop::extra_ticker_loop() {
     }
   }
   cex::common::log_json("INFO", "Venues extra-ticker loop stopped", {});
+}
+
+// ============================================================================
+// depth_fast_loop — ADR-070. Быстрая полоса сырого стакана для панели «Торговля».
+// Один REST-вызов глубины (до VENUES_FAST_DEPTH_LEVELS уровней; адаптер не меняет
+// своё LOB-состояние) на пару, без тикера и ленты сделок → нормализация → ТОЛЬКО
+// live-таблица глубоких снимков (venue_book_live, короткий TTL). В Kafka
+// venue.snapshots, venue_snapshots и кривые клиринга не попадает: основной цикл и
+// CE-цепочка работают как раньше. Выключена, если VENUES_FAST_DEPTH_VENUE пуст.
+// ============================================================================
+void VenuesLoop::depth_fast_loop() {
+  const std::string venue = cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "");
+  if (venue.empty()) return;  // выключено по умолчанию
+  const std::string list = cex::common::Env::get_string("VENUES_FAST_DEPTH_SYMBOLS", "BTC/USDT");
+  const int interval_ms =
+      std::max(200, cex::common::Env::get_int("VENUES_FAST_DEPTH_INTERVAL_MS", 1000));
+  // Глубина быстрой полосы задаётся отдельно от depth_levels биржи (там 20 — вход
+  // клиринга): панели нужен глубокий стакан (сотни BTC накопленного объёма).
+  const std::size_t fast_levels = static_cast<std::size_t>(
+      std::max(20, cex::common::Env::get_int("VENUES_FAST_DEPTH_LEVELS", 1000)));
+
+  std::vector<domain::VenueSnapshotRequest> reqs;
+  std::size_t pos = 0;
+  while (pos < list.size()) {
+    const std::size_t comma = list.find(',', pos);
+    std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+    while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+    const std::size_t slash = tok.find('/');
+    if (!tok.empty() && slash != std::string::npos) {
+      domain::VenueSnapshotRequest req;
+      const std::string base = tok.substr(0, slash);
+      const std::string quote = tok.substr(slash + 1);
+      req.instrument.set_symbol(tok);
+      req.instrument.set_base(base);
+      req.instrument.set_quote(quote);
+      req.venue_symbol = base + quote;
+      req.include_trades = false;  // ленту сделок читает только основной цикл (ADR-060)
+      reqs.push_back(std::move(req));
+    }
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  cex::common::log_json("INFO", "Venues fast-depth loop starting",
+                        {{"venue", venue}, {"symbols", std::to_string(reqs.size())},
+                         {"interval_ms", std::to_string(interval_ms)},
+                         {"levels", std::to_string(fast_levels)}});
+
+  // Выделенный REST-клиент: быстрая полоса не ждёт общий мьютекс (его держат основной
+  // цикл и extra_ticker_loop на сотни мс на символ — иначе проход ≈ 24 с вместо 2–3 с).
+  if (auto* cex = dynamic_cast<infra::CexWsRestAdapter*>(find_adapter(venue))) {
+    cex->SetDepthRestClient(std::make_unique<infra::CurlCexRestClient>());
+  }
+
+  while (running_.load()) {
+    domain::VenueAdapter* adapter = find_adapter(venue);
+    if (adapter != nullptr && live_book_storage_ != nullptr) {
+      // Пары — параллельно (по задаче на пару): проход ≈ одному запросу, а не сумме.
+      // RequestDepthOnly и CH-писатель потокобезопасны (состояние под mu_ адаптера,
+      // curl-хэндл на вызов); общий мьютекс нужен, только если REST-клиент общий.
+      const bool shared_client = adapter->DepthOnlyUsesSharedClient();
+      std::vector<std::future<void>> tasks;
+      tasks.reserve(reqs.size());
+      for (const auto& req : reqs) {
+        tasks.push_back(std::async(std::launch::async, [this, adapter, &req, &venue,
+                                                        fast_levels, shared_client] {
+          try {
+            std::optional<domain::VenueRawSnapshot> snap;
+            if (shared_client) {
+              std::lock_guard<std::mutex> lk(snapshot_mutex_for(venue));
+              snap = adapter->RequestDepthOnly(req, fast_levels);
+            } else {
+              snap = adapter->RequestDepthOnly(req, fast_levels);  // выделенный клиент
+            }
+            if (!snap.has_value()) return;
+            // Тот же нормализатор, что у основного пути; пишем ТОЛЬКО в live-таблицу.
+            const auto normalized =
+                domain::NormalizeSnapshot(*snap, snapshot_config_.normalization);
+            (void)live_book_storage_->SaveSnapshot(normalized);
+          } catch (const std::exception& e) {
+            cex::common::log_json("WARN", "fast-depth snapshot failed",
+                                  {{"symbol", req.instrument.symbol()}, {"error", e.what()}});
+          }
+        }));
+      }
+      for (auto& f : tasks) {
+        try { f.get(); } catch (...) { /* задача логирует сама */ }
+      }
+    }
+    for (int slept = 0; slept < interval_ms && running_.load(); slept += 100) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
+  cex::common::log_json("INFO", "Venues fast-depth loop stopped", {});
 }
 
 // ============================================================================
