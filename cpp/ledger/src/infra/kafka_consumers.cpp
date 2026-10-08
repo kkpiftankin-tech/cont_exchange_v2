@@ -90,6 +90,7 @@ void KafkaConsumers::loop_ce_position_delta() {
           d.delta = cex::common::Decimal::from_proto(ad.delta());
           d.price_used = cex::common::Decimal::from_proto(ad.price_used());  // цена ПАРЫ
           d.base_price = cex::common::Decimal::from_proto(ad.base_price());  // P(base) USDT
+          d.fair_price = cex::common::Decimal::from_proto(ad.fair_price());  // ADR-072: F_0 ДО skew
           d.quote = ad.quote();                                             // котируемая пары
           agent_deltas.push_back(std::move(d));
         } else {

@@ -875,7 +875,13 @@ void LedgerUseCases::ApplyPositionDelta(
     // F-18 v2 Э3: запоминаем последнюю цену узла (P_node), по которой клиринг
     // делил value→qty — risk конвертирует ею избыток полосы в объём хеджа.
     // Нулевую (price_used не пришёл) не затираем последней валидной.
-    if (ad.price_used.units != 0) st.last_price = ad.price_used;  // цена ПАРЫ
+    if (ad.price_used.units != 0) {
+      st.last_price = ad.price_used;   // цена ПАРЫ (СО skew)
+      // ADR-072: F_0 обновляем ВМЕСТЕ с last_price (не независимо): если matching
+      // перестал слать fair_price (откат/CE_AGENT_POS=0), F_0 сбрасывается в 0 ⇒
+      // клэмп отключается (фолбэк), а не срабатывает против УСТАРЕВШЕГО F_0.
+      st.fair_price = ad.fair_price;   // F_0 ДО skew (граница прибыли); 0 ⇒ фолбэк
+    }
     if (ad.base_price.units != 0) st.base_price = ad.base_price;  // P(base) USDT
     if (!ad.quote.empty()) st.quote = ad.quote;                    // котируемая пары
     st.last_batch_id = batch_id;
@@ -1954,7 +1960,31 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   breach.set_side(pos_positive ? "SELL" : "BUY");
   *breach.mutable_excess_value() = excess.to_proto();     // модуль, k-USDT
   *breach.mutable_base_price() = st.base_price.to_proto(); // P(base) USDT
-  *breach.mutable_pair_price() = st.last_price.to_proto(); // цена пары (лимит)
+  // ADR-072 §A: лимит хеджа = F_0 ± eff. Сдвиг цены ОСТАЁТСЯ (eff сжимается с ростом
+  // инвентаря — цена едет к F_0), но НЕ уходит за границу прибыли (инвариант A1:
+  // SELL ≥ F_0, BUY ≤ F_0, т.к. eff ≥ 0):
+  //   m   = F_0·(CE_HEDGE_MARGIN_BPS/1e4) — целевая маржа прибыли (квота при плоской позиции);
+  //   urg = min(1, |c|/Z̄mkt)             — инвентарная срочность (0 плоско → 1 в taker-зоне);
+  //   eff = m·(1−urg)                     — maker-зона: квота с маржой; taker-зона: eff→0 (слив по F_0).
+  // В sim (ADR-060) SELL@(F_0+eff) исполняется о принты ≥ лимита ⇒ продажа ВЫШЕ fair = прибыль.
+  // Нет F_0 (fair_price=0: старый matching/arbitrageur) ⇒ фолбэк на st.last_price (прежнее поведение).
+  Decimal hedge_limit = st.last_price;
+  if (st.fair_price.units != 0) {
+    double margin_bps = 5.0;  // целевая маржа, bps от F_0 (env-настраиваемо)
+    if (const auto s = cex::common::Env::try_get_string("CE_HEDGE_MARGIN_BPS")) {
+      try { margin_bps = std::stod(*s); } catch (...) { margin_bps = 5.0; }
+    }
+    // Валидация: stod принимает inf/nan/огромные (catch их не ловит) ⇒ ограничиваем,
+    // иначе eff_frac·1e8 выйдет за int64 (UB в llround) и A1 нарушится.
+    if (!std::isfinite(margin_bps) || margin_bps < 0.0 || margin_bps > 1000.0) margin_bps = 5.0;
+    const double urg = (z_mkt > 0.0) ? std::min(1.0, static_cast<double>(abs_c) / z_mkt) : 1.0;
+    const double eff_frac = std::max(0.0, (margin_bps / 1e4) * (1.0 - urg));
+    const Decimal offset = Decimal::mul(
+        st.fair_price, Decimal{static_cast<int64_t>(std::llround(eff_frac * 1e8)), 8});
+    hedge_limit = pos_positive ? Decimal::add(st.fair_price, offset)
+                               : Decimal::sub(st.fair_price, offset);
+  }
+  *breach.mutable_pair_price() = hedge_limit.to_proto(); // цена пары (лимит F_0±eff, A1)
   breach.set_batch_id(batch_id);
   breach.set_event_time_ms(ts_ms);
   breach.set_aggressive(aggressive);   // зона: taker (агрессив) | maker (пассив)
@@ -1965,6 +1995,9 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                         {{"agent_id", agent_id}, {"asset", asset}, {"quote", st.quote},
                          {"venue", venue}, {"side", pos_positive ? "SELL" : "BUY"},
                          {"excess_value", excess.to_string()},
+                         {"fair_price", st.fair_price.to_string()},   // ADR-072: F_0 ДО skew
+                         {"skewed_price", st.last_price.to_string()}, // цена пары СО skew
+                         {"hedge_limit", hedge_limit.to_string()},    // лимит после клэмпа A1
                          {"z_lim", q.to_string()},                    // порог входа (k-USDT)
                          {"z_mkt", std::to_string(z_mkt)},            // порог агрессии (k-USDT)
                          {"zone", aggressive ? "taker" : "maker"},

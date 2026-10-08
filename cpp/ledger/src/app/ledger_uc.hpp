@@ -68,6 +68,7 @@ class LedgerUseCases {
     // (номинал ⇒ "USDT"; арбитражёр ⇒ пусто). Идут в breach-событие для risk.
     cex::common::Decimal price_used{0, 0};
     cex::common::Decimal base_price{0, 0};
+    cex::common::Decimal fair_price{0, 0};  // ADR-072: F_0 = цена пары ДО skew (граница прибыли); 0 ⇒ нет
     std::string quote;
   };
 
@@ -392,8 +393,9 @@ class LedgerUseCases {
     std::string agent_kind;
     cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
     cex::common::Decimal in_flight{0, 0};  // committed (Э3+), знаковая
-    cex::common::Decimal last_price{0, 0}; // ЦЕНА ПАРЫ P(base)/P(quote) последней дельты
+    cex::common::Decimal last_price{0, 0}; // ЦЕНА ПАРЫ P(base)/P(quote) последней дельты (СО skew)
     cex::common::Decimal base_price{0, 0}; // P(base) USDT (для объёма заявки)
+    cex::common::Decimal fair_price{0, 0}; // ADR-072: F_0 = цена пары ДО skew (граница прибыли); 0 ⇒ нет
     std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
     std::string last_batch_id;
     long long updated_at_ms{0};
