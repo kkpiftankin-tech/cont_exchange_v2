@@ -130,3 +130,13 @@ CE (Continuous Exchange) — собственная биржа: держит о�
 | Feature | [F-18](../../02-system/features/F-18-ce-capital-position-hedge/) |
 | Сводка ревью | [F-18-v2-agents-review-summary](../../implementation-plan/F-18-v2-agents-review-summary.md) |
 | План реализации | [F-18-v2.tasks](../../implementation-plan/F-18-v2.tasks.md) |
+
+## Поправка (ADR-072, 2026-10-08)
+
+Inventory-skew ([ADR-066](ADR-066-ce-band-threshold-gamma-definition.md)) остаётся
+на CE-канале (виртуальная клиринговая цена, разворот потока/удержание позиции), но
+**лимит реального хеджа больше не берётся со сдвинутой цены** `price_used`. По
+[ADR-072](ADR-072-ce-translator-profit-hedge-price-skew-resting.md) §A matching
+публикует fair-цену `F_0` (ДО skew) в `AssetDelta.fair_price`, а ledger квотирует
+лимит `F_0 ± m·(1−urg)` — сдвиг остаётся, но не уходит за границу прибыли `F_0`
+(инвариант A1). Учёт A7 (`c + in_flight = I − F`) не меняется.

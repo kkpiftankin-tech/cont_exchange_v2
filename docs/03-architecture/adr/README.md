@@ -70,5 +70,7 @@
 | ADR-059 | CE clearing_trace — единый аудит-артефакт такта (агенты/узлы/инварианты/PnL/заявки) | [accepted](ADR-059-ce-clearing-trace-audit.md) |
 | ADR-069 | Две ноги позиции/хеджа CE-арбитражёра (по заявке на каждую биржу) | [accepted](ADR-069-ce-arbitrageur-two-leg-position-hedge.md) |
 | ADR-070 | Быстрая полоса стакана venues — свежий сырой стакан для панели «Торговля» | [proposed](ADR-070-venues-fast-depth-lane-for-raw-book-display.md) |
+| ADR-071 | Inventory-skew для ног CE-арбитражёра — самоограничение позиции сдвигом якоря | [accepted](ADR-071-ce-arbitrageur-inventory-skew.md) |
+| ADR-072 | Прибыль переводчика — клэмп сдвига цены границей прибыли, resting-заявки симулятора, realized/unrealized P&L | [proposed](ADR-072-ce-translator-profit-hedge-price-skew-resting.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

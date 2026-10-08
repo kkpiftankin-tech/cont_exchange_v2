@@ -281,3 +281,11 @@ $$
 (α_e, capital-depth CE-агента), не внешняя книга `Λ`. O2 (`A=σ√(2γ/Λ)` с реальной `Λ` из F-11
 `SideLiquidityCurve`) остаётся owner-gate. План реализации —
 [`F-18-liquidity-band.tasks.md`](../../implementation-plan/F-18-liquidity-band.tasks.md).
+
+## Поправка (ADR-072, 2026-10-08)
+
+Skew `γ` (эта ADR/ADR-061) применяется к CE-каналу (виртуальная цена), но лимит
+хеджа переводчика теперь строится от fair-цены `F_0` с клэмпом в границах прибыли
+(SELL≥`F_0`, BUY≤`F_0`), а не от сдвинутой `price_used` — см.
+[ADR-072](ADR-072-ce-translator-profit-hedge-price-skew-resting.md) §A. Это убрало
+убыток переводчика от skew, уводившего цену за fair.

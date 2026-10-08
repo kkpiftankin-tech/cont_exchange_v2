@@ -26,6 +26,9 @@ CALC — это единица, которую можно проверить з�
 |---|---|---|---|---|
 | [CALC-F12-HEDGE-PNL](CALC-F12-HEDGE-PNL.md) | Hedge PnL (результат внешнего хеджа) | `drift` — см. карточку | `cpp/ledger/src/app/ledger_uc.cpp#calculate_hedge_pnl` | `/hedge-flows-live`, `/hedge-pnl` |
 | [CALC-CE-ANCHOR](CALC-CE-ANCHOR.md) | Общий якорь дилера `a*` и порог хеджа `Q_i` (эталон IN-017) | `partial` — структура совпадает, коэффициенты расходятся (§7) | `cpp/matching/src/app/matching_loop.cpp` (anchor_eff), `cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked` | `/ce-agents` (косвенно, Γ-порог) |
+| [CALC-F11-BOOK-VWAP](CALC-BOOK-VWAP.md) | Кумулятивный VWAP по уровням стакана биржи | `implemented` | `frontend/api/book_vwap.js#cumulativeBookVwap` | `/main` (график глубины), `/vector-clearing-live` |
+| [CALC-F05A-SLOPE-ONDEMAND](CALC-F05A-SLOPE-ONDEMAND.md) | Кривые ликвидности M1–M4 по глубокому стакану по запросу | `implemented` | `cpp/venues/src/app/liquidity_curve_producer.cpp#ComputeSlopeMethods` | `/main` (график глубины) |
+| [CALC-CE-TRANSLATOR-PNL](CALC-CE-TRANSLATOR-PNL.md) | Прибыль переводчика — realized (закрытые round-trip) + unrealized (MTM остатка) | `proposed` — формула в ADR-072 §C; код считает только агрегат R+U | `frontend/api/trade_stats_math.js#tradedBasketUsdt`, `frontend/api/server.js#fetchAgentTradeStats` | `/vector-clearing` (разбор агента) |
 
 `status`: `implemented` (код и документ согласованы) / `planned` (формула
 описана, кода ещё нет) / `drift` (документ и код/несколько мест кода
