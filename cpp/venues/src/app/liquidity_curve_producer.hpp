@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <array>
 #include <optional>
 #include <limits>
 #include <mutex>
@@ -337,6 +338,27 @@ struct SideAlphas {
 // юнит-теста против числового примера §6.2 (100/80.26/60.98/83.33). См. ADR-053.
 SideAlphas AlphasFromCumulative(const std::vector<double>& delta,
                                 const std::vector<double>& cum_notional);
+
+// ADR-070 (дополнение): результат расчёта 4 способов §6.2 по снимку «по запросу» (без
+// ограничения 20 уровнями и не в цикле). Те же формулы, что в SetSafeTranslator.
+struct SlopeMethodsResult {
+  struct Method {
+    int kind = 0;           // 1=M1 касательная, 2=M2 МНК, 3=M3 по выгоде, 4=M4 минорант
+    double alpha_bid = 0.0;  // α_ext по стороне bid (quote за bps)
+    double alpha_ask = 0.0;  // α_ext по стороне ask
+    double alpha_ext = 0.0;  // min(bid, ask) — «тончайшая сторона»
+    double beta_raw = 0.0;   // mid²/(10⁴·α_ext), θ=1 (прямая P(q)=mid+β·q)
+  };
+  double mid = 0.0;
+  double depth_bid = 0.0;  // Σ q стороны bid, вошедшая в расчёт (base)
+  double depth_ask = 0.0;
+  std::array<Method, 4> methods{};
+};
+
+// nullopt — пустая сторона или нет mid. max_levels_per_side=0 — без ограничения глубины
+// (все уровни снимка); иначе берутся N лучших уровней каждой стороны.
+std::optional<SlopeMethodsResult> ComputeSlopeMethods(
+    const fob::venue::v1::VenueSnapshot& snapshot, std::size_t max_levels_per_side = 0);
 
 // §6.2: runtime-выбор способа снятия наклона α_ext, идущего в клиринг
 // (1=TANGENT, 2=LSQ_BAND, 3=PROFIT_AREA, 4=MINORANT). venues_loop поллит

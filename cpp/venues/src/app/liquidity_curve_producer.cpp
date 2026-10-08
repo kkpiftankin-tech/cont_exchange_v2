@@ -93,7 +93,7 @@ fob::common::v1::Decimal MakeDecimal(double val, std::int32_t scale) {
 SideAlphas RawSideAllMethods(
     const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& prices,
     const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& qtys,
-    double mid, bool is_bid) {
+    double mid, bool is_bid, std::size_t max_levels = 0) {
   const int n = std::min(prices.size(), qtys.size());
   std::vector<std::pair<double, double>> lv;
   lv.reserve(static_cast<std::size_t>(n));
@@ -106,6 +106,8 @@ SideAlphas RawSideAllMethods(
                                            const std::pair<double, double>& b) {
     return is_bid ? (a.first > b.first) : (a.first < b.first);
   });
+  // ADR-070 (on-demand): ограничить число уровней стороны ПОСЛЕ сортировки (лучшие первыми).
+  if (max_levels > 0 && lv.size() > max_levels) lv.resize(max_levels);
   std::vector<double> delta, D;
   delta.reserve(lv.size()); D.reserve(lv.size());
   double cum_q = 0.0, cum_n = 0.0;
@@ -125,17 +127,23 @@ SideAlphas RawSideAllMethods(
   return out;
 }
 
+// mid снимка: mid_price, иначе (best_bid+best_ask)/2. Общий для SetSafeTranslator и
+// ComputeSlopeMethods (один источник).
+double SnapshotMidForSlopes(const fob::venue::v1::VenueSnapshot& snapshot) {
+  const double rb = ProtoDecimalAsDouble(snapshot.best_bid());
+  const double ra = ProtoDecimalAsDouble(snapshot.best_ask());
+  return (snapshot.has_mid_price() && ProtoDecimalAsDouble(snapshot.mid_price()) > 0.0)
+             ? ProtoDecimalAsDouble(snapshot.mid_price())
+             : ((rb > 0.0 && ra > 0.0) ? 0.5 * (rb + ra) : 0.0);
+}
+
 // ADR-053: посчитать safe-translator ИЗ СЫРОГО стакана и записать в кривую.
 // Конвейер «стакан → кривая → клиринг»: наклон/anchor кладём в кривую, клиринг
 // (market_data → matching) берёт их отсюда, НЕ трогая сырой стакан.
 void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
                        fob::venue::v1::VenueLiquidityCurve* curve) {
   if (snapshot.bid_prices_size() == 0 || snapshot.ask_prices_size() == 0) return;
-  const double rb = ProtoDecimalAsDouble(snapshot.best_bid());
-  const double ra = ProtoDecimalAsDouble(snapshot.best_ask());
-  double mid = (snapshot.has_mid_price() && ProtoDecimalAsDouble(snapshot.mid_price()) > 0.0)
-                   ? ProtoDecimalAsDouble(snapshot.mid_price())
-                   : ((rb > 0.0 && ra > 0.0) ? 0.5 * (rb + ra) : 0.0);
+  const double mid = SnapshotMidForSlopes(snapshot);
   if (!(mid > 0.0)) return;
   double theta = 0.60;
   try {
@@ -778,6 +786,37 @@ SideAlphas AlphasFromCumulative(const std::vector<double>& delta,
   }
   // M3 — равенство площадей: линейная ∫δ dD = D_n²/(2α) = реальная Σ δ_k·ΔD_k.
   if (m3_denom > 1e-12 && D_n > 0.0) out.profit = (D_n * D_n) / (2.0 * m3_denom);
+  return out;
+}
+
+// ADR-070 (дополнение): те же 4 способа §6.2 по ПРОИЗВОЛЬНОМУ (глубокому) снимку, по запросу.
+// Логика идентична SetSafeTranslator: α по каждой стороне, combined = min(bid, ask),
+// β_raw = mid²/(10⁴·α) (θ=1 — кривая способа сравнима с VWAP).
+std::optional<SlopeMethodsResult> ComputeSlopeMethods(
+    const fob::venue::v1::VenueSnapshot& snapshot, std::size_t max_levels_per_side) {
+  if (snapshot.bid_prices_size() == 0 || snapshot.ask_prices_size() == 0) return std::nullopt;
+  const double mid = SnapshotMidForSlopes(snapshot);
+  if (!(mid > 0.0)) return std::nullopt;
+  const SideAlphas B = RawSideAllMethods(snapshot.bid_prices(), snapshot.bid_quantities(), mid,
+                                         true, max_levels_per_side);
+  const SideAlphas A = RawSideAllMethods(snapshot.ask_prices(), snapshot.ask_quantities(), mid,
+                                         false, max_levels_per_side);
+  if (!(B.depth > 0.0) || !(A.depth > 0.0)) return std::nullopt;
+  SlopeMethodsResult out;
+  out.mid = mid;
+  out.depth_bid = B.depth;
+  out.depth_ask = A.depth;
+  const double ab[4] = {B.tangent, B.lsq, B.profit, B.minorant};
+  const double aa[4] = {A.tangent, A.lsq, A.profit, A.minorant};
+  for (int i = 0; i < 4; ++i) {
+    SlopeMethodsResult::Method& m = out.methods[static_cast<std::size_t>(i)];
+    m.kind = i + 1;
+    m.alpha_bid = std::isfinite(ab[i]) ? ab[i] : 0.0;
+    m.alpha_ask = std::isfinite(aa[i]) ? aa[i] : 0.0;
+    const double cmb = std::min(ab[i], aa[i]);
+    m.alpha_ext = std::isfinite(cmb) ? cmb : 0.0;
+    m.beta_raw = (std::isfinite(cmb) && cmb > 0.0) ? (mid * mid) / (10000.0 * cmb) : 0.0;
+  }
   return out;
 }
 

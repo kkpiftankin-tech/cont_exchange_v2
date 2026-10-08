@@ -66,6 +66,7 @@ add_executable(venues
   src/domain/amm_direct_fob.cpp
   src/domain/trades_fetch_scheduler.cpp
   src/app/snapshot_producer.cpp
+  src/app/depth_watch_registry.cpp
   src/infra/snapshot_clickhouse_writer.cpp
 )
 
@@ -343,6 +344,16 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_snapshot_producer_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_snapshot_producer_test COMMAND venues_snapshot_producer_test)
+
+  add_executable(venues_depth_watch_registry_test
+    tests/depth_watch_registry_test.cpp
+    src/app/depth_watch_registry.cpp
+  )
+  target_include_directories(venues_depth_watch_registry_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_depth_watch_registry_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_watch_registry_test COMMAND venues_depth_watch_registry_test)
 
   add_executable(venues_liquidity_curve_producer_test
     tests/liquidity_curve_producer_test.cpp

@@ -18,6 +18,7 @@
 #include "cex/common/log.hpp"
 #include "cex/common/decimal.hpp"
 
+#include "app/liquidity_curve_producer.hpp"
 #include "app/venues_loop.hpp"
 #include "app/sim_session_manager.hpp"
 #include "infra/postgres_child_order_repository.hpp"
@@ -67,7 +68,9 @@ int main() {
   live_cfg.table = cex::common::Env::get_string("VENUES_CLICKHOUSE_LIVE_BOOK_TABLE", "venue_book_live");
   live_cfg.retention_hours = std::max(1, cex::common::Env::get_int("VENUES_CLICKHOUSE_LIVE_BOOK_RETENTION_HOURS", 2));
   cex::venues::infra::SnapshotClickHouseWriter live_book_storage(live_cfg);
+  // Live-таблица нужна и динамическому режиму (аренды панели), и статическому списку.
   const bool live_book_enabled =
+      cex::common::Env::get_bool("VENUES_FAST_DEPTH_DYNAMIC", true) ||
       !cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "").empty();
   if (live_book_enabled && !live_book_storage.EnsureSchema()) {
     cex::common::log_json("WARN", "Venues live-book ClickHouse schema initialization failed");
@@ -1074,6 +1077,124 @@ int main() {
           out["items"][i] = snapshot_to_json(rows[i]);
         }
         out["count"] = rows.size();
+        return crow::response(200, out);
+      });
+  // ADR-070 (дополнение, динамический режим): аренда глубокого опроса стакана. Панель
+  // «Торговля» раз в ~10 с шлёт набор (venue, symbol) и срок; без сигналов аренда истекает
+  // сама. venue="*" — все CEX. Потолок одновременных пар — VENUES_FAST_DEPTH_MAX_WATCH.
+  CROW_ROUTE(admin, "/api/v1/depth-watch").methods(crow::HTTPMethod::Post)(
+      [&loop](const crow::request& req) {
+        auto bad = [](const char* code) {
+          crow::json::wvalue err;
+          err["error"] = code;
+          return crow::response(400, err);
+        };
+        // Порт admin доступен напрямую (не только через BFF): типы проверяем явно,
+        // crow бросает runtime_error на .s()/.i() не того типа.
+        try {
+          const auto body = crow::json::load(req.body);
+          if (!body || body.t() != crow::json::type::Object || !body.has("items") ||
+              body["items"].t() != crow::json::type::List) {
+            return bad("items_required");
+          }
+          std::vector<cex::venues::app::DepthWatchRegistry::Item> items;
+          for (const auto& it : body["items"]) {
+            if (it.t() != crow::json::type::Object || !it.has("venue") || !it.has("symbol")) continue;
+            if (it["venue"].t() != crow::json::type::String ||
+                it["symbol"].t() != crow::json::type::String) continue;
+            items.emplace_back(std::string(it["venue"].s()), std::string(it["symbol"].s()));
+            if (items.size() >= 64) break;  // защита от раздутого запроса
+          }
+          double ttl = 30000.0;
+          if (body.has("ttl_ms") && body["ttl_ms"].t() == crow::json::type::Number) {
+            ttl = body["ttl_ms"].d();
+          }
+          if (!(ttl >= 0.0)) ttl = 0.0;          // отрицательное/NaN → минимум (клэмп реестра)
+          if (ttl > 3600000.0) ttl = 3600000.0;  // до приведения к int64 (иначе UB)
+          const auto out = loop.WatchDepth(items, static_cast<int64_t>(ttl));
+          crow::json::wvalue res;
+          res["accepted"] = out.touch.accepted;
+          res["rejected_over_cap"] = out.touch.rejected;
+          res["rejected_invalid"] = out.rejected_invalid;
+          res["active"] = out.touch.active;
+          res["ttl_ms"] = out.touch.ttl_ms;
+          res["max_items"] = loop.DepthWatchMaxItems();
+          return crow::response(200, res);
+        } catch (...) {
+          return bad("bad_request");
+        }
+      });
+  CROW_ROUTE(admin, "/api/v1/depth-watch").methods(crow::HTTPMethod::Get)(
+      [&loop]() {
+        crow::json::wvalue res;
+        res["max_items"] = loop.DepthWatchMaxItems();
+        const auto act = loop.ActiveDepthWatch();
+        res["active_count"] = act.size();
+        for (std::size_t i = 0; i < act.size(); ++i) {
+          res["active"][i]["venue"] = act[i].venue;
+          res["active"][i]["symbol"] = act[i].symbol;
+          res["active"][i]["remaining_ms"] = act[i].remaining_ms;
+        }
+        return crow::response(200, res);
+      });
+  // ADR-070 (дополнение): кривые ликвидности (4 способа §6.2) ПО ЗАПРОСУ по последнему
+  // глубокому снимку быстрой полосы. Те же формулы, что клиринг (ComputeSlopeMethods ==
+  // SetSafeTranslator), но без ограничения 20 уровнями и не в цикле. ?levels=N — взять N
+  // лучших уровней стороны (0/не задано — все).
+  CROW_ROUTE(admin, "/api/v1/venues/<string>/slope-curves").methods(crow::HTTPMethod::Get)(
+      [&loop, &timestamp_to_ms](const crow::request& req, const std::string& venue_id) {
+        const char* sym = req.url_params.get("symbol");
+        if (sym == nullptr || *sym == '\0') {
+          crow::json::wvalue err;
+          err["error"] = "symbol_required";
+          return crow::response(400, err);
+        }
+        std::size_t levels = 0;
+        if (const char* lv = req.url_params.get("levels")) {
+          try { levels = static_cast<std::size_t>(std::max(0L, std::stol(lv))); } catch (...) { levels = 0; }
+        }
+        const auto snap = loop.GetDeepBook(venue_id, sym);
+        if (!snap.has_value()) {
+          crow::json::wvalue err;
+          err["error"] = "no_deep_book";
+          return crow::response(404, err);
+        }
+        // Глубокий стакан живёт, только пока арендован (ADR-070, динамический режим): после
+        // истечения аренды последний снимок устаревает — считать по нему кривые нельзя.
+        const int64_t snap_ms = snap->has_timestamp() ? timestamp_to_ms(snap->timestamp()) : 0;
+        const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const int64_t max_age_ms = std::max(1000, cex::common::Env::get_int("VENUES_DEEP_BOOK_MAX_AGE_MS", 30000));
+        if (snap_ms <= 0 || now_ms - snap_ms > max_age_ms) {
+          crow::json::wvalue err;
+          err["error"] = "deep_book_stale";
+          err["age_ms"] = snap_ms > 0 ? (now_ms - snap_ms) : -1;
+          return crow::response(404, err);
+        }
+        const auto res = cex::venues::app::ComputeSlopeMethods(*snap, levels);
+        if (!res.has_value()) {
+          crow::json::wvalue err;
+          err["error"] = "insufficient_book";
+          return crow::response(422, err);
+        }
+        crow::json::wvalue out;
+        out["venue_id"] = venue_id;
+        out["symbol"] = std::string(sym);
+        out["timestamp_ms"] = snap->has_timestamp() ? timestamp_to_ms(snap->timestamp()) : 0;
+        out["levels_requested"] = levels;
+        out["levels_bid"] = snap->bid_prices_size();
+        out["levels_ask"] = snap->ask_prices_size();
+        out["mid"] = res->mid;
+        out["depth_bid"] = res->depth_bid;
+        out["depth_ask"] = res->depth_ask;
+        for (std::size_t i = 0; i < res->methods.size(); ++i) {
+          const auto& m = res->methods[i];
+          out["methods"][i]["method"] = m.kind;
+          out["methods"][i]["alpha_ext_bid"] = m.alpha_bid;
+          out["methods"][i]["alpha_ext_ask"] = m.alpha_ask;
+          out["methods"][i]["alpha_ext"] = m.alpha_ext;
+          out["methods"][i]["beta_t"] = m.beta_raw;
+        }
         return crow::response(200, out);
       });
   CROW_ROUTE(admin, "/api/v1/venues/<string>/curves").methods(crow::HTTPMethod::Get)(

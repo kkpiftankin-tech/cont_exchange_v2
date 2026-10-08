@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 #include "app/sim_execution_assembler.hpp"
 #include "app/sim_session_registry.hpp"
 #include "app/venue_sim_router.hpp"
+#include "app/depth_watch_registry.hpp"
 #include "app/snapshot_producer.hpp"
 #include "cex/common/kafka.hpp"
 #include "domain/venue_adapter.hpp"
@@ -93,6 +95,22 @@ class VenuesLoop : public ExecutionReportSink {
   std::optional<VenueRuntimeMetrics> GetVenueRuntimeMetrics(const std::string& venue_id) const;
   std::optional<fob::venue::v1::VenueSnapshot> GetLastVenueSnapshot(
       const std::string& venue_id) const;
+  // ADR-070 (дополнение): динамический режим. Панель присылает аренды (venue, symbol) —
+  // быстрая полоса опрашивает только их и выключается сама, когда сигналы прекращаются.
+  // venue="*" — все CEX-адаптеры. Неизвестные биржи/не-CEX и некорректные символы
+  // отбрасываются (rejected_invalid). Лимит одновременных пар — DepthWatchRegistry.
+  struct DepthWatchOutcome {
+    DepthWatchRegistry::TouchResult touch;
+    std::size_t rejected_invalid = 0;
+  };
+  DepthWatchOutcome WatchDepth(const std::vector<DepthWatchRegistry::Item>& items, int64_t ttl_ms);
+  std::vector<DepthWatchRegistry::ActiveItem> ActiveDepthWatch() { return depth_watch_.Active(); }
+  std::size_t DepthWatchMaxItems() const { return depth_watch_.max_items(); }
+
+  // ADR-070: последний ГЛУБОКИЙ снимок (быстрая полоса) по (venue, symbol) — вход
+  // расчёта кривых ликвидности «по запросу» (ComputeSlopeMethods). nullopt — нет.
+  std::optional<fob::venue::v1::VenueSnapshot> GetDeepBook(
+      const std::string& venue_id, const std::string& symbol) const;
   std::optional<fob::venue::v1::VenueLiquidityCurve> GetLastVenueCurve(
       const std::string& venue_id) const;
   std::vector<fob::venue::v1::VenueSnapshot> GetVenueSnapshots(
@@ -139,7 +157,7 @@ class VenuesLoop : public ExecutionReportSink {
   void extra_ticker_loop();
   // ADR-070: быстрая полоса стакана (только REST depth → хранилище снимков) для панели
   // «Торговля». Выключена, если VENUES_FAST_DEPTH_VENUE пуст.
-  void depth_fast_loop();
+  void depth_fast_loop(const std::string& venue);
   // F-20 Phase 4 — SIM/SHADOW fork: simulate the child order against the
   // cached live LOB and publish the sim ExecutionReport + SimExecutionAnnotation
   // to the isolated sim.* topics (ADR-015). Applies the sampled venue latency
@@ -160,6 +178,10 @@ class VenuesLoop : public ExecutionReportSink {
   std::string brokers_;
   ISnapshotStorage* snapshot_storage_{nullptr};
   ISnapshotStorage* live_book_storage_{nullptr};
+  DepthWatchRegistry depth_watch_;
+  std::set<std::string> static_depth_venues_;  // биржи «всегда включено» (VENUES_FAST_DEPTH_VENUE)
+  mutable std::mutex deep_books_mu_;
+  std::unordered_map<std::string, fob::venue::v1::VenueSnapshot> deep_books_;  // "venue|symbol"
   cex::common::KafkaProducer producer_;
   cex::common::KafkaConsumer consumer_;
   infra::VenueObservabilityProducer observability_;
@@ -220,7 +242,7 @@ class VenuesLoop : public ExecutionReportSink {
   std::thread t_exec_;
   std::thread t_sim_config_;
   std::thread t_extra_ticker_;
-  std::thread t_depth_fast_;
+  std::vector<std::thread> t_depth_fast_;  // по потоку на биржу (VENUES_FAST_DEPTH_VENUE)
   // Сериализует RequestSnapshot между md_publish_loop и extra_ticker_loop
   // (общий binance-адаптер; rest_client_->Get не потокобезопасен на shared handle).
   std::mutex snapshot_mu_;

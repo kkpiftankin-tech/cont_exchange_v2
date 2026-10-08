@@ -61,6 +61,7 @@
 #include <cstdlib>
 #include <deque>
 #include <memory>
+#include <set>
 #include <string>
 
 #include "cex/common/decimal.hpp"
@@ -422,6 +423,14 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       observability_(cex::common::KafkaProducer(
           {.brokers=brokers, .client_id="venues_observability"})) {
   md_started_at_ = std::chrono::steady_clock::now();
+  {
+    // ADR-070: потолок одновременных аренд и срок аренды — из env (нагрузочная защита).
+    DepthWatchRegistry::Config wc;
+    wc.max_items = static_cast<std::size_t>(
+        std::max(1, cex::common::Env::get_int("VENUES_FAST_DEPTH_MAX_WATCH", 8)));
+    wc.max_ttl_ms = std::max(5000, cex::common::Env::get_int("VENUES_FAST_DEPTH_LEASE_MAX_MS", 60000));
+    depth_watch_.SetConfig(wc);
+  }
   execution_report_producer_ = std::make_unique<infra::ExecutionReportProducer>(
       [this](const std::string& topic,
              const std::string& key,
@@ -743,7 +752,8 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     auto apply_real_cex_defaults = [](infra::CexWsRestAdapterConfig* cfg,
                                        const std::string& venue_env_prefix,
                                        double default_rps,
-                                       double default_burst) {
+                                       double default_burst,
+                                       double default_depth_rps) {
       if (cfg == nullptr) return;
       cfg->reconnect_cooldown_ms = static_cast<uint32_t>(
           std::max(1000, cex::common::Env::get_int("CEX_RECONNECT_COOLDOWN_MS", 300000)));
@@ -760,7 +770,11 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       cfg->rest_burst = env_double(
           venue_env_prefix + "_REST_BURST", env_double("CEX_REST_BURST", default_burst));
       // ADR-070: отдельный бюджет быстрой полосы стакана (не делит токены с основным).
-      cfg->depth_only_requests_per_sec = env_double("VENUES_FAST_DEPTH_RPS", 5.0);
+      // Приоритет: <PREFIX>_FAST_DEPTH_RPS → VENUES_FAST_DEPTH_RPS → дефолт биржи
+      // (kraken — строгий публичный лимит).
+      cfg->depth_only_requests_per_sec = env_double(
+          venue_env_prefix + "_FAST_DEPTH_RPS",
+          env_double("VENUES_FAST_DEPTH_RPS", default_depth_rps));
       cfg->depth_only_burst = std::max(1.0, 2.0 * cfg->depth_only_requests_per_sec);
       cfg->rest_ticker_volume_enabled = env_bool("CEX_REST_TICKER_VOLUME_ENABLED", true);
       cfg->simulate_orders = env_bool(
@@ -808,7 +822,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "BINANCE_WS_URL", "wss://stream.binance.com:9443/ws");
     binance_cfg.rest_base_url = cex::common::Env::get_string(
         "BINANCE_REST_BASE_URL", "https://api.binance.com");
-    apply_real_cex_defaults(&binance_cfg, "BINANCE", 8.0, 16.0);
+    apply_real_cex_defaults(&binance_cfg, "BINANCE", 8.0, 16.0, 5.0);
     // F-09 T-F09-068: symbols this venue (in simulate) returns as REJECTED —
     // моделирует отказ реальной биржи на дискретный ордер (combo external-leg E2E).
     binance_cfg.simulate_reject_symbols =
@@ -821,7 +835,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "COINBASE_WS_URL", "wss://ws-feed.exchange.coinbase.com");
     coinbase_cfg.rest_base_url = cex::common::Env::get_string(
         "COINBASE_REST_BASE_URL", "https://api.exchange.coinbase.com");
-    apply_real_cex_defaults(&coinbase_cfg, "COINBASE", 8.0, 16.0);
+    apply_real_cex_defaults(&coinbase_cfg, "COINBASE", 8.0, 16.0, 3.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(coinbase_cfg));
 
     // Kraken (REST /0/public/Depth; символ XBT для BTC).
@@ -833,7 +847,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     // Kraken — строгий публичный REST rate-limit; дефолт консервативный (риск 429/бан).
     // Справедливость чтения ленты трейдов на этой площадке обеспечивается ИМЕННО
     // IsStalestTradesCandidate (round-robin по голоду), а не поднятием RPS.
-    apply_real_cex_defaults(&kraken_cfg, "KRAKEN", 2.0, 4.0);
+    apply_real_cex_defaults(&kraken_cfg, "KRAKEN", 2.0, 4.0, 1.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(kraken_cfg));
 
     // OKX (REST /api/v5/market/books; instId BASE-QUOTE).
@@ -843,7 +857,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         cex::common::Env::get_string("OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public");
     okx_cfg.rest_base_url =
         cex::common::Env::get_string("OKX_REST_BASE_URL", "https://www.okx.com");
-    apply_real_cex_defaults(&okx_cfg, "OKX", 8.0, 16.0);
+    apply_real_cex_defaults(&okx_cfg, "OKX", 8.0, 16.0, 5.0);
     adapters_.push_back(std::make_unique<infra::CexWsRestAdapter>(okx_cfg));
 
     infra::DexAmmRpcAdapterConfig uniswap_cfg;
@@ -888,7 +902,17 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
                         "CIRCUIT_BREAKER_COOLDOWN_S",
                         static_cast<int>(uniswap_cfg.circuit_breaker_cooldown_ms / 1000)))) *
         1000U;
-    adapters_.push_back(std::make_unique<infra::DexAmmRpcAdapter>(uniswap_cfg));
+    // VENUES_ENABLE_DEX (деф true): при false DEX-адаптер (uniswap_v3) НЕ создаётся —
+    // uniswap выпадает из набора площадок (нет снапшотов → нет CE-арбитражёров на него).
+    // Причина отключения на dev: у DEX нет sim-исполнения сделок, поэтому хеджи на
+    // uniswap заведомо не проходят и band бесконечно их переэмитит (холостой флуд
+    // интентов ~37%, грузит venues и всю цепочку). Вернуть, когда появится sim-исполнение DEX.
+    if (env_bool("VENUES_ENABLE_DEX", true)) {
+      adapters_.push_back(std::make_unique<infra::DexAmmRpcAdapter>(uniswap_cfg));
+    } else {
+      cex::common::log_json("INFO", "VenuesLoop: DEX (uniswap_v3) отключён (VENUES_ENABLE_DEX=false)",
+                            {{"component", "venues_loop"}});
+    }
 
     cex::common::log_json(
         "INFO",
@@ -1295,6 +1319,14 @@ std::optional<VenueRuntimeMetrics> VenuesLoop::GetVenueRuntimeMetrics(
   return it->second;
 }
 
+std::optional<fob::venue::v1::VenueSnapshot> VenuesLoop::GetDeepBook(
+    const std::string& venue_id, const std::string& symbol) const {
+  std::lock_guard<std::mutex> lk(deep_books_mu_);
+  const auto it = deep_books_.find(venue_id + "|" + symbol);
+  if (it == deep_books_.end()) return std::nullopt;
+  return it->second;
+}
+
 std::optional<fob::venue::v1::VenueSnapshot> VenuesLoop::GetLastVenueSnapshot(
     const std::string& venue_id) const {
   std::lock_guard<std::mutex> lock(data_mu_);
@@ -1364,7 +1396,41 @@ void VenuesLoop::start() {
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
   t_extra_ticker_ = std::thread([this] { extra_ticker_loop(); });
-  t_depth_fast_ = std::thread([this] { depth_fast_loop(); });
+  {
+    // ADR-070: потоки быстрой полосы — по одному на биржу. Источники пар:
+    //  (1) динамический режим (по умолчанию ВКЛ): аренды от панели «Торговля»; без аренд
+    //      поток простаивает (нулевая нагрузка), поэтому поднимаем его для всех CEX;
+    //  (2) статический список VENUES_FAST_DEPTH_VENUE (CSV или "*") — «всегда включено»
+    //      для перечисленных бирж (по умолчанию пусто: тяжёлый режим выключен).
+    const bool dynamic_on = cex::common::Env::get_bool("VENUES_FAST_DEPTH_DYNAMIC", true);
+    const std::string spec = cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "");
+    std::vector<std::string> venues;
+    std::set<std::string> static_venues;
+    if (spec == "*") {
+      for (const auto& ad : adapters_) {
+        if (ad->Type() == domain::VenueType::kCex) static_venues.insert(ad->VenueId());
+      }
+    } else {
+      std::size_t p = 0;
+      while (p < spec.size()) {
+        const std::size_t comma = spec.find(',', p);
+        std::string tok = spec.substr(p, comma == std::string::npos ? std::string::npos : comma - p);
+        while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+        while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+        if (!tok.empty()) static_venues.insert(tok);
+        if (comma == std::string::npos) break;
+        p = comma + 1;
+      }
+    }
+    for (const auto& ad : adapters_) {
+      if (ad->Type() != domain::VenueType::kCex) continue;
+      if (dynamic_on || static_venues.count(ad->VenueId())) venues.push_back(ad->VenueId());
+    }
+    static_depth_venues_ = static_venues;
+    for (const auto& v : venues) {
+      t_depth_fast_.emplace_back([this, v] { depth_fast_loop(v); });
+    }
+  }
 }
 
 /// Graceful shutdown: clear running_ flag, ждём все threads.
@@ -1375,7 +1441,10 @@ void VenuesLoop::stop() {
   if (t_exec_.joinable()) t_exec_.join();
   if (t_sim_config_.joinable()) t_sim_config_.join();
   if (t_extra_ticker_.joinable()) t_extra_ticker_.join();
-  if (t_depth_fast_.joinable()) t_depth_fast_.join();
+  for (auto& t : t_depth_fast_) {
+    if (t.joinable()) t.join();
+  }
+  t_depth_fast_.clear();
 }
 
 // F-20 Phase 4 — consume `sim.config` (SimConfigEvent) and apply each to the
@@ -1521,43 +1590,51 @@ void VenuesLoop::extra_ticker_loop() {
 // своё LOB-состояние) на пару, без тикера и ленты сделок → нормализация → ТОЛЬКО
 // live-таблица глубоких снимков (venue_book_live, короткий TTL). В Kafka
 // venue.snapshots, venue_snapshots и кривые клиринга не попадает: основной цикл и
-// CE-цепочка работают как раньше. Выключена, если VENUES_FAST_DEPTH_VENUE пуст.
+// CE-цепочка работают как раньше. Один поток на биржу из VENUES_FAST_DEPTH_VENUE
+// (CSV или "*"); пусто — выключена.
 // ============================================================================
-void VenuesLoop::depth_fast_loop() {
-  const std::string venue = cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "");
-  if (venue.empty()) return;  // выключено по умолчанию
-  const std::string list = cex::common::Env::get_string("VENUES_FAST_DEPTH_SYMBOLS", "BTC/USDT");
+void VenuesLoop::depth_fast_loop(const std::string& venue) {
+  const std::string static_list = cex::common::Env::get_string("VENUES_FAST_DEPTH_SYMBOLS", "BTC/USDT");
   const int interval_ms =
-      std::max(200, cex::common::Env::get_int("VENUES_FAST_DEPTH_INTERVAL_MS", 1000));
+      std::max(200, cex::common::Env::get_int("VENUES_FAST_DEPTH_INTERVAL_MS", 2000));
   // Глубина быстрой полосы задаётся отдельно от depth_levels биржи (там 20 — вход
   // клиринга): панели нужен глубокий стакан (сотни BTC накопленного объёма).
   const std::size_t fast_levels = static_cast<std::size_t>(
       std::max(20, cex::common::Env::get_int("VENUES_FAST_DEPTH_LEVELS", 1000)));
 
-  std::vector<domain::VenueSnapshotRequest> reqs;
-  std::size_t pos = 0;
-  while (pos < list.size()) {
-    const std::size_t comma = list.find(',', pos);
-    std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-    while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
-    while (!tok.empty() && tok.back() == ' ') tok.pop_back();
-    const std::size_t slash = tok.find('/');
-    if (!tok.empty() && slash != std::string::npos) {
-      domain::VenueSnapshotRequest req;
-      const std::string base = tok.substr(0, slash);
-      const std::string quote = tok.substr(slash + 1);
-      req.instrument.set_symbol(tok);
-      req.instrument.set_base(base);
-      req.instrument.set_quote(quote);
-      req.venue_symbol = base + quote;
-      req.include_trades = false;  // ленту сделок читает только основной цикл (ADR-060)
-      reqs.push_back(std::move(req));
+  // "BASE/QUOTE" → запрос снимка (venue_symbol = BASEQUOTE, как у основного пути).
+  auto make_req = [](const std::string& sym) -> std::optional<domain::VenueSnapshotRequest> {
+    const std::size_t slash = sym.find('/');
+    if (sym.empty() || slash == std::string::npos || slash == 0 || slash + 1 >= sym.size()) {
+      return std::nullopt;
     }
-    if (comma == std::string::npos) break;
-    pos = comma + 1;
+    domain::VenueSnapshotRequest req;
+    const std::string base = sym.substr(0, slash);
+    const std::string quote = sym.substr(slash + 1);
+    req.instrument.set_symbol(sym);
+    req.instrument.set_base(base);
+    req.instrument.set_quote(quote);
+    req.venue_symbol = base + quote;
+    req.include_trades = false;  // ленту сделок читает только основной цикл (ADR-060)
+    return req;
+  };
+
+  // Статические пары — только для бирж из VENUES_FAST_DEPTH_VENUE («всегда включено»).
+  std::set<std::string> static_syms;
+  if (static_depth_venues_.count(venue)) {
+    std::size_t pos = 0;
+    while (pos < static_list.size()) {
+      const std::size_t comma = static_list.find(',', pos);
+      std::string tok = static_list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+      while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+      if (make_req(tok).has_value()) static_syms.insert(tok);
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
   }
   cex::common::log_json("INFO", "Venues fast-depth loop starting",
-                        {{"venue", venue}, {"symbols", std::to_string(reqs.size())},
+                        {{"venue", venue}, {"static_symbols", std::to_string(static_syms.size())},
                          {"interval_ms", std::to_string(interval_ms)},
                          {"levels", std::to_string(fast_levels)}});
 
@@ -1567,16 +1644,49 @@ void VenuesLoop::depth_fast_loop() {
     cex->SetDepthRestClient(std::make_unique<infra::CurlCexRestClient>());
   }
 
+  std::size_t rotate = 0;
+  std::string last_set;  // для лога включения/выключения опроса
   while (running_.load()) {
+    // Набор пар этого прохода = статические ∪ активные аренды панели. Пусто ⇒ простой:
+    // ни запросов, ни нагрузки.
+    std::set<std::string> syms = static_syms;
+    for (auto& s : depth_watch_.SymbolsFor(venue)) syms.insert(std::move(s));
+    std::vector<domain::VenueSnapshotRequest> reqs;
+    std::string cur_set;
+    for (const auto& sym : syms) {
+      if (auto r = make_req(sym)) { reqs.push_back(std::move(*r)); cur_set += sym + ","; }
+    }
+    if (cur_set != last_set) {
+      cex::common::log_json("INFO", reqs.empty() ? "fast-depth: опрос выключен (аренд нет)"
+                                                 : "fast-depth: набор опрашиваемых пар изменился",
+                            {{"venue", venue}, {"symbols", cur_set}});
+      last_set = cur_set;
+    }
+    {
+      // Аренда истекла ⇒ глубокий снимок пары больше не нужен: не держим 1000 уровней в памяти.
+      const std::string prefix = venue + "|";
+      std::lock_guard<std::mutex> lk(deep_books_mu_);
+      for (auto it = deep_books_.begin(); it != deep_books_.end();) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0 &&
+            syms.count(it->first.substr(prefix.size())) == 0) {
+          it = deep_books_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
     domain::VenueAdapter* adapter = find_adapter(venue);
-    if (adapter != nullptr && live_book_storage_ != nullptr) {
+    if (adapter != nullptr && !reqs.empty()) {
       // Пары — параллельно (по задаче на пару): проход ≈ одному запросу, а не сумме.
       // RequestDepthOnly и CH-писатель потокобезопасны (состояние под mu_ адаптера,
       // curl-хэндл на вызов); общий мьютекс нужен, только если REST-клиент общий.
       const bool shared_client = adapter->DepthOnlyUsesSharedClient();
+      // Порядок запуска вращается: при узком бюджете (kraken) токены достаются не всегда
+      // первым парам списка.
       std::vector<std::future<void>> tasks;
       tasks.reserve(reqs.size());
-      for (const auto& req : reqs) {
+      for (std::size_t k = 0; k < reqs.size(); ++k) {
+        const auto& req = reqs[(k + rotate) % reqs.size()];
         tasks.push_back(std::async(std::launch::async, [this, adapter, &req, &venue,
                                                         fast_levels, shared_client] {
           try {
@@ -1591,7 +1701,11 @@ void VenuesLoop::depth_fast_loop() {
             // Тот же нормализатор, что у основного пути; пишем ТОЛЬКО в live-таблицу.
             const auto normalized =
                 domain::NormalizeSnapshot(*snap, snapshot_config_.normalization);
-            (void)live_book_storage_->SaveSnapshot(normalized);
+            if (live_book_storage_ != nullptr) (void)live_book_storage_->SaveSnapshot(normalized);
+            {
+              std::lock_guard<std::mutex> lk(deep_books_mu_);
+              deep_books_[venue + "|" + normalized.instrument().symbol()] = normalized;
+            }
           } catch (const std::exception& e) {
             cex::common::log_json("WARN", "fast-depth snapshot failed",
                                   {{"symbol", req.instrument.symbol()}, {"error", e.what()}});
@@ -1601,12 +1715,54 @@ void VenuesLoop::depth_fast_loop() {
       for (auto& f : tasks) {
         try { f.get(); } catch (...) { /* задача логирует сама */ }
       }
+      if (!reqs.empty()) rotate = (rotate + 1) % reqs.size();
     }
-    for (int slept = 0; slept < interval_ms && running_.load(); slept += 100) {
+    // Простой (нет аренд) просыпается чаще, чтобы новая аренда подхватывалась за ≤0.5 с.
+    const int wait_ms = reqs.empty() ? 500 : interval_ms;
+    for (int slept = 0; slept < wait_ms && running_.load(); slept += 100) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }
   cex::common::log_json("INFO", "Venues fast-depth loop stopped", {});
+}
+
+// ADR-070: аренда глубокого опроса. venue="*" ⇒ все CEX-адаптеры; не-CEX/неизвестные
+// биржи и символы вне формата BASE/QUOTE отбрасываются (не нагружаем и не доверяем вводу).
+VenuesLoop::DepthWatchOutcome VenuesLoop::WatchDepth(
+    const std::vector<DepthWatchRegistry::Item>& items, int64_t ttl_ms) {
+  // Ровно один '/', обе части непусты, только буквы/цифры; регистр нормализуем (btc/usdt и
+  // BTC/USDT — одна пара, иначе поддельные дубликаты вытесняют легитимные под потолком).
+  auto symbol_ok = [](const std::string& s) {
+    if (s.empty() || s.size() > 24 || std::count(s.begin(), s.end(), '/') != 1) return false;
+    const std::size_t slash = s.find('/');
+    if (slash == 0 || slash + 1 >= s.size()) return false;
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) {
+      return std::isalnum(c) || c == '/';
+    });
+  };
+  auto upper = [](std::string s) {
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+  };
+  std::vector<std::string> cex_venues;
+  for (const auto& ad : adapters_) {
+    if (ad->Type() == domain::VenueType::kCex) cex_venues.push_back(ad->VenueId());
+  }
+  DepthWatchOutcome out;
+  std::vector<DepthWatchRegistry::Item> accepted;
+  for (const auto& [venue, raw_symbol] : items) {
+    if (!symbol_ok(raw_symbol)) { ++out.rejected_invalid; continue; }
+    const std::string symbol = upper(raw_symbol);
+    if (venue == "*") {
+      for (const auto& v : cex_venues) accepted.emplace_back(v, symbol);
+    } else if (std::find(cex_venues.begin(), cex_venues.end(), venue) != cex_venues.end()) {
+      accepted.emplace_back(venue, symbol);
+    } else {
+      ++out.rejected_invalid;
+    }
+  }
+  out.touch = depth_watch_.Touch(accepted, ttl_ms);
+  return out;
 }
 
 // ============================================================================

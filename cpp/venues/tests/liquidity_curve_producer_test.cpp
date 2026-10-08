@@ -1617,6 +1617,59 @@ bool TestSlopeMethodsGroundExample() {
   return pass;
 }
 
+// ADR-070 (дополнение): ComputeSlopeMethods — те же 4 способа §6.2 по произвольному снимку.
+// Ожидания пересчитаны независимо от продакшн-кода (δ_k=10⁴|ln(VWAP_k/mid)|, D_k=Σp·q).
+bool TestComputeSlopeMethodsOnDemand() {
+  const auto snap = MakeSnapshot();  // mid=100.5; bid (100,2)(99,3); ask (101,2)(102,4)
+  const double mid = 100.5;
+  auto side = [&](const std::vector<std::pair<double, double>>& lv) {
+    std::vector<double> delta, D;
+    double cq = 0.0, cn = 0.0;
+    for (const auto& [p, q] : lv) {
+      cq += q; cn += p * q;
+      delta.push_back(10000.0 * std::fabs(std::log((cn / cq) / mid)));
+      D.push_back(cn);
+    }
+    return cex::venues::app::AlphasFromCumulative(delta, D);
+  };
+  const auto eb = side({{100, 2}, {99, 3}});
+  const auto ea = side({{101, 2}, {102, 4}});
+
+  const auto r = cex::venues::app::ComputeSlopeMethods(snap);
+  bool pass = Check(r.has_value(), "ComputeSlopeMethods: есть результат");
+  if (!pass) return false;
+  pass = Check(std::fabs(r->mid - mid) < 1e-9, "mid = mid_price снимка") && pass;
+  pass = Check(std::fabs(r->depth_bid - 5.0) < 1e-9 && std::fabs(r->depth_ask - 6.0) < 1e-9,
+               "depth = Σ q стороны (все уровни, без лимита 20)") && pass;
+  const double bid_alpha[4] = {eb.tangent, eb.lsq, eb.profit, eb.minorant};
+  const double ask_alpha[4] = {ea.tangent, ea.lsq, ea.profit, ea.minorant};
+  for (int i = 0; i < 4; ++i) {
+    const auto& m = r->methods[static_cast<std::size_t>(i)];
+    const double cmb = std::min(bid_alpha[i], ask_alpha[i]);
+    pass = Check(m.kind == i + 1, "номер способа M1..M4") && pass;
+    pass = Check(std::fabs(m.alpha_bid - bid_alpha[i]) < 1e-9, "α bid по способу") && pass;
+    pass = Check(std::fabs(m.alpha_ask - ask_alpha[i]) < 1e-9, "α ask по способу") && pass;
+    pass = Check(std::fabs(m.alpha_ext - cmb) < 1e-9, "α_ext = min(bid, ask)") && pass;
+    pass = Check(std::fabs(m.beta_raw - (mid * mid) / (10000.0 * cmb)) < 1e-9 * (1.0 + m.beta_raw),
+                 "β_raw = mid²/(10⁴·α_ext)") && pass;
+  }
+  // Лимит уровней: берутся N ЛУЧШИХ уровней стороны; с одним уровнем M4 = M1 = D_1/δ_1.
+  const auto r1 = cex::venues::app::ComputeSlopeMethods(snap, 1);
+  pass = Check(r1.has_value() && std::fabs(r1->depth_bid - 2.0) < 1e-9 &&
+                   std::fabs(r1->depth_ask - 2.0) < 1e-9,
+               "levels=1: depth = лучший уровень") && pass;
+  if (r1.has_value()) {
+    pass = Check(std::fabs(r1->methods[3].alpha_bid - r1->methods[0].alpha_bid) < 1e-9,
+                 "levels=1: минорант = касательная") && pass;
+  }
+  // Пустая сторона → нет результата.
+  auto empty = snap;
+  empty.clear_ask_prices();
+  empty.clear_ask_quantities();
+  pass = Check(!cex::venues::app::ComputeSlopeMethods(empty).has_value(), "пустая сторона → nullopt") && pass;
+  return pass;
+}
+
 // §6.2: runtime-выбор способа для клиринга. Дефолт (минорант) = прежнее поведение
 // байт-в-байт; выбор другого способа детерминированно меняет β_t; обратим.
 bool TestSlopeMethodSelection() {
@@ -1662,6 +1715,7 @@ int main() {
   bool ok = true;
   ok = TestPublishesRegularizedCurve() && ok;
   ok = TestSlopeMethodsGroundExample() && ok;
+  ok = TestComputeSlopeMethodsOnDemand() && ok;
   ok = TestSlopeMethodSelection() && ok;
   ok = TestSlopeMethodsContract() && ok;
   ok = TestPublishesL2ForHighPriceSnapshot() && ok;

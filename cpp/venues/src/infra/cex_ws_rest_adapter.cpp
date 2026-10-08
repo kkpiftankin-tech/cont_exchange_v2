@@ -1181,8 +1181,11 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestDepthOnly(
   const bool ok = client->Get(rest_depth_url(normalized), auth_headers(),
                               cfg_.rest_timeout_ms, &body, &http_code);
   if (!ok || http_code < 200 || http_code >= 300) {
-    cex::common::log_json("WARN", "CEX depth-only REST request failed",
-                          {{"venue", cfg_.venue_id}, {"http_code", std::to_string(http_code)}});
+    // 1 раз в секунду на пару × N бирж — логируем первый отказ и каждый 30-й.
+    if (depth_only_failures_.fetch_add(1, std::memory_order_relaxed) % 30 == 0) {
+      cex::common::log_json("WARN", "CEX depth-only REST request failed",
+                            {{"venue", cfg_.venue_id}, {"http_code", std::to_string(http_code)}});
+    }
     return std::nullopt;
   }
 
@@ -1203,10 +1206,15 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestDepthOnly(
     ParseLevelArray(asks_json, cfg_.market_price_scale, cfg_.market_qty_scale, &asks, false);
   }
   if (bids.empty() || asks.empty()) {
-    cex::common::log_json("WARN", "CEX depth-only parse produced empty book",
-                          {{"venue", cfg_.venue_id}});
+    if (depth_only_failures_.fetch_add(1, std::memory_order_relaxed) % 30 == 0) {
+      cex::common::log_json("WARN", "CEX depth-only parse produced empty book",
+                            {{"venue", cfg_.venue_id}});
+    }
     return std::nullopt;
   }
+  // Coinbase level=2 отдаёт книгу целиком (без параметра глубины) — обрезаем до `levels`.
+  if (bids.size() > normalized.depth_levels) bids.resize(normalized.depth_levels);
+  if (asks.size() > normalized.depth_levels) asks.resize(normalized.depth_levels);
 
   domain::VenueRawSnapshot snapshot;
   snapshot.venue_id = cfg_.venue_id;
@@ -2639,13 +2647,13 @@ std::string CexWsRestAdapter::rest_depth_url(
   if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     std::ostringstream oss;
     oss << cfg_.rest_base_url << "/0/public/Depth?pair=" << kraken_pair_from_symbol(sym)
-        << "&count=" << levels;
+        << "&count=" << std::min<std::size_t>(levels, 500);  // Kraken Depth: максимум 500
     return oss.str();
   }
   if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     std::ostringstream oss;
     oss << cfg_.rest_base_url << "/api/v5/market/books?instId=" << okx_inst_from_symbol(sym)
-        << "&sz=" << levels;
+        << "&sz=" << std::min<std::size_t>(levels, 400);  // OKX books: максимум 400
     return oss.str();
   }
 

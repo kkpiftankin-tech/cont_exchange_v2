@@ -579,6 +579,47 @@ bool TestRequestDepthOnlyUsesDedicatedClient() {
   return Check(rest->get_calls == 0, "shared client untouched by depth-only");
 }
 
+// Глубина обрезается до запрошенной (Coinbase level=2 отдаёт книгу целиком).
+bool TestRequestDepthOnlyTruncatesToLevels() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();  // 3 уровня на сторону
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  auto deep = adapter.RequestDepthOnly(BtcReq(), 2);
+  if (!Check(deep.has_value(), "depth-only ok")) return false;
+  return Check(deep->bids.size() == 2 && deep->asks.size() == 2, "truncated to 2 levels");
+}
+
+// Kraken (count ≤ 500) и OKX (sz ≤ 400) режут запрошенную глубину до лимита API биржи.
+bool TestRequestDepthOnlyClampsVenueApiLimits() {
+  for (const std::string venue : {"kraken", "okx"}) {
+    FakeClock clock;
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_response = "{}";
+    CexWsRestAdapterConfig cfg;
+    cfg.venue_id = venue;
+    cfg.rest_base_url = venue == "kraken" ? "https://api.kraken.com" : "https://www.okx.com";
+    cfg.ws_url = venue == "kraken" ? "wss://ws.kraken.com/v2" : "wss://ws.okx.com:8443/ws/v5/public";
+    CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                             std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+    (void)adapter.RequestDepthOnly(BtcReq(), 1000);
+    const std::string want = venue == "kraken" ? "count=500" : "sz=400";
+    if (!Check(rest->last_get_url.find(want) != std::string::npos,
+               venue + " depth must be clamped to API limit (" + want + "), url=" + rest->last_get_url)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool TestRequestDepthOnlyFailureReturnsNullopt() {
   FakeClock clock;
   auto* rest = new FakeRestClient();
@@ -1702,6 +1743,8 @@ int main() {
   ok = TestRequestDepthOnlyUsesOwnBucket() && ok;
   ok = TestRequestDepthOnlyNonObjectJsonIsSafe() && ok;
   ok = TestRequestDepthOnlyFailureReturnsNullopt() && ok;
+  ok = TestRequestDepthOnlyTruncatesToLevels() && ok;
+  ok = TestRequestDepthOnlyClampsVenueApiLimits() && ok;
   ok = TestRequestDepthOnlyUsesDedicatedClient() && ok;
   ok = TestRequestSnapshotWithoutCacheReturnsNullOnRestFailure() && ok;
   ok = TestRequestSnapshotReturnsEmptyStatusForEmptyBook() && ok;

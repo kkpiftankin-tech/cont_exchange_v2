@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -395,6 +396,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   TokenBucket rest_bucket_;
   TokenBucket depth_bucket_;  // только RequestDepthOnly (ADR-070)
+  std::atomic<uint32_t> depth_only_failures_{0};  // для троттлинга лога отказов
   TokenBucket ws_bucket_;
   TokenBucket connect_bucket_;
 
