@@ -1032,6 +1032,12 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_inv_skew_gamma NUMERIC(38,18) NOT NULL DEFAULT 0.005;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 8;
+-- ADR-071: inventory-skew ноги арбитражёра (γ_A/K_A). Деф γ_A=0 ⇒ выключен (старое
+-- поведение); K_A=50 — клэмп сдвига (глубина transfer-ребра иная, чем у переводчика).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_arb_inv_skew_gamma NUMERIC(38,18) NOT NULL DEFAULT 0;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_arb_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 50;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_fee_k NUMERIC(38,18) NOT NULL DEFAULT 1.8;
 ALTER TABLE f05a_clearing_config
