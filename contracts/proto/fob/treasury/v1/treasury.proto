@@ -104,6 +104,13 @@ message AssetDelta {
   // price_used на per-agent пути несёт ЦЕНУ ПАРЫ P(base)/P(quote) (лимит заявки).
   string quote = 8;
   fob.common.v1.Decimal base_price = 9;
+  // ADR-072 §A: справедливая цена пары F_0 = P(base)/P(quote) ДО inventory-skew
+  // (единицы = цена пары, как price_used; НЕ USDT). Ledger строит клэмпленный лимит
+  // хеджа L_sell=F_0+max(0,m−γn⁺), L_buy=F_0−max(0,m−γn⁻) — сдвиг цены остаётся, но
+  // не уходит за границу прибыли F_0. Только per-agent путь (agent_id непуст),
+  // TRANSLATOR. Пусто (unset/0) при CE_AGENT_POS=0, у старого matching и у
+  // arbitrageur ⇒ ledger фолбэкает на price_used (прежнее поведение).
+  fob.common.v1.Decimal fair_price = 10;
 }
 message CePositionDeltaBatch {
   fob.common.v1.EventMeta meta = 1;

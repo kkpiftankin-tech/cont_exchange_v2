@@ -70,13 +70,24 @@ message CeAgentPositionDeltaBatch {
 
 **Миграция.** Топик internal-only, единственный consumer — `ledger`. Переключить producer (`matching`) и consumer (`ledger`) на новый payload синхронно в одном релизе (без dual-publish периода). Старые `AssetDelta` / `CePositionDeltaBatch` — не переиспользовать номера полей, пометить deprecated, вывести из proto отдельной чисткой (sunset-план в ADR-061).
 
+### ADR-072 — `fair_price` (F_0), аддитивно к `AssetDelta`
+
+Поле 10, добавлено для прибыли переводчика ([ADR-072](../../03-architecture/adr/ADR-072-ce-translator-profit-hedge-price-skew-resting.md) §A):
+
+```proto
+  fob.common.v1.Decimal fair_price = 10;  // F_0 = P(base)/P(quote) ДО inventory-skew
+```
+
+- **Смысл.** `price_used` (поле 4) на per-agent пути несёт **сдвинутую** цену пары (skew вшит) = прежний лимит хеджа. `fair_price` несёт **справедливую** цену пары `F_0` ДО skew (единицы — цена пары, не USDT). Ledger строит клэмпленный лимит `L_sell=F_0+max(0,m−γn⁺)`, `L_buy=F_0−max(0,m−γn⁻)` — сдвиг остаётся, но не уходит за границу прибыли `F_0`. Запас `m=ρ·h_v` (ρ — env `CE_HEDGE_MARGIN_RHO`); `h_v` ledger берёт из своего источника спреда/глубины (`venue.liquidity.fob`/`venue.snapshots`), в контракт не кладётся.
+- **Совместимость / фолбэк.** Аддитивное optional поле, не breaking. Пусто (`unset`/0) при `CE_AGENT_POS=0`, у старого matching и у арбитражёра ⇒ ledger откатывается на `price_used` (прежнее поведение). Порядок деплоя любой; новую логику лимита в ledger включать, только когда matching эмиттит `fair_price`.
+
 ## Live-bug (контекст, чинится в v2)
 
 В текущей v1-реализации consumer **отбрасывает** `AssetDelta.venue`: дельта агрегируется по `asset` без учёта площадки (`cpp/.../kafka_consumers.cpp:62`). Из-за этого позиция «размазана» по активу, а не по узлу «актив@площадка». v2 это исправляет: `AgentDelta` несёт `agent_id` + `venue`, а `ce_agent_position` имеет PK `(agent_id, asset, venue)` — площадка больше не теряется на приёме.
 
 ## Decimal / EventMeta
 
-- `delta`, `price_used`, `delta_value` — `fob.common.v1.Decimal` (деньги/объём, CLAUDE.md §9).
+- `delta`, `price_used`, `delta_value`, `base_price`, `fair_price` — `fob.common.v1.Decimal` (деньги/объём/цена, CLAUDE.md §9).
 - `CeAgentPositionDeltaBatch.meta` — `EventMeta` присутствует (обязателен для публикуемого в Kafka сообщения; несёт `correlation_id`, `partition_key`).
 
 ## Used In

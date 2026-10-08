@@ -381,3 +381,25 @@ protoContracts:
       - SimConfigEvent
       - SimAlert
       - SimExecutionAnnotation
+
+  treasury:
+    files:
+      - contracts/proto/fob/treasury/v1/treasury.proto
+    features:
+      - F-18
+    components:
+      - matching
+      - ledger
+      - risk
+    entities:
+      - CeCapital
+      - CePosition
+      - CePositionDelta
+      - AgentKind
+      - AssetDelta
+      - CePositionDeltaBatch
+      - AgentBandBreach
+      - CePositionStep
+      - CeClearingPosition
+      - CeNetHedgeIntent
+      - CeTreasurySnapshot
