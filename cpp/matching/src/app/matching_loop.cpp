@@ -918,38 +918,57 @@ std::map<std::string, double> ProjectXToDeltas(
 // Живая настройка inventory-skew из f05a_clearing_config (γ, клэмп). Кэш ~1с, чтобы
 // не бить PG каждый такт. Дефолты/override — env. Позволяет крутить обратную связь
 // с фронта без пересборки matching.
-std::pair<double, double> MatchingLoop::LoadInvSkewConfig() {
+MatchingLoop::InvSkewCfg MatchingLoop::LoadInvSkewConfig() {
   auto env_d = [](const char* n, double def) {
     const char* v = std::getenv(n);
     return v ? std::atof(v) : def;
   };
   const double def_gamma = env_d("CE_INVENTORY_SKEW_GAMMA", 0.02);
   const double def_clamp = env_d("CE_INVENTORY_SKEW_MAX_PM", 8.0);
+  // ADR-071: γ_A/K_A ноги арбитражёра. Деф γ_A=0 ⇒ skew арбитражёра выключен (старое
+  // поведение); K_A с запасом (глубина transfer-ребра иная). env-fallback.
+  const double def_arb_gamma = env_d("CE_ARB_INV_SKEW_GAMMA", 0.0);
+  const double def_arb_clamp = env_d("CE_ARB_INV_SKEW_MAX_PM", 50.0);
   {
     std::lock_guard<std::mutex> lk(inv_cfg_mu_);
     const auto now = std::chrono::steady_clock::now();
     if (inv_cfg_have_ &&
         std::chrono::duration_cast<std::chrono::milliseconds>(now - inv_cfg_last_).count() < 1000)
-      return {inv_cfg_gamma_, inv_cfg_max_pm_};
+      return {inv_cfg_gamma_, inv_cfg_max_pm_, inv_cfg_arb_gamma_, inv_cfg_arb_max_pm_};
   }
   double gamma = def_gamma, clamp = def_clamp;
+  double arb_gamma = def_arb_gamma, arb_clamp = def_arb_clamp;
   if (!postgres_dsn_.empty()) {
     try {
       pqxx::connection c(postgres_dsn_);
-      pqxx::work tx(c);
-      const pqxx::row r = tx.exec1(
-          "SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
-      gamma = r[0].as<double>();
-      clamp = r[1].as<double>();
-      tx.commit();
-    } catch (const std::exception&) { /* нет колонки/БД — дефолты/env */ }
+      // ДВА раздельных запроса (ADR-071 review, config-coupling): отсутствие arb-колонок
+      // НЕ должно сбрасывать живую настройку переводчика (T_) в env-дефолты. Каждый — свой try.
+      try {
+        pqxx::work tx(c);
+        const pqxx::row r = tx.exec1(
+            "SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+        gamma = r[0].as<double>();
+        clamp = r[1].as<double>();
+        tx.commit();
+      } catch (const std::exception&) { /* нет БД/строки — T_ на дефолтах/env */ }
+      try {
+        pqxx::work tx(c);
+        const pqxx::row r = tx.exec1(
+            "SELECT ce_arb_inv_skew_gamma, ce_arb_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+        arb_gamma = r[0].as<double>();
+        arb_clamp = r[1].as<double>();
+        tx.commit();
+      } catch (const std::exception&) { /* нет arb-колонок — arb skew off/env, T_ не затронут */ }
+    } catch (const std::exception&) { /* не удалось подключиться — всё на дефолтах/env */ }
   }
   std::lock_guard<std::mutex> lk(inv_cfg_mu_);
   inv_cfg_gamma_ = gamma;
   inv_cfg_max_pm_ = clamp;
+  inv_cfg_arb_gamma_ = arb_gamma;
+  inv_cfg_arb_max_pm_ = arb_clamp;
   inv_cfg_last_ = std::chrono::steady_clock::now();
   inv_cfg_have_ = true;
-  return {gamma, clamp};
+  return {gamma, clamp, arb_gamma, arb_clamp};
 }
 
 // F-18 #7 scoped (T-F18-L02): throttle записи depth в ce_asset_liquidity. true ⇒ пора
@@ -1000,7 +1019,11 @@ std::map<std::string, double> MatchingLoop::FetchAgentPositionsCached() {
     // когда в заявках висит большой объём (follow-up F-18: skew на полное обязательство).
     const double c = static_cast<double>(cex::common::Decimal::from_proto(p.position()));
     const double in_flight = static_cast<double>(cex::common::Decimal::from_proto(p.in_flight()));
-    m[p.agent_id()] = c + in_flight;
+    // ADR-071: ключ "agent_id|venue|asset" — двухногий арбитражёр (ADR-069) имеет ДВЕ
+    // строки с одним agent_id (ноги по venue); кросс-переводчик T_ETH_BTC — ДВЕ строки
+    // по asset (ETH и BTC) при одном venue (ADR-071 review). Оба различаем полным ключом.
+    // base = c+in_flight = I−F (нетто внутр.−подтв.внешн.).
+    m[p.agent_id() + "|" + p.venue() + "|" + p.asset()] = c + in_flight;
   }
   std::lock_guard<std::mutex> lk(inv_mu_);
   inv_positions_.swap(m);
@@ -1045,15 +1068,38 @@ void MatchingLoop::on_ce_clearing_input(
   // учитывает хедж-исполнения и кнопку сброса.
   // γ/клэмп — живая настройка из f05a_clearing_config (крутится с фронта без
   // пересборки). Дефолты/override — env. γ=0 ⇒ обратная связь выключена.
-  const auto [inv_gamma, inv_clamp] = LoadInvSkewConfig();
+  const auto inv_cfg = LoadInvSkewConfig();
+  const double inv_gamma = inv_cfg.gamma, inv_clamp = inv_cfg.clamp;
+  const double arb_gamma = inv_cfg.arb_gamma, arb_clamp = inv_cfg.arb_clamp;  // ADR-071
   const std::map<std::string, double> inv_pos =
-      (inv_gamma > 0.0) ? FetchAgentPositionsCached() : std::map<std::string, double>{};
+      (inv_gamma > 0.0 || arb_gamma > 0.0) ? FetchAgentPositionsCached()
+                                           : std::map<std::string, double>{};
 
+  // ADR-072: fair ЦЕНА ПАРЫ F_0 (P_λ, IN-017) по КЛЮЧУ "base/quote" = depth-
+  // взвешенное среднее цен пары по СЫРОМУ анкеру (ДО inventory-skew); независимо от
+  // решения клиринга. num=Σ depth·P_pair, den=Σ depth. Ключ по ПАРЕ, не активу: для
+  // кросс-пары anchor — отклонение цены пары от ref[base]/ref[quote], не base/USDT.
+  std::map<std::string, double> fair_num, fair_den;
   std::vector<domain::CeQuoteParams> quotes;
   for (const auto& q : input.quotes()) {
     // ADR-064: q.quote() — котируемая валюта пары (пусто ⇒ numeraire). Поле
     // используется только v2-сборщиком (AssembleCeGraphV2); v1 его игнорирует.
     double anchor = d2(q.anchor());
+    {  // P_pair = (ref[base]/ref[quote])·exp(σ*_raw/1000), ДО skew. anchor —
+       // отклонение цены ПАРЫ: для USDT-пары base/USDT, для кросс-пары base/quote.
+       // ref[quote]=1 для numeraire. Ключ копления — пара, не актив.
+      const std::string q_quote = q.quote().empty() ? numeraire : q.quote();
+      const auto rpb = ref_price.find(q.asset());
+      const double ref_q = (q_quote == numeraire)
+                               ? 1.0
+                               : (ref_price.count(q_quote) ? ref_price.at(q_quote) : 0.0);
+      const double depth_w = d2(q.depth());
+      if (rpb != ref_price.end() && rpb->second > 0.0 && ref_q > 0.0 && depth_w > 0.0) {
+        const std::string key = q.asset() + "/" + q_quote;
+        fair_num[key] += depth_w * (rpb->second / ref_q) * std::exp(anchor / 1000.0);
+        fair_den[key] += depth_w;
+      }
+    }
     if (inv_gamma > 0.0 && !inv_pos.empty()) {
       // agent_id как в AssembleCeClearInputV2: номинал ⇒ T_<asset>_<venue>,
       // кросс ⇒ T_<asset>_<quote>_<venue>.
@@ -1061,7 +1107,7 @@ void MatchingLoop::on_ce_clearing_input(
       const std::string agent_id = (quote_asset == numeraire)
           ? ("T_" + q.asset() + "_" + q.venue())
           : ("T_" + q.asset() + "_" + quote_asset + "_" + q.venue());
-      const auto it = inv_pos.find(agent_id);
+      const auto it = inv_pos.find(agent_id + "|" + q.venue() + "|" + q.asset());  // ADR-071: agent|venue|asset
       if (it != inv_pos.end()) {
         double skew = inv_gamma * it->second;  // ‰
         if (skew > inv_clamp) skew = inv_clamp;
@@ -1127,7 +1173,9 @@ void MatchingLoop::on_ce_clearing_input(
            {"venues_count", std::to_string(cfg2.venues.size())}});
       return;
     }
-    graph = domain::AssembleCeGraphV2(cfg2, quotes);
+    // ADR-071: inv_pos (ключ agent|venue, b=c+in_flight=I−F) + γ_A/K_A — сдвиг якоря
+    // ног арбитражёра (transfer-рёбра A_*). γ_A=0 ⇒ якоря A_* = 0 (старое поведение).
+    graph = domain::AssembleCeGraphV2(cfg2, quotes, inv_pos, arb_gamma, arb_clamp);
     house_pinned = true;
   } else {
     domain::CeAssembleConfig cfg;
@@ -1242,6 +1290,16 @@ void MatchingLoop::on_ce_clearing_input(
       if (d.price_used > 0.0) *ad->mutable_price_used() = to_dec(d.price_used);
       if (d.base_price > 0.0) *ad->mutable_base_price() = to_dec(d.base_price);
       if (!d.quote.empty()) ad->set_quote(d.quote);
+      // ADR-072 §A: fair ЦЕНА ПАРЫ F_0 (P_λ, ДО skew) по ключу "base/quote" — только
+      // переводчик. Ledger строит клэмпленный лимит L∈[F_0±m] (сдвиг не за границу
+      // прибыли). Пусто ⇒ ledger фолбэкает на price_used (прежнее поведение).
+      if (d.agent_kind == domain::CeAgentKind::kTranslator) {
+        const std::string fkey = d.asset + "/" + (d.quote.empty() ? numeraire : d.quote);
+        const auto nf = fair_num.find(fkey);
+        const auto df = fair_den.find(fkey);
+        if (nf != fair_num.end() && df != fair_den.end() && df->second > 0.0)
+          *ad->mutable_fair_price() = to_dec(nf->second / df->second);
+      }
       ++emitted;
     }
   }

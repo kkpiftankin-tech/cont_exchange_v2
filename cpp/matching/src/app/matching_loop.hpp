@@ -155,10 +155,14 @@ class MatchingLoop {
   std::mutex inv_cfg_mu_;
   double inv_cfg_gamma_{0.0};
   double inv_cfg_max_pm_{8.0};
+  double inv_cfg_arb_gamma_{0.0};   // ADR-071: γ_A ноги арбитражёра
+  double inv_cfg_arb_max_pm_{50.0}; // ADR-071: K_A клэмп сдвига арбитражёра
   std::chrono::steady_clock::time_point inv_cfg_last_{};
   bool inv_cfg_have_{false};
-  // Читает γ/клэмп из PG (кэш ~1с). Fallback — env, затем дефолты. Возврат: {γ, max_pm}.
-  std::pair<double, double> LoadInvSkewConfig();
+  // Читает γ/клэмп переводчика И арбитражёра (ADR-071) из PG (кэш ~1с). Fallback — env,
+  // затем дефолты. Возврат: {γ_T, max_pm_T, γ_A, max_pm_A}.
+  struct InvSkewCfg { double gamma; double clamp; double arb_gamma; double arb_clamp; };
+  InvSkewCfg LoadInvSkewConfig();
 
   // F-18 #7 scoped (T-F18-L02): троттл записи depth (α_e) per (asset,venue) в
   // ce_asset_liquidity (reader — ledger, ликвидностная ось band). За флагом

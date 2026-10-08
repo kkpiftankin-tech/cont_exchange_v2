@@ -235,6 +235,37 @@ int main() {
     }
   }
 
+  // ---- ADR-071: inventory-skew ноги арбитражёра снижает поток transfer-ребра ----
+  {
+    CeAssembleConfigV2 cfg;
+    cfg.numeraire = "USD"; cfg.assets = {"BTC"}; cfg.venues = {"B", "O"};
+    cfg.leg["BTC"] = CeTransferLegParamsV2{12.0, 0.10};
+    cfg.leg["USD"] = CeTransferLegParamsV2{18.0, 0.05};  // замыкает цикл ⇒ перевоз BTC реально течёт
+    std::vector<CeQuoteParams> quotes = {
+        {"BTC", "B", 0.00, 50.0, 0.05, ""}, {"BTC", "O", 0.40, 50.0, 0.05, ""}};
+    auto edge_idx = [](const CeClearInput& in, const std::string& nm) {
+      for (std::size_t i = 0; i < in.edges.size(); ++i) if (in.edges[i].name == nm) return (int)i;
+      return -1;
+    };
+    CeClearInput in0 = AssembleCeGraphV2(cfg, quotes);  // γ_A=0 (деф)
+    const int ei = edge_idx(in0, "A_BTC_BO");
+    if (ei < 0) { std::printf("FAIL ADR-071: ребро A_BTC_BO не найдено\n"); ++g_fail; }
+    else {
+      if (in0.edges[ei].anchor != 0.0) {
+        std::printf("FAIL ADR-071: при γ_A=0 anchor A_* должен быть 0 (регрессия)\n"); ++g_fail;
+      }
+      const double f0 = ClearCe(in0).f[ei];
+      std::map<std::string, double> inv; inv["A_BTC_BO|O|BTC"] = 5.0;  // приёмник O накопил +5 (нехедж.)
+      const double f_pos = ClearCe(AssembleCeGraphV2(cfg, quotes, inv, 0.02, 50.0)).f[ei];
+      const double f_neg = ClearCe(AssembleCeGraphV2(cfg, quotes, inv, -0.02, 50.0)).f[ei];
+      // I5: накопление на приёмнике j с γ_A>0 СНИЖАЕТ поток i→j (самоограничение).
+      if (!(f0 > 0.0)) { std::printf("FAIL ADR-071: базовый поток B→O >0 ожидался (got %.4f)\n", f0); ++g_fail; }
+      if (!(f_pos < f0)) { std::printf("FAIL ADR-071: γ_A>0 должен СНИЖАТЬ поток (f0=%.4f f+=%.4f)\n", f0, f_pos); ++g_fail; }
+      // Отрицательный γ_A запрещён (guard > 0.0) ⇒ skew не применяется, поток как при γ_A=0.
+      if (!(std::fabs(f_neg - f0) < 1e-9)) { std::printf("FAIL ADR-071: γ_A<0 должен игнорироваться (f0=%.4f f-=%.4f)\n", f0, f_neg); ++g_fail; }
+    }
+  }
+
   if (g_fail == 0) { std::printf("ce_graph_assembler_test: OK\n"); return 0; }
   std::printf("ce_graph_assembler_test: %d FAIL\n", g_fail);
   return 1;

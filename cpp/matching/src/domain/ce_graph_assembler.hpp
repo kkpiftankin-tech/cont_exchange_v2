@@ -159,8 +159,14 @@ struct CeAssembleConfigV2 {
 
 // Собирает CeClearInput для v2-графа. quotes — по одному на (asset,venue) для
 // tradeable-активов (тот же формат CeQuoteParams, что и в v1).
+// ADR-071: inv_basis — база inventory-skew ноги арбитражёра, ключ "agent_id|venue"
+// (b = c+in_flight = I−F). arb_skew_gamma/arb_skew_clamp_pm — γ_A/K_A (‰). При
+// arb_skew_gamma=0 (деф) якорь transfer-рёбер = 0 (побайтово старое поведение).
 inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
-                                      const std::vector<CeQuoteParams>& quotes) {
+                                      const std::vector<CeQuoteParams>& quotes,
+                                      const std::map<std::string, double>& inv_basis = {},
+                                      double arb_skew_gamma = 0.0,
+                                      double arb_skew_clamp_pm = 0.0) {
   std::vector<std::string> all_assets = cfg.assets;
   all_assets.push_back(cfg.numeraire);  // нумерарий — последний по соглашению (как в v1)
 
@@ -213,10 +219,26 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
     const auto lp = cfg.leg.find(a);
     if (lp == cfg.leg.end() || lp->second.transfer_depth <= 0.0) continue;
     for (std::size_t i = 0; i < cfg.venues.size(); ++i)
-      for (std::size_t j = i + 1; j < cfg.venues.size(); ++j)
-        add("A_" + a + "_" + cfg.venues[i] + cfg.venues[j], CeLeg::kTransfer,
+      for (std::size_t j = i + 1; j < cfg.venues.size(); ++j) {
+        const std::string name = "A_" + a + "_" + cfg.venues[i] + cfg.venues[j];
+        // ADR-071: inventory-skew ноги арбитражёра. Якорь transfer-ребра (0) смещаем
+        // на −clamp(γ_A·b_A), b_A — база dst-ноги (приёмник j, ключ "name|venues[j]").
+        // Положительное накопление на j снижает поток i→j (разворот, mean-reversion).
+        // γ_A=0 ⇒ anchor=0 (старое поведение, inv_basis не читается).
+        double anchor = 0.0;
+        if (arb_skew_gamma > 0.0) {  // только положительный γ_A (отриц. = положит. обратная связь)
+          const auto it = inv_basis.find(name + "|" + cfg.venues[j] + "|" + a);  // ключ agent|venue|asset
+          if (it != inv_basis.end()) {
+            double shift = arb_skew_gamma * it->second;  // ‰
+            if (shift > arb_skew_clamp_pm) shift = arb_skew_clamp_pm;
+            else if (shift < -arb_skew_clamp_pm) shift = -arb_skew_clamp_pm;
+            anchor = -shift;
+          }
+        }
+        add(name, CeLeg::kTransfer,
             node_index.at(a + "@" + cfg.venues[i]), node_index.at(a + "@" + cfg.venues[j]),
-            0.0, lp->second.transfer_depth, lp->second.transfer_dead_zone);
+            anchor, lp->second.transfer_depth, lp->second.transfer_dead_zone);
+      }
   }
   // STOCK-рёбер в v2 нет (ADR-061 §1: плечо запаса и узел-склад убраны).
   return in;
