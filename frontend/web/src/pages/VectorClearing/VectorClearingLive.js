@@ -455,10 +455,21 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
       {sgn(v)}<span style={{ opacity: 0.6, fontSize: '0.85em' }}> {cur}</span>
     </span>
   );
-  const pnlCell = (a) => (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt))) ? dash : (
-    <span style={{ color: Number(a.pnl_usdt) > 1e-9 ? '#5fd08a' : Number(a.pnl_usdt) < -1e-9 ? '#e06060' : '#9fb2c2', fontWeight: 600 }}
-      title={`заработок по ${a.trade_fills || 0} состоявшимся сделкам, USDT (без комиссий); может быть отрицательным`}>{sgn(a.pnl_usdt)}</span>
-  );
+  // ADR-072 §C: realized (R — закрытые round-trip, НАРАСТАЕТ = заработок) основным,
+  // unrealized (U — MTM открытого остатка, болтается с маркой) приглушённым: «R / U».
+  const pnlColor = (x) => Number(x) > 1e-9 ? '#5fd08a' : Number(x) < -1e-9 ? '#e06060' : '#9fb2c2';
+  const pnlCell = (a) => {
+    const r = a.realized_usdt, u = a.unrealized_usdt;
+    const rOk = r != null && Number.isFinite(Number(r));
+    const uOk = u != null && Number.isFinite(Number(u));
+    if (!rOk && (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt)))) return dash;
+    return (
+      <span title={`realized R (закрытые round-trip, нарастает = заработок) / unrealized U (MTM открытого остатка) по ${a.trade_fills || 0} сделкам, USDT без комиссий`}>
+        <span style={{ color: pnlColor(rOk ? r : a.pnl_usdt), fontWeight: 600 }}>{sgn(rOk ? r : a.pnl_usdt)}</span>
+        {uOk && <span style={{ color: pnlColor(u), opacity: 0.6, fontSize: '0.85em' }}> / {sgn(u)}</span>}
+      </span>
+    );
+  };
   // Две ноги агента (по валюте): переводчик base/quote; арбитражёр asset@src / asset@dst.
   const legsOf = (a) => {
     if (a.agent_kind === 'arbitrageur') {
@@ -495,9 +506,13 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
   const tRows = rows.filter((a) => a.agent_kind === 'translator');
   const aRows = rows.filter((a) => a.agent_kind === 'arbitrageur');
   // Итоги заработка по сделкам (USDT, без комиссий): по группам и вместе.
-  const sumPnl = (arr) => arr.reduce((s, a) =>
-    s + (Number.isFinite(Number(a.pnl_usdt)) ? Number(a.pnl_usdt) : 0), 0);
-  const haveStats = rows.some((a) => a.pnl_usdt != null);
+  // Итог — по realized (нарастающий заработок); fallback на pnl_usdt (R+U), если R нет.
+  const sumPnl = (arr) => arr.reduce((s, a) => {
+    const v = Number.isFinite(Number(a.realized_usdt)) ? Number(a.realized_usdt)
+            : (Number.isFinite(Number(a.pnl_usdt)) ? Number(a.pnl_usdt) : 0);
+    return s + v;
+  }, 0);
+  const haveStats = rows.some((a) => a.realized_usdt != null || a.pnl_usdt != null);
   const totT = sumPnl(tRows), totA = sumPnl(aRows), totAll = totT + totA;
   const pnlTotal = (v) => (
     <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)} USDT</b>
@@ -513,7 +528,7 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
       <th title="сколько исполнилось по результатам симуляции (filled_qty)">исполнено</th>
       <th title="кол-во БАЗОВОЙ валюты по состоявшимся сделкам (signed: BUY +, SELL −); без комиссий">сделки: база</th>
       <th title="кол-во КОТИРУЕМОЙ валюты по состоявшимся сделкам (signed); без комиссий">сделки: квота</th>
-      <th title="заработок по состоявшимся сделкам в USDT (без комиссий); может быть отрицательным">заработок USDT</th>
+      <th title="заработок USDT: realized R (закрытые round-trip, нарастает) / unrealized U (MTM открытого остатка); без комиссий">заработок R / U</th>
     </tr></thead>
   );
   return (
@@ -603,6 +618,72 @@ function AgentDrillDown({ detail }) {
           <b style={{ color: psColor }}>{ps >= 0 ? '+' : ''}{ps.toFixed(3)} ‰</b>{' '}
           ({cTotal > 1e-9 ? 'обязательство + ⇒ цена ↓ (возврат к нулю)' : cTotal < -1e-9 ? 'обязательство − ⇒ цена ↑ (возврат к нулю)' : 'обязательство 0 ⇒ сдвига нет'})
         </div>
+        {/* Таблица сдвига: якорь → дельта → сдвинутая цена; в ед. 2-й валюты пары и в USDT.
+            Числа считает BFF (skewTable), здесь только форматирование. */}
+        {(() => {
+          const st = detail.skewTable;
+          if (!st || !st.available) {
+            return <div style={{ fontSize: 12, color: MUTE, marginTop: 6 }}>таблица сдвига недоступна: {st && st.reason ? st.reason : 'нет данных'}</div>;
+          }
+          // Число знаков по величине якоря — одинаково для всех строк столбца.
+          const dd = (v) => { const m = Math.abs(v); return m >= 1000 ? 4 : m >= 1 ? 6 : 10; };
+          const fx = (v, ref, signed) => {
+            const t = Number(v).toLocaleString('ru-RU', { minimumFractionDigits: dd(ref), maximumFractionDigits: dd(ref) });
+            return signed && v > 0 ? '+' + t : t;
+          };
+          const dcol = (v) => (v > 0 ? GREEN : v < 0 ? RED : MUTE);
+          const baseCcy = st.base || 'база';
+          const legsTag = st.position.legs ? ' (Σ ног)' : '';
+          const rows = [
+            { n: '1) Цена якоря', q: st.anchor.quote, u: st.anchor.usdt, sg: false },
+            { n: '2) Дельта сдвига', q: st.delta.quote, u: st.delta.usdt, sg: true },
+            { n: '3) Сдвинутая цена', q: st.shifted.quote, u: st.shifted.usdt, sg: false },
+            // Позиция (c_j + in_flight) — в обеих валютах пары: по 1-й (базовой) и по 2-й (котируемой).
+            // Знаки противоположны: держишь базовую (+) ⇔ должен котируемую (−). USDT-стоимость
+            // базовой ноги = −usdt (та же величина с обратным знаком). Столбец «ед. валюты»
+            // для этих строк самоподписан своей валютой (posCcy).
+            { n: `4) Позиция по 1-й валюте (${baseCcy})${legsTag}`, q: st.position.base, u: (st.position.usdt == null ? null : -st.position.usdt), sg: true, own: true, posCcy: baseCcy },
+            { n: `5) Позиция по 2-й валюте (${st.quote})${legsTag}`, q: st.position.quote, u: st.position.usdt, sg: true, own: true, posCcy: st.quote },
+            // Пороги позиции (по модулю |позиция|):
+            { n: '6) Порог входа в хедж Z̄lim (мейкер)', q: st.thresholds.zLim.quote, u: st.thresholds.zLim.usdt, sg: false, own: true },
+            { n: '7) Порог тейкер-сброса Z̄mkt', q: st.thresholds.zMkt.quote, u: st.thresholds.zMkt.usdt, sg: false, own: true },
+            { n: '8) Пол полосы q_floor', q: st.thresholds.floor.quote, u: st.thresholds.floor.usdt, sg: false, own: true },
+          ];
+          return (
+            <table className="vc-sub-table" style={{ marginTop: 6 }}>
+              <thead><tr>
+                <th>Показатель</th>
+                <th style={{ textAlign: 'right' }}>В ед. 2-й валюты ({st.quote})</th>
+                <th style={{ textAlign: 'right' }}>В USDT</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.n}</td>
+                    <td className="vc-mono" style={{ textAlign: 'right', color: r.sg ? dcol(r.q) : undefined }}>{r.q == null ? '—' : (fx(r.q, r.own ? Math.max(Math.abs(r.q), 1) : st.anchor.quote, r.sg) + (r.posCcy ? ' ' + r.posCcy : ''))}</td>
+                    <td className="vc-mono" style={{ textAlign: 'right', color: r.sg ? dcol(r.u) : undefined }}>{r.u == null ? '—' : fx(r.u, r.own ? Math.max(Math.abs(r.u), 1) : st.anchor.usdt, r.sg)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          );
+        })()}
+        {detail.skewTable && detail.skewTable.position && detail.skewTable.position.legs && (
+          <div style={{ fontSize: 11, color: MUTE, marginTop: 4 }}>
+            ноги арбитражёра: {detail.skewTable.position.legs.map((l, i) => (
+              <span key={i} style={{ marginRight: 10 }}>
+                {l.venue || '—'} <b style={{ color: posColor(l.usdt) }}>{Number(l.usdt).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} USDT</b>
+                {' '}({Number(l.quote).toLocaleString('ru-RU', { maximumFractionDigits: 6 })} {detail.skewTable.quote})
+              </span>
+            ))}
+          </div>
+        )}
+        {detail.skewTable && detail.skewTable.note && <div style={{ fontSize: 11, color: '#e0b84a', marginTop: 4 }}>{detail.skewTable.note}</div>}
+        <div style={{ fontSize: 11, color: MUTE, marginTop: 4 }}>
+          пороги 5–7 — по модулю позиции: |позиция| &gt; Z̄lim ⇒ хедж (мейкер), &gt; Z̄mkt ⇒ тейкер; q_floor — нижняя граница Z̄lim ·{' '}
+          сдвинутая = якорь·exp(сдвиг‰/1000) · курс 2-й валюты: 1 {(detail.skewTable && detail.skewTable.quote) || ''} ={' '}
+          {detail.skewTable && detail.skewTable.available ? Number(detail.skewTable.quoteUsdt).toLocaleString('ru-RU', { maximumFractionDigits: 6 }) : '—'} USDT
+        </div>
       </div>
       <div style={box}>
         <div style={head}>Порог по позиции — трёхзонное правило от комиссии (Кривые §6.4)</div>
@@ -614,7 +695,7 @@ function AgentDrillDown({ detail }) {
           <div style={{ fontSize: 12, color: MUTE, marginTop: 3 }}>
             зоны: ≤{kusd(b.zLim)} — не хеджируем; {kusd(b.zLim)}…{kusd(b.zMkt)} — пассивный <b>мейкер</b>-лимит; &gt;{kusd(b.zMkt)} — агрессивный <b>тейкер</b>-сброс.{' '}
             текущая зона: <b style={{ color: b.aggressive ? '#e6a15a' : '#8fb0e0' }}>{b.aggressive ? 'тейкер (агрессив)' : 'мейкер (пассив)'}</b>
-            {!isT && ' · арбитражёр: round-trip 2 биржи (комиссия ×2)'}
+            {!isT && ' · арбитражёр: порог на ногу (ADR-069, rt=1)'}
           </div>
         )}
       </div>

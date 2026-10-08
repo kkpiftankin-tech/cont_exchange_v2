@@ -5,6 +5,8 @@ const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require("./trade_stats_math");
+const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
+const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
 
 // gRPC client for ledger
 const grpc = require('@grpc/grpc-js');
@@ -3323,6 +3325,20 @@ async function refreshTradeStatuses() {
   } catch (err) {
     console.error("[frontend-api] failed to refresh trade statuses:", err.message || err);
   }
+}
+
+// Способ снятия наклона §6.2 (1..4), идущий в клиринг: f05a_clearing_config.slope_method; PG
+// недоступен/пусто — дефолт M4 (минорант), как в движке.
+async function readClearingSlopeMethod() {
+  try {
+    const pool = getPgPool();
+    if (pool) {
+      const q = await pool.query("SELECT slope_method FROM f05a_clearing_config WHERE id=1");
+      const m = q.rows[0] && Number(q.rows[0].slope_method);
+      if (m >= 1 && m <= 4) return m;
+    }
+  } catch (_) { /* PG опционален */ }
+  return 4;
 }
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -7028,10 +7044,16 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
       ...((() => {
         const t = ts.get(b.agent_id);
         if (!t) return {};
+        // ADR-072 §C: realized (R, закрытые round-trip — НАРАСТАЕТ, это заработок) отдельно
+        // от unrealized (U = (R+U) − R, MTM открытого остатка — болтается с маркой).
+        const rpu = tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price);
+        const rlz = pnlQuoteToUsdt(t.realized_quote, basePrice, price);
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
-          pnl_usdt: tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price),
+          pnl_usdt: rpu,                                                    // R+U (MTM корзины, прежняя метрика)
+          realized_usdt: rlz,                                              // R: реализованный заработок
+          unrealized_usdt: (rpu != null && rlz != null) ? rpu - rlz : null, // U: MTM открытого остатка
           pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),  // диагностика: fill vs лимит
           trade_fills: t.trade_fills,
         };
@@ -7097,10 +7119,16 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
       ...((() => {
         const t = ts.get(agentId);
         if (!t) return {};
+        // ADR-072 §C: realized (R) отдельно от unrealized (U). Для арбитражёра R =
+        // кросс-спред закрытого объёма (net_base≈0, спред в avg_pS−avg_pB).
+        const rpu = tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price);
+        const rlz = pnlQuoteToUsdt(t.realized_quote, basePrice, price);
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
-          pnl_usdt: tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price),
+          pnl_usdt: rpu,
+          realized_usdt: rlz,
+          unrealized_usdt: (rpu != null && rlz != null) ? rpu - rlz : null,
           pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),
           trade_fills: t.trade_fills,
         };
@@ -7418,14 +7446,14 @@ async function fetchVenueCurveImpl(venue, symbol, ts, opts) {
   // Накопление стороны: sign=+1 ask (покупка), −1 bid (продажа). VWAP + D/|δ|.
   const buildSide = (levels, n, sign) => {
     const use = levels.slice(0, Math.max(1, Math.min(n, levels.length)));
-    let cumQty = 0, cumNotional = 0; const pts = [];
-    for (let i = 0; i < use.length; i++) {
-      cumQty += use[i].v; cumNotional += use[i].p * use[i].v;
-      if (cumQty <= 0) continue;
-      const vwap = cumNotional / cumQty;
+    const pts = [];
+    // VWAP/накопление — общий модуль book_vwap (CALC-BOOK-VWAP), тот же, что в /api/venues/orderbook.
+    const acc = cumulativeBookVwap(use, "v");
+    for (let i = 0; i < acc.length; i++) {
+      const { cum: cumQty, notional: cumNotional, vwap } = acc[i];
       const absDeltaBps = (anchor > 0 && vwap > 0) ? Math.abs(10000 * Math.log(vwap / anchor)) : 0;
       const slopePerBps = absDeltaBps > 1e-9 ? cumNotional / absDeltaBps : Infinity;
-      pts.push({ q: sign * cumQty, priceRaw: use[i].p, priceVwap: vwap, slopePerBps });
+      pts.push({ q: sign * cumQty, priceRaw: acc[i].p, priceVwap: vwap, slopePerBps });
     }
     return pts;
   };
@@ -7898,7 +7926,9 @@ async function handleVectorClearing(req, res, pathname, query) {
     const priceShiftPm = -skewPm;   // anchor_eff = anchor − skew ⇒ сдвиг цены = −skew
     // Трёхзонные пороги от комиссии (как в ledger detect_and_emit): rt=round-trip
     // (арбитражёр ×2 биржи). Z̄lim — вход в хедж (пассив-мейкер), Z̄mkt — агрессив-тейкер.
-    const rt = isT ? 1 : 2;
+    // ADR-069: rt=1 на ногу для ВСЕХ агентов (как в ledger detect_and_emit_band_breach_locked):
+    // арбитражёр держит две ноги — по одной taker-комиссии на биржу; прежний rt=2 задваивал порог.
+    const rt = 1;
     const qFloor = 5;  // = CE_AGENT_BAND_Q_MIN
     const zLim = Math.max(qFloor, kBand * climBps * rt);
     const zMkt = Math.max(zLim, kBand * cmktBps * rt);
@@ -7982,8 +8012,66 @@ async function handleVectorClearing(req, res, pathname, query) {
         }
       } catch (e) { /* таблицы может не быть */ }
     }
+    // Таблица «Сдвиг цены от позиции»: якорь → дельта → сдвинутая цена, в единицах 2-й
+    // валюты пары (quote) и в USDT. Считает бэкенд, фронт только рисует.
+    // Якорь движка — σ* = 1000·ln(mid/P0) ‰ относительно опорной цены P0 пары
+    // (vector_liquidity.proto CeQuoteAgent.anchor), сдвиг: anchor_eff = σ* − skew (‰), т.е.
+    // цена_сдвинутая = P·exp(priceShiftPm/1000). P — цена пары в ед. quote (ledger
+    // reference_price); курс quote→USDT = base_price/reference_price (как в legs()).
+    const skewTable = (() => {
+      const raw = (agentPositions || []).filter((p) => p.agent_id === agentId);
+      // Позиция = обязательство c_j + in_flight (k-USDT → USDT) — от неё считается сдвиг;
+      // в ед. 2-й валюты = USDT / курс, знак как у обязательства. Арбитражёр (ADR-069) хранит
+      // позицию по ногам (строка ledger на биржу) и c_total в строке списка нет — берём Σ ног
+      // и отдаём сами ноги (нетто ≈ 0 скрывает размер ног).
+      const positionOf = (qUsd) => {
+        const legK = (p) => (Number(p.position) || 0) + (Number(p.in_flight) || 0);  // k-USDT
+        // Позиция по 1-й (базовой) валюте = −(USDT-номинал / P(base)); ЗНАК противоположен
+        // котируемой ноге: держишь базовую (+) ⇔ должен котируемую (−), как pos_base/pos_quote
+        // в главной таблице. null, если нет курса базы. baseUsdt определён ниже (8016),
+        // positionOf вызывается после его инициализации (8030).
+        const baseAmt = (usdtVal) => (baseUsdt > 0 ? -(usdtVal / baseUsdt) : null);
+        if (agent.agent_kind === "arbitrageur" && raw.length) {
+          const sumK = raw.reduce((s, p) => s + legK(p), 0);
+          return {
+            usdt: sumK * 1000, quote: (sumK * 1000) / qUsd, base: baseAmt(sumK * 1000),
+            legs: raw.map((p) => ({ venue: p.venue, usdt: legK(p) * 1000, quote: (legK(p) * 1000) / qUsd, base: baseAmt(legK(p) * 1000) })),
+          };
+        }
+        return { usdt: c * 1000, quote: (c * 1000) / qUsd, base: baseAmt(c * 1000), legs: null };
+      };
+      const withRef = raw.find((p) => Number(p.reference_price) > 0) || raw[0] || null;
+      const quoteCcy = agent.quote && agent.quote.length ? agent.quote : "USDT";
+      // Перенос номинала (A_USDT_*): актив — сам USDT, пары и цены нет; якорь = 1 USDT.
+      const isNumeraire = agent.base === "USDT";
+      const P = isNumeraire ? 1 : (withRef ? Number(withRef.reference_price) : 0);   // цена якоря, ед. quote
+      const baseUsdt = isNumeraire ? 1 : (withRef ? Number(withRef.base_price) : 0); // P(base) в USDT
+      const quoteIsUsdt = quoteCcy === "USDT";
+      const qUsdt = quoteIsUsdt ? 1 : ((P > 0 && baseUsdt > 0) ? baseUsdt / P : 0);  // 1 quote = qUsdt USDT
+      if (!(P > 0) || !(qUsdt > 0) || !Number.isFinite(priceShiftPm)) {
+        return { available: false, quote: quoteCcy, reason: !(P > 0) ? "нет цены пары у агента" : "нет курса второй валюты к USDT" };
+      }
+      const shifted = P * Math.exp(priceShiftPm / 1000);
+      const delta = shifted - P;
+      return {
+        available: true, quote: quoteCcy, base: agent.base || '', quoteUsdt: qUsdt, shiftPm: priceShiftPm,
+        note: isNumeraire ? "перенос номинала: якорь = 1 USDT (сам номинал), сдвиг — по формуле позиции" : null,
+        anchor: { quote: P, usdt: P * qUsdt },
+        delta: { quote: delta, usdt: delta * qUsdt },
+        shifted: { quote: shifted, usdt: shifted * qUsdt },
+        position: positionOf(qUsdt),
+        // Три порога позиции (по модулю), K USDT → USDT и ед. 2-й валюты: Z̄lim (вход в
+        // хедж, мейкер), Z̄mkt (тейкер-сброс), пол полосы q_floor. Те же значения, что
+        // считает ledger (плоские; динамический масштаб — отдельный блок volatility).
+        thresholds: {
+          zLim: { usdt: zLim * 1000, quote: (zLim * 1000) / qUsdt },
+          zMkt: { usdt: zMkt * 1000, quote: (zMkt * 1000) / qUsdt },
+          floor: { usdt: qFloor * 1000, quote: (qFloor * 1000) / qUsdt },
+        },
+      };
+    })();
     return writeJson(res, 200, {
-      agent, skew: { gamma, clamp, skewPm, priceShiftPm },
+      agent, skew: { gamma, clamp, skewPm, priceShiftPm }, skewTable,
       band: { q, zLim, zMkt, aggressive, applies: true, absC, excess, breached },
       volatility,  // F-18 D1+#7 (704): σ актива + превью динамического порога Γ=γσ²τ (null = нет σ)
       hedge, generatedAt: new Date().toISOString()
@@ -8028,10 +8116,14 @@ async function handleVectorClearing(req, res, pathname, query) {
       if (!curve) return writeJson(res, 404, { error: "not_found" });
       // F-05A #3: агрегатные кривые всех площадок пары (all + all-кроме-этой). Best-effort:
       // при ошибке/одной площадке — просто не добавляем (фронт скроет тумблеры).
-      try {
-        const agg = await fetchAggregateCurves(symbol, venue, query && query.ts, opts);
-        if (agg) Object.assign(curve, agg);
-      } catch (_) { /* агрегат опционален */ }
+      // ?light=1 — без агрегатов по всем площадкам (панель «Торговля» рисует только кривую
+      // этой биржи; агрегаты дороги: ~4 с против <1 с).
+      if (!(query && query.light === "1")) {
+        try {
+          const agg = await fetchAggregateCurves(symbol, venue, query && query.ts, opts);
+          if (agg) Object.assign(curve, agg);
+        } catch (_) { /* агрегат опционален */ }
+      }
       return writeJson(res, 200, curve);
     } catch (err) {
       console.error("[vector-clearing] curve failed:", err.message || err);
@@ -8274,7 +8366,8 @@ async function handleVenues(req, res, pathname, query) {
           if (Number.isFinite(p) && Number.isFinite(q) && p > 0 && q > 0) out.push({ p, q });
         }
         out.sort((a, b) => (isBid ? b.p - a.p : a.p - b.p));
-        return out.slice(0, depth);
+        // Накопленный объём и VWAP считает бэкенд (CALC-BOOK-VWAP), фронт только рисует.
+        return cumulativeBookVwap(out.slice(0, depth), "q").map((x) => ({ p: x.p, q: x.qty, cum: x.cum, vwap: x.vwap }));
       };
       const eventMs = Number(rows[0].event_time_ms);
       return writeJson(res, 200, {
@@ -8284,6 +8377,128 @@ async function handleVenues(req, res, pathname, query) {
       });
     } catch (e) {
       return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
+    }
+  }
+
+  // Панель Торговля (ADR-070, дополнение «динамический режим»): аренда глубокого опроса
+  // стакана. Панель раз в ~10 с шлёт набор (venue, symbol); venues опрашивает только их
+  // и выключает опрос сам, когда сигналы прекращаются (срок аренды). Лимит пар и срок
+  // ограничивает venues — BFF только проверяет форму и проксирует.
+  if (pathname === "/api/venues/depth-watch") {
+    try {
+      if (req.method === "GET") {
+        const r = await fetchJsonWithTimeout(`${VENUES_ADDR}/api/v1/depth-watch`, {}, 5000);
+        return writeJson(res, 200, r);
+      }
+      if (req.method === "POST") {
+        const body = await parseBody(req);
+        const raw = body && Array.isArray(body.items) ? body.items : null;
+        if (!raw) return writeJson(res, 400, { error: "items_required" });
+        const items = raw.slice(0, 64)
+          .map((i) => ({ venue: String((i && i.venue) || ""), symbol: String((i && i.symbol) || "") }))
+          .filter((i) => i.venue && i.symbol);
+        const ttl = Math.max(0, Math.min(60000, parseInt(body.ttl_ms, 10) || 30000));
+        const r = await fetchJsonWithTimeout(`${VENUES_ADDR}/api/v1/depth-watch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items, ttl_ms: ttl }),
+        }, 5000);
+        return writeJson(res, 200, r);
+      }
+      return writeJson(res, 405, { error: "method_not_allowed" });
+    } catch (e) {
+      if (e && e.status === 404) return writeJson(res, 404, { error: "endpoint_unavailable" });
+      return writeJson(res, 502, { error: "venues_error", message: String(e.message || e) });
+    }
+  }
+
+  // Панель Торговля (ADR-070, дополнение): кривые ликвидности ВСЕХ бирж по валюте (паре) и
+  // суммарные — Σ всех бирж и Σ всех бирж минус выбранная. Для каждой биржи берём прямую
+  // выбранного способа §6.2 из venues (ComputeSlopeMethods по глубокому стакану, по запросу),
+  // суммируем линейные ликвидности на бэкенде (slope_aggregate.js; формула как в
+  // fetchAggregateCurves на вкладке Clearing). Биржи без свежего глубокого стакана не
+  // считаются — возвращаем их списком missing с причиной (фронт покажет «учтено N из M»).
+  if (req.method === "GET" && pathname === "/api/venues/slope-curves-all") {
+    const sym = String((query && query.symbol) || "");
+    const exclude = String((query && query.exclude) || "");
+    const list = String((query && query.venues) || "").split(",").map((x) => x.trim())
+      .filter((x) => /^[A-Za-z0-9_.-]{1,32}$/.test(x)).slice(0, 12);
+    if (!sym || !list.length) return writeJson(res, 400, { error: "symbol and venues are required" });
+    const selectedMethod = await readClearingSlopeMethod();
+    let method = parseInt(query && query.method, 10);
+    if (!(method >= 1 && method <= 4)) method = selectedMethod;
+    const settled = await Promise.all(list.map(async (v) => {
+      try {
+        const d = await fetchJsonWithTimeout(
+          `${VENUES_ADDR}/api/v1/venues/${encodeURIComponent(v)}/slope-curves?symbol=${encodeURIComponent(sym)}&levels=0`, {}, 8000);
+        const m = (d.methods || []).find((x) => Number(x.method) === method);
+        if (!m || !(Number(m.beta_t) > 0)) return { venue: v, missing: "insufficient_book" };
+        return { venue: v, anchor: Number(d.mid), betaT: Number(m.beta_t), alphaExt: Number(m.alpha_ext),
+                 levelsBid: d.levels_bid, levelsAsk: d.levels_ask, depthBid: d.depth_bid, depthAsk: d.depth_ask,
+                 eventTimeMs: Number(d.timestamp_ms) };
+      } catch (e) {
+        let code = "venues_error";
+        if (e && (e.status === 404 || e.status === 422)) {
+          let body = {}; try { body = JSON.parse(e.body || "{}"); } catch (_) { /* не JSON */ }
+          code = body.error || "endpoint_unavailable";
+        }
+        return { venue: v, missing: code };
+      }
+    }));
+    const have = settled.filter((x) => !x.missing);
+    const agg = aggregateLines(have, exclude);
+    return writeJson(res, 200, {
+      symbol: sym, method, selectedMethod, exclude,
+      venues: agg.lines.map((l) => {
+        const src = have.find((x) => x.venue === l.venue) || {};
+        return { venue: l.venue, anchor: l.anchor, betaT: l.betaT, k: l.k, c: l.c,
+                 levelsBid: src.levelsBid, levelsAsk: src.levelsAsk, depthBid: src.depthBid, depthAsk: src.depthAsk,
+                 eventTimeMs: src.eventTimeMs };
+      }),
+      missing: settled.filter((x) => x.missing).map((x) => ({ venue: x.venue, reason: x.missing })),
+      requested: list.length,
+      all: agg.all,   // {k, c, count}: q_Σ(p) = k·p + c
+      ex: agg.ex,     // {k, c, count, excluded}: Σ без выбранной биржи
+    });
+  }
+
+  // Панель Торговля (ADR-070, дополнение): кривые ликвидности — те же 4 способа §6.2
+  // (M1 касательная, M2 МНК, M3 по выгоде, M4 минорант), что на вкладке Clearing, но по
+  // ГЛУБОКОМУ стакану быстрой полосы, ПО ЗАПРОСУ с фронта, не в цикле. Считает сервис
+  // venues (ComputeSlopeMethods == SetSafeTranslator) — BFF формулы не дублирует: только
+  // проксирует и добавляет выбранный клирингом способ (f05a_clearing_config.slope_method).
+  // Кривая каждого способа — ПРЯМАЯ P(q) = anchor + β·q на всю ось (q со знаком: ask +).
+  if (req.method === "GET" && pathname === "/api/venues/slope-curves") {
+    const v = String((query && query.venue) || "");
+    const s = String((query && query.symbol) || "");
+    if (!v || !s) return writeJson(res, 400, { error: "venue and symbol are required" });
+    const levels = Math.max(0, parseInt((query && query.levels), 10) || 0);
+    try {
+      const url = `${VENUES_ADDR}/api/v1/venues/${encodeURIComponent(v)}/slope-curves`
+        + `?symbol=${encodeURIComponent(s)}&levels=${levels}`;
+      const r = await fetchJsonWithTimeout(url, {}, 8000);
+      const data = r && (r.json || r.data || r);
+      if (!data || data.error) return writeJson(res, 404, { error: (data && data.error) || "not_found" });
+      const selectedMethod = await readClearingSlopeMethod();
+      return writeJson(res, 200, {
+        venue: data.venue_id, symbol: data.symbol, event_time_ms: Number(data.timestamp_ms),
+        anchor: data.mid,   // якорь прямой = mid снимка (как у клиринга)
+        levels_requested: data.levels_requested, levels_bid: data.levels_bid, levels_ask: data.levels_ask,
+        depth_bid: data.depth_bid, depth_ask: data.depth_ask,
+        selectedMethod,
+        methods: (data.methods || []).map((m) => ({
+          method: m.method, betaT: m.beta_t, alphaExt: m.alpha_ext,
+          alphaExtBid: m.alpha_ext_bid, alphaExtAsk: m.alpha_ext_ask,
+        })),
+      });
+    } catch (e) {
+      // 404 (нет глубокого стакана) / 422 (пустая сторона) от venues — пробрасываем как есть.
+      if (e && (e.status === 404 || e.status === 422)) {
+        let body = {}; try { body = JSON.parse(e.body || "{}"); } catch (_) { /* не JSON */ }
+        // Пустое тело 404 = у venues нет такой ручки (старая версия сервиса), а не «нет данных».
+        return writeJson(res, e.status, { error: body.error || "endpoint_unavailable" });
+      }
+      return writeJson(res, 502, { error: "venues_error", message: String(e.message || e) });
     }
   }
 

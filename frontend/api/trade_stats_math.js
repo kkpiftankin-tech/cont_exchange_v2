@@ -12,10 +12,19 @@
 //   pnl_quote    = Σ s·(p_exec−p_int)·q = sell_pnlbase − buy_pnlbase (в валюте quote)
 function combineTradeStats(raw) {
   const n = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  // ADR-072 §C / CALC-CE-TRANSLATOR-PNL: realized P&L на ЗАКРЫТОМ объёме round-trip
+  // = min(B,S)·(avg_pS − avg_pB), в валюте quote. B/S — объёмы buy/sell (base),
+  // avg_pB/avg_pS — средние цены. Нарастает только при закрытии (unrealized — остаток,
+  // считается в BFF как (R+U) − R). Нужно, чтобы заработок был ВИДЕН отдельно от MTM.
+  const B = n(raw.buy_base), S = n(raw.sell_base);
+  const avgB = B > 0 ? n(raw.buy_notional) / B : 0;
+  const avgS = S > 0 ? n(raw.sell_notional) / S : 0;
+  const realized_quote = Math.min(B, S) * (avgS - avgB);
   return {
     traded_base: n(raw.buy_base) - n(raw.sell_base),
     traded_quote: n(raw.sell_notional) - n(raw.buy_notional),
     pnl_quote: n(raw.sell_pnlbase) - n(raw.buy_pnlbase),
+    realized_quote,
     trade_fills: n(raw.fills),
   };
 }

@@ -25,6 +25,8 @@ check('base = -0.2 (BUY +, SELL -)', near(s.traded_base, -0.2));
 check('quote = +510 (SELL +, BUY -)', near(s.traded_quote, 510));
 check('pnl_quote = +6 (s·(p_exec-p_int)·q)', near(s.pnl_quote, 6));
 check('fills = 2', s.trade_fills === 2);
+// ADR-072 §C: realized = min(B,S)·(avg_pS−avg_pB) = min(0.2,0.4)·(2510−2470) = 0.2·40 = +8
+check('realized_quote = +8 (закрытый объём 0.2 × спред 40)', near(s.realized_quote, 8));
 
 // Знаки в отдельности: чистый SELL (short base, +quote, прибыль если p_exec>p_int)
 const sell = combineTradeStats({ sell_base: 1, sell_notional: 100, sell_pnlbase: 5, buy_base: 0, buy_notional: 0, buy_pnlbase: 0, fills: 1 });
@@ -35,6 +37,12 @@ const buy = combineTradeStats({ buy_base: 1, buy_notional: 100, buy_pnlbase: 5, 
 check('pure BUY: base>0', buy.traded_base === 1);
 check('pure BUY: quote<0', buy.traded_quote === -100);
 check('pure BUY: pnl знак инвертирован (−5)', buy.pnl_quote === -5);
+// ADR-072 §C realized: односторонние сделки ⇒ нет закрытого объёма ⇒ realized=0 (только unrealized).
+check('pure SELL: realized=0 (нет закрытого объёма)', sell.realized_quote === 0);
+check('pure BUY: realized=0 (нет закрытого объёма)', buy.realized_quote === 0);
+// Закрытый round-trip: купил 1 @100, продал 1 @110 ⇒ realized = min(1,1)·(110−100) = +10.
+const rt = combineTradeStats({ buy_base: 1, buy_notional: 100, sell_base: 1, sell_notional: 110, buy_pnlbase: 0, sell_pnlbase: 0, fills: 2 });
+check('round-trip: realized = +10 (1×(110−100))', near(rt.realized_quote, 10));
 
 // Конверсия в USDT: */USDT (price==basePrice ⇒ ×1)
 check('USDT pair: pnl_usdt == pnl_quote', pnlQuoteToUsdt(6, 2500, 2500) === 6);

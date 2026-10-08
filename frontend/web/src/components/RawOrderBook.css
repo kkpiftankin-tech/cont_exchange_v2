@@ -37,3 +37,21 @@
 .rob-reset:disabled { opacity: .4; cursor: default; }
 .rob-range { color: #94a3b8; font-size: 11px; padding: 0 6px 4px; }
 .rob-chart { cursor: ns-resize; }
+.rob-zero { stroke: #94a3b8; stroke-width: 1.2; }
+.rob-vwap-bid, .rob-vwap-ask { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.rob-vwap-bid { stroke: #7ef0c4; }
+.rob-vwap-ask { stroke: #ffa3b1; }
+.rob-lg { margin-right: 10px; font-weight: 600; }
+.rob-lg-vwap-bid { color: #7ef0c4; }
+.rob-lg-vwap-ask { color: #ffa3b1; }
+.rob-curves { display: flex; gap: 12px; align-items: center; padding: 4px 6px 6px; color: #94a3b8; flex-wrap: wrap; }
+.rob-curves label { display: flex; gap: 4px; align-items: center; cursor: pointer; color: #e5e7eb; }
+.rob-err { color: #f6465d; }
+.rob-fob-ask, .rob-fob-bid, .rob-safe-ask, .rob-safe-bid { fill: none; stroke-linejoin: round; }
+.rob-fob-ask { stroke: #d88fb0; stroke-width: 1.4; stroke-dasharray: 5 3; }
+.rob-fob-bid { stroke: #4fb0d8; stroke-width: 1.4; stroke-dasharray: 5 3; }
+.rob-safe-ask { stroke: #ffd36b; stroke-width: 2.2; }
+.rob-safe-bid { stroke: #ffd36b; stroke-width: 2.2; }
+.rob-lg-fob { color: #d88fb0; }
+.rob-lg-safe { color: #ffd36b; }
+.rob-slope { fill: none; stroke-width: 2.2; }
