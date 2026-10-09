@@ -166,3 +166,11 @@ $0{,}919$ — IN-017 §11). Прямого unit-теста ЭТОЙ формул
    (`ce_inv_skew_gamma`) теперь действует только на CE-канал (виртуальная цена). Realized/
    unrealized P&L переводчика — [CALC-CE-TRANSLATOR-PNL](CALC-CE-TRANSLATOR-PNL.md). Код:
    `matching_loop.cpp` (fair_price), `ledger_uc.cpp#detect_and_emit_band_breach_locked` (клэмп).
+8. **Единый источник порога (наведение порядка, 2026-10-09, фаза 1).** Порог `Z̄lim/Z̄mkt`
+   считается **только** в ledger `detect_and_emit_band_breach_locked` (per-currency: σ по
+   активу `LoadAssetSigma`, depth по активу/venue, vol/liq/omega-масштаб ADR-066) и
+   сохраняется в `AgentPositionState.z_lim/z_mkt` → отдаётся в `GetAgentPositions.z_lim/z_mkt`
+   (proto 13/14). BFF/фронт **только отображают** эти значения, НЕ пересчитывают (ранее BFF
+   считал свой ПЛОСКИЙ порог `kBand·fee` + отдельный vol-preview → дисплей≠реальность; баг
+   усугублялся падением config-SELECT на отсутствующей колонке `gamma`, см. миграцию init.sql).
+   Фаза 2 (план): консолидировать band-конфиг env→`f05a_clearing_config` (одно место установки).

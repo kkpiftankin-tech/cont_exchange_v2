@@ -7166,6 +7166,8 @@ async function fetchAgentPositions() {
       reference_price: decToNum(p.reference_price),  // цена ПАРЫ P(base)/P(quote) (номинал ⇒ P(base))
       base_price: decToNum(p.base_price),  // P(base) USDT — абсолют для разложения ног
       realized_vs_fair: decToNum(p.realized_vs_fair),  // ADR-072 §C: заработок vs F_0 (quote)
+      z_lim: decToNum(p.z_lim),  // единый источник порога из ledger (per-currency, k-USDT) — не пересчитываем
+      z_mkt: decToNum(p.z_mkt),
       position: decToNum(p.position),
       in_flight: decToNum(p.in_flight),
       updated_at_ms: Number(p.updated_at_ms) || 0,  // unix ms последнего изменения (свежесть стадии «Позиции»)
@@ -7936,9 +7938,13 @@ async function handleVectorClearing(req, res, pathname, query) {
     // ADR-069: rt=1 на ногу для ВСЕХ агентов (как в ledger detect_and_emit_band_breach_locked):
     // арбитражёр держит две ноги — по одной taker-комиссии на биржу; прежний rt=2 задваивал порог.
     const rt = 1;
-    const qFloor = 5;  // = CE_AGENT_BAND_Q_MIN
-    const zLim = Math.max(qFloor, kBand * climBps * rt);
-    const zMkt = Math.max(zLim, kBand * cmktBps * rt);
+    const qFloor = 5;  // = CE_AGENT_BAND_Q_MIN (для fallback, если ledger ещё не считал)
+    // ПОРЯДОК В ПОРОГАХ: единый источник — ledger (per-currency, vol/liq-масштаб), отдан
+    // в GetAgentPositions.z_lim/z_mkt. BFF их ТОЛЬКО отображает, НЕ пересчитывает. Плоский
+    // kBand·fee — лишь fallback, пока ledger не вычислил порог по агенту (z_lim=0).
+    const posRaw = (agentPositions || []).find((p) => p.agent_id === agentId) || {};
+    const zLim = (Number(posRaw.z_lim) > 0) ? Number(posRaw.z_lim) : Math.max(qFloor, kBand * climBps * rt);
+    const zMkt = (Number(posRaw.z_mkt) > 0) ? Number(posRaw.z_mkt) : Math.max(zLim, kBand * cmktBps * rt);
     const q = zLim;  // порог входа = Z̄lim (совместимость с фронтом b.q)
     const absC = Math.abs(c);
     const excess = absC - q;

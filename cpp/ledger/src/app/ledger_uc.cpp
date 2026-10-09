@@ -1003,6 +1003,8 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     *p->mutable_reference_price() = st.last_price.to_proto();  // цена ПАРЫ P(base)/P(quote)
     *p->mutable_base_price() = st.base_price.to_proto();        // P(base) USDT (разложение ног)
     *p->mutable_realized_vs_fair() = st.realized_vs_fair.to_proto();  // ADR-072 §C: заработок vs F_0 (quote)
+    *p->mutable_z_lim() = st.z_lim.to_proto();   // единый источник порога (per-currency), k-USDT
+    *p->mutable_z_mkt() = st.z_mkt.to_proto();
     p->set_quote(st.quote);                                    // котируемая пары (номинал ⇒ "USDT")
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
@@ -1792,6 +1794,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
         ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 1.0)   // ADR-069: rt=1 на ногу
         : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
     const Decimal q_n{static_cast<int64_t>(std::llround(z_lim_n * 1e6)), 6};
+    st.z_lim = q_n; st.z_mkt = q_n;  // единый источник порога (нумерарий: без тейкер-зоны)
     const Decimal abs_c_n = Decimal::cmp(st.position, zero) >= 0 ? st.position
                                                                  : Decimal::sub(zero, st.position);
     const Decimal excess_n = Decimal::sub(abs_c_n, q_n);
@@ -1914,6 +1917,10 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   }
   // Порог входа в хедж = Z̄lim; scale 6 для дробного порога от комиссии.
   const Decimal q{static_cast<int64_t>(std::llround(z_lim * 1e6)), 6};
+  // Единственный источник порога: сохраняем вычисленные (per-currency, vol/liq/omega-
+  // масштаб) z_lim/z_mkt в стейт → GetAgentPositions отдаёт их на фронт. BFF не считает.
+  st.z_lim = q;
+  st.z_mkt = Decimal{static_cast<int64_t>(std::llround(z_mkt * 1e6)), 6};
   const Decimal abs_c = Decimal::cmp(st.position, zero) >= 0 ? st.position
                                                              : Decimal::sub(zero, st.position);
   // Модель A7: избыток эмиссии УЖЕ вычтен из c (c -= excess ниже), поэтому c — это

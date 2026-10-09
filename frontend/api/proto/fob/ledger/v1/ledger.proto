@@ -370,6 +370,12 @@ message AgentPosition {
   // BUY (F_0−avg)·q, суммарно по подтверждённым хедж-филлам. Аддитивно, 0 до
   // первого филла. BFF переводит quote→USDT и показывает как "заработок".
   fob.common.v1.Decimal realized_vs_fair = 12;
+  // Порядок в порогах (одно место расчёта — ledger, per-currency, vol/liq-масштаб
+  // ADR-066): фактические z_lim (Z̄lim, вход в хедж) и z_mkt (Z̄mkt, тейкер-сброс),
+  // k-USDT. BFF/фронт ОТОБРАЖАЮТ их и НЕ пересчитывают (устранение дисплей≠реальность).
+  // 0 до первого расчёта порога по агенту.
+  fob.common.v1.Decimal z_lim = 13;
+  fob.common.v1.Decimal z_mkt = 14;
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;
