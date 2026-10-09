@@ -1040,6 +1040,11 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_arb_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 50;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_fee_k NUMERIC(38,18) NOT NULL DEFAULT 1.8;
+-- capital-cap γ (α=W/(γσ²τ), ADR-066). Есть в CREATE TABLE, но тома, созданные ДО
+-- его добавления, остаются без колонки → SELECT с `gamma` (BFF agent-detail) падает
+-- и дисплей молча откатывается на дефолты (пороги/skew не отражают живой конфиг).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS gamma NUMERIC(38,18) NOT NULL DEFAULT 1;
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
 ALTER TABLE f05a_clearing_config
