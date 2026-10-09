@@ -105,3 +105,15 @@ message Error {
   string message = 2;  // human-readable
   string details = 3;  // optional payload
 }
+
+// §6.2 «Кривые котирования внутренних маркет-мейкеров CE»: линейный наклон
+// α_ext снимается из одного стакана четырьмя способами. MINORANT — дефолт и
+// единственный, удовлетворяющий §6.3 (αT≤αext поточечно, «целиком под
+// лестницей»); M1–M3 точнее трекают VWAP, но могут локально переобещать глубину.
+enum SlopeMethodKind {
+  SLOPE_METHOD_UNSPECIFIED = 0;
+  SLOPE_METHOD_TANGENT = 1;      // M1 касательная: D_1/δ_1
+  SLOPE_METHOD_LSQ_BAND = 2;     // M2 МНК на рабочей полосе (OLS со свободным членом)
+  SLOPE_METHOD_PROFIT_AREA = 3;  // M3 подгонка по выгоде (площади под кривыми)
+  SLOPE_METHOD_MINORANT = 4;     // M4 консервативный минорант min_k D_k/δ_k (дефолт)
+}

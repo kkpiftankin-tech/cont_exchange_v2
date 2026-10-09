@@ -365,6 +365,11 @@ message AgentPosition {
   // P_quote=base_price/reference_price) нужна одна абсолютная цена. Номинал ⇒
   // base_price=reference_price=P_base. 0 у арбитражёров/до первой дельты.
   fob.common.v1.Decimal base_price = 11;
+  // ADR-072 §C: накопленный РЕАЛЬНЫЙ заработок агента на внешних сделках
+  // относительно справедливой цены F_0 (в валюте quote): SELL (avg−F_0)·q +
+  // BUY (F_0−avg)·q, суммарно по подтверждённым хедж-филлам. Аддитивно, 0 до
+  // первого филла. BFF переводит quote→USDT и показывает как "заработок".
+  fob.common.v1.Decimal realized_vs_fair = 12;
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;

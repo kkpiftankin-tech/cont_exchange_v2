@@ -7041,20 +7041,26 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
       // tradedBasketUsdt): net_base·P(base)_USDT + net_quote·P(quote)_USDT. Прежняя
       // (avg−limit)-slippage метрика (pnlQuoteToUsdt/pnl_quote) была околонулевой по
       // построению; оставлена как pnl_exec_slip для диагностики исполнения.
+      // ADR-072 §C: РЕАЛЬНЫЙ заработок переводчика на внешних сделках vs F_0 (ledger
+      // realized_vs_fair, quote→USDT) — честная метрика «отображаем что получается».
+      // Доступна даже без tradeStats-окна (накоплена в ledger). Арбитражёр: нет F_0 ⇒
+      // остаётся round-trip ниже.
+      realized_usdt: (b.realized_vs_fair != null && Number.isFinite(Number(b.realized_vs_fair)))
+        ? pnlQuoteToUsdt(b.realized_vs_fair, basePrice, price) : null,
       ...((() => {
         const t = ts.get(b.agent_id);
         if (!t) return {};
-        // ADR-072 §C: realized (R, закрытые round-trip — НАРАСТАЕТ, это заработок) отдельно
-        // от unrealized (U = (R+U) − R, MTM открытого остатка — болтается с маркой).
+        // pnl_usdt = MTM корзины (R+U, прежняя метрика); realized берём из ledger
+        // (realized_vs_fair, выше), unrealized = R+U − realized.
         const rpu = tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price);
-        const rlz = pnlQuoteToUsdt(t.realized_quote, basePrice, price);
+        const rfair = (b.realized_vs_fair != null && Number.isFinite(Number(b.realized_vs_fair)))
+          ? pnlQuoteToUsdt(b.realized_vs_fair, basePrice, price) : null;
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
-          pnl_usdt: rpu,                                                    // R+U (MTM корзины, прежняя метрика)
-          realized_usdt: rlz,                                              // R: реализованный заработок
-          unrealized_usdt: (rpu != null && rlz != null) ? rpu - rlz : null, // U: MTM открытого остатка
-          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),  // диагностика: fill vs лимит
+          pnl_usdt: rpu,                                                     // R+U (MTM корзины)
+          unrealized_usdt: (rpu != null && rfair != null) ? rpu - rfair : null, // U = R+U − R
+          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),   // диагностика: fill vs лимит
           trade_fills: t.trade_fills,
         };
       })()),
@@ -7159,6 +7165,7 @@ async function fetchAgentPositions() {
       quote: p.quote || "",              // котируемая валюта пары (переводчик; номинал ⇒ USDT)
       reference_price: decToNum(p.reference_price),  // цена ПАРЫ P(base)/P(quote) (номинал ⇒ P(base))
       base_price: decToNum(p.base_price),  // P(base) USDT — абсолют для разложения ног
+      realized_vs_fair: decToNum(p.realized_vs_fair),  // ADR-072 §C: заработок vs F_0 (quote)
       position: decToNum(p.position),
       in_flight: decToNum(p.in_flight),
       updated_at_ms: Number(p.updated_at_ms) || 0,  // unix ms последнего изменения (свежесть стадии «Позиции»)

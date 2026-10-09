@@ -112,6 +112,19 @@ message SafeTranslator {
   fob.common.v1.Decimal q_bid = 8;  // суммарная глубина bid (Q_bid)
   fob.common.v1.Decimal q_ask = 9;  // суммарная глубина ask (Q_ask)
   string model = 10;                // "safe_vwap_raw" | "safe_vwap_fob"
+  // §6.2: наклон снят всеми 4 способами (диагностика/display). selected_method —
+  // какой свёрнут в slope(3)/alpha_ext(4)/beta_t(6). Только MINORANT §6.3-safe.
+  repeated SafeTranslatorSlopeEstimate slope_methods = 11;
+  fob.common.v1.SlopeMethodKind selected_method = 12;
+}
+
+// §6.2: оценка наклона одним способом (display-слой венью, double — до матчинга).
+message SafeTranslatorSlopeEstimate {
+  fob.common.v1.SlopeMethodKind method = 1;
+  double alpha_ext_bid = 2;
+  double alpha_ext_ask = 3;
+  double alpha_ext = 4;   // combined
+  double beta_t = 5;      // mid²/(1e4·α_T) для этого способа
 }
 
 // Execution side for liquidity curves
