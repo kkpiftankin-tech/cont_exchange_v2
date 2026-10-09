@@ -1002,6 +1002,7 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     *p->mutable_in_flight() = st.in_flight.to_proto();
     *p->mutable_reference_price() = st.last_price.to_proto();  // цена ПАРЫ P(base)/P(quote)
     *p->mutable_base_price() = st.base_price.to_proto();        // P(base) USDT (разложение ног)
+    *p->mutable_realized_vs_fair() = st.realized_vs_fair.to_proto();  // ADR-072 §C: заработок vs F_0 (quote)
     p->set_quote(st.quote);                                    // котируемая пары (номинал ⇒ "USDT")
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
@@ -1960,31 +1961,16 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   breach.set_side(pos_positive ? "SELL" : "BUY");
   *breach.mutable_excess_value() = excess.to_proto();     // модуль, k-USDT
   *breach.mutable_base_price() = st.base_price.to_proto(); // P(base) USDT
-  // ADR-072 §A: лимит хеджа = F_0 ± eff. Сдвиг цены ОСТАЁТСЯ (eff сжимается с ростом
-  // инвентаря — цена едет к F_0), но НЕ уходит за границу прибыли (инвариант A1:
-  // SELL ≥ F_0, BUY ≤ F_0, т.к. eff ≥ 0):
-  //   m   = F_0·(CE_HEDGE_MARGIN_BPS/1e4) — целевая маржа прибыли (квота при плоской позиции);
-  //   urg = min(1, |c|/Z̄mkt)             — инвентарная срочность (0 плоско → 1 в taker-зоне);
-  //   eff = m·(1−urg)                     — maker-зона: квота с маржой; taker-зона: eff→0 (слив по F_0).
-  // В sim (ADR-060) SELL@(F_0+eff) исполняется о принты ≥ лимита ⇒ продажа ВЫШЕ fair = прибыль.
-  // Нет F_0 (fair_price=0: старый matching/arbitrageur) ⇒ фолбэк на st.last_price (прежнее поведение).
-  Decimal hedge_limit = st.last_price;
-  if (st.fair_price.units != 0) {
-    double margin_bps = 5.0;  // целевая маржа, bps от F_0 (env-настраиваемо)
-    if (const auto s = cex::common::Env::try_get_string("CE_HEDGE_MARGIN_BPS")) {
-      try { margin_bps = std::stod(*s); } catch (...) { margin_bps = 5.0; }
-    }
-    // Валидация: stod принимает inf/nan/огромные (catch их не ловит) ⇒ ограничиваем,
-    // иначе eff_frac·1e8 выйдет за int64 (UB в llround) и A1 нарушится.
-    if (!std::isfinite(margin_bps) || margin_bps < 0.0 || margin_bps > 1000.0) margin_bps = 5.0;
-    const double urg = (z_mkt > 0.0) ? std::min(1.0, static_cast<double>(abs_c) / z_mkt) : 1.0;
-    const double eff_frac = std::max(0.0, (margin_bps / 1e4) * (1.0 - urg));
-    const Decimal offset = Decimal::mul(
-        st.fair_price, Decimal{static_cast<int64_t>(std::llround(eff_frac * 1e8)), 8});
-    hedge_limit = pos_positive ? Decimal::add(st.fair_price, offset)
-                               : Decimal::sub(st.fair_price, offset);
-  }
-  *breach.mutable_pair_price() = hedge_limit.to_proto(); // цена пары (лимит F_0±eff, A1)
+  // ADR-072 (пересмотр 2026-10-08): лимит хеджа = ЦЕНА БИРЖИ (st.last_price, узловая
+  // клиринговая цена со skew) — переводчик физически торгует по цене СВОЕЙ площадки,
+  // поэтому только такой лимит пересекает публичные сделки и ИСПОЛНЯЕТСЯ. Клэмп к fair
+  // (F_0±m) отклонён: он уводил лимит с распределения сделок биржи (P_v≠F_0) →
+  // none_cross_limit → 0 филлов. «Продать по fair на одной бирже» невозможно — это
+  // роль арбитражёра (торговля МЕЖДУ биржами). Заработок vs fair МЕРИТСЯ отдельно
+  // (st.realized_vs_fair, честно ±), не навязывается лимитом. F_0 (st.fair_price) —
+  // только для метрики заработка, не для цены заявки.
+  const Decimal& hedge_limit = st.last_price;
+  *breach.mutable_pair_price() = hedge_limit.to_proto(); // цена пары (лимит = цена биржи, исполняется)
   breach.set_batch_id(batch_id);
   breach.set_event_time_ms(ts_ms);
   breach.set_aggressive(aggressive);   // зона: taker (агрессив) | maker (пассив)
@@ -2041,6 +2027,16 @@ bool LedgerUseCases::apply_agent_band_report_locked(
                                            : magnitude;
     st.in_flight = Decimal::add(st.in_flight, if_delta);   // позицию НЕ трогаем (A7)
     hedge.filled_value = Decimal::add(hedge.filled_value, filled_incr);
+    // ADR-072 §C: РЕАЛЬНЫЙ заработок на внешней сделке vs fair. По модели владельца
+    // CE-позиция виртуальна («куплена» по F_0), внешний филл реализует кэш по
+    // average_price (цена пары). SELL: (avg−F_0)·q; BUY: (F_0−avg)·q — накопительно
+    // в quote. Клэмп A1 (лимит ≥/≤ F_0) ⇒ вклад ≥0, но пишем как есть (честно).
+    if (st.fair_price.units != 0 && average_price.units != 0) {
+      const Decimal diff = sent_positive ? Decimal::sub(average_price, st.fair_price)
+                                         : Decimal::sub(st.fair_price, average_price);
+      st.realized_vs_fair =
+          Decimal::add(st.realized_vs_fair, Decimal::mul(diff, incr_filled_qty));
+    }
     if (agent_position_repo_)
       agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta, ts_ms);
     // F-18 #6 (T-F18-804): РАСЧЁТНАЯ band-комиссия зоны на инкремент (quote):

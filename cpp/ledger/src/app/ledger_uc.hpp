@@ -396,6 +396,7 @@ class LedgerUseCases {
     cex::common::Decimal last_price{0, 0}; // ЦЕНА ПАРЫ P(base)/P(quote) последней дельты (СО skew)
     cex::common::Decimal base_price{0, 0}; // P(base) USDT (для объёма заявки)
     cex::common::Decimal fair_price{0, 0}; // ADR-072: F_0 = цена пары ДО skew (граница прибыли); 0 ⇒ нет
+    cex::common::Decimal realized_vs_fair{0, 0}; // ADR-072 §C: накопл. заработок на внешних сделках vs F_0 (quote), SELL:(avg−F_0)·q / BUY:(F_0−avg)·q
     std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
     std::string last_batch_id;
     long long updated_at_ms{0};
