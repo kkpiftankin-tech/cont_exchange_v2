@@ -29,6 +29,7 @@ CALC — это единица, которую можно проверить з�
 | [CALC-F11-BOOK-VWAP](CALC-BOOK-VWAP.md) | Кумулятивный VWAP по уровням стакана биржи | `implemented` | `frontend/api/book_vwap.js#cumulativeBookVwap` | `/main` (график глубины), `/vector-clearing-live` |
 | [CALC-F05A-SLOPE-ONDEMAND](CALC-F05A-SLOPE-ONDEMAND.md) | Кривые ликвидности M1–M4 по глубокому стакану по запросу | `implemented` | `cpp/venues/src/app/liquidity_curve_producer.cpp#ComputeSlopeMethods` | `/main` (график глубины) |
 | [CALC-CE-TRANSLATOR-PNL](CALC-CE-TRANSLATOR-PNL.md) | Прибыль переводчика — realized (закрытые round-trip) + unrealized (MTM остатка) | `proposed` — формула в ADR-072 §C; код считает только агрегат R+U | `frontend/api/trade_stats_math.js#tradedBasketUsdt`, `frontend/api/server.js#fetchAgentTradeStats` | `/vector-clearing` (разбор агента) |
+| [CALC-CE-SKEW-BAND-CALIBRATION](CALC-CE-SKEW-BAND-CALIBRATION.md) | Калибровка порога (band) + сдвига цены (skew γ_s) под максимум заработка (IN-017 + свип) | `calibrated` — γ_s=0.006, z_lim=3.6 (live в f05a_clearing_config) | `cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked`, `cpp/matching/src/app/matching_loop.cpp` (skew) | `/vector-clearing` (realized R/U) |
 
 `status`: `implemented` (код и документ согласованы) / `planned` (формула
 описана, кода ещё нет) / `drift` (документ и код/несколько мест кода
