@@ -173,4 +173,13 @@ $0{,}919$ — IN-017 §11). Прямого unit-теста ЭТОЙ формул
    (proto 13/14). BFF/фронт **только отображают** эти значения, НЕ пересчитывают (ранее BFF
    считал свой ПЛОСКИЙ порог `kBand·fee` + отдельный vol-preview → дисплей≠реальность; баг
    усугублялся падением config-SELECT на отсутствующей колонке `gamma`, см. миграцию init.sql).
-   Фаза 2 (план): консолидировать band-конфиг env→`f05a_clearing_config` (одно место установки).
+9. **Конфиг порога в одном месте (наведение порядка, 2026-10-09, фаза 2).** Все ключевые
+   ручки порога — в `f05a_clearing_config`: `ce_band_fee_k` (k_band), `ce_maker/taker_fee_bps`
+   (clim/cmkt), `gamma`, + новые `ce_band_q_floor`, `ce_band_gamma_mode`, `ce_band_sigma_ref`,
+   `ce_band_vol_ratio_min/max`. ledger `LoadBandFeeConfig` читает их из PG (TTL-кэш ~1с), env —
+   только fallback. Два отдельных SELECT (core-4 и новые-5) в своих try/catch — отсутствие
+   новых колонок не роняет чтение core-4 (регрессия класса бага `gamma`). **Caveat деплоя:**
+   PG-значения АВТОРИТЕТНЫ и перебивают env (в т.ч. PG-дефолты на свежем томе перекроют
+   `CE_BAND_GAMMA_MODE`/`SIGMA_REF` env — переносить env→PG при миграции); применять `ALTER`
+   из init.sql на существующих томах ДО выката ledger. Остаточно (display-only): BFF vol-preview
+   ещё читает `sigma_ref` из env — разойдётся с PG после правки (actual-порог из ledger, не затронут).

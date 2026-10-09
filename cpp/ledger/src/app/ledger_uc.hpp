@@ -338,6 +338,11 @@ class LedgerUseCases {
   double band_cfg_cmkt_bps_ = 0.0;   // тейкер+½спред (агрессивная зона), bps
   double band_cfg_k_ = 0.0;          // 1/Γ — калибровка порога (k-USDT на bps)
   double band_cfg_gamma_ = 1.0;      // риск-неприятие γ (Γ=γσ²τ, ADR-066 D1)
+  double band_cfg_q_floor_ = 5.0;    // пол порога (k-USDT)
+  bool band_cfg_gamma_mode_ = false; // vol-масштаб порога вкл (ADR-066 D1)
+  double band_cfg_sigma_ref_ = 0.0005;    // σ-якорь VolScaleFactor
+  double band_cfg_vr_min_ = 0.1;     // клэмп vol-масштаба (мин)
+  double band_cfg_vr_max_ = 10.0;    // клэмп vol-масштаба (макс)
   std::chrono::steady_clock::time_point band_cfg_last_{};
   bool band_cfg_have_ = false;
 
@@ -454,7 +459,13 @@ class LedgerUseCases {
   // {clim_bps, cmkt_bps, k_band}: clim=мейкер (пассив), cmkt=тейкер+½спред (агрессив),
   // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (ADR-069: rt=1 на ногу).
   // Из f05a_clearing_config (TTL-кэш ~1с; при отсутствии DSN/колонок — env/дефолты).
-  struct BandFeeCfg { double clim_bps; double cmkt_bps; double k_band; double gamma; };
+  // Фаза 2 (наведение порядка): ВСЕ ключевые ручки порога — из f05a_clearing_config
+  // (одно место), env — fallback. q_floor (пол), gamma_mode (vol-масштаб вкл),
+  // sigma_ref/vol_ratio_min/max (параметры VolScaleFactor, ADR-066).
+  struct BandFeeCfg {
+    double clim_bps; double cmkt_bps; double k_band; double gamma;
+    double q_floor; bool gamma_mode; double sigma_ref; double vol_ratio_min; double vol_ratio_max;
+  };
   BandFeeCfg LoadBandFeeConfig();
 
   // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —

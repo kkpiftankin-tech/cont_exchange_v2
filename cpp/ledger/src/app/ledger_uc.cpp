@@ -1565,14 +1565,25 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   // плоский прокси 1/Γ при фиксир. σ,τ (D2); per-asset Γ=γσ²τ — целевой D1 (см. #7).
   const double def_k = env_d("CE_BAND_FEE_K", 1.8);                // 1/Γ (k-USDT на bps)
   const double def_gamma = env_d("CE_BAND_GAMMA", 1.0);  // γ риск-неприятия (Γ=γσ²τ, ADR-066)
+  // Фаза 2: ручки порога env-fallback (основной источник — PG ниже).
+  const double def_floor = env_d("CE_AGENT_BAND_Q_MIN", 5.0);      // пол порога (k-USDT)
+  const bool def_gmode = [] { const char* v = std::getenv("CE_BAND_GAMMA_MODE");
+    return v && (std::string(v) == "1" || std::string(v) == "true"); }();  // vol-масштаб вкл
+  const double def_sref = env_d("CE_BAND_SIGMA_REF", 0.0005);      // σ-якорь
+  const double def_vrmin = env_d("CE_BAND_VOL_RATIO_MIN", 0.1);    // клэмп vol-масштаба
+  const double def_vrmax = env_d("CE_BAND_VOL_RATIO_MAX", 10.0);
   {
     std::lock_guard<std::mutex> lk(band_cfg_mu_);
     const auto now = std::chrono::steady_clock::now();
     if (band_cfg_have_ &&
         std::chrono::duration_cast<std::chrono::milliseconds>(now - band_cfg_last_).count() < 1000)
-      return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_, band_cfg_gamma_};
+      return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_, band_cfg_gamma_,
+              band_cfg_q_floor_, band_cfg_gamma_mode_, band_cfg_sigma_ref_,
+              band_cfg_vr_min_, band_cfg_vr_max_};
   }
   double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k, gamma = def_gamma;
+  double q_floor = def_floor; bool gamma_mode = def_gmode; double sigma_ref = def_sref;
+  double vol_ratio_min = def_vrmin, vol_ratio_max = def_vrmax;
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!postgres_dsn_.empty()) {
     std::lock_guard<std::mutex> pk(poll_conn_mu_);  // T-F18-706: переиспользуемое соединение
@@ -1594,6 +1605,22 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
     } catch (const std::exception&) {
       poll_conn_.reset();  // broken/нет колонок — переподключимся на след. вызове; env/дефолты
     }
+    // Фаза 2: ручки порога из PG — ОТДЕЛЬНЫЙ try, чтобы отсутствие новых колонок на
+    // старом томе (без ALTER) НЕ роняло чтение core-4 выше (регрессия класса бага gamma).
+    try {
+      pqxx::work tx2(poll_conn());
+      const pqxx::row r2 = tx2.exec1(
+          "SELECT ce_band_q_floor, ce_band_gamma_mode, ce_band_sigma_ref, "
+          "ce_band_vol_ratio_min, ce_band_vol_ratio_max FROM f05a_clearing_config WHERE id=1");
+      if (r2[0].as<double>() > 0.0) q_floor = r2[0].as<double>();  // ≤0 ⇒ env-дефолт
+      gamma_mode = r2[1].as<bool>();                               // PG авторитетен
+      if (r2[2].as<double>() > 0.0) sigma_ref = r2[2].as<double>();
+      if (r2[3].as<double>() > 0.0) vol_ratio_min = r2[3].as<double>();
+      if (r2[4].as<double>() > 0.0) vol_ratio_max = r2[4].as<double>();
+      tx2.commit();
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // нет колонок порога — остаются env/дефолты (core-4 уже прочитаны)
+    }
   }
 #endif
   std::lock_guard<std::mutex> lk(band_cfg_mu_);
@@ -1601,9 +1628,14 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_cmkt_bps_ = cmkt_bps;
   band_cfg_k_ = k_band;
   band_cfg_gamma_ = gamma;
+  band_cfg_q_floor_ = q_floor;
+  band_cfg_gamma_mode_ = gamma_mode;
+  band_cfg_sigma_ref_ = sigma_ref;
+  band_cfg_vr_min_ = vol_ratio_min;
+  band_cfg_vr_max_ = vol_ratio_max;
   band_cfg_last_ = std::chrono::steady_clock::now();
   band_cfg_have_ = true;
-  return {clim_bps, cmkt_bps, k_band, gamma};
+  return {clim_bps, cmkt_bps, k_band, gamma, q_floor, gamma_mode, sigma_ref, vol_ratio_min, vol_ratio_max};
 }
 
 // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
@@ -1789,7 +1821,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
   if (is_arbitrageur && asset == numeraire) {
     const auto cfg_n = LoadBandFeeConfig();
-    const double floor_n = [] { const char* v = std::getenv("CE_AGENT_BAND_Q_MIN"); return v ? std::atof(v) : 5.0; }();
+    const double floor_n = cfg_n.q_floor;  // фаза 2: пол порога из PG (env fallback в LoadBandFeeConfig)
     const double z_lim_n = (cfg_n.k_band > 0.0)
         ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 1.0)   // ADR-069: rt=1 на ногу
         : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
@@ -1822,10 +1854,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // Хедж стартует за Z̄lim; выше Z̄mkt — агрессивно (taker). Live-настройка из PG.
   // k_band ≤ 0 ⇒ линк выключен: плоский env-порог, всегда агрессив (обратная совм.).
   const auto cfg = LoadBandFeeConfig();
-  const double q_floor = [] {
-    const char* v = std::getenv("CE_AGENT_BAND_Q_MIN");
-    return v ? std::atof(v) : 5.0;  // минимум, чтобы порог не схлопнулся при малой комиссии
-  }();
+  const double q_floor = cfg.q_floor;  // фаза 2: пол порога из PG (env fallback в LoadBandFeeConfig)
   const double rt = 1.0;
   const bool fee_linked = cfg.k_band > 0.0 && cfg.cmkt_bps > 0.0;
   double z_lim, z_mkt;
@@ -1846,16 +1875,16 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     // клэмп total_scale (LIQ-2) — не даёт двум осям (низкая σ + большой α) разогнать
     // порог за диапазон. Обе оси off ⇒ total=1 ⇒ поведение как до фичи (LIQ-3).
     double vol_scale = 1.0, liq_scale = 1.0;
-    if (cex::common::Env::get_bool("CE_BAND_GAMMA_MODE", false)) {
+    if (cfg.gamma_mode) {  // фаза 2: vol-масштаб вкл — из PG
       const std::string symbol = asset + (st.quote.empty() ? numeraire : st.quote);
       double sigma = 0.0; long long ssamples = 0, sage_ms = 0;
       const long long stale_ms = cex::common::Env::get_int("CE_BAND_SIGMA_STALE_MS", 120000);
       const long long min_samp = cex::common::Env::get_int("CE_BAND_SIGMA_MIN_SAMPLES", 20);
       if (LoadAssetSigma(symbol, &sigma, &ssamples, &sage_ms) && sigma > 0.0 &&
           ssamples >= min_samp && sage_ms >= 0 && sage_ms < stale_ms) {
-        const double sref = [] { const char* v = std::getenv("CE_BAND_SIGMA_REF"); return v ? std::atof(v) : 0.0005; }();
-        const double vr_min = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MIN"); return v ? std::atof(v) : 0.1; }();
-        const double vr_max = [] { const char* v = std::getenv("CE_BAND_VOL_RATIO_MAX"); return v ? std::atof(v) : 10.0; }();
+        const double sref = cfg.sigma_ref;       // фаза 2: из PG (env fallback в LoadBandFeeConfig)
+        const double vr_min = cfg.vol_ratio_min;
+        const double vr_max = cfg.vol_ratio_max;
         // τ (CE_BAND_TAU_SEC) в множитель НЕ входит намеренно: z=clim/(γσ²τ), а якорь
         // (плоский z_lim при σ_ref) калиброван при той же τ ⇒ τ сокращается в отношении.
         // Клэмп scale (γ-канал тоже) — внутри VolScaleFactor (юнит ce_band_vol_scale_test).

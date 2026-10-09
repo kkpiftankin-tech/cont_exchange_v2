@@ -1011,6 +1011,13 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
     -- (пассив → агрессив-тейкер), cmkt = ce_taker_fee_bps. clim < cmkt (мейкер дешевле).
     ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 2,
+    -- Фаза 2 (наведение порядка): ключевые ручки порога band — здесь, в одном месте
+    -- (ledger читает из PG, env — fallback). ADR-066 D1 (vol-масштаб Γ=γσ²τ).
+    ce_band_q_floor       NUMERIC(38,18) NOT NULL DEFAULT 5,       -- пол порога (k-USDT)
+    ce_band_gamma_mode    BOOLEAN        NOT NULL DEFAULT false,   -- vol-масштаб порога вкл
+    ce_band_sigma_ref     NUMERIC(38,18) NOT NULL DEFAULT 0.0005,  -- σ-якорь VolScaleFactor
+    ce_band_vol_ratio_min NUMERIC(38,18) NOT NULL DEFAULT 0.1,     -- клэмп vol-масштаба (мин)
+    ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10,      -- клэмп vol-масштаба (макс)
     -- §6.2 «Кривые котирования»: способ снятия наклона α_ext кривой переводчика,
     -- идущего в КЛИРИНГ. 1=TANGENT (касательная), 2=LSQ_BAND (МНК на полосе),
     -- 3=PROFIT_AREA (подгонка по выгоде), 4=MINORANT (консервативный минорант,
@@ -1045,6 +1052,18 @@ ALTER TABLE f05a_clearing_config
 -- и дисплей молча откатывается на дефолты (пороги/skew не отражают живой конфиг).
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS gamma NUMERIC(38,18) NOT NULL DEFAULT 1;
+-- Фаза 2 (наведение порядка в пороге, ADR-066): ключевые ручки порога band — в ОДНОМ
+-- месте (f05a_clearing_config), ledger читает из PG (env — fallback). Одна точка настройки.
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_q_floor NUMERIC(38,18) NOT NULL DEFAULT 5;        -- пол порога (k-USDT)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_gamma_mode BOOLEAN NOT NULL DEFAULT false;        -- vol-масштаб порога вкл (Γ=γσ²τ)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_sigma_ref NUMERIC(38,18) NOT NULL DEFAULT 0.0005; -- σ-якорь VolScaleFactor
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_min NUMERIC(38,18) NOT NULL DEFAULT 0.1;-- клэмп vol-масштаба (мин)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10; -- клэмп vol-масштаба (макс)
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
 ALTER TABLE f05a_clearing_config
