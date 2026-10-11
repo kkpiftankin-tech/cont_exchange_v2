@@ -1972,6 +1972,26 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
 
   const bool pos_positive = Decimal::cmp(st.position, zero) >= 0;
+  // Профит-гейт (CE_BAND_PROFIT_GATE, деф on): НЕ хеджировать себе в убыток vs fair в
+  // maker-зоне. Биржа структурно не на той стороне F_0 (d_v<0): SELL прибылен при
+  // last_price≥F_0, BUY — при last_price≤F_0. Если нет и зона maker — НЕ эмитим: держим
+  // позицию (skew ограничит), убыток vs fair не реализуем. В taker-зоне (|c|>Z̄mkt,
+  // aggressive) хеджим всё равно — инвентарный риск важнее малого убытка. Скип ничего не
+  // трогает ⇒ c+in_flight=I−F сохраняется, позиция копится как при отсутствии пробоя.
+  if (st.fair_price.units != 0 && !aggressive &&
+      cex::common::Env::get_bool("CE_BAND_PROFIT_GATE", true)) {
+    const bool profitable = pos_positive ? (Decimal::cmp(st.last_price, st.fair_price) >= 0)
+                                         : (Decimal::cmp(st.last_price, st.fair_price) <= 0);
+    if (!profitable) {
+      st.last_band_emit_ms = ts_ms;  // cooldown: не перепроверять каждый такт (меньше churn)
+      cex::common::log_json("INFO", "F-18 band hedge skipped (profit gate: venue vs fair)",
+                            {{"agent_id", agent_id}, {"venue", venue},
+                             {"side", pos_positive ? "SELL" : "BUY"},
+                             {"last_price", st.last_price.to_string()},
+                             {"fair_price", st.fair_price.to_string()}});
+      return;  // не реализуем убыток; позиция держится, skew/taker-зона разрулят
+    }
+  }
   // c>0 ⇒ реализуем накопленный поток SELL; c<0 ⇒ BUY. in_flight того же знака.
   const Decimal in_flight_delta = pos_positive ? excess : Decimal::sub(zero, excess);
   // Модель A7 (док CE_algorithm_v2 §A7): отправленное УХОДИТ из позиции в заявку —
