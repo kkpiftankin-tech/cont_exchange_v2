@@ -1038,6 +1038,7 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
     }
     st.position = Decimal::zero();
     st.in_flight = Decimal::zero();
+    st.realized_vs_fair = Decimal::zero();  // сброс = чистый старт наблюдения: обнуляем и накопленный заработок
     st.updated_at_ms = ts_ms;
     ++cleared;
   }

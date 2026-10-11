@@ -98,8 +98,10 @@ realized_vs_fair` → BFF `fetchAgentPositions`/`buildAgentRows` (quote→USDT) 
    батчем; поздний филл считается против свежего F_0. Приемлемо при медленном
    дрейфе; точнее — фиксировать F_0 в hedge при эмиссии breach.
 3. **realized_vs_fair в памяти (N3).** Лежит в `AgentPositionState`, обнуляется на
-   рестарте ledger (LoadAgentPositionsFromRepo clear) и на reset-positions. Принято
-   как MVP (метрика наблюдения заработка); персист — колонка в `ce_agent_position`
+   рестарте ledger (LoadAgentPositionsFromRepo clear). Кнопка «сброс позиций»
+   (`ResetAgentPositions`) ЯВНО обнуляет его вместе с position/in_flight — сброс =
+   чистый старт наблюдения заработка (иначе «общий заработок не менялся после сброса»).
+   Принято как MVP (метрика наблюдения); персист — колонка в `ce_agent_position`
    при необходимости переживать рестарт.
 4. **Арбитражёр.** fair_price не публикуется (нет QUOTE-fair) ⇒ realized_vs_fair=0;
    его кросс-спред — отдельная величина (не покрыта этой карточкой).
