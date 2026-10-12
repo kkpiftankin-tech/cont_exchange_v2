@@ -137,6 +137,19 @@ $\text{PnL}_{\text{дом}}$ — арб-прибыль на счёт дома + 
 именно их нет в $\text{PnL}_{\text{sys}}$. Ежедневная сверка ledger ↔
 `venue_fill_diagnostics`.
 
+## Реализация (этап 1, диагностика)
+
+Инструментировано как structured log, БЕЗ изменения бизнес-поведения:
+`ledger_uc.cpp` — `ComputeSystemInvariants()` (чистая математика §1/§4.1/§4.2) +
+`ComputeAndLogSystemInvariantsLocked()` (лог `"F-18 system invariants"`:
+`pnl_system_usd`, `mtm_usd`, `wc_max`, `wc_nodes_violating`, `cif_abs_sum`,
+`invariant_cif="not_instrumented"`). Вызов раз в `CE_SYSTEM_PNL_LOG_EVERY` (деф 20)
+батчей; K_0 = MTM на первом замере при `skipped==0`, сброс на `ResetAgentPositions`.
+MTM-мид — `base_price` агентов (P(base) USDT); валюты без мида → `skipped`.
+§4.2 c+in_flight=I−F — пока `not_instrumented` (I/F персистентно не копятся).
+Тест: `cpp/ledger/tests/ce_system_invariants_test.cpp` (8 проверок, ALL PASS).
+Внешняя SQL-регрессия W·c: `Testing/ce_invariants_check.sh`.
+
 ## 5. Тесты (для test-architect)
 
 1. §2: $A+B+C=s(p_f-F_0^{\text{экр}})$ для BUY/SELL; $C=0$ при свежих снимках.

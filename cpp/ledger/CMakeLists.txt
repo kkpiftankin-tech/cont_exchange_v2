@@ -410,6 +410,22 @@ if (BUILD_TESTING)
   target_compile_options(ledger_agent_position_deltas_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ledger_agent_position_deltas_test COMMAND ledger_agent_position_deltas_test)
 
+  # F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): чистая математика закрытого
+  # учёта — MTM, W·c=0, Σ|c+in_flight|. Pure unit (static метод, без PG/Kafka).
+  add_executable(ce_system_invariants_test
+    tests/ce_system_invariants_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_system_invariants_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_system_invariants_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_system_invariants_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_system_invariants_test COMMAND ce_system_invariants_test)
+
   # F-18 v2 (T-F18-204/205): PostgresAgentPositionRepository against a REAL
   # PostgreSQL (TEST_PG_DSN / LEDGER_POSTGRES_DSN). Gracefully skips (exit 0)
   # when no DB is configured, matching order_flow's postgres_* test pattern.

@@ -810,6 +810,94 @@ fob::ledger::v1::GetExchangeNopHistoryResponse LedgerUseCases::GetExchangeNopHis
   return resp;
 }
 
+// F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL §1/§4): диагностика закрытого учёта.
+// ТОЛЬКО structured log (бизнес-поведение не меняется). Вызывается под mu_.
+//  §1 MTM: Σ_ccy NOP_ccy · mid_ccy(USDT) − K_0; K_0 = MTM на первом замере/сбросе
+//          (drift-from-baseline — не требует seed-time мидов, CALC §6 вопрос 3).
+//  §4.1 W·c=0: Σ позиций агентов по узлу (asset,venue); max|нетто|, число нарушений.
+//  §4.2 c+in_flight=I−F: I/F персистентно не аккумулируются ⇒ not_instrumented,
+//          логируем лишь Σ|c+in_flight| (новое состояние в этой задаче не заводим).
+// Чистая математика (юнит-тестируема, без доступа к состоянию) — см. hpp.
+LedgerUseCases::SystemInvariants LedgerUseCases::ComputeSystemInvariants(
+    const std::map<std::string, Decimal>& nop,
+    const std::map<std::string, Decimal>& mid_usd,
+    const std::map<std::pair<std::string, std::string>, Decimal>& node_sum,
+    const std::vector<Decimal>& cif_values,
+    double wc_eps) {
+  SystemInvariants r;
+  // §1 MTM: Σ_ccy nop·mid (валюты без мида честно пропускаем). Перед mul квантуем
+  // операнды к scale 4: Decimal::mul даёт units=a·b, scale=a.scale+b.scale — при
+  // «сырых» scale 8 произведение qty·price (напр. 10 BTC·85000) переполняет int64.
+  // scale 4 (0.0001) с запасом хватает для диагностической MTM и не переполняет.
+  const Decimal one{1, 0};
+  for (const auto& [ccy, qty] : nop) {
+    auto m = mid_usd.find(ccy);
+    if (m == mid_usd.end()) { ++r.skipped; continue; }
+    const Decimal q4 = Decimal::div(qty, one, 4);
+    const Decimal m4 = Decimal::div(m->second, one, 4);
+    r.mtm = Decimal::add(r.mtm, Decimal::mul(q4, m4));  // scale 8, units с запасом
+    ++r.valued;
+  }
+  // §4.1 W·c=0: max|нетто| по узлу + число нарушений (|нетто|>eps).
+  for (const auto& [n, s] : node_sum) {
+    const Decimal a = Decimal::cmp(s, Decimal::zero()) >= 0 ? s : Decimal::sub(Decimal::zero(), s);
+    if (Decimal::cmp(a, r.wc_max) > 0) r.wc_max = a;
+    if (static_cast<double>(a) > wc_eps) ++r.wc_nodes;
+  }
+  // §4.2 Σ|c+in_flight| (I/F персистентно не инструментированы).
+  for (const auto& v : cif_values)
+    r.cif_sum = Decimal::add(r.cif_sum, Decimal::cmp(v, Decimal::zero()) >= 0
+                                            ? v : Decimal::sub(Decimal::zero(), v));
+  return r;
+}
+
+void LedgerUseCases::ComputeAndLogSystemInvariantsLocked() {
+  // Мид в USDT по активу — последний base_price (P(base) USDT) из позиций агентов.
+  std::map<std::string, Decimal> mid_usd;
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  mid_usd[numeraire] = Decimal{1, 0};
+  for (const auto& [key, st] : agent_positions_) {
+    const std::string& asset = std::get<1>(key);
+    if (st.base_price.units != 0) mid_usd[asset] = st.base_price;  // последний выигрывает
+  }
+  // Узловой нетто позиций агентов (W·c) и значения c+in_flight.
+  std::map<std::pair<std::string, std::string>, Decimal> node_sum;
+  std::vector<Decimal> cif_values;
+  cif_values.reserve(agent_positions_.size());
+  for (const auto& [key, st] : agent_positions_) {
+    node_sum[{std::get<1>(key), std::get<2>(key)}] =
+        Decimal::add(node_sum[{std::get<1>(key), std::get<2>(key)}], st.position);
+    cif_values.push_back(Decimal::add(st.position, st.in_flight));
+  }
+  double wc_eps = 1.0;  // Env не имеет get_double — парсим строку с фолбэком
+  try { wc_eps = std::stod(cex::common::Env::get_string("CE_WC_EPS", "1.0")); } catch (...) {}
+
+  const SystemInvariants inv =
+      ComputeSystemInvariants(ComputeExchangeNopLocked(), mid_usd, node_sum, cif_values, wc_eps);
+  // baseline K_0 фиксируем ТОЛЬКО когда все валюты оценены (skipped==0): иначе мид
+  // актива появится позже и pnl=mtm−K_0 даст ложный скачок на всю стоимость валюты.
+  // До этого pnl=0 и baseline_set=false (честно «ещё нет базы»).
+  if (!system_mtm_baseline_set_ && inv.skipped == 0) {
+    system_mtm_baseline_ = inv.mtm;
+    system_mtm_baseline_set_ = true;
+  }
+  const Decimal pnl_system =
+      system_mtm_baseline_set_ ? Decimal::sub(inv.mtm, system_mtm_baseline_) : Decimal::zero();
+
+  cex::common::log_json(
+      "INFO", "F-18 system invariants",
+      {{"pnl_system_usd", pnl_system.to_string()},
+       {"baseline_set", system_mtm_baseline_set_ ? "1" : "0"},
+       {"mtm_usd", inv.mtm.to_string()},
+       {"mtm_valued_ccy", std::to_string(inv.valued)},
+       {"mtm_skipped_ccy", std::to_string(inv.skipped)},
+       {"wc_max", inv.wc_max.to_string()},
+       {"wc_nodes_violating", std::to_string(inv.wc_nodes)},
+       {"wc_eps", std::to_string(wc_eps)},
+       {"cif_abs_sum", inv.cif_sum.to_string()},
+       {"invariant_cif", "not_instrumented"}});
+}
+
 void LedgerUseCases::ApplyPositionDelta(
     const std::string& batch_id, long long ts_ms,
     const std::vector<std::pair<std::string, Decimal>>& node_deltas,
@@ -933,6 +1021,12 @@ void LedgerUseCases::ApplyPositionDelta(
     agent_delta_history_.push_back(std::move(snap));
     while (agent_delta_history_.size() > kAgentDeltaHistoryCap) agent_delta_history_.pop_front();
   }
+
+  // F-18 remediation этап 1: периодическая диагностика закрытого учёта (раз в N
+  // батчей; 0 ⇒ выключено). Только лог, бизнес-поведение не трогаем.
+  const int log_every = cex::common::Env::get_int("CE_SYSTEM_PNL_LOG_EVERY", 20);
+  if (log_every > 0 && (++system_inv_batch_counter_ % static_cast<std::uint64_t>(log_every)) == 0)
+    ComputeAndLogSystemInvariantsLocked();
 }
 
 fob::ledger::v1::GetAgentPositionDeltasResponse LedgerUseCases::GetAgentPositionDeltas(
@@ -1048,6 +1142,7 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
     ++cleared;
   }
   band_hedges_.clear();  // in_flight guard — с нуля, чтобы новые пробои эмитились
+  system_mtm_baseline_set_ = false;  // этап 1: K_0 переустановится на следующем замере (drift с нуля)
   resp.set_cleared(cleared);
   cex::common::log_json("INFO", "F-18 agent positions reset",
                         {{"cleared", std::to_string(cleared)},

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <deque>
 #include <map>
@@ -291,6 +292,25 @@ class LedgerUseCases {
   fob::ledger::v1::ResetAgentPositionsResponse ResetAgentPositions(
       const fob::ledger::v1::ResetAgentPositionsRequest& req);
 
+  // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): ЧИСТАЯ математика закрытого
+  // учёта — вынесена из состояния для юнит-тестируемости. mtm = Σ_ccy nop·mid
+  // (валюты без мида пропускаются, см. skipped); wc_max/wc_nodes — узловой баланс
+  // по node_sum; cif_sum = Σ|c+in_flight|. baseline/pnl считает вызывающий.
+  struct SystemInvariants {
+    cex::common::Decimal mtm{0, 0};
+    int valued{0};
+    int skipped{0};
+    cex::common::Decimal wc_max{0, 0};
+    int wc_nodes{0};
+    cex::common::Decimal cif_sum{0, 0};
+  };
+  static SystemInvariants ComputeSystemInvariants(
+      const std::map<std::string, cex::common::Decimal>& nop,
+      const std::map<std::string, cex::common::Decimal>& mid_usd,
+      const std::map<std::pair<std::string, std::string>, cex::common::Decimal>& node_sum,
+      const std::vector<cex::common::Decimal>& cif_values,
+      double wc_eps);
+
  private:
   // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
   std::map<std::string, cex::common::Decimal> ComputeExchangeNopLocked() const;
@@ -414,6 +434,16 @@ class LedgerUseCases {
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+
+  // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): диагностика «закрытого учёта» —
+  // P&L системы = MTM реальных остатков (venue_balances_+house) минус baseline K_0,
+  // инвариант W·c=0 (Σ позиций агентов по узлу), c+in_flight=I−F. ТОЛЬКО structured
+  // log, бизнес-поведение не трогает. Вызывается раз в CE_SYSTEM_PNL_LOG_EVERY батчей
+  // из ApplyPositionDelta под mu_. baseline фиксируется на первом замере и на сбросе.
+  void ComputeAndLogSystemInvariantsLocked();
+  std::uint64_t system_inv_batch_counter_{0};
+  cex::common::Decimal system_mtm_baseline_{0, 0};  // K_0 (USDT), MTM на старте/сбросе
+  bool system_mtm_baseline_set_{false};
   // F-18 v2 · Э3/Э4 (ADR-061 §4): учёт хедж-заявок агента «в пути». Ключ —
   // hedge_flow_id ("ce|band|<agent_id>|<asset>|<venue>"). Позволяет: (1) на
   // эмиссии пометить in_flight и не слать избыток повторно; (2) по исполнению
