@@ -179,6 +179,7 @@ struct AgentPositionRow {
   std::string venue;
   cex::common::Decimal position{0, 0};    // c_j, ЗНАКОВАЯ, накопленная клирингом
   cex::common::Decimal in_flight{0, 0};   // committed (Э3+), ЗНАКОВАЯ
+  cex::common::Decimal realized_vs_fair{0, 0};  // ADR-072 §C: накопл. заработок vs fair (quote), персист
   std::string last_batch_id;              // последний такт, менявший позицию
   int64_t updated_at_ms{0};
 };
@@ -213,12 +214,15 @@ class AgentPositionRepositoryPort {
   // в единицах позиции (k-USDT). Строка обязана существовать (создаётся
   // клирингом раньше эмиссии); при отсутствии — no-op. Пустой default для
   // no-op/тестовых репозиториев.
+  // realized_delta (ADR-072 §C) — аддитивный прирост realized_vs_fair (quote), чтобы
+  // заработок переживал рестарт ledger; деф 0 (эмиссия/сброс/нумерарий не копят).
   virtual void ApplyHedge(const std::string& /*agent_id*/,
                           const std::string& /*asset*/,
                           const std::string& /*venue*/,
                           const cex::common::Decimal& /*position_delta*/,
                           const cex::common::Decimal& /*in_flight_delta*/,
-                          int64_t /*updated_at_ms*/) {}
+                          int64_t /*updated_at_ms*/,
+                          const cex::common::Decimal& /*realized_delta*/ = cex::common::Decimal{0, 0}) {}
 };
 
 }  // namespace cex::ledger::app

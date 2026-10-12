@@ -174,7 +174,9 @@ class PostgresAgentPositionRepository final : public app::AgentPositionRepositor
                   const std::string& venue,
                   const cex::common::Decimal& position_delta,
                   const cex::common::Decimal& in_flight_delta,
-                  int64_t updated_at_ms) override;
+                  int64_t updated_at_ms,
+                  const cex::common::Decimal& realized_delta =
+                      cex::common::Decimal{0, 0}) override;
 
  private:
   std::shared_ptr<LedgerPgPool> pool_;

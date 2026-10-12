@@ -1099,10 +1099,15 @@ CREATE TABLE IF NOT EXISTS ce_agent_position (
     agent_kind    TEXT CHECK (agent_kind IN ('translator', 'arbitrageur')),
     position      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- c_j, ЗНАКОВАЯ (см. коммент выше)
     in_flight     NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- committed (Э3+), ЗНАКОВАЯ
+    realized_vs_fair NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- ADR-072 §C: накопл. заработок vs fair (quote), персист
     last_batch_id TEXT,                                -- идемпотентность per batch_id
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (agent_id, asset, venue)
 );
+-- Миграция на существующем dev-volume (init.sql применяется только при создании
+-- volume; на живой БД колонку добавляем вручную этим ALTER — ADR-072 §C).
+ALTER TABLE ce_agent_position
+    ADD COLUMN IF NOT EXISTS realized_vs_fair NUMERIC(38, 18) NOT NULL DEFAULT 0;
 -- Запросы «все переводчики/арбитражёры вне полосы» + staleness-мониторинг.
 CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
     ON ce_agent_position (agent_kind, updated_at DESC);

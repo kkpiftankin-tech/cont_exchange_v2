@@ -150,11 +150,17 @@ void ensure_agent_position_table(pqxx::work& tx) {
       agent_kind    text,
       position      numeric(38,18) not null default 0,
       in_flight     numeric(38,18) not null default 0,
+      realized_vs_fair numeric(38,18) not null default 0,
       last_batch_id text,
       updated_at    timestamptz not null default now(),
       primary key (agent_id, asset, venue)
     )
   )sql");
+  // ADR-072 §C (N3): persist накопленного заработка vs fair — переживает рестарт
+  // ledger (иначе realized обнулялся на каждый рестарт → «заработок не растёт»).
+  // Миграция существующих томов (колонка могла отсутствовать).
+  tx.exec("alter table ce_agent_position add column if not exists "
+          "realized_vs_fair numeric(38,18) not null default 0");
 }
 
 // Parse a PostgreSQL NUMERIC text value (e.g. "1234.56000") into a Decimal.
@@ -928,7 +934,8 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
     // pqxx array-parameter binding for what is effectively an optional
     // WHERE IN (...) filter on three independent columns.
     auto rows = tx.exec(
-        "SELECT agent_id, asset, venue, agent_kind, position, in_flight, last_batch_id, "
+        "SELECT agent_id, asset, venue, agent_kind, position, in_flight, "
+        "COALESCE(realized_vs_fair, 0) AS realized_vs_fair, last_batch_id, "
         "(extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms FROM ce_agent_position");
     tx.commit();
 
@@ -946,6 +953,7 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
       r.agent_kind = row["agent_kind"].is_null() ? std::string() : row["agent_kind"].as<std::string>();
       r.position = parse_pg_numeric(row["position"].as<std::string>());
       r.in_flight = parse_pg_numeric(row["in_flight"].as<std::string>());
+      r.realized_vs_fair = parse_pg_numeric(row["realized_vs_fair"].as<std::string>());
       r.last_batch_id = row["last_batch_id"].is_null() ? std::string() : row["last_batch_id"].as<std::string>();
       r.updated_at_ms = row["updated_at_ms"].as<int64_t>();
       out.push_back(std::move(r));
@@ -970,7 +978,8 @@ void PostgresAgentPositionRepository::ApplyHedge(
     const std::string& venue,
     const cex::common::Decimal& position_delta,
     const cex::common::Decimal& in_flight_delta,
-    int64_t updated_at_ms) {
+    int64_t updated_at_ms,
+    const cex::common::Decimal& realized_delta) {
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!pool_) return;  // persistence disabled — кэш ledger_uc авторитетен
   try {
@@ -982,11 +991,12 @@ void PostgresAgentPositionRepository::ApplyHedge(
           UPDATE ce_agent_position SET
             position   = position + ($4)::numeric,
             in_flight  = in_flight + ($5)::numeric,
+            realized_vs_fair = COALESCE(realized_vs_fair, 0) + ($7)::numeric,
             updated_at = to_timestamp($6 / 1000.0)
           WHERE agent_id = $1 AND asset = $2 AND venue = $3
         )sql",
         agent_id, asset, venue, position_delta.to_string(),
-        in_flight_delta.to_string(), updated_at_ms);
+        in_flight_delta.to_string(), updated_at_ms, realized_delta.to_string());
     tx.commit();
   } catch (const std::exception& e) {
     cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyHedge failed",

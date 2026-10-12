@@ -971,6 +971,7 @@ void LedgerUseCases::LoadAgentPositionsFromRepo() {
     st.agent_kind = row.agent_kind;
     st.position = row.position;
     st.in_flight = row.in_flight;
+    st.realized_vs_fair = row.realized_vs_fair;  // ADR-072 §C: заработок переживает рестарт
     st.last_batch_id = row.last_batch_id;
     st.updated_at_ms = row.updated_at_ms;
     agent_positions_[AgentPositionKey{row.agent_id, row.asset, row.venue}] = std::move(st);
@@ -1030,11 +1031,15 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
   for (auto& [key, st] : agent_positions_) {
     const auto& [agent_id, asset, venue] = key;
     if (!want.empty() && !want.count(agent_id)) continue;
-    // Персист сброса в PG (если репозиторий подключён): зануляющая дельта.
-    if (agent_position_repo_ && (st.position.units != 0 || st.in_flight.units != 0)) {
+    // Персист сброса в PG (если репозиторий подключён): зануляющие дельты
+    // по position/in_flight И по накопленному realized_vs_fair (иначе рестарт
+    // ledger вернул бы старый заработок — ADR-072 §C, "сброс = чистый старт").
+    if (agent_position_repo_ && (st.position.units != 0 || st.in_flight.units != 0 ||
+                                 st.realized_vs_fair.units != 0)) {
       agent_position_repo_->ApplyHedge(agent_id, asset, venue,
                                        Decimal::sub(Decimal::zero(), st.position),
-                                       Decimal::sub(Decimal::zero(), st.in_flight), ts_ms);
+                                       Decimal::sub(Decimal::zero(), st.in_flight), ts_ms,
+                                       Decimal::sub(Decimal::zero(), st.realized_vs_fair));
     }
     st.position = Decimal::zero();
     st.in_flight = Decimal::zero();
@@ -1972,26 +1977,16 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
 
   const bool pos_positive = Decimal::cmp(st.position, zero) >= 0;
-  // Профит-гейт (CE_BAND_PROFIT_GATE, деф on): НЕ хеджировать себе в убыток vs fair в
-  // maker-зоне. Биржа структурно не на той стороне F_0 (d_v<0): SELL прибылен при
-  // last_price≥F_0, BUY — при last_price≤F_0. Если нет и зона maker — НЕ эмитим: держим
-  // позицию (skew ограничит), убыток vs fair не реализуем. В taker-зоне (|c|>Z̄mkt,
-  // aggressive) хеджим всё равно — инвентарный риск важнее малого убытка. Скип ничего не
-  // трогает ⇒ c+in_flight=I−F сохраняется, позиция копится как при отсутствии пробоя.
-  if (st.fair_price.units != 0 && !aggressive &&
-      cex::common::Env::get_bool("CE_BAND_PROFIT_GATE", true)) {
-    const bool profitable = pos_positive ? (Decimal::cmp(st.last_price, st.fair_price) >= 0)
-                                         : (Decimal::cmp(st.last_price, st.fair_price) <= 0);
-    if (!profitable) {
-      st.last_band_emit_ms = ts_ms;  // cooldown: не перепроверять каждый такт (меньше churn)
-      cex::common::log_json("INFO", "F-18 band hedge skipped (profit gate: venue vs fair)",
-                            {{"agent_id", agent_id}, {"venue", venue},
-                             {"side", pos_positive ? "SELL" : "BUY"},
-                             {"last_price", st.last_price.to_string()},
-                             {"fair_price", st.fair_price.to_string()}});
-      return;  // не реализуем убыток; позиция держится, skew/taker-зона разрулят
-    }
-  }
+  // ADR-072 §A (пересмотр 2026-10-12, решение владельца): профит-гейт УДАЛЁН.
+  // Прежде гейт держал позицию в maker-зоне на структурно-убыточных vs fair биржах
+  // (SELL при last<F_0 / BUY при last>F_0) — НЕ эмитил, «ждал skew». На практике это
+  // ломало исходный инвариант «пробой полосы ⇒ хедж через несколько циклов»: приток
+  // клиринга копил позицию далеко за полосу (напр. T_SOL_okx → −44 при z_lim=3.6),
+  // а когда |c|>z_mkt гейт всё равно вынужденно хеджировал — но уже крупной заявкой
+  // глубоко в книгу ⇒ редкий КРУПНЫЙ тейкер-убыток (−334) вместо мелких maker-убытков.
+  // Диагностика: band-филлы = эмиссиям 1:1 (фид исправен), единственный блокер был гейт.
+  // Теперь: хеджируем КАЖДЫЙ пробой (|c|>z_lim); убыток vs fair на плохих биржах мелкий
+  // и регулярный, позиция держится у полосы; заработок по-прежнему меряется realized_vs_fair.
   // c>0 ⇒ реализуем накопленный поток SELL; c<0 ⇒ BUY. in_flight того же знака.
   const Decimal in_flight_delta = pos_positive ? excess : Decimal::sub(zero, excess);
   // Модель A7 (док CE_algorithm_v2 §A7): отправленное УХОДИТ из позиции в заявку —
@@ -2088,14 +2083,16 @@ bool LedgerUseCases::apply_agent_band_report_locked(
     // CE-позиция виртуальна («куплена» по F_0), внешний филл реализует кэш по
     // average_price (цена пары). SELL: (avg−F_0)·q; BUY: (F_0−avg)·q — накопительно
     // в quote. Клэмп A1 (лимит ≥/≤ F_0) ⇒ вклад ≥0, но пишем как есть (честно).
+    Decimal realized_incr = Decimal::zero();
     if (st.fair_price.units != 0 && average_price.units != 0) {
       const Decimal diff = sent_positive ? Decimal::sub(average_price, st.fair_price)
                                          : Decimal::sub(st.fair_price, average_price);
-      st.realized_vs_fair =
-          Decimal::add(st.realized_vs_fair, Decimal::mul(diff, incr_filled_qty));
+      realized_incr = Decimal::mul(diff, incr_filled_qty);
+      st.realized_vs_fair = Decimal::add(st.realized_vs_fair, realized_incr);
     }
-    if (agent_position_repo_)
-      agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta, ts_ms);
+    if (agent_position_repo_)  // персистим и realized-прирост (переживает рестарт)
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta,
+                                       ts_ms, realized_incr);
     // F-18 #6 (T-F18-804): РАСЧЁТНАЯ band-комиссия зоны на инкремент (quote):
     // |Δq·P|·bps/1e4. bps зафиксирован на эмиссии (hedge.fee_bps_snapshot, maker=clim/
     // taker=cmkt) — не зависит от live-реконфига. ОТДЕЛЬНО от real venue fee (tot_fee,
