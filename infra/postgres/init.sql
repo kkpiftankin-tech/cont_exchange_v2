@@ -1074,6 +1074,42 @@ INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_sta
 VALUES (1, 1000, 60000, 180000)
 ON CONFLICT (id) DO NOTHING;
 
+-- F-18 remediation этап 0 (причина 6: «конфиг — одна строка без истории»):
+-- версионирование f05a_clearing_config для воспроизводимости прогонов.
+-- config_version растёт при КАЖДОМ реальном изменении значений; снимок старой
+-- строки пишется в историю как jsonb (устойчиво к добавлению колонок).
+-- Выжимка эксперимента (docs/experiments/) ссылается на config_version.
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS f05a_clearing_config_history (
+    version    BIGINT      NOT NULL,   -- config_version снимка (ДО изменения)
+    snapshot   JSONB       NOT NULL,   -- полная строка конфига ДО изменения
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (version, changed_at)
+);
+
+-- Триггер: при UPDATE с реальным изменением значений (игнорируя служебные
+-- config_version/updated_at) архивируем OLD-строку и инкрементим версию.
+CREATE OR REPLACE FUNCTION f05a_clearing_config_versioning()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'config_version' - 'updated_at')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'config_version' - 'updated_at') THEN
+        INSERT INTO f05a_clearing_config_history (version, snapshot)
+        VALUES (OLD.config_version, to_jsonb(OLD));
+        NEW.config_version := OLD.config_version + 1;
+        NEW.updated_at := now();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS f05a_clearing_config_versioning_trg ON f05a_clearing_config;
+CREATE TRIGGER f05a_clearing_config_versioning_trg
+    BEFORE UPDATE ON f05a_clearing_config
+    FOR EACH ROW EXECUTE FUNCTION f05a_clearing_config_versioning();
+
 -- ---------------------------------------------------------------------------
 -- ce_agent_position: F-18 v2 (T-F18-204, ADR-061 §7, ADR-063) — знаковая
 -- накопленная позиция CE-агента (виртуального контрагента: переводчик |
