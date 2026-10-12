@@ -49,6 +49,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
@@ -2221,6 +2222,29 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
   } else if (!have_book) {
     diag_reason = "no_trade_feed";
   }
+  // ADR-074 / ADR-072 §B (этап 3 F-18-remediation, ОБРАТИМО флагом): forward-only
+  // исполнение — матчить ТОЛЬКО принты с биржевым временем ПОСЛЕ момента эмиссии
+  // (+задержка), иначе хедж исполняется о сделки минутной давности (причина 1, на dev
+  // 230–352с устаревания = бесплатный опцион). Момент эмиссии зашит в intent_id band-
+  // хеджа последним полем (ce|band|<agent>|<asset>|<venue>|<ms>). Деф off = прежнее
+  // поведение (ноль изменений). Принты с неизвестным биржевым временем (exchange_ms=0,
+  // напр. coinbase) при forward-only НЕ матчатся (нельзя подтвердить, что они «вперёд»).
+  const bool forward_only = cex::common::Env::get_bool("CE_SIM_FORWARD_ONLY", false);
+  const int64_t fwd_delay_ms = cex::common::Env::get_int("CE_SIM_FILL_DELAY_MS", 0);
+  int64_t emit_ms = 0;
+  if (forward_only) {
+    const std::string& iid = intent.intent_id();
+    const auto bar = iid.rfind('|');
+    if (bar != std::string::npos) {
+      try { emit_ms = std::stoll(iid.substr(bar + 1)); } catch (...) { emit_ms = 0; }
+    }
+  }
+  // true ⇒ принт допустим к матчингу. off или нет метки эмиссии ⇒ не фильтруем.
+  const auto forward_ok = [&](const auto& tr) -> bool {
+    if (!forward_only || emit_ms <= 0) return true;
+    return tr.exchange_ms > 0 && tr.exchange_ms >= emit_ms + fwd_delay_ms;
+  };
+
   if (have_book && (limit.units != 0 || marketable) && target.units > 0) {
     const auto window = effective_trade_window_locked(it->second);
     while (!it->second.recent_trades.empty() &&
@@ -2234,7 +2258,8 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     // cross_count==0 ⟺ none_cross_limit.
     std::size_t cross_count = 0;
     for (const auto& tr : it->second.recent_trades) {
-      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0;
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0
+                         && forward_ok(tr);  // forward-only: устаревшие принты не в счёт
       if (cross) ++cross_count;
     }
     // considered — РОВНО множество матчинга (ADR-060): свежее окно recent_trades,
@@ -2252,7 +2277,8 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     considered.reserve(std::min<std::size_t>(it->second.recent_trades.size(), 100));
     for (const auto& tr : it->second.recent_trades) {
       if (considered.size() >= 100) break;
-      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0;
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0
+                         && forward_ok(tr);  // forward-only: crosses только если «вперёд»
       app::ConsideredTrade ct;
       ct.price = DecimalText(tr.price);
       ct.qty = DecimalText(tr.qty);
@@ -2268,6 +2294,7 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     for (auto& tr : it->second.recent_trades) {
       if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
       if (!crosses_price(tr.price)) continue;
+      if (!forward_ok(tr)) continue;  // forward-only: не матчим принты старше эмиссии
       const Decimal want = Decimal::sub(target, filled);
       if (Decimal::cmp(want, zero_q) <= 0) break;
       const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
