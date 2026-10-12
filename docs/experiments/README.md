@@ -12,6 +12,20 @@
 - `_template.md` — форма выжимки (копировать в `EXP-<дата>-<id>.md`).
 - `EXP-*.md` — выжимки прогонов (по одной на прогон).
 
+## Генерация
+
+Скрипт [`Testing/ce_experiment_summary.sh`](../../Testing/ce_experiment_summary.sh)
+собирает выжимку из живых данных dev (профиль, риск, W·c=0, исполнение, причины
+1/3) по полям `_template.md`. На dev-хосте:
+
+```bash
+RUN_ID=2026-10-12-run1 WINDOW='6 hours' bash Testing/ce_experiment_summary.sh \
+  > docs/experiments/EXP-2026-10-12-run1.md
+```
+
+Разделы MTM/P&L и инварианты 4.2/4.3 помечаются `pending` до инструментации
+этапа 1. «Вывод» заполняется вручную.
+
 ## Правила
 
 - Один прогон → одна выжимка → одна строка в `journal.md`.
