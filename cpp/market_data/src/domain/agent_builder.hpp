@@ -8,7 +8,10 @@
 //   depth  α   = θ · min( α_ext(bid), α_ext(ask) )          [quote units на ‰]
 //              α_ext = min_i ( V_i / δ_i ),  V_i = Σ_{k≤i} price_k·size_k,
 //              δ_i = |1000·ln(price_i / mid)|               [консервативный минорант]
-//   dead_zone c = taker_fee_pm + ½·spread_pm                [‰]
+//   dead_zone c = [taker_fee_pm] + guard_mult·½·spread_pm
+//                 + [k·σ·√age_sec]                          [‰]
+//   (полка по умолчанию 0: half_spread_mult=0, комиссия не в полке; age-член —
+//    ADR-075, k=0 по умолчанию ⇒ тоже 0. См. AgentBuilderConfig.)
 //
 // Чистая детерминированная логика (replay). α/c/mid — ‰-коэффициенты кривой
 // (диагностика/параметры), не ledger-деньги → double допустим (CLAUDE.md §9).
@@ -50,6 +53,14 @@ struct AgentBuilderConfig {
   // порогах band (ledger). false (дефолт) ⇒ полка = ½·spread без комиссии. true ⇒
   // §A1-поведение (полка = комиссия + ½·spread) — обратимо через env CE_COMMISSION_IN_POLKA.
   bool commission_in_polka = false;
+  // ADR-075 (этап 4 F-18-remediation, причина 2): age-aware полка. Устаревший снимок
+  // несёт неопределённость цены ⇒ добавляем к полке c += k·σ·√age (‰), чтобы клиринг не
+  // гонял поток по «кажущемуся базису» от рассинхрона возрастов снимков (на dev ≈3.8‱
+  // от разницы возрастов 20с). Деф k=0 ⇒ член нулевой (прежнее поведение). Поля
+  // заполняет caller (market_data_uc): age снимка, σ актива (‰), k из env CE_AGE_DEAD_ZONE_K.
+  double snapshot_age_ms = 0.0;   // возраст снимка (ms) на момент окна
+  double sigma_pm = 0.0;          // σ актива в ‰ (из ce_asset_volatility)
+  double age_dead_zone_k = 0.0;   // k; 0 ⇒ age-полка выключена
 };
 
 struct QuoteAgent {
@@ -135,7 +146,13 @@ inline QuoteAgent BuildQuoteAgent(const std::vector<ExternalOrderLevel>& levels,
           : cfg.half_spread_mult;
   // ADR-065 Q1: комиссия входит в полку ТОЛЬКО при commission_in_polka (§A1-совместимость);
   // по умолчанию (§6.4) полка = множитель·½спред, комиссия — только в порогах band (ledger).
-  a.dead_zone_pm = (cfg.commission_in_polka ? taker_fee_pm : 0.0) + guard_mult * half_spread_pm;
+  // ADR-075: age-aware член полки c += k·σ·√(age_sec), ‰ (деф k=0 ⇒ 0, прежнее поведение).
+  const double age_floor_pm =
+      (cfg.age_dead_zone_k > 0.0 && cfg.sigma_pm > 0.0 && cfg.snapshot_age_ms > 0.0)
+          ? cfg.age_dead_zone_k * cfg.sigma_pm * std::sqrt(cfg.snapshot_age_ms / 1000.0)
+          : 0.0;
+  a.dead_zone_pm = (cfg.commission_in_polka ? taker_fee_pm : 0.0)
+                   + guard_mult * half_spread_pm + age_floor_pm;
 
   a.valid = a.depth > 0.0;
   if (!a.valid) a.reason = "non-positive depth";

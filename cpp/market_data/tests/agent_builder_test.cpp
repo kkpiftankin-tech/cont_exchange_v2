@@ -50,7 +50,10 @@ int main() {
   if (!a.valid) { std::printf("FAIL: agent invalid (%s)\n", a.reason.c_str()); ++g_fail; }
   close(a.anchor_pm, 10.05034, 1e-3, "anchor_pm");
   close(a.depth, 4.875595, 1e-3, "depth α");
-  close(a.dead_zone_pm, 10.20034, 1e-3, "dead_zone c");
+  // Полка по умолчанию НУЛЕВАЯ: half_spread_mult=0 + commission_in_polka=false
+  // (решение владельца 2026-09-16). Прежнее 10.20034 — из эпохи ADR-055 (½спред+fee),
+  // устарело после обнуления полки; было красным. Age-член тоже 0 (k=0 по умолчанию).
+  close(a.dead_zone_pm, 0.0, 1e-9, "dead_zone c (полка нулевая по умолчанию)");
 
   // θ масштабирует глубину линейно
   AgentBuilderConfig cfg2 = cfg; cfg2.theta = 0.3;
@@ -64,6 +67,25 @@ int main() {
   std::vector<ExternalOrderLevel> one_sided = {Lvl(LevelSide::kBid, 99, 1, 2.0)};
   if (BuildQuoteAgent(one_sided, cfg).valid) {
     std::printf("FAIL: односторонняя книга должна быть невалидна\n"); ++g_fail;
+  }
+
+  // ADR-075 (этап 4): age-aware полка добавляет член k·σ·√(age_sec), ‰.
+  // Проверяем ДЕЛЬТУ к базовой полке — не завися от её абсолютного значения.
+  {
+    AgentBuilderConfig base = cfg;  // age_dead_zone_k=0 ⇒ член нулевой (деф)
+    const double base_c = BuildQuoteAgent(book, base).dead_zone_pm;
+    // k=0 (деф) не меняет полку
+    close(BuildQuoteAgent(book, base).dead_zone_pm, base_c, 1e-9, "age-полка off (k=0)");
+    // k=1, σ=2‰, age=4000ms (√4=2) ⇒ +1·2·2 = 4‰
+    AgentBuilderConfig ca = cfg;
+    ca.age_dead_zone_k = 1.0; ca.sigma_pm = 2.0; ca.snapshot_age_ms = 4000.0;
+    close(BuildQuoteAgent(book, ca).dead_zone_pm, base_c + 4.0, 1e-6, "age-полка +k·σ·√age=4");
+    // σ=0 ⇒ член 0 (нет оценки волатильности — не штрафуем)
+    AgentBuilderConfig cs = ca; cs.sigma_pm = 0.0;
+    close(BuildQuoteAgent(book, cs).dead_zone_pm, base_c, 1e-9, "age-полка σ=0 ⇒ 0");
+    // age=0 ⇒ член 0 (свежий снимок)
+    AgentBuilderConfig cz = ca; cz.snapshot_age_ms = 0.0;
+    close(BuildQuoteAgent(book, cz).dead_zone_pm, base_c, 1e-9, "age-полка age=0 ⇒ 0");
   }
 
   if (g_fail == 0) { std::printf("agent_builder_test: OK\n"); return 0; }
