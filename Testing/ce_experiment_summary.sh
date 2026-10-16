@@ -19,6 +19,9 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M)}"
 EPS="${EPS:-1.0}"
 PSQL="${PSQL:-docker exec -i infra-postgres-1 psql -U cex -d cex}"
 LEDGER="${LEDGER:-infra-ledger-1}"
+# Контекст прогона (передаёт скилл /experiment): гипотеза, изменение, решение.
+HYP="${HYP:-—}"; CHANGE="${CHANGE:-—}"; DECISION="${DECISION:-(заполнить вручную)}"
+RUN_DATE="${RUN_DATE:-$(date +%Y-%m-%d)}"
 Q() { $PSQL -tA -F'|' -c "$1" 2>/dev/null; }
 
 # Профиль (ключевые флаги из env ledger).
@@ -45,11 +48,15 @@ C1=$(Q "SELECT COALESCE(round(avg(oldest)/1000.0,0)::text,'нет данных')
 # Причина 3: нетто T_* vs A_* по площадке (BTC, окно скрипта). ESCAPE '!' надёжнее бэкслеша.
 C3=$(Q "SELECT venue||' T='||COALESCE(round(sum(CASE WHEN split_part(hedge_flow_id,'|',3) LIKE 'T!_%' ESCAPE '!' THEN CASE side WHEN 'BUY' THEN filled_qty ELSE -filled_qty END END)::numeric,2),0)::text||' A='||COALESCE(round(sum(CASE WHEN split_part(hedge_flow_id,'|',3) LIKE 'A!_%' ESCAPE '!' THEN CASE side WHEN 'BUY' THEN filled_qty ELSE -filled_qty END END)::numeric,2),0)::text FROM venue_fill_diagnostics WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty>0 AND symbol LIKE 'BTC%' AND created_at>now()-interval '${WINDOW}' GROUP BY venue ORDER BY venue;" | paste -sd'; ' -)
 
+C3="${C3:-}"; [ -z "$C3" ] && C3="(нет BTC band-филлов в окне)"  # пусто ⇒ плейсхолдер
+# Компактная сводка результата для строки журнала (одна строка, без переносов).
+RESULT_LINE="W·c ${WC_NODES}узл/max${WC_MAX}; принты старше эмиссии ${C1}; филлов ${FILLS}/истёкших ${EXPIRED}"
+
 cat <<MD
 # EXP-${RUN_ID}
 
-**Паспорт.** run_id ${RUN_ID} · окно ${WINDOW} (dev, живой клиринг) · git ${SHA} ·
-профиль: ${PROFILE}.
+**Паспорт.** run_id ${RUN_ID} · дата ${RUN_DATE} · окно ${WINDOW} (dev, живой клиринг) ·
+git ${SHA} · гипотеза: ${HYP} · изменение: ${CHANGE} · профиль: ${PROFILE}.
 
 **Рынок в окне.** σ/спред/базис/возраст — pending (нужны синхронные снимки, этап 4).
 
@@ -67,5 +74,10 @@ cat <<MD
 - Причина 1 (возраст пересекающих принтов старше эмиссии, 24ч): ${C1}.
 - Причина 3 (нетто T vs A по площадке, BTC): ${C3}.
 
-**Вывод.** (заполнить вручную: принять/отклонить гипотезу, следующее действие.)
+**Вывод.** ${DECISION}
 MD
+
+# Готовая строка для docs/experiments/journal.md (скилл /experiment её допишет).
+# Маркер JOURNAL_ROW: парсится скиллом; сам журнал не трогаем (генератор на dev,
+# журнал — в локальном репозитории).
+echo "JOURNAL_ROW: | ${RUN_DATE} | [${RUN_ID}](EXP-${RUN_ID}.md) | ${HYP} | ${CHANGE} | ${RESULT_LINE} | ${DECISION} |"
