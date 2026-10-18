@@ -18,6 +18,7 @@
 #include "cex/common/log.hpp"
 #include "cex/common/decimal.hpp"
 
+#include "app/async_snapshot_storage.hpp"
 #include "app/liquidity_curve_producer.hpp"
 #include "app/venues_loop.hpp"
 #include "app/sim_session_manager.hpp"
@@ -78,7 +79,17 @@ int main() {
 
   cex::common::log_json("INFO", "Venues starting", {{"brokers", brokers}});
 
-  cex::venues::app::VenuesLoop loop(brokers, &snapshot_storage);
+  // ADR-078 этап 2б: запись снимков в ClickHouse не задерживает ни опрос, ни расчёт (ограниченная очередь, при
+  // переполнении отбрасывается старое). Включается VENUES_STORAGE_ASYNC=1 (деф 0 — запись синхронно, как раньше).
+  std::unique_ptr<cex::venues::app::AsyncSnapshotStorage> async_storage;
+  cex::venues::app::ISnapshotStorage* loop_storage = &snapshot_storage;
+  if (cex::common::Env::get_bool("VENUES_STORAGE_ASYNC", false)) {
+    const auto cap = static_cast<std::size_t>(std::max(10, cex::common::Env::get_int("VENUES_STORAGE_QUEUE", 2000)));
+    async_storage = std::make_unique<cex::venues::app::AsyncSnapshotStorage>(&snapshot_storage, cap);
+    loop_storage = async_storage.get();
+    cex::common::log_json("INFO", "Snapshot storage async (ADR-078 2b) enabled", {{"queue", std::to_string(cap)}});
+  }
+  cex::venues::app::VenuesLoop loop(brokers, loop_storage);
   if (live_book_enabled) loop.SetLiveBookStorage(&live_book_storage);
   loop.start();
 
@@ -431,6 +442,60 @@ int main() {
     out["last_curve_effective_level"] = metrics.last_curve_effective_level;
     out["last_curve_degradation_reason"] = metrics.last_curve_degradation_reason;
     out["last_curve_quality_action"] = metrics.last_curve_quality_action;
+    // Этап 0 (EXP-2026-10-15-exchange-requests): где уходит время цикла опроса.
+    out["cycle_ms"] = metrics.last_cycle_ms;
+    out["cycle_ms_ema"] = metrics.cycle_ms_ema;
+    out["cycle_pairs"] = metrics.cycle_pairs;
+    out["cycle_end_ms"] = metrics.cycle_end_wall_ms;
+    if (metrics.poll_active) {
+      // ADR-078: состояние опроса под управлением планировщика
+      auto& po = out["poll"];
+      po["mode"] = "scheduler";
+      po["period_s"] = metrics.poll_period_s;
+      po["scale"] = metrics.poll_scale;
+      po["paused"] = metrics.poll_paused;
+      po["ok"] = metrics.poll_ok;
+      po["retries"] = metrics.poll_retries;
+      po["failures"] = metrics.poll_failures;
+      po["missed_ticks"] = metrics.poll_missed;
+      po["quarantines"] = metrics.poll_quarantines;
+      po["venue_pauses"] = metrics.poll_venue_pauses;
+      po["rate_limited"] = metrics.poll_rate_limited;
+      if (metrics.publish_async) {
+        po["publish_submitted"] = metrics.publish_submitted;
+        po["publish_executed"] = metrics.publish_executed;
+        po["publish_coalesced"] = metrics.publish_coalesced;   // вытеснено более свежей книгой
+        po["publish_pending"] = static_cast<std::uint64_t>(metrics.publish_pending);
+      }
+      for (const auto& [symbol, p] : metrics.poll_pairs) {
+        auto& pp = po["pairs"][symbol];
+        pp["health"] = p.health;  // 0 свежая, 1 стареющая, 2 устаревшая, 3 недоступна
+        if (p.age_s >= 0.0) pp["age_s"] = p.age_s;
+        pp["fails"] = p.fails;
+        pp["quarantine_s"] = p.quarantine_s;
+        pp["period_s"] = p.period_s;
+        if (p.sigma_pm >= 0.0) pp["sigma_pm"] = p.sigma_pm;          // ‰/√с, оценка по потоку mid биржи
+        if (p.valid_age_s >= 0.0) pp["valid_age_s"] = p.valid_age_s;  // срок годности данных по допуску ε_soft
+      }
+    }
+    for (const auto& [symbol, st] : metrics.stages) {
+      auto& o = out["stages"][symbol];
+      o["lock_wait_ms"] = st.lock_wait_ms;
+      o["fetch_ms"] = st.fetch_ms;
+      // Разбивка REST известна только если снимок получен; иначе ключей нет (в UI — прочерк, не ноль).
+      if (st.rest_valid) {
+        o["rest_depth_ms"] = st.rest_depth_ms;
+        o["rest_ticker_ms"] = st.rest_ticker_ms;
+        o["rest_trades_ms"] = st.rest_trades_ms;
+        o["rest_requests"] = st.rest_requests;
+        o["ticker_state"] = st.ticker_state;
+      }
+      o["raw_publish_ms"] = st.raw_publish_ms;
+      o["snapshot_ms"] = st.snapshot_ms;
+      o["curve_ms"] = st.curve_ms;
+      o["total_ms"] = st.total_ms;
+      if (st.recv_wall_ms > 0) o["recv_ms"] = st.recv_wall_ms;
+    }
     return out;
   };
 

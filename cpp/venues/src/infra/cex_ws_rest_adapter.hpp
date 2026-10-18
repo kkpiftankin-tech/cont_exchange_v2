@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -16,6 +17,7 @@
 #include "infra/cex_local_lob_assembler.hpp"
 #include "app/execution_report_sink.hpp"
 #include "app/fill_diagnostics_sink.hpp"
+#include "domain/poll_planner.hpp"
 #include "domain/venue_adapter.hpp"
 
 namespace cex::venues::infra {
@@ -37,6 +39,18 @@ struct CexWsRestAdapterConfig {
   uint32_t heartbeat_pong_timeout_ms{15000};
   uint32_t stale_threshold_ms{15000};
   uint32_t rest_timeout_ms{5000};
+  // ADR-078: дедлайн запросов снимка (стакан, тикер, лента) в режиме планировщика; 0 — как rest_timeout_ms.
+  // Не влияет на POST ордеров и глубокий стакан быстрой полосы.
+  uint32_t rest_snapshot_timeout_ms{0};
+  // Этап 1 (EXP-2026-10-15-exchange-requests); по умолчанию выключено ⇒ поведение прежнее.
+  bool rest_reuse_connections{false};   // пул curl-handle: keep-alive и DNS-кэш
+  bool rest_ipv4_only{false};           // не ждать AAAA (на dev-хосте ≈1 с на запрос)
+  uint32_t rest_connect_timeout_ms{0};  // 0 — отдельного таймаута подключения нет
+  uint32_t rest_ticker_refresh_ms{0};   // 0 — тикер на каждом снимке; >0 — не чаще раза в N мс на пару
+  // Ожидание REST-токена вместо отказа: 0 — не ждать (запрос пропускается, как раньше); >0 —
+  // ждать не дольше N мс. Нужно строгим биржам (Kraken, 2 запроса/с): при частом опросе
+  // хвост очереди пар иначе голодает (пропускается каждый проход).
+  uint32_t rest_token_wait_ms{0};
   bool rest_ticker_volume_enabled{false};
   bool simulate_orders{false};
   std::string simulated_order_id_prefix{"SIM-CEX-"};
@@ -119,6 +133,17 @@ class ICexWsSession {
 
 class CurlCexRestClient final : public ICexRestClient {
  public:
+  struct Options {
+    bool reuse_connections{false};
+    bool ipv4_only{false};
+    uint32_t connect_timeout_ms{0};
+  };
+  CurlCexRestClient() = default;
+  explicit CurlCexRestClient(Options options) : options_(options) {}
+  ~CurlCexRestClient() override;
+  CurlCexRestClient(const CurlCexRestClient&) = delete;
+  CurlCexRestClient& operator=(const CurlCexRestClient&) = delete;
+
   bool Get(const std::string& url,
            const std::vector<std::string>& headers,
            uint32_t timeout_ms,
@@ -131,6 +156,11 @@ class CurlCexRestClient final : public ICexRestClient {
             uint32_t timeout_ms,
             std::string* response_body,
             long* http_code) override;
+
+ private:
+  Options options_;
+  std::mutex pool_mu_;
+  std::vector<void*> idle_handles_;  // CURL*; пул при reuse_connections (handle не потокобезопасен — берётся целиком)
 };
 
 // Minimal WS session placeholder for environments where WS transport
@@ -154,7 +184,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   explicit CexWsRestAdapter(
       CexWsRestAdapterConfig cfg,
-      std::unique_ptr<ICexRestClient> rest_client = std::make_unique<CurlCexRestClient>(),
+      std::unique_ptr<ICexRestClient> rest_client = nullptr,  // nullptr ⇒ CurlCexRestClient по cfg
       std::unique_ptr<ICexWsSession> ws_session = std::make_unique<NoopCexWsSession>(),
       ClockNowFn now_fn = [] { return SteadyClock::now(); });
 
@@ -174,6 +204,21 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   // Выделенный REST-клиент для RequestDepthOnly (ADR-070): глубокий запрос не стоит в
   // очереди за общим клиентом и мьютексом основного цикла. Вызывать до старта потока
   // быстрой полосы; единственный потребитель — этот поток.
+  // ADR-078 (этап 2а): запрос снимка под управлением планировщика. Адаптер НЕ применяет свой предохранитель и
+  // лимитер токенов (политику ведёт планировщик), не подменяет неудачу книгой из кэша и возвращает класс исхода.
+  struct FetchOutcome {
+    std::optional<domain::VenueRawSnapshot> fresh;  // только свежая книга
+    domain::FetchClass cls{domain::FetchClass::kTransient};
+    long http_code{0};
+    // 429/418 на побочном запросе (тикер, лента) при удачном стакане: планировщик обязан замедлиться и здесь.
+    bool side_rate_limited{false};
+  };
+  FetchOutcome FetchSnapshot(const domain::VenueSnapshotRequest& request);
+
+  // Опции REST-клиента из конфига адаптера (для клиента быстрой полосы).
+  CurlCexRestClient::Options RestClientOptions() const {
+    return {cfg_.rest_reuse_connections, cfg_.rest_ipv4_only, cfg_.rest_connect_timeout_ms};
+  }
   void SetDepthRestClient(std::unique_ptr<ICexRestClient> client) {
     depth_rest_client_ = std::move(client);
   }
@@ -227,6 +272,9 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     bool is_empty_book{false};
     std::deque<CexLocalLobAssembler::DiffEvent> pending_depth_diffs;
     cex::common::Decimal volume_24h{0, 0};
+    cex::common::Decimal window_volume_24h{0, 0};  // ADR-077: объём для окна глубины (OKX/Kraken)
+    SteadyClock::time_point last_ticker_fetch{};   // этап 1: когда тикер читали в последний раз
+    bool ticker_fetched{false};
     bool volume_24h_authoritative{false};
     SteadyClock::time_point last_market_event{};
     // Лента недавних реальных публичных сделок для реалистичной симуляции исполнения
@@ -281,6 +329,11 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   };
 
   bool consume_rest_token_locked(SteadyClock::time_point now);
+  // Берёт REST-токен, при нехватке ждёт не дольше cfg_.rest_token_wait_ms (вызывать БЕЗ mu_).
+  bool acquire_rest_token(SteadyClock::time_point* now);
+  // Общая реализация RequestSnapshot/FetchSnapshot: outcome != nullptr — режим планировщика (см. FetchSnapshot).
+  std::optional<domain::VenueRawSnapshot> RequestSnapshotImpl(
+      const domain::VenueSnapshotRequest& request, FetchOutcome* outcome);
   bool consume_ws_token_locked(SteadyClock::time_point now);
   bool consume_connect_token_locked(SteadyClock::time_point now);
   static bool consume_token(TokenBucket* bucket, double need, SteadyClock::time_point now);

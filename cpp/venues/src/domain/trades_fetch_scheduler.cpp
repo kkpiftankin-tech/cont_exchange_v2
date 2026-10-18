@@ -27,4 +27,8 @@ bool IsStalestTradesCandidate(const TradesFreshnessEntry& candidate,
   return true;
 }
 
+bool TradesReadDue(const int64_t age_ms, const int64_t min_interval_ms) {
+  return age_ms < 0 || age_ms >= min_interval_ms;
+}
+
 }  // namespace cex::venues::domain

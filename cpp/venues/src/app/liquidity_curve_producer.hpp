@@ -2,6 +2,7 @@
 
 #include <string>
 #include <array>
+#include <map>
 #include <optional>
 #include <limits>
 #include <mutex>
@@ -195,6 +196,8 @@ class LiquidityCurveProducer {
   struct PublishOptions {
     std::optional<std::string> requested_level;
     std::optional<bool> synthetic_enabled;
+    // ADR-077: дополнительные теги кривой (depth_window.*); пустой — поведение прежнее.
+    std::map<std::string, std::string> extra_tags;
   };
 
   LiquidityCurveProducer(IMessagePublisher* publisher,

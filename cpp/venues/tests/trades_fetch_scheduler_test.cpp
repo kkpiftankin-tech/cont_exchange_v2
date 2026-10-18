@@ -8,6 +8,7 @@
 namespace {
 
 using cex::venues::domain::IsStalestTradesCandidate;
+using cex::venues::domain::TradesReadDue;
 using cex::venues::domain::TradesFreshnessEntry;
 
 bool Check(const bool condition, const std::string& message) {
@@ -152,9 +153,21 @@ bool TestSingleSymbolAlwaysWins() {
   return true;
 }
 
+// Режим планировщика (ADR-078): ленту пара читает не чаще минимального интервала; ещё не читавшаяся — сразу.
+bool TestTradesReadDueRespectsMinInterval() {
+  if (!Check(TradesReadDue(-1, 15000), "ещё не читали — читать сразу")) return false;
+  if (!Check(!TradesReadDue(0, 15000), "только что прочитана — рано")) return false;
+  if (!Check(!TradesReadDue(14999, 15000), "на 1 мс раньше интервала — рано")) return false;
+  if (!Check(TradesReadDue(15000, 15000), "ровно интервал — пора")) return false;
+  if (!Check(TradesReadDue(40000, 15000), "давно не читали — пора")) return false;
+  if (!Check(TradesReadDue(0, 0), "нулевой интервал — всегда пора (прежнее поведение)")) return false;
+  return true;
+}
+
 }  // namespace
 
 int main() {
+  if (!TestTradesReadDueRespectsMinInterval()) return EXIT_FAILURE;
   if (!TestOldestAgeWins()) return EXIT_FAILURE;
   if (!TestNeverReadBeatsAnyFiniteAge()) return EXIT_FAILURE;
   if (!TestFirstTickTieBreakIsDeterministicAndExclusive()) return EXIT_FAILURE;

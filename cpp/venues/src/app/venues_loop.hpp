@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <memory>
 #include <optional>
@@ -20,7 +21,11 @@
 #include "app/sim_session_registry.hpp"
 #include "app/venue_sim_router.hpp"
 #include "app/depth_watch_registry.hpp"
+#include "app/latest_wins_pool.hpp"
+#include "app/poll_runner.hpp"
+#include "app/depth_window_controller.hpp"
 #include "app/snapshot_producer.hpp"
+#include "cex/common/data_validity.hpp"
 #include "cex/common/kafka.hpp"
 #include "domain/venue_adapter.hpp"
 #include "infra/execution_report_producer.hpp"
@@ -29,6 +34,10 @@
 #include "infra/postgres_hedgeflow_repository.hpp"
 #include "infra/postgres_synthetic_order_repository.hpp"
 #include "infra/venue_observability_producer.hpp"
+
+namespace cex::venues::infra {
+class CexWsRestAdapter;
+}  // namespace cex::venues::infra
 
 namespace cex::venues::app {
 
@@ -54,6 +63,34 @@ struct VenueConfigRecord {
   int64_t updated_at_ms{0};
 };
 
+// Этап 0 (EXP-2026-10-15-exchange-requests): где уходит время цикла опроса одной пары, мс.
+struct VenueStageTimings {
+  double lock_wait_ms{0.0};     // ожидание per-venue мьютекса снимка
+  double fetch_ms{0.0};         // RequestSnapshot целиком (REST + разбор)
+  double rest_depth_ms{0.0};
+  double rest_ticker_ms{0.0};
+  double rest_trades_ms{0.0};
+  double raw_publish_ms{0.0};   // marketdata.raw (стакан, мета, тикер)
+  double snapshot_ms{0.0};      // нормализация + Kafka + запись в хранилище (ClickHouse)
+  double curve_ms{0.0};         // расчёт и публикация кривой
+  double total_ms{0.0};
+  int rest_requests{0};
+  int ticker_state{3};          // 0 запрошен, 1 пропущен (кэш), 2 нет токена, 3 выключен
+  bool rest_valid{false};       // разбивка REST известна (снимок получен); иначе в DTO её нет
+  int64_t recv_wall_ms{0};      // момент получения СВЕЖЕГО снимка; 0 ⇒ не обновлять прежнее значение
+};
+
+// ADR-078: состояние опроса пары и биржи под управлением планировщика (для админ-API и интерфейса).
+struct VenuePollPairInfo {
+  int health{3};            // 0 свежая, 1 стареющая, 2 устаревшая, 3 недоступна/нет данных
+  double age_s{-1.0};
+  int fails{0};
+  double quarantine_s{0.0};
+  double period_s{0.0};       // текущий период опроса пары (адаптивный, ADR-078 §7)
+  double sigma_pm{-1.0};      // оценка σ пары, ‰/√с; -1 — оценки ещё нет
+  double valid_age_s{-1.0};   // срок годности данных пары по допуску ε_soft, с; -1 — нет σ
+};
+
 struct VenueRuntimeMetrics {
   double stale_rate{0.0};
   double snapshots_per_sec{0.0};
@@ -63,6 +100,22 @@ struct VenueRuntimeMetrics {
   std::string last_curve_effective_level;
   std::string last_curve_degradation_reason;
   std::string last_curve_quality_action;
+  std::map<std::string, VenueStageTimings> stages;  // по символу ("BTC/USDT")
+  double last_cycle_ms{0.0};     // полный проход poll_adapter по всем парам биржи
+  double cycle_ms_ema{0.0};
+  int cycle_pairs{0};
+  int64_t cycle_end_wall_ms{0};
+  // ADR-078: режим планировщика (заполняется при чтении метрик; poll_active=false — старый цикл)
+  bool poll_active{false};
+  double poll_period_s{0.0};
+  double poll_scale{1.0};
+  bool poll_paused{false};
+  std::uint64_t poll_ok{0}, poll_retries{0}, poll_failures{0}, poll_missed{0};
+  std::uint64_t poll_quarantines{0}, poll_venue_pauses{0}, poll_rate_limited{0};
+  bool publish_async{false};                       // этап 2б: публикация через пул
+  std::uint64_t publish_submitted{0}, publish_executed{0}, publish_coalesced{0};
+  std::size_t publish_pending{0};
+  std::map<std::string, VenuePollPairInfo> poll_pairs;   // по символу ("BTC/USDT")
 };
 
 // "Venues" service responsibilities in architecture:
@@ -179,6 +232,17 @@ class VenuesLoop : public ExecutionReportSink {
   ISnapshotStorage* snapshot_storage_{nullptr};
   ISnapshotStorage* live_book_storage_{nullptr};
   DepthWatchRegistry depth_watch_;
+  // ADR-077: окно глубины стакана по объёму для цикла клиринга (CE_DEPTH_WINDOW_ENABLED).
+  std::unique_ptr<DepthWindowController> depth_window_;
+  bool poll_scheduler_mode_{false};                          // ADR-078: VENUES_POLL_MODE=scheduler
+  std::vector<std::unique_ptr<PollRunner>> poll_runners_;
+  std::map<std::string, PollRunner*> poll_runner_by_venue_;  // venue_id -> исполнитель (только чтение после старта)
+  std::unique_ptr<LatestWinsPool> publish_pool_;            // ADR-078 этап 2б: расчёт кривой отвязан от потоков опроса
+  // ADR-078 §7: адаптивный период опроса пары по её волатильности (VENUES_POLL_ADAPTIVE=1).
+  bool poll_adaptive_{false};
+  double poll_eps_soft_{5e-4};                              // допуск ε_soft (доля цены): срок годности τ_ε = (ε/(zσ))²
+  mutable std::mutex poll_vol_mu_;
+  std::map<std::string, cex::common::DualHorizonVolatility> poll_vol_;  // "venue|symbol" -> σ по потоку mid этой биржи
   std::set<std::string> static_depth_venues_;  // биржи «всегда включено» (VENUES_FAST_DEPTH_VENUE)
   mutable std::mutex deep_books_mu_;
   std::unordered_map<std::string, fob::venue::v1::VenueSnapshot> deep_books_;  // "venue|symbol"
@@ -224,6 +288,35 @@ class VenuesLoop : public ExecutionReportSink {
   // колонка venue_stale_ms). Настраивается из UI (вкладка Площадки). -1 = не задан
   // (используется env STALE_THRESHOLD_MS). TTL-поллинг в md_publish_loop.
   void RefreshVenueStaleFromPg();
+ public:
+  // Этап 0: запись таймингов пары и цикла биржи (вызывает poll_adapter).
+  void RecordPairStage(const std::string& venue, const std::string& symbol,
+                       VenueStageTimings timings);
+  void RecordCycle(const std::string& venue, double cycle_ms, int pairs);
+  // Контекст публикации снимка (общий для старого цикла и планировщика, ADR-078).
+  struct SnapshotPublishContext {
+    std::size_t legacy_depth_levels{20};
+    std::size_t requested_levels{20};   // сколько уровней реально просили у площадки
+    uint32_t stale_threshold_ms{15000};
+    std::string requested_curve_level;
+    bool synthetic_enabled{false};
+  };
+  // Публикует один свежий снимок: окно глубины, marketdata.raw, нормализация и хранилище, кривая, метрики.
+  void ProcessFetchedSnapshot(domain::VenueAdapter* adapter, domain::VenueRawSnapshot& snapshot,
+                              const SnapshotPublishContext& ctx, VenueStageTimings* st);
+
+  // ADR-078 (этап 2а): опрос CEX-бирж под управлением планировщика (VENUES_POLL_MODE=scheduler).
+  void StartPollRunners();
+  void StopPollRunners();
+  PollFetchResult PollFetchOnce(infra::CexWsRestAdapter* cex, std::size_t pair);
+  // Свежая книга от исполнителя: ставит публикацию в пул «побеждает последнее» (этап 2б) или публикует сразу.
+  void PollDeliver(infra::CexWsRestAdapter* cex, std::size_t pair, PollFetchResult&& res);
+  std::optional<double> PollSigma(const std::string& venue, const std::string& symbol) const;
+  void PollPublish(infra::CexWsRestAdapter* cex, std::size_t pair, PollFetchResult&& res);
+  void PollTickDone(const std::string& venue, std::size_t pair, const PollFetchResult& last, bool ok);
+  void PollHousekeeping(infra::CexWsRestAdapter* cex);
+  bool VenueActive(const std::string& venue_id) const;
+ private:
   std::string venue_stale_pg_dsn_{};
   std::atomic<int64_t> runtime_stale_ms_{-1};
   std::chrono::steady_clock::time_point last_stale_poll_{};

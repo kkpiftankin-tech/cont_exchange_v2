@@ -65,6 +65,13 @@ add_executable(venues
   src/domain/amm_virtual_lob.cpp
   src/domain/amm_direct_fob.cpp
   src/domain/trades_fetch_scheduler.cpp
+  src/domain/depth_window.cpp
+  src/domain/venue_endpoints.cpp
+  src/domain/poll_planner.cpp
+  src/app/poll_runner.cpp
+  src/app/latest_wins_pool.cpp
+  src/app/async_snapshot_storage.cpp
+  src/app/depth_window_controller.cpp
   src/app/snapshot_producer.cpp
   src/app/depth_watch_registry.cpp
   src/infra/snapshot_clickhouse_writer.cpp
@@ -344,6 +351,90 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_snapshot_producer_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_snapshot_producer_test COMMAND venues_snapshot_producer_test)
+
+  add_executable(venues_depth_window_test
+    tests/depth_window_test.cpp
+    src/domain/depth_window.cpp
+  )
+  target_include_directories(venues_depth_window_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_depth_window_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_window_test COMMAND venues_depth_window_test)
+
+  add_executable(venues_depth_window_controller_test
+    tests/depth_window_controller_test.cpp
+    src/app/depth_window_controller.cpp
+    src/domain/depth_window.cpp
+  )
+  target_include_directories(venues_depth_window_controller_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_depth_window_controller_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_depth_window_controller_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_window_controller_test COMMAND venues_depth_window_controller_test)
+
+  add_executable(venues_endpoints_test
+    tests/venue_endpoints_test.cpp
+    src/domain/venue_endpoints.cpp
+  )
+  target_include_directories(venues_endpoints_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_endpoints_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_endpoints_test COMMAND venues_endpoints_test)
+
+  add_executable(venues_poll_planner_test
+    tests/poll_planner_test.cpp
+    src/domain/poll_planner.cpp
+  )
+  target_include_directories(venues_poll_planner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_poll_planner_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_poll_planner_test COMMAND venues_poll_planner_test)
+
+  add_executable(venues_poll_runner_test
+    tests/poll_runner_test.cpp
+    src/app/poll_runner.cpp
+    src/domain/poll_planner.cpp
+  )
+  target_include_directories(venues_poll_runner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_poll_runner_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_poll_runner_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_poll_runner_test COMMAND venues_poll_runner_test)
+
+  add_executable(venues_latest_wins_pool_test
+    tests/latest_wins_pool_test.cpp
+    src/app/latest_wins_pool.cpp
+  )
+  target_include_directories(venues_latest_wins_pool_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_latest_wins_pool_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_latest_wins_pool_test COMMAND venues_latest_wins_pool_test)
+
+  add_executable(venues_async_snapshot_storage_test
+    tests/async_snapshot_storage_test.cpp
+    src/app/async_snapshot_storage.cpp
+  )
+  target_include_directories(venues_async_snapshot_storage_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_async_snapshot_storage_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_async_snapshot_storage_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_async_snapshot_storage_test COMMAND venues_async_snapshot_storage_test)
 
   add_executable(venues_depth_watch_registry_test
     tests/depth_watch_registry_test.cpp

@@ -52,4 +52,10 @@ struct TradesFreshnessEntry {
 bool IsStalestTradesCandidate(const TradesFreshnessEntry& candidate,
                                const std::vector<TradesFreshnessEntry>& others);
 
+// Режим планировщика опроса (ADR-078): лента сделок — отдельный запрос, и при фиксированном периоде 3 с чтение
+// «у самой голодной пары в каждом тике» удваивало бы поток запросов (у Kraken бюджет 2 запр/с превышался, тики
+// пропускались) и удлиняло снимок на ещё один последовательный запрос. Поэтому ленту пара читает не чаще раза в
+// min_interval_ms; ещё не читавшаяся (age_ms < 0) — читает сразу.
+bool TradesReadDue(int64_t age_ms, int64_t min_interval_ms);
+
 }  // namespace cex::venues::domain

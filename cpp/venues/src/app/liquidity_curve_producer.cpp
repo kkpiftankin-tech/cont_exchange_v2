@@ -1468,6 +1468,7 @@ bool LiquidityCurveProducer::Publish(
       std::to_string(config_.l3_impact.execution_blend_weight);
   (*tags)["amm_path"] = using_direct_amm ? "direct" : "virtual_lob";
   (*tags)["amm_direct_enabled"] = BoolTag(config_.amm_direct.enabled);
+  for (const auto& [tag_key, tag_value] : options.extra_tags) (*tags)[tag_key] = tag_value;
   (*tags)["amm_pool_fee_rate"] = std::to_string(amm_pool_fee_rate_applied);
   (*tags)["amm_gas_cost_quote"] = std::to_string(amm_gas_cost_quote_applied);
   (*tags)["amm_execution_overhead_bps"] = std::to_string(amm_execution_overhead_bps_applied);

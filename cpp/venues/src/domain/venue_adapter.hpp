@@ -137,11 +137,26 @@ struct VenueSnapshotRequest {
   fob::common::v1::Instrument instrument;
   std::string venue_symbol;
   std::size_t depth_levels{20};
+  // ADR-077: лимит REST-запроса стакана от окна глубины по объёму. 0 — прежний путь
+  // (max(depth_levels, lob_max_levels)); >0 — запрашивать ровно столько (в пределах
+  // потолков площадки) и не давать LOB-сборщику обрезать стакан раньше.
+  std::size_t rest_depth_limit{0};
   // Тянуть ли ленту публичных сделок (recent-trades) вместе со стаканом. true для
   // ядрового md-цикла (CE-хеджируемые символы — нужна лента для sim-fill), false
   // для лёгкого ticker-цикла (extra_ticker_loop), чтобы не жечь REST-бюджет на
   // символах, которые CE не хеджирует, и не растягивать каденс CE-ленты.
   bool include_trades{true};
+};
+
+// Этап 0 (EXP-2026-10-15-exchange-requests): время REST-запросов одного снимка, мс.
+// Диагностика, не контракт: заполняет CexWsRestAdapter, у остальных адаптеров нули.
+struct VenueFetchTimings {
+  double rest_depth_ms{0.0};
+  double rest_ticker_ms{0.0};
+  double rest_trades_ms{0.0};
+  int32_t rest_requests{0};
+  // 0 — запрошен; 1 — пропущен (кэш по CEX_REST_TICKER_REFRESH_MS); 2 — нет токена; 3 — выключен.
+  int32_t ticker_state{3};
 };
 
 // Unified raw payload expected from CEX/DEX/AMM adapters.
@@ -163,6 +178,11 @@ struct VenueRawSnapshot {
   cex::common::Decimal mid_price{0, 0};
   cex::common::Decimal spread{0, 0};
   cex::common::Decimal volume_24h{0, 0};
+  // ADR-077: суточный объём (base) для окна глубины. Заполняется только при запросе окна
+  // (rest_depth_limit>0) и только там, где общий разбор тикера не работает (OKX, Kraken);
+  // volume_24h и всё, что от него зависит (τ-потолок кривой), не затрагивается. 0 ⇒ нет.
+  cex::common::Decimal window_volume_24h{0, 0};
+  VenueFetchTimings fetch_timings;
 
   VenueFees fees;
   VenueTradingRules trading_rules;

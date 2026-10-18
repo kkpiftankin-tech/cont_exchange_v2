@@ -16,6 +16,16 @@ function fmtMs(ms) {
   return s < 60 ? `${s.toFixed(1)} с` : `${(s / 60).toFixed(1)} мин`;
 }
 
+// Время стадии: мс с одним знаком для малых значений; нет данных — «—» (ничего не выдумываем).
+function fmtStage(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  if (ms < 10) return `${ms.toFixed(1)} мс`;
+  return fmtMs(ms);
+}
+
+// Состояние тикера (суточный объём): запрошен / пропущен по кэшу / нет токена / выключен.
+const TICKER_STATE = { 0: 'запрос', 1: 'кэш', 2: 'нет токена', 3: 'выкл' };
+
 // Свежесть: зелёный если возраст < порога, иначе красный (снапшот пропускается).
 function ageColor(ageMs, staleMs) {
   if (ageMs == null) return '#888';
@@ -109,6 +119,7 @@ const VenueStatsPanel = () => {
             <tr style={{ textAlign: 'left', borderBottom: '1px solid rgba(127,127,127,0.3)' }}>
               <th style={{ padding: '6px 8px' }}>Биржа</th>
               <th style={{ padding: '6px 8px' }}>Период обновления (ср.)</th>
+              <th style={{ padding: '6px 8px' }} title="Время одного прохода опроса по всем парам биржи (venues, этап 0)">Проход опроса</th>
               <th style={{ padding: '6px 8px' }}>Возраст последнего</th>
               <th style={{ padding: '6px 8px' }}>Пар со стаканами</th>
               <th style={{ padding: '6px 8px' }}></th>
@@ -116,12 +127,13 @@ const VenueStatsPanel = () => {
           </thead>
           <tbody>
             {stats.venues.length === 0 ? (
-              <tr><td colSpan={5} style={{ padding: '10px 8px', color: '#888' }}>Нет данных за окно {stats.window_s} с</td></tr>
+              <tr><td colSpan={6} style={{ padding: '10px 8px', color: '#888' }}>Нет данных за окно {stats.window_s} с</td></tr>
             ) : stats.venues.map((v) => (
               <React.Fragment key={v.venue_id}>
                 <tr style={{ borderBottom: '1px solid rgba(127,127,127,0.15)' }}>
                   <td style={{ padding: '6px 8px', fontWeight: 600 }}>{v.venue_id}</td>
                   <td style={{ padding: '6px 8px' }}>{fmtMs(v.avg_period_ms)}</td>
+                  <td style={{ padding: '6px 8px' }}>{fmtStage(v.cycle_ms)}</td>
                   <td style={{ padding: '6px 8px', color: ageColor(v.age_ms, staleMs) }}>
                     {fmtMs(v.age_ms)}{v.age_ms != null && v.age_ms > staleMs ? ' ⚠ stale' : ''}
                   </td>
@@ -135,7 +147,7 @@ const VenueStatsPanel = () => {
                 </tr>
                 {expanded[v.venue_id] ? (
                   <tr>
-                    <td colSpan={5} style={{ padding: '4px 8px 10px 20px', background: 'rgba(127,127,127,0.04)' }}>
+                    <td colSpan={6} style={{ padding: '4px 8px 10px 20px', background: 'rgba(127,127,127,0.04)' }}>
                       <table style={{ width: 'auto', borderCollapse: 'collapse', fontSize: 12 }}>
                         <thead>
                           <tr style={{ textAlign: 'left', color: '#888' }}>
@@ -143,6 +155,14 @@ const VenueStatsPanel = () => {
                             <th style={{ padding: '3px 14px 3px 0' }}>Период</th>
                             <th style={{ padding: '3px 14px 3px 0' }}>Возраст</th>
                             <th style={{ padding: '3px 14px 3px 0' }}>Снимков</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="REST-запрос стакана">Стакан</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="REST-запрос суточного объёма (тикер)">Тикер</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="REST-запрос ленты сделок">Лента</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="Ожидание мьютекса снимка биржи">Мьютекс</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="Публикации marketdata.raw + снимок + запись в хранилище">Публикация</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="Расчёт и публикация кривой ликвидности">Кривая</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="Полное время обработки пары">Итого</th>
+                            <th style={{ padding: '3px 14px 3px 0' }} title="Возраст книги в venues сейчас (с момента получения)">Книга</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -152,6 +172,24 @@ const VenueStatsPanel = () => {
                               <td style={{ padding: '3px 14px 3px 0' }}>{p.samples > 1 ? fmtMs(p.period_ms) : '—'}</td>
                               <td style={{ padding: '3px 14px 3px 0', color: ageColor(p.age_ms, staleMs) }}>{fmtMs(p.age_ms)}</td>
                               <td style={{ padding: '3px 14px 3px 0' }}>{p.samples}</td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>{fmtStage(p.stages && p.stages.rest_depth_ms)}</td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>
+                                {p.stages && p.stages.ticker_state != null && p.stages.ticker_state !== 0
+                                  ? (TICKER_STATE[p.stages.ticker_state] || '—')
+                                  : fmtStage(p.stages && p.stages.rest_ticker_ms)}
+                              </td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>
+                                {p.stages && p.stages.rest_requests != null && p.stages.rest_trades_ms === 0
+                                  ? '—' : fmtStage(p.stages && p.stages.rest_trades_ms)}
+                              </td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>{fmtStage(p.stages && p.stages.lock_wait_ms)}</td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>
+                                {p.stages && p.stages.raw_publish_ms != null && p.stages.snapshot_ms != null
+                                  ? fmtStage(p.stages.raw_publish_ms + p.stages.snapshot_ms) : '—'}
+                              </td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>{fmtStage(p.stages && p.stages.curve_ms)}</td>
+                              <td style={{ padding: '3px 14px 3px 0', fontWeight: 600 }}>{fmtStage(p.stages && p.stages.total_ms)}</td>
+                              <td style={{ padding: '3px 14px 3px 0' }}>{fmtStage(p.stages && p.stages.book_age_ms)}</td>
                             </tr>
                           ))}
                         </tbody>

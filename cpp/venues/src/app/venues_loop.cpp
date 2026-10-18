@@ -49,6 +49,7 @@
 #include "app/venues_loop.hpp"
 
 #include "app/sim_config_applier.hpp"
+#include "domain/venue_endpoints.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -56,6 +57,7 @@
 #include <thread>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -150,6 +152,60 @@ bool env_bool(const std::string& key, const bool def) {
   if (text == "0" || text == "false" || text == "no" || text == "off") return false;
   return def;
 }
+
+// Этап 1 (EXP-2026-10-15-exchange-requests): транспорт REST. Всё выключено по умолчанию ⇒ как прежде.
+//   CEX_REST_REUSE_CONNECTIONS=1   — keep-alive и DNS-кэш (пул curl-handle)
+//   CEX_REST_IPV4_ONLY=1           — не ждать AAAA-ответ
+//   CEX_REST_CONNECT_TIMEOUT_MS=N  — отдельный таймаут подключения (0 — нет)
+//   CEX_REST_TICKER_REFRESH_MS=N   — суточный объём не чаще раза в N мс на пару (0 — каждый снимок)
+void ApplyRestTransportEnv(infra::CexWsRestAdapterConfig* cfg, const std::string& venue_prefix) {
+  if (cfg == nullptr) return;
+  // CEX_REST_TOKEN_WAIT_MS / <PREFIX>_REST_TOKEN_WAIT_MS: ждать REST-токен не дольше N мс вместо отказа
+  // (0 — как прежде). Приоритет у per-venue значения.
+  const double global_wait = env_double("CEX_REST_TOKEN_WAIT_MS", 0.0);
+  const double wait_ms = env_double(venue_prefix + "_REST_TOKEN_WAIT_MS", global_wait);
+  cfg->rest_token_wait_ms = (wait_ms >= 1.0 && wait_ms <= 5000.0) ? static_cast<uint32_t>(wait_ms) : 0u;
+  cfg->rest_reuse_connections = env_bool("CEX_REST_REUSE_CONNECTIONS", false);
+  cfg->rest_ipv4_only = env_bool("CEX_REST_IPV4_ONLY", false);
+  const double connect_ms = env_double("CEX_REST_CONNECT_TIMEOUT_MS", 0.0);
+  cfg->rest_connect_timeout_ms =
+      (connect_ms >= 1.0 && connect_ms <= 60000.0) ? static_cast<uint32_t>(connect_ms) : 0u;
+  const double ticker_ms = env_double("CEX_REST_TICKER_REFRESH_MS", 0.0);
+  cfg->rest_ticker_refresh_ms =
+      (ticker_ms >= 1.0 && ticker_ms <= 3600000.0) ? static_cast<uint32_t>(ticker_ms) : 0u;
+  // ADR-078: в режиме планировщика дедлайн запроса короткий (повторы укладываются в тик), подключение — 0,5 с.
+  if (cex::common::Env::get_string("VENUES_POLL_MODE", "legacy") == "scheduler") {
+    const double deadline_ms = env_double("VENUES_POLL_DEADLINE_MS", 800.0);
+    // Только запросы снимка в режиме планировщика; POST ордеров и быстрая полоса остаются на CEX_REST_TIMEOUT_MS.
+    if (deadline_ms >= 100.0 && deadline_ms <= 10000.0) cfg->rest_snapshot_timeout_ms = static_cast<uint32_t>(deadline_ms);
+    if (cfg->rest_connect_timeout_ms == 0) cfg->rest_connect_timeout_ms = 500;
+  }
+}
+
+// Этап 0: часы стадий и охранник записи таймингов пары (срабатывает и на ранних continue).
+using StageClock = std::chrono::steady_clock;
+double StageMs(const StageClock::time_point t0) {
+  return std::chrono::duration<double, std::milli>(StageClock::now() - t0).count();
+}
+
+struct PairStageGuard {
+  PairStageGuard(VenuesLoop* loop, std::string venue, std::string symbol)
+      : loop_(loop), venue_(std::move(venue)), symbol_(std::move(symbol)),
+        t0_(StageClock::now()) {}
+  ~PairStageGuard() {
+    t.total_ms = StageMs(t0_);
+    loop_->RecordPairStage(venue_, symbol_, t);
+  }
+  PairStageGuard(const PairStageGuard&) = delete;
+  PairStageGuard& operator=(const PairStageGuard&) = delete;
+  VenueStageTimings t;
+
+ private:
+  VenuesLoop* loop_;
+  std::string venue_;
+  std::string symbol_;
+  StageClock::time_point t0_;
+};
 
 Decimal env_decimal_units_scale(const std::string& units_key,
                                 const std::string& scale_key,
@@ -431,6 +487,21 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     wc.max_ttl_ms = std::max(5000, cex::common::Env::get_int("VENUES_FAST_DEPTH_LEASE_MAX_MS", 60000));
     depth_watch_.SetConfig(wc);
   }
+  {
+    // ADR-077: окно глубины по объёму; выключено по умолчанию — путь опроса прежний.
+    auto dw_cfg = DepthWindowControllerConfig::FromEnv();
+    const bool dw_enabled = dw_cfg.enabled;
+    const auto dsn = cex::common::Env::try_get_string("VENUES_POSTGRES_DSN");
+    depth_window_ = std::make_unique<DepthWindowController>(
+        std::move(dw_cfg),
+        DepthWindowController::MakePgSigmaProvider(dsn.value_or(std::string{})));
+    cex::common::log_json("INFO", "Depth window (ADR-077) config",
+                          {{"enabled", dw_enabled ? "1" : "0"}});
+  }
+  // ADR-078: опрос CEX-бирж планировщиком (legacy — прежний цикл, деф).
+  poll_scheduler_mode_ = cex::common::Env::get_string("VENUES_POLL_MODE", "legacy") == "scheduler";
+  cex::common::log_json("INFO", "Poll mode (ADR-078)",
+                        {{"mode", poll_scheduler_mode_ ? "scheduler" : "legacy"}});
   execution_report_producer_ = std::make_unique<infra::ExecutionReportProducer>(
       [this](const std::string& topic,
              const std::string& key,
@@ -777,6 +848,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
           env_double("VENUES_FAST_DEPTH_RPS", default_depth_rps));
       cfg->depth_only_burst = std::max(1.0, 2.0 * cfg->depth_only_requests_per_sec);
       cfg->rest_ticker_volume_enabled = env_bool("CEX_REST_TICKER_VOLUME_ENABLED", true);
+      ApplyRestTransportEnv(cfg, venue_env_prefix);
       cfg->simulate_orders = env_bool(
           "CEX_SIMULATE_ORDERS",
           env_bool("VENUES_SIMULATE_ORDERS", true));
@@ -947,6 +1019,7 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
     cfg.ws_messages_per_sec = env_double("CEX_WS_RPS", 10.0);
     cfg.ws_burst = env_double("CEX_WS_BURST", 10.0);
     cfg.rest_ticker_volume_enabled = env_bool("CEX_REST_TICKER_VOLUME_ENABLED", true);
+    ApplyRestTransportEnv(&cfg, "CEX");
     cfg.simulate_orders = env_bool(
         "CEX_SIMULATE_ORDERS",
         env_bool("VENUES_SIMULATE_ORDERS", true));
@@ -1074,6 +1147,15 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
         "COINBASE_WS_URL", "wss://ws-feed.exchange.coinbase.com");
     const std::string coinbase_rest_base_url = cex::common::Env::get_string(
         "COINBASE_REST_BASE_URL", "https://api.exchange.coinbase.com");
+    // Запись конфигурации ПРИМЕНЯЕТСЯ к адаптеру при каждом сохранении (админ-API: включить/выключить, порог),
+    // поэтому адреса в ней обязаны совпадать с адресами самого адаптера (иначе Kraken начнёт ходить на Binance).
+    domain::CexEndpointDefaults cex_endpoint_defaults;
+    cex_endpoint_defaults.binance = {binance_ws_url, binance_rest_base_url};
+    cex_endpoint_defaults.coinbase = {coinbase_ws_url, coinbase_rest_base_url};
+    cex_endpoint_defaults.kraken = {cex::common::Env::get_string("KRAKEN_WS_URL", "wss://ws.kraken.com"),
+                                    cex::common::Env::get_string("KRAKEN_REST_BASE_URL", "https://api.kraken.com")};
+    cex_endpoint_defaults.okx = {cex::common::Env::get_string("OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
+                                 cex::common::Env::get_string("OKX_REST_BASE_URL", "https://www.okx.com")};
     const std::string dex_ws_url = cex::common::Env::get_string("DEX_WS_URL", "");
     const std::string dex_rpc_url = cex::common::Env::get_string("DEX_RPC_URL", "");
     const std::string uniswap_api_url = cex::common::Env::get_string(
@@ -1089,13 +1171,10 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       config.venue_id = adapter->VenueId();
       config.adapter_mode = mode;
       if ((mode == "real_multi_2cex_1dex" || mode == "multi_real") &&
-          adapter->VenueId().find("coinbase") != std::string::npos) {
-        config.ws_url = coinbase_ws_url;
-        config.rest_base_url = coinbase_rest_base_url;
-      } else if ((mode == "real_multi_2cex_1dex" || mode == "multi_real") &&
-                 adapter->Type() == domain::VenueType::kCex) {
-        config.ws_url = binance_ws_url;
-        config.rest_base_url = binance_rest_base_url;
+          adapter->Type() == domain::VenueType::kCex) {
+        const auto endpoints = domain::SeedCexEndpoints(adapter->VenueId(), cex_endpoint_defaults);
+        config.ws_url = endpoints.ws_url;
+        config.rest_base_url = endpoints.rest_base_url;
       } else if (adapter->Type() == domain::VenueType::kDex ||
                  adapter->Type() == domain::VenueType::kAmm) {
         config.ws_url = dex_ws_url;
@@ -1311,12 +1390,90 @@ std::optional<domain::VenueHeartbeat> VenuesLoop::GetVenueHeartbeat(
   return it->second;
 }
 
+void VenuesLoop::RecordPairStage(const std::string& venue, const std::string& symbol,
+                                 VenueStageTimings timings) {
+  std::lock_guard<std::mutex> lock(data_mu_);
+  auto& slot = runtime_metrics_by_venue_[venue].stages[symbol];
+  // recv_wall_ms == 0 ⇒ свежего снимка не было: сохраняем прежний момент получения.
+  if (timings.recv_wall_ms == 0) timings.recv_wall_ms = slot.recv_wall_ms;
+  slot = timings;
+}
+
+void VenuesLoop::RecordCycle(const std::string& venue, const double cycle_ms, const int pairs) {
+  double sum_fetch = 0.0, sum_pub = 0.0, sum_curve = 0.0, sum_wait = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(data_mu_);
+    auto& m = runtime_metrics_by_venue_[venue];
+    m.last_cycle_ms = cycle_ms;
+    m.cycle_ms_ema = m.cycle_ms_ema > 0.0 ? 0.7 * m.cycle_ms_ema + 0.3 * cycle_ms : cycle_ms;
+    m.cycle_pairs = pairs;
+    m.cycle_end_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+    for (const auto& kv : m.stages) {
+      sum_fetch += kv.second.fetch_ms;
+      sum_pub += kv.second.raw_publish_ms + kv.second.snapshot_ms;
+      sum_curve += kv.second.curve_ms;
+      sum_wait += kv.second.lock_wait_ms;
+    }
+  }
+  cex::common::log_json("INFO", "Venue poll cycle (этап 0)",
+                        {{"venue", venue},
+                         {"cycle_ms", std::to_string(cycle_ms)},
+                         {"pairs", std::to_string(pairs)},
+                         {"fetch_ms_sum", std::to_string(sum_fetch)},
+                         {"publish_ms_sum", std::to_string(sum_pub)},
+                         {"curve_ms_sum", std::to_string(sum_curve)},
+                         {"lock_wait_ms_sum", std::to_string(sum_wait)}});
+}
+
 std::optional<VenueRuntimeMetrics> VenuesLoop::GetVenueRuntimeMetrics(
     const std::string& venue_id) const {
   std::lock_guard<std::mutex> lock(data_mu_);
   const auto it = runtime_metrics_by_venue_.find(venue_id);
   if (it == runtime_metrics_by_venue_.end()) return std::nullopt;
-  return it->second;
+  VenueRuntimeMetrics out = it->second;
+  const auto rit = poll_runner_by_venue_.find(venue_id);
+  if (rit != poll_runner_by_venue_.end()) {
+    // Порог «устаревшей» пары — runtime-настройка из интерфейса (вкладка Площадки), иначе 180 с.
+    const int64_t rt = runtime_stale_ms_.load(std::memory_order_relaxed);
+    const auto info = rit->second->GetInfo(rt > 0 ? static_cast<double>(rt) / 1000.0 : 180.0);
+    out.poll_active = true;
+    out.poll_period_s = info.period_s;
+    out.poll_scale = info.scale;
+    out.poll_paused = info.venue_paused;
+    out.poll_ok = info.stats.ok;
+    out.poll_retries = info.stats.retries;
+    out.poll_failures = info.stats.failures;
+    out.poll_missed = info.stats.missed_ticks;
+    out.poll_quarantines = info.stats.quarantines;
+    out.poll_venue_pauses = info.stats.venue_pauses;
+    out.poll_rate_limited = info.stats.rate_limited;
+    if (publish_pool_ != nullptr) {
+      const auto ps = publish_pool_->GetStats();
+      out.publish_async = true;
+      out.publish_submitted = ps.submitted;
+      out.publish_executed = ps.executed;
+      out.publish_coalesced = ps.coalesced;
+      out.publish_pending = ps.pending;
+    }
+    for (std::size_t i = 0; i < info.pairs.size() && i < sim_instruments_.size(); ++i) {
+      VenuePollPairInfo p;
+      p.health = static_cast<int>(info.pairs[i].health);
+      p.age_s = info.pairs[i].last_ok_age_s;
+      p.fails = info.pairs[i].fails;
+      p.quarantine_s = info.pairs[i].quarantine_remaining_s;
+      p.period_s = info.pairs[i].period_s;
+      if (poll_adaptive_) {
+        if (const auto sg = PollSigma(venue_id, sim_instruments_[i].symbol())) {
+          p.sigma_pm = *sg * 1000.0;
+          if (const auto va = cex::common::ValidAgeSeconds(*sg, poll_eps_soft_)) p.valid_age_s = *va;
+        }
+      }
+      out.poll_pairs[sim_instruments_[i].symbol()] = p;
+    }
+  }
+  return out;
 }
 
 std::optional<fob::venue::v1::VenueSnapshot> VenuesLoop::GetDeepBook(
@@ -1392,6 +1549,9 @@ void VenuesLoop::start() {
   for (const auto& adapter : adapters_) {
     if (adapter) snapshot_mu_by_venue_[adapter->VenueId()] = std::make_unique<std::mutex>();
   }
+  // ADR-078: CEX-биржи опрашивает планировщик, а не md-цикл. Исполнители поднимаются ДО md-цикла: он читает
+  // poll_runner_by_venue_ (после старта — только чтение), и первый проход не должен опросить эти биржи старым путём.
+  if (poll_scheduler_mode_) StartPollRunners();
   t_md_ = std::thread([this] { md_publish_loop(); });
   t_exec_ = std::thread([this] { exec_consume_loop(); });
   t_sim_config_ = std::thread([this] { sim_config_consume_loop(); });
@@ -1437,6 +1597,7 @@ void VenuesLoop::start() {
 /// joinable() check — защита от double-stop без crash'а.
 void VenuesLoop::stop() {
   running_.store(false);
+  StopPollRunners();
   if (t_md_.joinable()) t_md_.join();
   if (t_exec_.joinable()) t_exec_.join();
   if (t_sim_config_.joinable()) t_sim_config_.join();
@@ -1641,7 +1802,8 @@ void VenuesLoop::depth_fast_loop(const std::string& venue) {
   // Выделенный REST-клиент: быстрая полоса не ждёт общий мьютекс (его держат основной
   // цикл и extra_ticker_loop на сотни мс на символ — иначе проход ≈ 24 с вместо 2–3 с).
   if (auto* cex = dynamic_cast<infra::CexWsRestAdapter*>(find_adapter(venue))) {
-    cex->SetDepthRestClient(std::make_unique<infra::CurlCexRestClient>());
+    cex->SetDepthRestClient(
+        std::make_unique<infra::CurlCexRestClient>(cex->RestClientOptions()));
   }
 
   std::size_t rotate = 0;
@@ -2161,6 +2323,7 @@ void VenuesLoop::md_publish_loop() {
     tasks.reserve(adapters_.size());
     for (auto& adapter : adapters_) {
       domain::VenueAdapter* ad = adapter.get();
+      if (poll_runner_by_venue_.count(ad->VenueId()) != 0) continue;  // ADR-078: опрашивает планировщик
       tasks.push_back(std::async(std::launch::async, [this, ad] { poll_adapter(ad); }));
     }
     for (auto& f : tasks) {
@@ -2183,6 +2346,449 @@ std::mutex& VenuesLoop::snapshot_mutex_for(const std::string& venue_id) {
 // md_publish_loop). Общие мапы под data_mu_/config_mu_, издатели потокобезопасны
 // (SnapshotProducer/LiquidityCurveProducer лочат свои мьютексы, librdkafka
 // produce thread-safe), RequestSnapshot — под per-venue snapshot_mutex_for.
+// Публикация одного свежего снимка: окно глубины ADR-077, marketdata.raw, нормализация и хранилище, кривая ликвидности,
+// метрики. Общая для старого цикла (poll_adapter) и планировщика (ADR-078): поведение не зависит от того, кто получил снимок.
+void VenuesLoop::ProcessFetchedSnapshot(domain::VenueAdapter* adapter, domain::VenueRawSnapshot& snapshot,
+                                        const SnapshotPublishContext& ctx, VenueStageTimings* st) {
+  (void)adapter;
+  // ADR-077: окно по объёму — обрезаем снимок до n уровней (или до прежнего
+  // depth_levels, если входов нет) ДО публикации; теги уйдут в meta кривой.
+  std::map<std::string, std::string> depth_window_tags;
+  if (depth_window_ != nullptr && depth_window_->enabled()) {
+    // Сколько уровней реально просили у площадки: лимит окна либо прежний depth_levels.
+    const std::size_t requested_levels = ctx.requested_levels;
+    depth_window_tags = depth_window_->Apply(&snapshot, ctx.legacy_depth_levels, requested_levels).tags;
+  }
+
+  (void)observability_.PublishTraffic(
+      snapshot.venue_id,
+      "snapshot",
+      approx_snapshot_payload_bytes(snapshot),
+      true,
+      "inbound",
+      domain::ToString(snapshot.status));
+
+  const auto t_raw = StageClock::now();
+  publish_raw_order_book(&producer_, snapshot);
+  publish_raw_symbol_meta(&producer_, snapshot);
+  publish_raw_ticker(&producer_, snapshot);
+  st->raw_publish_ms = StageMs(t_raw);
+  fob::venue::v1::VenueSnapshot normalized_snapshot;
+  SnapshotProducer::PublishOptions snapshot_options;
+  snapshot_options.stale_threshold_ms = static_cast<int64_t>(ctx.stale_threshold_ms);
+  const auto t_snap = StageClock::now();
+  const bool snapshot_published = snapshot_producer_ != nullptr &&
+      snapshot_producer_->Publish(snapshot, &normalized_snapshot, snapshot_options);
+  st->snapshot_ms = StageMs(t_snap);
+  if (snapshot_published && liquidity_curve_producer_ != nullptr) {
+    if (normalized_snapshot.status() == "empty") {
+      (void)observability_.PublishMetric(
+          normalized_snapshot.venue_id(),
+          "venue.empty_snapshots",
+          1.0,
+          {{"symbol", normalized_snapshot.instrument().symbol()}});
+    }
+
+    {
+      std::lock_guard<std::mutex> data_lock(data_mu_);
+      last_snapshots_[normalized_snapshot.venue_id()] = normalized_snapshot;
+      push_bounded(&snapshot_history_[normalized_snapshot.venue_id()],
+                   normalized_snapshot, history_capacity_);
+      ++total_snapshots_by_venue_[normalized_snapshot.venue_id()];
+      if (normalized_snapshot.status() == "stale") {
+        ++stale_snapshots_by_venue_[normalized_snapshot.venue_id()];
+      }
+    }
+
+    double snapshots_per_sec = 0.0;
+    double stale_rate = 0.0;
+    {
+      std::lock_guard<std::mutex> data_lock(data_mu_);
+      const auto total = static_cast<double>(
+          total_snapshots_by_venue_[normalized_snapshot.venue_id()]);
+      const auto stale = static_cast<double>(
+          stale_snapshots_by_venue_[normalized_snapshot.venue_id()]);
+      const auto elapsed_ms = std::max<int64_t>(
+          1,
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - md_started_at_)
+              .count());
+      snapshots_per_sec = total * 1000.0 / static_cast<double>(elapsed_ms);
+      stale_rate = total > 0.0 ? stale / total : 0.0;
+      auto& metrics = runtime_metrics_by_venue_[normalized_snapshot.venue_id()];
+      metrics.snapshots_per_sec = snapshots_per_sec;
+      metrics.stale_rate = stale_rate;
+    }
+    (void)observability_.PublishMetric(
+        normalized_snapshot.venue_id(),
+        "venue.snapshots_per_sec",
+        snapshots_per_sec,
+        {{"symbol", normalized_snapshot.instrument().symbol()}});
+    (void)observability_.PublishMetric(
+        normalized_snapshot.venue_id(),
+        "venue.stale_rate",
+        stale_rate,
+        {{"symbol", normalized_snapshot.instrument().symbol()}});
+
+    fob::venue::v1::VenueLiquidityCurve published_curve;
+    std::vector<fob::orders::v1::SyntheticFlowOrder> published_synthetics;
+    const std::string normalized_curve_level =
+        normalize_curve_level(ctx.requested_curve_level);
+    if (normalized_curve_level == "OFF") {
+      std::lock_guard<std::mutex> data_lock(data_mu_);
+      auto& metrics = runtime_metrics_by_venue_[normalized_snapshot.venue_id()];
+      metrics.last_curve_requested_level = "OFF";
+      metrics.last_curve_effective_level = "OFF";
+      metrics.last_curve_degradation_reason = "disabled_by_config";
+      metrics.last_curve_quality_action = "disabled";
+      metrics.last_curve_confidence = 0.0;
+      return;
+    }
+    LiquidityCurveProducer::PublishOptions curve_options;
+    curve_options.requested_level = normalized_curve_level;
+    curve_options.synthetic_enabled = ctx.synthetic_enabled;
+    curve_options.extra_tags = depth_window_tags;
+    const auto t_curve = StageClock::now();
+    const bool curve_published = liquidity_curve_producer_->Publish(
+        normalized_snapshot, &published_curve, &published_synthetics, curve_options);
+    st->curve_ms = StageMs(t_curve);
+    if (!curve_published) {
+      cex::common::log_json("WARN", "Failed to publish venue liquidity outputs",
+                            {{"venue", normalized_snapshot.venue_id()},
+                             {"symbol", normalized_snapshot.instrument().symbol()}});
+      (void)observability_.PublishError(
+          normalized_snapshot.venue_id(),
+          "Failed to publish venue liquidity outputs",
+          {{"symbol", normalized_snapshot.instrument().symbol()}});
+    } else {
+      std::lock_guard<std::mutex> data_lock(data_mu_);
+      push_bounded(&curve_history_[published_curve.venue_id()],
+                   published_curve, history_capacity_);
+      auto& metrics = runtime_metrics_by_venue_[published_curve.venue_id()];
+      metrics.last_curve_confidence = published_curve.confidence();
+      metrics.last_curve_effective_level = published_curve.level();
+      const auto& tags = published_curve.meta().tags();
+      const auto latency_it = tags.find("build_latency_ms");
+      if (latency_it != tags.end()) {
+        char* end = nullptr;
+        const double latency = std::strtod(latency_it->second.c_str(), &end);
+        if (end != nullptr && *end == '\0') {
+          metrics.last_curve_build_latency_ms = latency;
+        }
+      }
+      const auto requested_it = tags.find("requested_level");
+      if (requested_it != tags.end()) {
+        metrics.last_curve_requested_level = requested_it->second;
+      }
+      const auto effective_it = tags.find("effective_level");
+      if (effective_it != tags.end()) {
+        metrics.last_curve_effective_level = effective_it->second;
+      }
+      const auto reason_it = tags.find("degradation_reason");
+      if (reason_it != tags.end()) {
+        metrics.last_curve_degradation_reason = reason_it->second;
+      }
+      const auto quality_it = tags.find("quality_action");
+      if (quality_it != tags.end()) {
+        metrics.last_curve_quality_action = quality_it->second;
+      }
+      for (const auto& order : published_synthetics) {
+        push_bounded(&synthetic_history_[order.venue_id()],
+                     order, history_capacity_);
+      }
+    }
+  }
+}
+
+// ============================================================================
+// ADR-078 (этап 2а) — опрос CEX-бирж под управлением планировщика (VENUES_POLL_MODE=scheduler).
+// Расписание, лестница сбоев и пейсинг — в domain/poll_planner, потоки — в app/poll_runner; здесь только привязка к
+// адаптеру, конфигурации и конвейеру публикации (ProcessFetchedSnapshot, общий со старым циклом).
+// ============================================================================
+namespace {
+
+std::string UpperCopy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return s;
+}
+
+// Допустимая скорость запросов биржи L (запр/с), ДОПУЩЕНИЕ по документации бирж (проверить перед боевым включением);
+// переопределяется VENUES_POLL_LIMIT_RPS_<БИРЖА>.
+double PollVenueLimitRps(const std::string& venue_upper) {
+  if (venue_upper.find("BINANCE") != std::string::npos) return 20.0;
+  if (venue_upper.find("OKX") != std::string::npos) return 10.0;
+  if (venue_upper.find("COINBASE") != std::string::npos) return 10.0;
+  if (venue_upper.find("KRAKEN") != std::string::npos) return 1.5;
+  return 2.0;
+}
+
+}  // namespace
+
+bool VenuesLoop::VenueActive(const std::string& venue_id) const {
+  std::lock_guard<std::mutex> lock(config_mu_);
+  const auto it = venue_configs_.find(venue_id);
+  return it == venue_configs_.end() ? true : it->second.is_active;
+}
+
+void VenuesLoop::StartPollRunners() {
+  if (sim_instruments_.empty()) return;
+  const std::size_t n_pairs = sim_instruments_.size();
+  poll_adaptive_ = env_bool("VENUES_POLL_ADAPTIVE", false);
+  poll_eps_soft_ = std::max(1e-6, env_double("VENUES_POLL_EPS_PM", 0.5) / 1000.0);  // ‰ → доля
+  if (poll_adaptive_) {
+    cex::common::log_json("INFO", "Adaptive poll period (ADR-078 §7) enabled",
+                          {{"eps_pm", std::to_string(poll_eps_soft_ * 1000.0)}});
+  }
+  for (auto& adapter : adapters_) {
+    auto* cex = dynamic_cast<infra::CexWsRestAdapter*>(adapter.get());
+    if (cex == nullptr) continue;  // DEX/AMM и симулятор остаются на старом цикле
+    const std::string venue = cex->VenueId();
+    const std::string up = UpperCopy(venue);
+
+    domain::PollPlannerConfig pc;
+    pc.pair_count = n_pairs;
+    const double limit = env_double("VENUES_POLL_LIMIT_RPS_" + up, PollVenueLimitRps(up));
+    pc.budget_rps = env_double("VENUES_POLL_BUDGET_RPS_" + up, 0.5 * limit);
+    pc.budget_burst = std::max(2.0, std::ceil(0.25 * limit));
+    // T = max(3 с, N / (0,5 · L)); переопределяется VENUES_POLL_PERIOD_MS_<БИРЖА>
+    const double t_default = std::max(3.0, std::ceil(static_cast<double>(n_pairs) / (0.5 * limit)));
+    pc.period_s = std::max(0.2, env_double("VENUES_POLL_PERIOD_MS_" + up, t_default * 1000.0) / 1000.0);
+    // ADR-078 §7: период пары можно растянуть до max_period (тихий рынок — данные живут дольше); по умолчанию выключено.
+    if (poll_adaptive_) {
+      pc.max_period_s = std::max(pc.period_s,
+                                 env_double("VENUES_POLL_MAX_PERIOD_MS_" + up,
+                                            env_double("VENUES_POLL_MAX_PERIOD_MS", 3.0 * pc.period_s * 1000.0)) / 1000.0);
+    }
+    pc.max_retries = static_cast<int>(env_double("VENUES_POLL_MAX_RETRIES", 3.0));
+    pc.quarantine_after = static_cast<int>(env_double("VENUES_POLL_QUARANTINE_AFTER", 5.0));
+    const int workers = std::max(1, static_cast<int>(env_double("VENUES_POLL_WORKERS", 3.0)));
+
+    PollRunner::Hooks h;
+    h.fetch = [this, cex](std::size_t pair, int) { return PollFetchOnce(cex, pair); };
+    h.deliver = [this, cex](std::size_t pair, PollFetchResult&& r) { PollDeliver(cex, pair, std::move(r)); };
+    h.on_tick_done = [this, venue](std::size_t pair, const PollFetchResult& last, int, bool ok) {
+      PollTickDone(venue, pair, last, ok);
+    };
+    h.housekeeping = [this, cex] { PollHousekeeping(cex); };
+    h.active = [this, venue] { return VenueActive(venue); };
+    if (poll_adaptive_) {
+      const double t_min = pc.period_s;
+      const double t_max = pc.max_period_s;
+      h.period_hint = [this, venue, t_min, t_max](std::size_t pair) {
+        return cex::common::AdaptivePollPeriod(PollSigma(venue, sim_instruments_[pair].symbol()), poll_eps_soft_, t_min,
+                                               t_max);
+      };
+    }
+
+    auto runner = std::make_unique<PollRunner>(venue, pc, workers, std::move(h));
+    poll_runner_by_venue_[venue] = runner.get();
+    cex::common::log_json("INFO", "Poll scheduler (ADR-078) starting",
+                          {{"venue", venue},
+                           {"pairs", std::to_string(n_pairs)},
+                           {"period_s", std::to_string(pc.period_s)},
+                           {"budget_rps", std::to_string(pc.budget_rps)},
+                           {"workers", std::to_string(workers)},
+                           {"max_retries", std::to_string(pc.max_retries)}});
+    poll_runners_.push_back(std::move(runner));
+  }
+  // Этап 2б: публикация (нормализация, запись, кривая) идёт в отдельном пуле «побеждает последнее»,
+  // а не в потоках опроса; выключается VENUES_PUBLISH_ASYNC=0 (публикация прямо в потоке опроса).
+  if (env_bool("VENUES_PUBLISH_ASYNC", true)) {
+    const int threads = std::max(1, static_cast<int>(env_double("VENUES_PUBLISH_THREADS", 2.0)));
+    publish_pool_ = std::make_unique<LatestWinsPool>(threads);
+    cex::common::log_json("INFO", "Publish pool (ADR-078 2b) enabled", {{"threads", std::to_string(threads)}});
+  }
+  for (auto& r : poll_runners_) r->Start();
+}
+
+void VenuesLoop::StopPollRunners() {
+  for (auto& r : poll_runners_) r->Stop();   // сначала источник заданий
+  if (publish_pool_ != nullptr) publish_pool_->Stop();
+}
+
+PollFetchResult VenuesLoop::PollFetchOnce(infra::CexWsRestAdapter* cex, const std::size_t pair) {
+  PollFetchResult out;
+  const std::string venue = cex->VenueId();
+  const auto& inst = sim_instruments_[pair];
+
+  domain::VenueSnapshotRequest request = default_snapshot_request_;
+  {
+    std::lock_guard<std::mutex> cfg_lock(config_mu_);
+    const auto it = venue_configs_.find(venue);
+    if (it != venue_configs_.end()) {
+      if (!it->second.venue_symbol.empty()) request.venue_symbol = it->second.venue_symbol;
+      request.depth_levels = std::max<std::size_t>(1, static_cast<std::size_t>(it->second.depth_levels));
+    }
+  }
+  request.instrument = inst;
+  {
+    std::string vs = inst.symbol();
+    vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
+    request.venue_symbol = vs;
+  }
+  const std::size_t legacy_levels = request.depth_levels;
+  request.rest_depth_limit = 0;
+  if (depth_window_ != nullptr && depth_window_->enabled()) {
+    const std::size_t lim = depth_window_->RequestLimit(venue, request.venue_symbol);
+    if (lim > 0) {
+      request.rest_depth_limit = lim;
+      request.depth_levels = lim;
+    }
+  }
+  {  // лента сделок — самой «голодной» паре (как в старом цикле, ADR-060)
+    std::vector<domain::TradesFreshnessEntry> fresh;
+    fresh.reserve(sim_instruments_.size());
+    for (const auto& i : sim_instruments_) {
+      std::string vs = i.symbol();
+      vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
+      fresh.push_back({vs, cex->TradesReadAgeMs(vs)});
+    }
+    std::vector<domain::TradesFreshnessEntry> others;
+    const auto runner_it = poll_runner_by_venue_.find(venue);
+    for (std::size_t j = 0; j < fresh.size(); ++j) {
+      if (j == pair) continue;
+      // Пара в карантине ленту не читает: если считать её «самой голодной», остальным include_trades не достанется.
+      if (runner_it != poll_runner_by_venue_.end() && runner_it->second->PairInQuarantine(j)) continue;
+      others.push_back(fresh[j]);
+    }
+    // Самая голодная пара читает ленту, но не чаще VENUES_POLL_TRADES_INTERVAL_MS (деф 15 с) на пару.
+    const int64_t trades_min_interval_ms =
+        static_cast<int64_t>(std::max(0.0, env_double("VENUES_POLL_TRADES_INTERVAL_MS", 15000.0)));
+    request.include_trades = domain::IsStalestTradesCandidate(fresh[pair], others) &&
+                             domain::TradesReadDue(fresh[pair].age_ms, trades_min_interval_ms);
+  }
+
+  const auto t0 = StageClock::now();
+  auto fetched = cex->FetchSnapshot(request);
+  out.latency_s = StageMs(t0) / 1000.0;
+  out.cls = fetched.cls;
+  out.http_code = fetched.http_code;
+  out.side_rate_limited = fetched.side_rate_limited;
+  out.legacy_levels = legacy_levels;
+  out.requested_levels = request.rest_depth_limit > 0 ? request.rest_depth_limit : legacy_levels;
+  if (fetched.fresh.has_value()) {
+    out.cls = domain::FetchClass::kOk;
+    out.depth_latency_s = fetched.fresh->fetch_timings.rest_depth_ms / 1000.0;
+    out.extra_requests = std::max(0, fetched.fresh->fetch_timings.rest_requests - 1);
+    out.fresh = std::move(fetched.fresh);
+  }
+  return out;
+}
+
+std::optional<double> VenuesLoop::PollSigma(const std::string& venue, const std::string& symbol) const {
+  std::lock_guard<std::mutex> lk(poll_vol_mu_);
+  const auto it = poll_vol_.find(venue + "|" + symbol);
+  if (it == poll_vol_.end()) return std::nullopt;
+  return it->second.Sigma();
+}
+
+void VenuesLoop::PollDeliver(infra::CexWsRestAdapter* cex, const std::size_t pair, PollFetchResult&& res) {
+  if (!res.fresh.has_value()) return;
+  if (poll_adaptive_) {
+    // σ пары — по потоку mid ЭТОЙ биржи (последовательные точки одного источника: без межбиржевого базиса в r²).
+    const double mid = static_cast<double>(res.fresh->mid_price);
+    const double t_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lk(poll_vol_mu_);
+    poll_vol_.try_emplace(cex->VenueId() + "|" + sim_instruments_[pair].symbol()).first->second.Update(t_s, mid);
+  }
+  if (publish_pool_ == nullptr) {
+    PollPublish(cex, pair, std::move(res));
+    return;
+  }
+  // Ключ — биржа|пара: на пару ждёт не более одного задания, свежая книга вытесняет несостоявшуюся публикацию старой.
+  const std::string key = cex->VenueId() + "|" + sim_instruments_[pair].symbol();
+  auto shared = std::make_shared<PollFetchResult>(std::move(res));
+  publish_pool_->Submit(key, [this, cex, pair, shared] { PollPublish(cex, pair, std::move(*shared)); });
+}
+
+void VenuesLoop::PollPublish(infra::CexWsRestAdapter* cex, const std::size_t pair, PollFetchResult&& res) {
+  if (!res.fresh.has_value()) return;
+  const std::string venue = cex->VenueId();
+  SnapshotPublishContext ctx;
+  ctx.legacy_depth_levels = res.legacy_levels;
+  ctx.requested_levels = res.requested_levels;
+  ctx.stale_threshold_ms = static_cast<uint32_t>(std::max<int64_t>(1, snapshot_config_.status.stale_threshold_ms));
+  ctx.requested_curve_level = curve_config_.level;
+  ctx.synthetic_enabled = curve_config_.synthetic.enabled;
+  {
+    std::lock_guard<std::mutex> cfg_lock(config_mu_);
+    const auto it = venue_configs_.find(venue);
+    if (it != venue_configs_.end()) {
+      ctx.stale_threshold_ms = std::max<uint32_t>(1, it->second.stale_threshold_ms);
+      if (!it->second.curve_level.empty()) ctx.requested_curve_level = it->second.curve_level;
+      ctx.synthetic_enabled = it->second.synthetic_enabled;
+    }
+  }
+  {
+    const int64_t rt = runtime_stale_ms_.load(std::memory_order_relaxed);
+    if (rt > 0) ctx.stale_threshold_ms = static_cast<uint32_t>(rt);
+  }
+
+  PairStageGuard stage(this, venue, sim_instruments_[pair].symbol());
+  const auto& ft = res.fresh->fetch_timings;
+  stage.t.fetch_ms = res.latency_s * 1000.0;
+  stage.t.rest_depth_ms = ft.rest_depth_ms;
+  stage.t.rest_ticker_ms = ft.rest_ticker_ms;
+  stage.t.rest_trades_ms = ft.rest_trades_ms;
+  stage.t.rest_requests = ft.rest_requests;
+  stage.t.ticker_state = ft.ticker_state;
+  stage.t.rest_valid = true;
+  stage.t.recv_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+  ProcessFetchedSnapshot(cex, *res.fresh, ctx, &stage.t);
+}
+
+void VenuesLoop::PollTickDone(const std::string& venue, const std::size_t pair, const PollFetchResult& last,
+                              const bool ok) {
+  if (ok) return;  // успешный тик уже записан в PollDeliver
+  VenueStageTimings t;
+  t.fetch_ms = last.latency_s * 1000.0;
+  t.total_ms = t.fetch_ms;
+  t.rest_valid = false;  // разбивка REST неизвестна; recv_wall_ms = 0 ⇒ прежний момент получения сохраняется
+  RecordPairStage(venue, sim_instruments_[pair].symbol(), t);
+}
+
+void VenuesLoop::PollHousekeeping(infra::CexWsRestAdapter* cex) {
+  try {
+    const std::string venue = cex->VenueId();
+    bool active = true;
+    std::string routing_mode = "auto";
+    {
+      std::lock_guard<std::mutex> cfg_lock(config_mu_);
+      const auto it = venue_configs_.find(venue);
+      if (it != venue_configs_.end()) {
+        active = it->second.is_active;
+        routing_mode = normalize_routing_mode(it->second.routing_mode);
+      }
+    }
+    auto hb = cex->Heartbeat();
+    if (!active) {
+      hb.status = domain::VenueConnectionStatus::kDisconnected;
+      hb.circuit_breaker_reason = "disabled_by_operator";
+      hb.timestamp = cex::common::now_ts();
+      {
+        std::lock_guard<std::mutex> data_lock(data_mu_);
+        last_heartbeats_[hb.venue_id] = hb;
+      }
+      (void)observability_.PublishStatus(hb, "disabled", "disable");
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> data_lock(data_mu_);
+      last_heartbeats_[hb.venue_id] = hb;
+    }
+    (void)observability_.PublishStatus(hb, "poll", routing_mode);
+    if (hb.status == domain::VenueConnectionStatus::kDisconnected && !cex->Reconnect()) {
+      cex::common::log_json("WARN", "Adapter reconnect failed", {{"venue", venue}});
+      (void)observability_.PublishError(venue, "Venue adapter reconnect failed",
+                                        {{"stage", "heartbeat_reconnect"}});
+    }
+  } catch (const std::exception& ex) {
+    cex::common::log_json("ERROR", "Poll housekeeping failed", {{"error", ex.what()}});
+  }
+}
+
 void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
       try {
         bool venue_active = true;
@@ -2272,6 +2878,8 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
           trades_freshness.push_back({vs, adapter->TradesReadAgeMs(vs)});
         }
 
+        const std::size_t legacy_depth_levels = request.depth_levels;  // ADR-077: до подмены окном
+        const auto cycle_t0 = StageClock::now();  // этап 0: время прохода по всем парам биржи
         for (std::size_t inst_i = 0; inst_i < inst_n; ++inst_i) {
         const auto& sim_inst = sim_instruments_[inst_i];
         request.instrument = sim_inst;
@@ -2279,6 +2887,18 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
           std::string vs = sim_inst.symbol();
           vs.erase(std::remove(vs.begin(), vs.end(), '/'), vs.end());
           request.venue_symbol = vs;
+        }
+        // ADR-077: окно по объёму задаёт лимит REST-запроса; 0 — прежний depth_levels.
+        // request живёт на весь проход по инструментам — сбрасываем прежний depth_levels.
+        request.depth_levels = legacy_depth_levels;
+        request.rest_depth_limit = 0;
+        if (depth_window_ != nullptr && depth_window_->enabled()) {
+          const std::size_t lim =
+              depth_window_->RequestLimit(adapter->VenueId(), request.venue_symbol);
+          if (lim > 0) {
+            request.rest_depth_limit = lim;
+            request.depth_levels = lim;  // адаптер не должен резать стакан раньше
+          }
         }
         {  // Приоритет чтения ленты трейдов — самому "голодному" символу такта
            // (round-robin: как только он читает трейды, его age обнуляется, и на
@@ -2292,10 +2912,31 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
               domain::IsStalestTradesCandidate(trades_freshness[inst_i], others);
         }
 
+        PairStageGuard stage(this, adapter->VenueId(), sim_inst.symbol());
         std::optional<domain::VenueRawSnapshot> snapshot;
         {
+          const auto t_lock = StageClock::now();
           std::lock_guard<std::mutex> lk(snapshot_mutex_for(adapter->VenueId()));
+          stage.t.lock_wait_ms = StageMs(t_lock);
+          const auto t_fetch = StageClock::now();
           snapshot = adapter->RequestSnapshot(request);
+          stage.t.fetch_ms = StageMs(t_fetch);
+        }
+        if (snapshot.has_value()) {
+          const auto& ft = snapshot->fetch_timings;
+          stage.t.rest_depth_ms = ft.rest_depth_ms;
+          stage.t.rest_ticker_ms = ft.rest_ticker_ms;
+          stage.t.rest_trades_ms = ft.rest_trades_ms;
+          stage.t.rest_requests = ft.rest_requests;
+          stage.t.ticker_state = ft.ticker_state;
+          stage.t.rest_valid = true;
+          // Возраст книги считаем только от СВЕЖЕГО снимка; stale/disconnected из кэша —
+          // не обновляем момент получения (иначе устаревшая книга выглядела бы свежей).
+          if (snapshot->status == domain::VenueConnectionStatus::kConnected) {
+            stage.t.recv_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
+          }
         }
         if (!snapshot.has_value()) {
           cex::common::log_json("WARN", "Adapter returned empty snapshot",
@@ -2310,138 +2951,17 @@ void VenuesLoop::poll_adapter(domain::VenueAdapter* adapter) {
           continue;
         }
 
-        (void)observability_.PublishTraffic(
-            snapshot->venue_id,
-            "snapshot",
-            approx_snapshot_payload_bytes(*snapshot),
-            true,
-            "inbound",
-            domain::ToString(snapshot->status));
-
-        publish_raw_order_book(&producer_, *snapshot);
-        publish_raw_symbol_meta(&producer_, *snapshot);
-        publish_raw_ticker(&producer_, *snapshot);
-        fob::venue::v1::VenueSnapshot normalized_snapshot;
-        SnapshotProducer::PublishOptions snapshot_options;
-        snapshot_options.stale_threshold_ms = static_cast<int64_t>(stale_threshold_ms);
-        const bool snapshot_published = snapshot_producer_ != nullptr &&
-            snapshot_producer_->Publish(*snapshot, &normalized_snapshot, snapshot_options);
-        if (snapshot_published && liquidity_curve_producer_ != nullptr) {
-          if (normalized_snapshot.status() == "empty") {
-            (void)observability_.PublishMetric(
-                normalized_snapshot.venue_id(),
-                "venue.empty_snapshots",
-                1.0,
-                {{"symbol", normalized_snapshot.instrument().symbol()}});
-          }
-
-          {
-            std::lock_guard<std::mutex> data_lock(data_mu_);
-            last_snapshots_[normalized_snapshot.venue_id()] = normalized_snapshot;
-            push_bounded(&snapshot_history_[normalized_snapshot.venue_id()],
-                         normalized_snapshot, history_capacity_);
-            ++total_snapshots_by_venue_[normalized_snapshot.venue_id()];
-            if (normalized_snapshot.status() == "stale") {
-              ++stale_snapshots_by_venue_[normalized_snapshot.venue_id()];
-            }
-          }
-
-          double snapshots_per_sec = 0.0;
-          double stale_rate = 0.0;
-          {
-            std::lock_guard<std::mutex> data_lock(data_mu_);
-            const auto total = static_cast<double>(
-                total_snapshots_by_venue_[normalized_snapshot.venue_id()]);
-            const auto stale = static_cast<double>(
-                stale_snapshots_by_venue_[normalized_snapshot.venue_id()]);
-            const auto elapsed_ms = std::max<int64_t>(
-                1,
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - md_started_at_)
-                    .count());
-            snapshots_per_sec = total * 1000.0 / static_cast<double>(elapsed_ms);
-            stale_rate = total > 0.0 ? stale / total : 0.0;
-            auto& metrics = runtime_metrics_by_venue_[normalized_snapshot.venue_id()];
-            metrics.snapshots_per_sec = snapshots_per_sec;
-            metrics.stale_rate = stale_rate;
-          }
-          (void)observability_.PublishMetric(
-              normalized_snapshot.venue_id(),
-              "venue.snapshots_per_sec",
-              snapshots_per_sec,
-              {{"symbol", normalized_snapshot.instrument().symbol()}});
-          (void)observability_.PublishMetric(
-              normalized_snapshot.venue_id(),
-              "venue.stale_rate",
-              stale_rate,
-              {{"symbol", normalized_snapshot.instrument().symbol()}});
-
-          fob::venue::v1::VenueLiquidityCurve published_curve;
-          std::vector<fob::orders::v1::SyntheticFlowOrder> published_synthetics;
-          const std::string normalized_curve_level =
-              normalize_curve_level(requested_curve_level);
-          if (normalized_curve_level == "OFF") {
-            std::lock_guard<std::mutex> data_lock(data_mu_);
-            auto& metrics = runtime_metrics_by_venue_[normalized_snapshot.venue_id()];
-            metrics.last_curve_requested_level = "OFF";
-            metrics.last_curve_effective_level = "OFF";
-            metrics.last_curve_degradation_reason = "disabled_by_config";
-            metrics.last_curve_quality_action = "disabled";
-            metrics.last_curve_confidence = 0.0;
-            continue;
-          }
-          LiquidityCurveProducer::PublishOptions curve_options;
-          curve_options.requested_level = normalized_curve_level;
-          curve_options.synthetic_enabled = synthetic_enabled;
-          const bool curve_published = liquidity_curve_producer_->Publish(
-              normalized_snapshot, &published_curve, &published_synthetics, curve_options);
-          if (!curve_published) {
-            cex::common::log_json("WARN", "Failed to publish venue liquidity outputs",
-                                  {{"venue", normalized_snapshot.venue_id()},
-                                   {"symbol", normalized_snapshot.instrument().symbol()}});
-            (void)observability_.PublishError(
-                normalized_snapshot.venue_id(),
-                "Failed to publish venue liquidity outputs",
-                {{"symbol", normalized_snapshot.instrument().symbol()}});
-          } else {
-            std::lock_guard<std::mutex> data_lock(data_mu_);
-            push_bounded(&curve_history_[published_curve.venue_id()],
-                         published_curve, history_capacity_);
-            auto& metrics = runtime_metrics_by_venue_[published_curve.venue_id()];
-            metrics.last_curve_confidence = published_curve.confidence();
-            metrics.last_curve_effective_level = published_curve.level();
-            const auto& tags = published_curve.meta().tags();
-            const auto latency_it = tags.find("build_latency_ms");
-            if (latency_it != tags.end()) {
-              char* end = nullptr;
-              const double latency = std::strtod(latency_it->second.c_str(), &end);
-              if (end != nullptr && *end == '\0') {
-                metrics.last_curve_build_latency_ms = latency;
-              }
-            }
-            const auto requested_it = tags.find("requested_level");
-            if (requested_it != tags.end()) {
-              metrics.last_curve_requested_level = requested_it->second;
-            }
-            const auto effective_it = tags.find("effective_level");
-            if (effective_it != tags.end()) {
-              metrics.last_curve_effective_level = effective_it->second;
-            }
-            const auto reason_it = tags.find("degradation_reason");
-            if (reason_it != tags.end()) {
-              metrics.last_curve_degradation_reason = reason_it->second;
-            }
-            const auto quality_it = tags.find("quality_action");
-            if (quality_it != tags.end()) {
-              metrics.last_curve_quality_action = quality_it->second;
-            }
-            for (const auto& order : published_synthetics) {
-              push_bounded(&synthetic_history_[order.venue_id()],
-                           order, history_capacity_);
-            }
-          }
+        {
+          SnapshotPublishContext pctx;
+          pctx.legacy_depth_levels = legacy_depth_levels;
+          pctx.requested_levels = request.rest_depth_limit > 0 ? request.rest_depth_limit : legacy_depth_levels;
+          pctx.stale_threshold_ms = stale_threshold_ms;
+          pctx.requested_curve_level = requested_curve_level;
+          pctx.synthetic_enabled = synthetic_enabled;
+          ProcessFetchedSnapshot(adapter, *snapshot, pctx, &stage.t);
         }
         }  // for (sim_inst : sim_instruments_)
+        RecordCycle(adapter->VenueId(), StageMs(cycle_t0), static_cast<int>(inst_n));
       } catch (const std::exception& ex) {
         cex::common::log_json("ERROR", "Venue adapter poll iteration failed",
                               {{"venue", adapter->VenueId()},

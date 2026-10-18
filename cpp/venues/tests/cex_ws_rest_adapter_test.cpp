@@ -6,6 +6,15 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -21,6 +30,7 @@ using cex::venues::domain::VenueSnapshotRequest;
 using cex::venues::domain::VenueSubscription;
 using cex::venues::infra::CexWsRestAdapter;
 using cex::venues::infra::CexWsRestAdapterConfig;
+using cex::venues::infra::CurlCexRestClient;
 using cex::venues::infra::ICexRestClient;
 using cex::venues::infra::ICexWsSession;
 
@@ -47,13 +57,16 @@ class FakeRestClient final : public ICexRestClient {
            std::string* response_body,
            long* http_code) override {
     (void)headers;
-    (void)timeout_ms;
     ++get_calls;
+    last_get_timeout_ms = timeout_ms;
+    get_timeouts.push_back(timeout_ms);
     last_get_url = url;
     if (response_body == nullptr || http_code == nullptr) return false;
     if (route_ticker_response &&
         (url.find("/ticker/24hr") != std::string::npos ||
-         url.find("/stats") != std::string::npos)) {
+         url.find("/stats") != std::string::npos ||
+         url.find("/market/ticker") != std::string::npos ||
+         url.find("/public/Ticker") != std::string::npos)) {
       *response_body = ticker_response;
       *http_code = ticker_http_code;
       return get_ok;
@@ -84,6 +97,8 @@ class FakeRestClient final : public ICexRestClient {
   long get_http_code{200};
   std::string get_response;
   bool route_ticker_response{false};
+  uint32_t last_get_timeout_ms{0};
+  std::vector<uint32_t> get_timeouts;
   long ticker_http_code{200};
   std::string ticker_response;
   int get_calls{0};
@@ -1164,6 +1179,626 @@ bool TestRestTickerVolumePopulatesSnapshot() {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Этап 1 (EXP-2026-10-15-exchange-requests)
+// ---------------------------------------------------------------------------
+
+// Локальный HTTP/1.1-сервер: поток на соединение, считает принятые TCP-соединения.
+// close_after_response — закрывает соединение сразу после ответа (имитация закрытия idle keep-alive).
+class LocalHttpServer {
+ public:
+  explicit LocalHttpServer(const bool close_after_response = false)
+      : close_after_response_(close_after_response) {
+    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    int yes = 1;
+    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    socklen_t len = sizeof(addr);
+    ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len);
+    port_ = ntohs(addr.sin_port);
+    ::listen(listen_fd_, 16);
+    acceptor_ = std::thread([this] { AcceptLoop(); });
+  }
+  ~LocalHttpServer() {
+    stop_ = true;
+    if (acceptor_.joinable()) acceptor_.join();
+    for (auto& t : workers_) {
+      if (t.joinable()) t.join();
+    }
+    ::close(listen_fd_);
+  }
+  int port() const { return port_; }
+  int connections() const { return connections_.load(); }
+  std::string last_request() {
+    std::lock_guard<std::mutex> lk(req_mu_);
+    return last_request_;
+  }
+
+ private:
+  void AcceptLoop() {
+    while (!stop_) {
+      pollfd pfd{listen_fd_, POLLIN, 0};
+      if (::poll(&pfd, 1, 50) <= 0) continue;
+      const int fd = ::accept(listen_fd_, nullptr, nullptr);
+      if (fd < 0) continue;
+      ++connections_;
+      workers_.emplace_back([this, fd] {
+        Serve(fd);
+        ::close(fd);
+      });
+    }
+  }
+  // Обслуживает запросы одного соединения, пока клиент не закроет его.
+  void Serve(const int fd) {
+    std::string buf;
+    char tmp[1024];
+    while (!stop_) {
+      pollfd pfd{fd, POLLIN, 0};
+      if (::poll(&pfd, 1, 50) <= 0) continue;
+      const ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+      if (n <= 0) return;  // клиент закрыл соединение
+      buf.append(tmp, static_cast<std::size_t>(n));
+      std::size_t pos;
+      while ((pos = buf.find("\r\n\r\n")) != std::string::npos) {
+        {
+          std::lock_guard<std::mutex> lk(req_mu_);
+          last_request_ = buf.substr(0, pos);
+        }
+        buf.erase(0, pos + 4);
+        const std::string resp =
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+        ::send(fd, resp.data(), resp.size(), kNoSigpipe);
+        if (close_after_response_) return;
+      }
+    }
+  }
+
+#ifdef MSG_NOSIGNAL
+  static constexpr int kNoSigpipe = MSG_NOSIGNAL;
+#else
+  static constexpr int kNoSigpipe = 0;
+#endif
+  bool close_after_response_{false};
+  int listen_fd_{-1};
+  int port_{0};
+  std::atomic<bool> stop_{false};
+  std::atomic<int> connections_{0};
+  std::mutex req_mu_;
+  std::string last_request_;
+  std::thread acceptor_;
+  std::vector<std::thread> workers_;  // изменяется только потоком acceptor_ и деструктором (после его join)
+};
+
+bool TestCurlClientReusesConnectionsWhenEnabled() {
+  for (const bool reuse : {true, false}) {
+    LocalHttpServer server;
+    {
+      CurlCexRestClient::Options opts;
+      opts.reuse_connections = reuse;
+      opts.ipv4_only = true;
+      CurlCexRestClient client(opts);
+      const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+      for (int i = 0; i < 5; ++i) {
+        std::string body;
+        long code = 0;
+        if (!Check(client.Get(url, {}, 2000, &body, &code) && code == 200 && body == "ok",
+                   "GET #" + std::to_string(i) + " must succeed")) return false;
+      }
+    }  // клиент уничтожен ⇒ idle-handle закрыт, сервер видит EOF
+    const int want = reuse ? 1 : 5;
+    if (!Check(server.connections() == want,
+               std::string("reuse=") + (reuse ? "on" : "off") + ": expected " +
+                   std::to_string(want) + " TCP connection(s), got " +
+                   std::to_string(server.connections()))) return false;
+  }
+  return true;
+}
+
+// GET обязан нести User-Agent: Coinbase Exchange без него отвечает 400 (libcurl-библиотека сама его не ставит).
+bool TestCurlClientSendsUserAgent() {
+  LocalHttpServer server;
+  CurlCexRestClient client;  // опции по умолчанию: заголовок не зависит от флагов транспорта
+  std::string body;
+  long code = 0;
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  if (!Check(client.Get(url, {"Content-Type: application/json"}, 2000, &body, &code) && code == 200,
+             "GET must succeed")) return false;
+  return Check(server.last_request().find("User-Agent: cont-exchange-venues/") != std::string::npos,
+               "GET must carry User-Agent, request was: " + server.last_request());
+}
+
+// Главный риск пула: сервер закрыл keep-alive соединение между запросами. Следующий Get обязан
+// пройти (новое соединение), а не вернуть ложную ошибку — иначе она ушла бы в circuit breaker.
+bool TestCurlClientSurvivesServerClosingIdleConnection() {
+  LocalHttpServer server(/*close_after_response=*/true);
+  CurlCexRestClient::Options opts;
+  opts.reuse_connections = true;
+  opts.ipv4_only = true;
+  CurlCexRestClient client(opts);
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  for (int i = 0; i < 6; ++i) {
+    std::string body;
+    long code = 0;
+    if (!Check(client.Get(url, {}, 2000, &body, &code) && code == 200 && body == "ok",
+               "GET #" + std::to_string(i) + " after server-side close must succeed")) return false;
+  }
+  return Check(server.connections() == 6, "каждый запрос — новое соединение (сервер закрывал), got " +
+                                              std::to_string(server.connections()));
+}
+
+// Одновременные Get из нескольких потоков одним клиентом: каждый берёт свой handle.
+bool TestCurlClientConcurrentGets() {
+  LocalHttpServer server;
+  CurlCexRestClient::Options opts;
+  opts.reuse_connections = true;
+  opts.ipv4_only = true;
+  CurlCexRestClient client(opts);
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; ++t) {
+    threads.emplace_back([&] {
+      for (int i = 0; i < 10; ++i) {
+        std::string body;
+        long code = 0;
+        if (!(client.Get(url, {}, 3000, &body, &code) && code == 200 && body == "ok")) ++failures;
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  if (!Check(failures.load() == 0, "все 40 параллельных GET успешны, ошибок: " +
+                                       std::to_string(failures.load()))) return false;
+  return Check(server.connections() >= 1 && server.connections() <= 8,
+               "соединений не больше размера пула (≤8), got " + std::to_string(server.connections()));
+}
+
+// Ошибка запроса не должна оставлять в пуле «мёртвый» handle: после неудачи следующий
+// запрос открывает новое соединение и проходит.
+bool TestCurlClientRecoversAfterFailure() {
+  CurlCexRestClient::Options opts;
+  opts.reuse_connections = true;
+  opts.ipv4_only = true;
+  CurlCexRestClient client(opts);
+  std::string body;
+  long code = 0;
+  // порт, на котором никто не слушает ⇒ отказ в подключении
+  if (!Check(!client.Get("http://127.0.0.1:1/x", {}, 1000, &body, &code), "closed port must fail")) {
+    return false;
+  }
+  LocalHttpServer server;
+  const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
+  return Check(client.Get(url, {}, 2000, &body, &code) && code == 200, "next GET must succeed");
+}
+
+// Таймаут подключения ограничивает ожидание. Детерминированно: слушающий сокет с backlog=0,
+// забитый подключениями без accept — новые SYN молча отбрасываются, connect «висит».
+bool TestCurlClientConnectTimeout() {
+  const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  socklen_t len = sizeof(addr);
+  ::getsockname(lfd, reinterpret_cast<sockaddr*>(&addr), &len);
+  ::listen(lfd, 0);
+  std::vector<int> fillers;  // забиваем очередь неблокирующими connect
+  for (int i = 0; i < 6; ++i) {
+    const int cfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ::fcntl(cfd, F_SETFL, ::fcntl(cfd, F_GETFL, 0) | O_NONBLOCK);
+    ::connect(cfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    fillers.push_back(cfd);
+  }
+  CurlCexRestClient::Options opts;
+  opts.ipv4_only = true;
+  opts.connect_timeout_ms = 300;
+  CurlCexRestClient client(opts);
+  std::string body;
+  long code = 0;
+  const std::string url = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/x";
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = client.Get(url, {}, 5000, &body, &code);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  for (const int fd : fillers) ::close(fd);
+  ::close(lfd);
+  if (ms < 100.0) {
+    // Ядро отказало мгновенно (иная семантика backlog) — таймаут подключения не проверить.
+    std::cerr << "[SKIP] connect-timeout: instant failure (" << ms << " ms), backlog semantics differ" << std::endl;
+    return Check(!ok, "instant failure must still be a failure");
+  }
+  return Check(!ok && ms >= 250.0 && ms < 2500.0,
+               "connect timeout 300 мс должен оборвать ожидание, took " + std::to_string(ms) + " ms");
+}
+
+// Суточный объём (тикер) не запрашивается чаще rest_ticker_refresh_ms на пару; объём из кэша
+// остаётся в снимках; тайминги показывают состояние тикера.
+bool TestTickerRefreshThrottle() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_ticker_response = true;
+  rest->ticker_response = R"({"symbol":"BTCUSDT","volume":"123.456"})";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_requests_per_sec = 100.0;
+  cfg.rest_burst = 100.0;
+  cfg.rest_ticker_volume_enabled = true;
+  cfg.rest_ticker_refresh_ms = 60000;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  const auto s1 = adapter.RequestSnapshot(BtcReq());
+  if (!Check(s1.has_value() && rest->get_calls == 2, "первый снимок: стакан + тикер")) return false;
+  if (!Check(s1->fetch_timings.ticker_state == 0 && s1->fetch_timings.rest_requests == 2,
+             "тайминги: тикер запрошен, 2 запроса")) return false;
+  if (!Check(s1->volume_24h.units == 123456, "объём из тикера")) return false;
+
+  clock.AdvanceMs(1000);
+  const auto s2 = adapter.RequestSnapshot(BtcReq());
+  if (!Check(s2.has_value() && rest->get_calls == 3, "второй снимок за 1 с: только стакан")) return false;
+  if (!Check(s2->fetch_timings.ticker_state == 1 && s2->fetch_timings.rest_requests == 1,
+             "тайминги: тикер пропущен по кэшу")) return false;
+  if (!Check(s2->volume_24h.units == 123456, "объём остаётся из кэша состояния")) return false;
+
+  clock.AdvanceMs(61000);
+  const auto s3 = adapter.RequestSnapshot(BtcReq());
+  return Check(s3.has_value() && rest->get_calls == 5 && s3->fetch_timings.ticker_state == 0,
+               "после 60 с тикер запрашивается снова");
+}
+
+// По умолчанию (refresh=0) поведение прежнее: тикер на каждом снимке.
+bool TestTickerDefaultStillEverySnapshot() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_ticker_response = true;
+  rest->ticker_response = R"({"symbol":"BTCUSDT","volume":"1.000"})";
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_requests_per_sec = 100.0;
+  cfg.rest_burst = 100.0;
+  cfg.rest_ticker_volume_enabled = true;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  (void)adapter.RequestSnapshot(BtcReq());
+  clock.AdvanceMs(10);
+  (void)adapter.RequestSnapshot(BtcReq());
+  return Check(rest->get_calls == 4, "refresh=0 ⇒ стакан+тикер на каждом из двух снимков");
+}
+
+// Тикер, который стабильно отвечает ошибкой (OKX/Kraken без окна — путь Binance, 404), тоже
+// троттлится: отсчёт идёт от ПОПЫТКИ, иначе запрос шёл бы на каждом снимке и жёг токен.
+bool TestTickerThrottleCountsFailedAttempts() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_ticker_response = true;
+  rest->ticker_http_code = 404;
+  rest->ticker_response = "not found";
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_requests_per_sec = 100.0;
+  cfg.rest_burst = 100.0;
+  cfg.rest_ticker_volume_enabled = true;
+  cfg.rest_ticker_refresh_ms = 60000;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  for (int i = 0; i < 3; ++i) {
+    clock.AdvanceMs(1000);
+    if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot must succeed")) return false;
+  }
+  // 1-й снимок: стакан + тикер(404); 2-й и 3-й: только стакан ⇒ 4 вызова (без исправления было бы 6).
+  return Check(rest->get_calls == 4, "неудачная попытка тикера отсчитывает троттлинг, calls=" +
+                                         std::to_string(rest->get_calls));
+}
+
+// Ожидание токена вместо отказа (строгие биржи): без ожидания второй быстрый запрос пропускается,
+// с ожиданием — выстраивается по лимиту. Настоящие часы: ожидание реально спит.
+bool TestRestTokenWaitPacesRequests() {
+  auto make = [](const uint32_t wait_ms) {
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_response = DepthSnapshotJson();
+    CexWsRestAdapterConfig cfg;
+    cfg.ws_url = "wss://stream.binance.com:9443/ws";
+    cfg.rest_base_url = "https://api.binance.com";
+    cfg.market_price_scale = 2;
+    cfg.market_qty_scale = 3;
+    cfg.rest_requests_per_sec = 10.0;  // токен каждые 100 мс
+    cfg.rest_burst = 1.0;
+    cfg.rest_ticker_volume_enabled = false;
+    cfg.rest_token_wait_ms = wait_ms;
+    return std::make_unique<CexWsRestAdapter>(cfg, std::unique_ptr<ICexRestClient>(rest),
+                                              std::unique_ptr<ICexWsSession>(ws));
+  };
+  {
+    auto a = make(0);
+    if (!Check(a->Connect(), "Connect")) return false;
+    const bool first = a->RequestSnapshot(BtcReq()).has_value();
+    const bool second = a->RequestSnapshot(BtcReq()).has_value();
+    if (!Check(first && !second, "wait=0: второй запрос сразу после первого пропущен (как раньше)")) return false;
+  }
+  {
+    auto a = make(500);
+    if (!Check(a->Connect(), "Connect")) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) {
+      if (!Check(a->RequestSnapshot(BtcReq()).has_value(), "wait=500: запрос #" + std::to_string(i) + " должен пройти")) {
+        return false;
+      }
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!Check(ms >= 150.0 && ms < 1500.0, "три запроса выстроены по лимиту 10/с (≈200 мс), took " + std::to_string(ms))) {
+      return false;
+    }
+  }
+  {
+    // ожидание дольше допустимого ⇒ отказ без сна: rps=1 ⇒ токен через 1000 мс > wait 100 мс
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_response = DepthSnapshotJson();
+    CexWsRestAdapterConfig cfg;
+    cfg.ws_url = "wss://stream.binance.com:9443/ws";
+    cfg.rest_base_url = "https://api.binance.com";
+    cfg.market_price_scale = 2;
+    cfg.market_qty_scale = 3;
+    cfg.rest_requests_per_sec = 1.0;
+    cfg.rest_burst = 1.0;
+    cfg.rest_ticker_volume_enabled = false;
+    cfg.rest_token_wait_ms = 100;
+    CexWsRestAdapter a(cfg, std::unique_ptr<ICexRestClient>(rest), std::unique_ptr<ICexWsSession>(ws));
+    if (!Check(a.Connect(), "Connect")) return false;
+    (void)a.RequestSnapshot(BtcReq());
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool second = a.RequestSnapshot(BtcReq()).has_value();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!Check(!second && ms < 80.0, "нужно ждать дольше wait_ms ⇒ отказ без сна, took " + std::to_string(ms))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// ADR-078: FetchSnapshot возвращает класс исхода для лестницы сбоев и НЕ применяет предохранитель, лимитер токенов
+// и подмену книгой из кэша.
+bool TestFetchSnapshotClassifiesOutcomes() {
+  using cex::venues::domain::FetchClass;
+  struct Case { const char* name; bool get_ok; long code; std::string body; FetchClass want; bool has_book; };
+  const std::vector<Case> cases = {
+      {"успех", true, 200, DepthSnapshotJson(), FetchClass::kOk, true},
+      {"нет ответа (сеть/таймаут)", false, 0, "", FetchClass::kTransient, false},
+      {"5xx", true, 503, "{}", FetchClass::kTransient, false},
+      {"429", true, 429, "{}", FetchClass::kRateLimited, false},
+      {"418", true, 418, "{}", FetchClass::kRateLimited, false},
+      {"400", true, 400, "{\"message\":\"User-Agent header is required.\"}", FetchClass::kClientError, false},
+      {"404", true, 404, "{}", FetchClass::kClientError, false},
+      {"200, мусор", true, 200, "не json", FetchClass::kBadData, false},
+      {"200, пустая книга", true, 200, EmptyDepthSnapshotJson(), FetchClass::kBadData, false},
+  };
+  for (const auto& c : cases) {
+    FakeClock clock;
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_ok = c.get_ok;
+    rest->get_http_code = c.code;
+    rest->get_response = c.body;
+    CexWsRestAdapterConfig cfg;
+    cfg.ws_url = "wss://stream.binance.com:9443/ws";
+    cfg.rest_base_url = "https://api.binance.com";
+    cfg.market_price_scale = 2;
+    cfg.market_qty_scale = 3;
+    cfg.rest_ticker_volume_enabled = false;
+    CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                             std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+    if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+    const auto r = adapter.FetchSnapshot(BtcReq());
+    if (!Check(r.cls == c.want, std::string("класс исхода: ") + c.name)) return false;
+    if (!Check(r.fresh.has_value() == c.has_book, std::string("свежая книга только при успехе: ") + c.name)) return false;
+  }
+  return true;
+}
+
+// Режим планировщика: 429/418 на побочном запросе (тикер) при удачном стакане не теряется — флаг доходит до планировщика.
+bool TestFetchSnapshotFlagsSideRateLimit() {
+  for (const long ticker_code : {200L, 429L, 418L}) {
+    FakeClock clock;
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_response = DepthSnapshotJson();
+    rest->route_ticker_response = true;
+    rest->ticker_response = R"({"symbol":"BTCUSDT","volume":"123.456"})";
+    rest->ticker_http_code = ticker_code;
+    CexWsRestAdapterConfig cfg;
+    cfg.ws_url = "wss://stream.binance.com:9443/ws";
+    cfg.rest_base_url = "https://api.binance.com";
+    cfg.market_price_scale = 2;
+    cfg.market_qty_scale = 3;
+    cfg.rest_ticker_volume_enabled = true;
+    CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                             std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+    if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+    const auto r = adapter.FetchSnapshot(BtcReq());
+    if (!Check(r.fresh.has_value() && r.cls == cex::venues::domain::FetchClass::kOk,
+               "стакан получен — снимок свежий несмотря на ответ тикера " + std::to_string(ticker_code))) return false;
+    const bool want = ticker_code != 200;
+    if (!Check(r.side_rate_limited == want,
+               "side_rate_limited при тикере " + std::to_string(ticker_code) + " = " + (want ? "true" : "false"))) return false;
+  }
+  return true;
+}
+
+// Короткий дедлайн режима планировщика действует только на запросы снимка через FetchSnapshot;
+// прежний путь RequestSnapshot и всё прочее остаются на rest_timeout_ms.
+bool TestSnapshotDeadlineAppliesOnlyToManagedFetch() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_ticker_response = true;
+  rest->ticker_response = R"({"symbol":"BTCUSDT","volume":"123.456"})";
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_ticker_volume_enabled = true;
+  cfg.rest_requests_per_sec = 100.0;
+  cfg.rest_burst = 100.0;
+  cfg.rest_timeout_ms = 3000;
+  cfg.rest_snapshot_timeout_ms = 800;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  rest->get_timeouts.clear();
+  if (!Check(adapter.FetchSnapshot(BtcReq()).fresh.has_value(), "управляемый снимок получен")) return false;
+  if (!Check(!rest->get_timeouts.empty(), "запросы снимка были")) return false;
+  for (const uint32_t t : rest->get_timeouts) {
+    if (!Check(t == 800, "дедлайн запроса снимка в режиме планировщика = 800 мс, got " + std::to_string(t))) return false;
+  }
+  rest->get_timeouts.clear();
+  clock.AdvanceMs(1000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "прежний путь получил снимок")) return false;
+  for (const uint32_t t : rest->get_timeouts) {
+    if (!Check(t == 3000, "прежний путь остаётся на rest_timeout_ms = 3000, got " + std::to_string(t))) return false;
+  }
+  return true;
+}
+
+// Режим планировщика: книга из кэша не подменяет неудачу, предохранитель адаптера не открывается,
+// собственный лимитер не отбрасывает запросы.
+bool TestFetchSnapshotBypassesBreakerAndLimiter() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_ticker_volume_enabled = false;
+  cfg.rest_requests_per_sec = 0.1;  // лимитер адаптера отбросил бы всё, кроме первого запроса
+  cfg.rest_burst = 1.0;
+  cfg.circuit_breaker_enabled = true;
+  cfg.circuit_breaker_errors = 3;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  for (int i = 0; i < 4; ++i) {
+    if (!Check(adapter.FetchSnapshot(BtcReq()).fresh.has_value(), "лимитер адаптера не режет запросы планировщика")) return false;
+  }
+  // 5 отказов подряд: у старого пути это открыло бы предохранитель и заблокировало ВСЕ пары
+  rest->get_http_code = 500;
+  for (int i = 0; i < 5; ++i) {
+    const auto r = adapter.FetchSnapshot(BtcReq());
+    if (!Check(!r.fresh.has_value(), "при отказе нет книги из кэша (устаревшее не выдаётся за свежее)")) return false;
+  }
+  rest->get_http_code = 200;
+  const auto after = adapter.FetchSnapshot(BtcReq());
+  return Check(after.fresh.has_value() && after.cls == cex::venues::domain::FetchClass::kOk,
+               "после серии отказов следующий запрос выполняется (предохранитель адаптера не открывался)");
+}
+
+// Нет токена на тикер ⇒ ticker_state==2 (диагностика), стакан получен.
+bool TestTickerStateNoToken() {
+  FakeClock clock;
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_ticker_response = true;
+  rest->ticker_response = R"({"symbol":"BTCUSDT","volume":"1.000"})";
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+  cfg.rest_requests_per_sec = 0.1;
+  cfg.rest_burst = 1.0;  // единственный токен уйдёт на стакан
+  cfg.rest_ticker_volume_enabled = true;
+  CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                           std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  const auto s = adapter.RequestSnapshot(BtcReq());
+  return Check(s.has_value() && s->fetch_timings.ticker_state == 2 && s->fetch_timings.rest_requests == 1,
+               "ticker_state=2 (нет токена), 1 запрос");
+}
+
+// ADR-077: у OKX и Kraken путь тикера Binance даёт 404 (объём 0). При запросе окна глубины
+// (rest_depth_limit>0) берётся настоящий тикер в ОТДЕЛЬНОЕ поле window_volume_24h;
+// volume_24h не трогается. Без окна — URL и поведение прежние.
+bool TestWindowVolumeTickerForOkxAndKraken() {
+  struct Case { std::string venue, base, ws, depth, ticker, want_url; };
+  const std::vector<Case> cases = {
+      {"okx", "https://www.okx.com", "wss://ws.okx.com:8443/ws/v5/public",
+       R"({"code":"0","data":[{"bids":[["100.10","1.500","0","1"],["100.00","2.000","0","1"]],
+           "asks":[["100.20","1.300","0","1"],["100.30","2.600","0","1"]]}]})",
+       R"({"code":"0","data":[{"instId":"BTC-USDT","vol24h":"123.456","volCcy24h":"9999"}]})",
+       "/api/v5/market/ticker"},
+      {"kraken", "https://api.kraken.com", "wss://ws.kraken.com/v2",
+       R"({"error":[],"result":{"XBTUSDT":{"bids":[["100.10","1.500",1700000000],["100.00","2.000",1700000000]],
+           "asks":[["100.20","1.300",1700000000],["100.30","2.600",1700000000]]}}})",
+       R"({"error":[],"result":{"XBTUSDT":{"v":["10.5","123.456"],"c":["100.2","1"]}}})",
+       "/0/public/Ticker"}};
+  for (const auto& c : cases) {
+    for (const bool windowed : {true, false}) {
+      FakeClock clock;
+      auto* rest = new FakeRestClient();
+      auto* ws = new FakeWsSession();
+      rest->get_response = c.depth;
+      rest->route_ticker_response = true;
+      rest->ticker_response = c.ticker;
+      CexWsRestAdapterConfig cfg;
+      cfg.venue_id = c.venue;
+      cfg.rest_base_url = c.base;
+      cfg.ws_url = c.ws;
+      cfg.market_price_scale = 2;
+      cfg.market_qty_scale = 3;
+      cfg.rest_requests_per_sec = 10.0;
+      cfg.rest_burst = 10.0;
+      cfg.rest_ticker_volume_enabled = true;
+      CexWsRestAdapter adapter(cfg, std::unique_ptr<ICexRestClient>(rest),
+                               std::unique_ptr<ICexWsSession>(ws), [&clock] { return clock.now; });
+      if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+      auto req = BtcReq();
+      req.rest_depth_limit = windowed ? 100 : 0;
+      const auto snap = adapter.RequestSnapshot(req);
+      const std::string tag = c.venue + (windowed ? " windowed" : " legacy");
+      if (!Check(snap.has_value(), tag + ": snapshot")) return false;
+      if (windowed) {
+        if (!Check(rest->last_get_url.find(c.want_url) != std::string::npos,
+                   tag + ": real ticker URL, got " + rest->last_get_url)) return false;
+        if (!Check(snap->window_volume_24h.units == 123456, tag + ": window volume from ticker")) return false;
+      } else {
+        if (!Check(rest->last_get_url.find("/api/v3/ticker/24hr") != std::string::npos,
+                   tag + ": legacy ticker URL unchanged, got " + rest->last_get_url)) return false;
+        if (!Check(snap->window_volume_24h.units == 0, tag + ": no window volume without window")) return false;
+      }
+      if (!Check(snap->volume_24h.units == 0, tag + ": volume_24h untouched (tau cap unchanged)")) return false;
+    }
+  }
+  return true;
+}
+
 bool TestWsWrappedDepthEventAndInvalidMessagePath() {
   FakeClock clock;
   auto* rest = new FakeRestClient();
@@ -1758,6 +2393,22 @@ int main() {
   ok = TestWsDepthTradeCacheFallbackAndStale() && ok;
   ok = TestWsTickerVolumeOverridesTradeAccumulator() && ok;
   ok = TestRestTickerVolumePopulatesSnapshot() && ok;
+  ok = TestWindowVolumeTickerForOkxAndKraken() && ok;
+  ok = TestCurlClientReusesConnectionsWhenEnabled() && ok;
+  ok = TestCurlClientSendsUserAgent() && ok;
+  ok = TestCurlClientSurvivesServerClosingIdleConnection() && ok;
+  ok = TestCurlClientConcurrentGets() && ok;
+  ok = TestCurlClientRecoversAfterFailure() && ok;
+  ok = TestCurlClientConnectTimeout() && ok;
+  ok = TestTickerRefreshThrottle() && ok;
+  ok = TestTickerDefaultStillEverySnapshot() && ok;
+  ok = TestTickerThrottleCountsFailedAttempts() && ok;
+  ok = TestTickerStateNoToken() && ok;
+  ok = TestFetchSnapshotClassifiesOutcomes() && ok;
+  ok = TestFetchSnapshotBypassesBreakerAndLimiter() && ok;
+  ok = TestFetchSnapshotFlagsSideRateLimit() && ok;
+  ok = TestSnapshotDeadlineAppliesOnlyToManagedFetch() && ok;
+  ok = TestRestTokenWaitPacesRequests() && ok;
   ok = TestWsWrappedDepthEventAndInvalidMessagePath() && ok;
   ok = TestWsWrappedDepthWithoutUUsesSingleIdFallback() && ok;
   ok = TestBufferedDiffsAppliedAfterSnapshotInit() && ok;

@@ -405,6 +405,10 @@ fob::execution::v1::ExecutionReportStatus ParseOrderStatus(const std::string& st
 
 }  // namespace
 
+CurlCexRestClient::~CurlCexRestClient() {
+  for (void* handle : idle_handles_) curl_easy_cleanup(static_cast<CURL*>(handle));
+}
+
 bool CurlCexRestClient::Get(const std::string& url,
                             const std::vector<std::string>& headers,
                             const uint32_t timeout_ms,
@@ -414,7 +418,23 @@ bool CurlCexRestClient::Get(const std::string& url,
   response_body->clear();
   *http_code = 0;
 
-  CURL* curl = curl_easy_init();
+  // Этап 1 (EXP-2026-10-15-exchange-requests): при reuse_connections handle берётся из пула
+  // целиком (одновременно им пользуется один вызов) и возвращается после успешного запроса —
+  // живое соединение (keep-alive) и DNS-кэш переживают curl_easy_reset. Выключено ⇒ как прежде:
+  // новый handle на каждый запрос.
+  CURL* curl = nullptr;
+  if (options_.reuse_connections) {
+    std::lock_guard<std::mutex> lock(pool_mu_);
+    if (!idle_handles_.empty()) {
+      curl = static_cast<CURL*>(idle_handles_.back());
+      idle_handles_.pop_back();
+    }
+  }
+  if (curl == nullptr) {
+    curl = curl_easy_init();
+  } else {
+    curl_easy_reset(curl);  // сбрасывает опции, но не живые соединения и не DNS-кэш
+  }
   if (curl == nullptr) return false;
 
   struct curl_slist* header_list = nullptr;
@@ -424,12 +444,28 @@ bool CurlCexRestClient::Get(const std::string& url,
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+  // Coinbase Exchange отвечает 400 «User-Agent header is required», когда заголовка нет, а libcurl
+  // как библиотека его не ставит (в отличие от консольного curl). Раньше это давало ≈60 % снимков
+  // Coinbase и открытый предохранитель; всем биржам заголовок безвреден. Только GET: Post не менялся.
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "cont-exchange-venues/1.0");
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_body);
   if (header_list != nullptr) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+  }
+  if (options_.ipv4_only) {
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, static_cast<long>(CURL_IPRESOLVE_V4));
+  }
+  if (options_.connect_timeout_ms > 0) {
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(options_.connect_timeout_ms));
+  }
+  if (options_.reuse_connections) {
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
   }
 
   const CURLcode rc = curl_easy_perform(curl);
@@ -438,7 +474,17 @@ bool CurlCexRestClient::Get(const std::string& url,
   if (header_list != nullptr) {
     curl_slist_free_all(header_list);
   }
-  curl_easy_cleanup(curl);
+  // Успешный запрос — handle (с живым соединением) обратно в пул; ошибка — соединение могло
+  // оборваться, handle выбрасываем.
+  if (options_.reuse_connections && rc == CURLE_OK) {
+    constexpr std::size_t kMaxIdleHandles = 8;
+    std::lock_guard<std::mutex> lock(pool_mu_);
+    if (idle_handles_.size() < kMaxIdleHandles) {
+      idle_handles_.push_back(curl);
+      curl = nullptr;
+    }
+  }
+  if (curl != nullptr) curl_easy_cleanup(curl);
   return rc == CURLE_OK;
 }
 
@@ -513,6 +559,9 @@ CexWsRestAdapter::CexWsRestAdapter(
       rest_client_(std::move(rest_client)),
       ws_session_(std::move(ws_session)),
       now_fn_(std::move(now_fn)) {
+  if (rest_client_ == nullptr) {
+    rest_client_ = std::make_unique<CurlCexRestClient>(RestClientOptions());
+  }
   rest_bucket_.capacity = std::max(1.0, cfg_.rest_burst);
   rest_bucket_.tokens = rest_bucket_.capacity;
   rest_bucket_.refill_per_sec = std::max(0.1, cfg_.rest_requests_per_sec);
@@ -975,51 +1024,111 @@ domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
 /// Запрашивает полный snapshot order book через REST. Используется на
 /// initial connect и при skew detection. nullopt при failure (circuit
 /// breaker может блокировать вызов).
+CexWsRestAdapter::FetchOutcome CexWsRestAdapter::FetchSnapshot(
+    const domain::VenueSnapshotRequest& request) {
+  FetchOutcome outcome;
+  outcome.fresh = RequestSnapshotImpl(request, &outcome);
+  // Пустая книга — не данные: планировщик получает её как негодную, а не как свежую.
+  if (outcome.fresh.has_value() && outcome.fresh->status != domain::VenueConnectionStatus::kConnected) {
+    outcome.fresh.reset();
+    outcome.cls = domain::FetchClass::kBadData;
+  }
+  return outcome;
+}
+
 std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     const domain::VenueSnapshotRequest& request) {
-  const SteadyClock::time_point now = now_fn_();
+  return RequestSnapshotImpl(request, nullptr);
+}
+
+std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshotImpl(
+    const domain::VenueSnapshotRequest& request, FetchOutcome* outcome) {
+  // outcome != nullptr — режим планировщика (ADR-078): политику сбоев и бюджет запросов ведёт он.
+  const bool managed = outcome != nullptr;
+  SteadyClock::time_point now = now_fn_();
   domain::VenueSnapshotRequest normalized = normalize_request(request);
   std::string body;
   long http_code = 0;
 
-  {
+  if (!managed) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!circuit_allows_external_call_locked(now, "snapshot")) {
       return snapshot_from_state_locked(
           normalized, domain::VenueConnectionStatus::kDisconnected);
     }
-    if (!consume_rest_token_locked(now)) {
+    // Без ожидания (деф) — прежний путь: токен берётся здесь же, под тем же локом.
+    if (cfg_.rest_token_wait_ms == 0 && !consume_rest_token_locked(now)) {
       ++consecutive_errors_;
       cex::common::log_json("WARN", "CEX snapshot request rate-limited",
                             {{"venue", cfg_.venue_id}});
       return std::nullopt;
     }
   }
+  if (!managed && cfg_.rest_token_wait_ms > 0 && !acquire_rest_token(&now)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++consecutive_errors_;
+    cex::common::log_json("WARN", "CEX snapshot request rate-limited",
+                          {{"venue", cfg_.venue_id}});
+    return std::nullopt;
+  }
 
+  // Этап 0: время каждого REST-запроса снимка (реальные часы, не now_fn_).
+  using StageClock = std::chrono::steady_clock;
+  const auto ms_since = [](const StageClock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(StageClock::now() - t0).count();
+  };
+  domain::VenueFetchTimings timings;
+  // В режиме планировщика запросы снимка идут с коротким дедлайном (повторы укладываются в тик).
+  const uint32_t snapshot_timeout_ms =
+      (managed && cfg_.rest_snapshot_timeout_ms > 0) ? cfg_.rest_snapshot_timeout_ms : cfg_.rest_timeout_ms;
+  auto t_stage = StageClock::now();
   const bool ok = rest_client_->Get(
       rest_depth_url(normalized),
       auth_headers(),
-      cfg_.rest_timeout_ms,
+      snapshot_timeout_ms,
       &body,
       &http_code);
+  timings.rest_depth_ms = ms_since(t_stage);
+  timings.rest_requests = 1;
 
   if (ok && http_code >= 200 && http_code < 300) {
     std::string ticker_body;
     long ticker_http_code = 0;
     bool ticker_ok = false;
+    bool ticker_attempted = false;  // этап 1: попытка (даже неудачная) отсчитывает троттлинг
     if (cfg_.rest_ticker_volume_enabled) {
       bool can_fetch_ticker = false;
+      bool ticker_due = true;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        can_fetch_ticker = consume_rest_token_locked(now);
+        // Этап 1: суточный объём меняется медленно — не чаще раза в rest_ticker_refresh_ms на пару.
+        if (cfg_.rest_ticker_refresh_ms > 0) {
+          const auto st = books_.find(symbol_key_from_request(normalized));
+          if (st != books_.end() && st->second.ticker_fetched &&
+              now - st->second.last_ticker_fetch <
+                  std::chrono::milliseconds(cfg_.rest_ticker_refresh_ms)) {
+            ticker_due = false;
+          }
+        }
+        if (ticker_due && managed) {
+          can_fetch_ticker = true;  // бюджет ведёт планировщик (затраты видны в rest_requests)
+        } else if (ticker_due && cfg_.rest_token_wait_ms == 0) {
+          can_fetch_ticker = consume_rest_token_locked(now);
+        }
       }
+      if (ticker_due && !managed && cfg_.rest_token_wait_ms > 0) can_fetch_ticker = acquire_rest_token(&now);
+      timings.ticker_state = !ticker_due ? 1 : (can_fetch_ticker ? 0 : 2);
+      ticker_attempted = can_fetch_ticker;
       if (can_fetch_ticker) {
+        t_stage = StageClock::now();
         ticker_ok = rest_client_->Get(
             rest_ticker_url(normalized),
             auth_headers(),
-            cfg_.rest_timeout_ms,
+            snapshot_timeout_ms,
             &ticker_body,
             &ticker_http_code);
+        timings.rest_ticker_ms = ms_since(t_stage);
+        ++timings.rest_requests;
       }
     }
 
@@ -1035,16 +1144,27 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     };
     if (cfg_.sim_match_real_trades && normalized.include_trades) {
       bool can_fetch_trades = false;
-      {
+      if (managed) {
+        can_fetch_trades = true;  // бюджет ведёт планировщик
+      } else if (cfg_.rest_token_wait_ms == 0) {
         std::lock_guard<std::mutex> lock(mu_);
         can_fetch_trades = consume_rest_token_locked(now);
+      } else {
+        can_fetch_trades = acquire_rest_token(&now);
       }
       if (can_fetch_trades) {
         trades_req_ms = wall_ms();
+        t_stage = StageClock::now();
         trades_ok = rest_client_->Get(rest_trades_url(normalized), auth_headers(),
-                                      cfg_.rest_timeout_ms, &trades_body, &trades_http_code);
+                                      snapshot_timeout_ms, &trades_body, &trades_http_code);
+        timings.rest_trades_ms = ms_since(t_stage);
+        ++timings.rest_requests;
         trades_resp_ms = wall_ms();
       }
+    }
+    if (managed) {
+      const auto limited = [](const long code) { return code == 429 || code == 418; };
+      outcome->side_rate_limited = limited(ticker_http_code) || limited(trades_http_code);
     }
 
     // unique_lock (не lock_guard): follow-up отчёты resting-заявок публикуются
@@ -1053,11 +1173,21 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     std::vector<FollowUpReport> followups;
     auto parsed = parse_rest_snapshot_locked(body, normalized, now);
     if (parsed.has_value()) {
+      parsed->fetch_timings = timings;
+      if (ticker_attempted) {
+        // У OKX/Kraken без окна ADR-077 тикер по пути Binance отвечает 404 — без отметки о
+        // попытке троттлинг не сработал бы и запрос шёл бы на каждом снимке.
+        if (auto st = books_.find(parsed->venue_symbol); st != books_.end()) {
+          st->second.last_ticker_fetch = now;
+          st->second.ticker_fetched = true;
+        }
+      }
       if (ticker_ok && ticker_http_code >= 200 && ticker_http_code < 300) {
         (void)apply_rest_ticker_volume_locked(ticker_body, normalized, now);
         if (auto state_it = books_.find(parsed->venue_symbol);
             state_it != books_.end()) {
           parsed->volume_24h = state_it->second.volume_24h;
+          parsed->window_volume_24h = state_it->second.window_volume_24h;  // ADR-077
         }
       }
       if (trades_ok && trades_http_code >= 200 && trades_http_code < 300) {
@@ -1075,7 +1205,13 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
       // trades_ok), чтобы дедлайн-эскалация (EXPIRED) сработала и без новых сделок.
       progress_resting_orders_locked(parsed->venue_symbol, now, &followups);
       last_pong_at_ = now;
-      record_external_success_locked();
+      if (managed) {
+        consecutive_errors_ = 0;  // предохранитель адаптера не используется
+        outcome->cls = domain::FetchClass::kOk;
+        outcome->http_code = http_code;
+      } else {
+        record_external_success_locked();
+      }
       cex::common::log_json("INFO", "Fetched raw CEX snapshot",
                             {{"service", "venues"},
                              {"component", "external_venues_connector"},
@@ -1108,7 +1244,13 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
       }
       return parsed;
     }
-    record_external_error_locked(now, "snapshot_parse_failed");
+    if (managed) {
+      ++consecutive_errors_;
+      outcome->cls = domain::FetchClass::kBadData;
+      outcome->http_code = http_code;
+    } else {
+      record_external_error_locked(now, "snapshot_parse_failed");
+    }
     cex::common::log_json("WARN", "CEX snapshot parse failed",
                           {{"venue", cfg_.venue_id},
                            {"http_code", std::to_string(http_code)}});
@@ -1118,6 +1260,25 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
                            {"http_code", std::to_string(http_code)}});
   }
 
+  if (managed) {
+    // Класс отказа для лестницы сбоев: нет ответа / 5xx — сеть или биржа; 429 и 418 — лимит; прочие 4xx — запрос.
+    if (outcome->cls != domain::FetchClass::kBadData) {
+      outcome->http_code = http_code;
+      if (!ok) {
+        outcome->cls = domain::FetchClass::kTransient;
+      } else if (http_code == 429 || http_code == 418) {
+        outcome->cls = domain::FetchClass::kRateLimited;
+      } else if (http_code >= 500) {
+        outcome->cls = domain::FetchClass::kTransient;
+      } else {
+        outcome->cls = domain::FetchClass::kClientError;
+      }
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    ++consecutive_errors_;
+    return std::nullopt;  // книгу из кэша не подменяем: последнюю хорошую держит планировщик
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     record_external_error_locked(now, "snapshot_request_failed");
@@ -1125,7 +1286,10 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
         normalized,
         connected_ ? domain::VenueConnectionStatus::kStale
                    : domain::VenueConnectionStatus::kDisconnected);
-    if (from_cache.has_value()) return from_cache;
+    if (from_cache.has_value()) {
+      from_cache->fetch_timings = timings;  // этап 0: видно, сколько ждали отказавший запрос
+      return from_cache;
+    }
   }
 
   return std::nullopt;
@@ -1154,6 +1318,25 @@ void ExtractRestBookLevels(const json& root, const bool kraken, const bool okx,
     *bids_json = root.value("bids", json::array());
     *asks_json = root.value("asks", json::array());
   }
+}
+
+// ADR-077: суточный объём (base) из тикера OKX/Kraken для окна глубины. Kraken: result.{pair}.v[1]
+// (объём за 24 ч, v[0] — за сегодня); OKX: data[0].vol24h (spot: base). Нет данных ⇒ "0".
+std::string ExtractWindowVolumeText(const json& root, const bool kraken, const bool okx) {
+  if (!root.is_object()) return "0";
+  if (kraken) {
+    const json result = root.value("result", json::object());
+    if (result.is_object() && !result.empty() && result.begin().value().is_object()) {
+      const json v = result.begin().value().value("v", json::array());
+      if (v.is_array() && v.size() >= 2) return JsonToString(v[1]);
+    }
+  } else if (okx) {
+    const json data = root.value("data", json::array());
+    if (data.is_array() && !data.empty() && data[0].is_object()) {
+      return JsonToString(data[0].value("vol24h", json("0")));
+    }
+  }
+  return "0";
 }
 }  // namespace
 
@@ -1522,6 +1705,23 @@ bool CexWsRestAdapter::consume_rest_token_locked(const SteadyClock::time_point n
   return consume_token(&rest_bucket_, 1.0, now);
 }
 
+bool CexWsRestAdapter::acquire_rest_token(SteadyClock::time_point* now) {
+  double wait_ms = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (consume_rest_token_locked(*now)) return true;
+    if (cfg_.rest_token_wait_ms == 0) return false;
+    // consume_token только что дозаполнил ведро до *now: считаем время до накопления одного токена.
+    const double deficit = 1.0 - rest_bucket_.tokens;
+    wait_ms = deficit / std::max(0.1, rest_bucket_.refill_per_sec) * 1000.0 + 1.0;
+    if (wait_ms > static_cast<double>(cfg_.rest_token_wait_ms)) return false;  // дольше допустимого
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>(wait_ms * 1000.0)));
+  *now = now_fn_();
+  std::lock_guard<std::mutex> lock(mu_);
+  return consume_rest_token_locked(*now);
+}
+
 bool CexWsRestAdapter::consume_ws_token_locked(const SteadyClock::time_point now) {
   return consume_token(&ws_bucket_, 1.0, now);
 }
@@ -1787,6 +1987,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::snapshot_from_state_lo
   snapshot.timestamp = cex::common::now_ts();
   snapshot.sequence = it->second.sequence;
   snapshot.volume_24h = it->second.volume_24h;
+  snapshot.window_volume_24h = it->second.window_volume_24h;  // ADR-077 (0 ⇒ нет данных)
 
   snapshot.fees.maker = cfg_.maker_fee;
   snapshot.fees.taker = cfg_.taker_fee;
@@ -1859,7 +2060,9 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   snapshot.trading_rules.lot_size = cfg_.lot_size;
 
   SymbolBookState& state = books_[snapshot.venue_symbol];
-  state.lob.ConfigureMaxLevels(std::max<uint32_t>(1, cfg_.lob_max_levels));
+  // ADR-077: при окне по объёму LOB-сборщик не должен резать стакан по lob_max_levels.
+  state.lob.ConfigureMaxLevels(std::max<std::size_t>(
+      std::max<uint32_t>(1, cfg_.lob_max_levels), request.rest_depth_limit));
   if (state.volume_24h.scale != cfg_.market_qty_scale) {
     state.volume_24h = cex::common::Decimal{state.volume_24h.units, cfg_.market_qty_scale};
   }
@@ -1878,6 +2081,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
     snapshot.bids.clear();
     snapshot.asks.clear();
     snapshot.volume_24h = state.volume_24h;
+    snapshot.window_volume_24h = state.window_volume_24h;
     return snapshot;
   }
 
@@ -1924,6 +2128,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   };
   snapshot.spread = cex::common::Decimal::sub(snapshot.best_ask, snapshot.best_bid);
   snapshot.volume_24h = state.volume_24h;
+  snapshot.window_volume_24h = state.window_volume_24h;  // ADR-077 (0, если окно не запрашивалось)
   state.last_market_event = now;
 
   return snapshot;
@@ -1935,6 +2140,22 @@ bool CexWsRestAdapter::apply_rest_ticker_volume_locked(
     const SteadyClock::time_point now) {
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded() || !root.is_object()) return false;
+
+  // ADR-077: для OKX/Kraken при запросе окна объём идёт в отдельное поле — volume_24h
+  // (и τ-потолок кривой) остаются как до ADR.
+  const bool win_kraken = is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url);
+  const bool win_okx = is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url);
+  if (request.rest_depth_limit > 0 && (win_kraken || win_okx)) {
+    int64_t window_units = 0;
+    if (!parse_decimal_to_scale(ExtractWindowVolumeText(root, win_kraken, win_okx),
+                                cfg_.market_qty_scale, &window_units) ||
+        window_units < 0) {
+      return false;
+    }
+    books_[symbol_key_from_request(request)].window_volume_24h =
+        cex::common::Decimal{window_units, cfg_.market_qty_scale};
+    return true;
+  }
 
   const std::string volume_text = ExtractBaseVolumeText(root);
   int64_t volume_units = 0;
@@ -2661,9 +2882,12 @@ std::vector<std::string> CexWsRestAdapter::auth_headers() const {
 std::string CexWsRestAdapter::rest_depth_url(
     const domain::VenueSnapshotRequest& request) const {
   const std::string sym = symbol_key_from_request(request);
-  const std::size_t levels = std::max<std::size_t>(
-      request.depth_levels,
-      static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
+  // ADR-077: окно по объёму задаёт лимит явно; иначе прежняя формула.
+  const std::size_t levels = request.rest_depth_limit > 0
+      ? request.rest_depth_limit
+      : std::max<std::size_t>(
+            request.depth_levels,
+            static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
   if (is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     std::ostringstream oss;
     oss << cfg_.rest_base_url
@@ -2684,9 +2908,7 @@ std::string CexWsRestAdapter::rest_depth_url(
     return oss.str();
   }
 
-  const std::size_t requested_levels = std::max<std::size_t>(
-      request.depth_levels,
-      static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
+  const std::size_t requested_levels = levels;
   std::ostringstream oss;
   oss << cfg_.rest_base_url
       << "/api/v3/depth?symbol=" << symbol_key_from_request(request)
@@ -2702,6 +2924,22 @@ std::string CexWsRestAdapter::rest_ticker_url(
         << "/products/" << coinbase_product_id_from_symbol(symbol_key_from_request(request))
         << "/stats";
     return oss.str();
+  }
+  // ADR-077: у OKX и Kraken путь Binance даёт 404 (объём всегда 0). Настоящий тикер берём
+  // ТОЛЬКО при запросе окна глубины — без окна запрос и поведение прежние.
+  if (request.rest_depth_limit > 0) {
+    if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+      std::ostringstream oss;
+      oss << cfg_.rest_base_url << "/api/v5/market/ticker?instId="
+          << okx_inst_from_symbol(symbol_key_from_request(request));
+      return oss.str();
+    }
+    if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+      std::ostringstream oss;
+      oss << cfg_.rest_base_url << "/0/public/Ticker?pair="
+          << kraken_pair_from_symbol(symbol_key_from_request(request));
+      return oss.str();
+    }
   }
 
   std::ostringstream oss;
