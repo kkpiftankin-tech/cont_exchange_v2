@@ -1,6 +1,8 @@
 #pragma once
 
+#include "cex/common/data_validity.hpp"
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -164,9 +166,14 @@ class MarketDataUseCases {
   void FlushVectorWindow(std::int64_t window_close_ms);
   // F-05A CE (вариант A): собрать book-derived агентов из свежих кривых окна и
   // опубликовать CeClearingInput в ce.clearing.input (agent_builder §A1).
+  // ADR-075 (этап 4, причина 2): curve_ts_ms — время события каждой кривой, ключ "venue|SYMBOL"
+  // (SYMBOL как в instrument().symbol(), напр. "ETH/USDT"); по нему считается возраст снимка
+  // для age-aware полки c += k·σ·√age (env CE_AGE_DEAD_ZONE_K, деф 0 ⇒ член выключен).
   void BuildAndPublishCeClearingInput(
       const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
-      const std::string& batch_id, std::int64_t window_close_ms);
+      const std::string& batch_id, std::int64_t window_close_ms,
+      const std::map<std::string, std::int64_t>& curve_ts_ms = {},
+      const std::vector<fob::marketdata::v1::CeDroppedQuote>& stale_dropped = {});
 
  private:
   static std::string key(const std::string& venue, const std::string& symbol);
@@ -242,7 +249,11 @@ class MarketDataUseCases {
     long long last_write_ms{0};  // троттлинг записи в PG
     bool init{false};
   };
-  std::unordered_map<std::string, VolState> vol_state_;
+  // Отдельный мьютекс σ-состояния (ревью ADR-075): mu_ держится на синхронном I/O (ClickHouse,
+  // Kafka) в OnMarketDataRaw, поэтому поток окна не должен вставать за ним ради чтения σ.
+  // Порядок захвата: mu_ → vol_mu_ (SigmaSnapshot берёт ТОЛЬКО vol_mu_). Обратного нет.
+  mutable std::mutex vol_mu_;
+  std::unordered_map<std::string, VolState> vol_state_;  // под vol_mu_
   infra::PostgresAssetVolatilityRepository* vol_repo_{nullptr};
   double vol_halflife_sec_{60.0};
   double vol_write_period_sec_{15.0};
@@ -252,6 +263,17 @@ class MarketDataUseCases {
   bool UpdateAssetVolatilityLocked(const std::string& asset, double mid,
                                    long long now_ms, double* out_sigma,
                                    long long* out_samples);
+  // Копия σ (на √сек, лог-доходность) по символам пар ("ETHUSDT") с ≥ min_samples выборок.
+  // Берёт ТОЛЬКО vol_mu_ (коротко, раз на окно) — не mu_, на котором висит I/O консьюмера.
+  std::map<std::string, double> SigmaSnapshot(long long min_samples) const;
+
+  // ADR-078 §7: σ по потоку mid КАЖДОЙ площадки отдельно ("venue|ETHUSDT"). Объединённый ряд актива
+  // (SigmaSnapshot) смешивает mid разных бирж, и межбиржевой базис попадает в r²/Δt: на dev σ BTC по объединённому
+  // потоку 0,106 ‰/√с против 0,042 по каждой бирже. Срок годности КРИВОЙ определяется движением её собственной
+  // площадки, поэтому жёсткий порог устаревания берёт σ отсюда. Берёт ТОЛЬКО vol_mu_.
+  void UpdateVenueVolatility(const std::string& venue_symbol_key, double mid, double t_s);
+  std::map<std::string, double> VenueSigmaSnapshot(long long min_samples) const;
+  std::unordered_map<std::string, cex::common::DualHorizonVolatility> venue_vol_;  // под vol_mu_
 
   // F-05 perf: троттлинг ClickHouse в hot-path консьюмера. На каждый снапшот
   // (включая высокочастотные venue.snapshots) синхронный CH-запрос перегружал

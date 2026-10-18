@@ -41,6 +41,7 @@ struct CeQuoteParams {
   // соединяет asset@venue ↔ quote@venue напрямую, минуя numeraire. Используется
   // только AssembleCeGraphV2; AssembleCeGraph (v1) поле игнорирует.
   std::string quote;
+  CeEdgeDiag diag;  // ADR-079: диагностика (компоненты полки, возраст, σ, skew); клиринг не читает
 };
 
 // Капитал/риск-параметры плеч перевода и запаса (per asset, включая нумерарий).
@@ -92,7 +93,7 @@ inline CeClearInput AssembleCeGraph(const CeAssembleConfig& cfg,
   }
 
   auto add = [&](const std::string& nm, CeLeg leg, int u, int v, double anc, double dep,
-                 double c) { in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c}); };
+                 double c) { in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c, CeEdgeDiag{}}); };
 
   // QUOTE: a@v → num@v (по одному переводчику на площадку/актив)
   for (const auto& q : quotes) {
@@ -199,7 +200,9 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
       in.node_meta[node_index.at(a + "@" + v)] = CeNodeMeta{a, v, false};
 
   auto add = [&](const std::string& nm, CeLeg leg, int u, int v, double anc, double dep,
-                 double c) { in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c}); };
+                 double c, const CeEdgeDiag& diag = CeEdgeDiag{}) {
+    in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c, diag});
+  };
 
   // QUOTE: a@v → q@v (по одному переводчику на площадку/пару). ADR-064: q.quote
   // пуст ⇒ numeraire (прежнее поведение T_<asset>_<venue>, байт-в-байт регрессия);
@@ -212,7 +215,7 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
     const std::string name = (quote_asset == cfg.numeraire)
                                   ? ("T_" + q.asset + "_" + q.venue)
                                   : ("T_" + q.asset + "_" + quote_asset + "_" + q.venue);
-    add(name, CeLeg::kQuote, u, v, q.anchor, q.depth, q.dead_zone);
+    add(name, CeLeg::kQuote, u, v, q.anchor, q.depth, q.dead_zone, q.diag);
   }
   // TRANSFER: a@vi → a@vj (i<j), для каждого актива (включая нумерарий), если задано плечо
   for (const auto& a : all_assets) {
@@ -235,9 +238,13 @@ inline CeClearInput AssembleCeGraphV2(const CeAssembleConfigV2& cfg,
             anchor = -shift;
           }
         }
+        CeEdgeDiag tdiag;   // ADR-079: у арбитражёра полка = c_A (издержки перевода), якорь = сдвиг skew ноги
+        tdiag.anchor_raw = 0.0;
+        tdiag.skew_pm = -anchor;
+        tdiag.has = true;
         add(name, CeLeg::kTransfer,
             node_index.at(a + "@" + cfg.venues[i]), node_index.at(a + "@" + cfg.venues[j]),
-            anchor, lp->second.transfer_depth, lp->second.transfer_dead_zone);
+            anchor, lp->second.transfer_depth, lp->second.transfer_dead_zone, tdiag);
       }
   }
   // STOCK-рёбер в v2 нет (ADR-061 §1: плечо запаса и узел-склад убраны).

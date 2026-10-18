@@ -24,6 +24,19 @@ namespace cex::matching::domain {
 // ce_agent_clearing_test — флаг CE_V2_GRAPH=0) — не удалять.
 enum class CeLeg { kQuote = 0, kTransfer = 1, kStock = 2 };
 
+// ADR-079: диагностика ребра (клиринг её НЕ читает — только для снимка «почему нет потока»).
+// Заполняется сборщиком из ce.clearing.input / inventory-skew; нули ⇒ «не передано».
+struct CeEdgeDiag {
+  double dz_age{0.0};         // age-полка ADR-075, ‰ (часть dead_zone)
+  double dz_spread{0.0};      // член ½спреда, ‰ (часть dead_zone)
+  double dz_commission{0.0};  // комиссия в полке, ‰ (часть dead_zone)
+  double sigma_pm{0.0};       // σ пары, ‰/√с, по которой считалась age-полка
+  long long age_ms{0};        // возраст кривой на закрытии окна, мс
+  double anchor_raw{0.0};     // якорь ДО сдвига от позиции (inventory-skew), ‰
+  double skew_pm{0.0};        // сдвиг якоря от позиции, ‰ (anchor = anchor_raw − skew_pm для переводчика)
+  bool has{false};            // диагностика передана
+};
+
 // Ребро графа = виртуальный контрагент. u,v — индексы узлов (0..num_nodes-1); узлы
 // [0..num_free) свободны (балансируются), [num_free..num_nodes) — книга (потенциал = mark).
 struct CeEdge {
@@ -34,6 +47,7 @@ struct CeEdge {
   double anchor{0.0};     // σ*_e, ‰
   double depth{0.0};      // α_e, тыс. USDT на ‰
   double dead_zone{0.0};  // c_e, ‰
+  CeEdgeDiag diag;        // ADR-079: диагностика (необязательна)
 };
 
 // Метаданные узла (для money-path проекции по узлам, ADR-057). Опциональны:

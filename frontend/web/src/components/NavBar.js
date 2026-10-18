@@ -33,6 +33,7 @@ const TABS = [
   { href: '/policy-config-live', label: 'Policy' },
   { href: '/sim-sessions', label: 'Sim' },
   { href: '/vector-clearing-live', label: 'Clearing' },
+  { href: '/ce-graph-live', label: 'Граф' },
   { href: '/ce-treasury-live', label: 'Treasury' },
   { href: '/replay', label: 'Replay' }
 ];

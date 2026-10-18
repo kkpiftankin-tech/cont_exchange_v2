@@ -7,6 +7,7 @@
 
 #include <pqxx/pqxx>  // ADR-050/052: runtime-конфиг окна клиринга из Postgres
 
+#include "cex/common/data_validity.hpp"
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
@@ -102,6 +103,17 @@ void MarketDataUseCases::OnMarketDataRaw(const fob::marketdata::v1::MarketDataRa
   const auto& t = evt.ticker();
   last_ticker_[key(t.venue(), t.instrument().symbol())] = t;
   update_uc_.OnMarketDataRaw(evt);
+  if (t.has_bid() && t.has_ask()) {
+    const double bid = static_cast<double>(common::Decimal::from_proto(t.bid()));
+    const double ask = static_cast<double>(common::Decimal::from_proto(t.ask()));
+    if (bid > 0.0 && ask >= bid) {
+      // Время СОБЫТИЯ снимка биржи, а не приход сообщения: при воспроизведении очереди после перезапуска
+      // сообщения приходят пачкой (Δt≈0 при реальном движении цены) и раздули бы σ на минуты.
+      double t_s = static_cast<double>(t.timestamp().seconds()) + 1e-9 * static_cast<double>(t.timestamp().nanos());
+      if (!(t_s > 0.0)) t_s = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+      UpdateVenueVolatility(t.venue() + "|" + NormalizeAsset(t.instrument().symbol()), 0.5 * (bid + ask), t_s);
+    }
+  }
 }
 
 void MarketDataUseCases::OnBatchResult(const fob::matching::v1::BatchResult& batch) {
@@ -605,15 +617,60 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
 
   std::vector<domain::ExternalOrderLevel> levels;   // per-level / linear путь
   std::vector<fob::venue::v1::VenueLiquidityCurve> fresh_curves;  // two-sided путь
+  std::map<std::string, std::int64_t> curve_ts;  // "venue|SYMBOL" → event_ts_ms (возраст якоря, ADR-075)
   int stale_dropped = 0;
+  std::vector<fob::marketdata::v1::CeDroppedQuote> stale_list;   // ADR-079: идентичность отброшенных
+  // ADR-078 §7 (флаг CE_STALE_EPS_PM, деф 0 ⇒ выключено): жёсткий порог устаревания зависит от волатильности пары —
+  // у бурной пары данные годны недолго, у тихой дольше: τ = (ε/(zσ))², зажим [CE_STALE_MIN_S, CE_STALE_MAX_S].
+  // Заданный оператором stale_level_ms остаётся потолком: адаптация порог только ужесточает.
+  const char* stale_eps_env = std::getenv("CE_STALE_EPS_PM");
+  const double stale_eps = stale_eps_env ? std::max(0.0, std::atof(stale_eps_env)) / 1000.0 : 0.0;
+  std::map<std::string, double> stale_sigma;
+  double stale_lo_s = 10.0, stale_hi_s = 180.0;
+  int stale_adaptive = 0;
+  double stale_limit_min_s = 0.0;
+  if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
+    stale_sigma = VenueSigmaSnapshot(cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20));
+    const char* lo_env = std::getenv("CE_STALE_MIN_S");
+    const char* hi_env = std::getenv("CE_STALE_MAX_S");
+    if (lo_env) stale_lo_s = std::max(0.1, std::atof(lo_env));
+    if (hi_env) stale_hi_s = std::max(stale_lo_s, std::atof(hi_env));
+  }
   for (const auto& bc : fresh) {
     const std::int64_t age = window_close_ms - bc.event_ts_ms;
-    if (vector_stale_ms_ > 0 && age >= vector_stale_ms_) {
+    std::int64_t stale_limit_ms = vector_stale_ms_;
+    if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
+      // σ собственной площадки кривой: ключ "venue|BTCUSDT" (символ "BTC/USDT" без '/')
+      std::string sym = bc.curve.venue_id() + "|" + bc.curve.instrument().symbol();
+      sym.erase(std::remove(sym.begin(), sym.end(), '/'), sym.end());
+      std::optional<double> sigma;
+      if (const auto sg = stale_sigma.find(sym); sg != stale_sigma.end()) sigma = sg->second;
+      const double limit_s = cex::common::HardStaleLimitSeconds(
+          sigma, stale_eps, stale_lo_s, stale_hi_s, static_cast<double>(vector_stale_ms_) / 1000.0);
+      stale_limit_ms = static_cast<std::int64_t>(limit_s * 1000.0);
+      if (sigma.has_value()) {
+        ++stale_adaptive;
+        if (stale_limit_min_s <= 0.0 || limit_s < stale_limit_min_s) stale_limit_min_s = limit_s;
+      }
+    }
+    if (stale_limit_ms > 0 && age >= stale_limit_ms) {
       ++stale_dropped;
+      {  // ADR-079: кто именно отброшен и по какому пределу (для диагностики «почему нет потока»)
+        fob::marketdata::v1::CeDroppedQuote dq;
+        dq.set_asset(bc.curve.instrument().base());
+        dq.set_quote(bc.curve.instrument().quote());
+        dq.set_venue(bc.curve.venue_id());
+        dq.set_reason("stale");
+        dq.set_age_ms(age);
+        auto* th = dq.mutable_threshold();
+        *th = cex::common::Decimal{stale_limit_ms, 0}.to_proto();
+        stale_list.push_back(std::move(dq));
+      }
       continue;
     }
     if (vector_two_sided_) {                 // ADR-052: собираем свежие кривые
       fresh_curves.push_back(bc.curve);
+      curve_ts[bc.curve.venue_id() + "|" + bc.curve.instrument().symbol()] = bc.event_ts_ms;
       continue;
     }
     double f = 1.0;
@@ -654,7 +711,7 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
   }
   // F-05A CE (вариант A): те же свежие кривые окна → book-derived агенты → ce.clearing.input.
   if (ce_agents_enabled_ && ce_publisher_ != nullptr && !fresh_curves.empty()) {
-    BuildAndPublishCeClearingInput(fresh_curves, batch_id, window_close_ms);
+    BuildAndPublishCeClearingInput(fresh_curves, batch_id, window_close_ms, curve_ts, stale_list);
   }
   cex::common::log_json("INFO", "F-05A vector window flushed",
                         {{"service", "market_data"},
@@ -664,7 +721,9 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
                          {"venues_pairs", std::to_string(fresh.size())},
                          {"num_segments", std::to_string(vr.segments.size())},
                          {"num_assets", std::to_string(vr.basis.num_assets)},
-                         {"stale_dropped", std::to_string(stale_dropped)}});
+                         {"stale_dropped", std::to_string(stale_dropped)},
+                         {"stale_adaptive", std::to_string(stale_adaptive)},
+                         {"stale_limit_min_s", std::to_string(stale_limit_min_s)}});
 }
 
 // F-05A CE (вариант A): свежие кривые окна → book-derived quote-агенты (agent_builder §A1)
@@ -677,7 +736,9 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
 // соответствовали реальным парам стаканов площадок, а не только X/номинал.
 void MarketDataUseCases::BuildAndPublishCeClearingInput(
     const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
-    const std::string& batch_id, std::int64_t window_close_ms) {
+    const std::string& batch_id, std::int64_t window_close_ms,
+    const std::map<std::string, std::int64_t>& curve_ts_ms,
+    const std::vector<fob::marketdata::v1::CeDroppedQuote>& stale_dropped) {
   const char* num_env = std::getenv("CE_NUMERAIRE");
   const std::string numeraire = num_env ? std::string(num_env) : std::string("USDT");
   const char* theta_env = std::getenv("CE_AGENT_THETA");
@@ -699,10 +760,30 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
   };
 
+  // ADR-075: age-aware полка. k=0 (деф) ⇒ не читаем σ и не меняем поведение.
+  const char* age_k_env = std::getenv("CE_AGE_DEAD_ZONE_K");
+  const double age_dead_zone_k = age_k_env ? std::max(0.0, std::atof(age_k_env)) : 0.0;
+  const long long sigma_min_samples = cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20);
+  const std::map<std::string, double> sigma_by_pair =
+      age_dead_zone_k > 0.0 ? SigmaSnapshot(sigma_min_samples) : std::map<std::string, double>{};
+
+  // ADR-077 этап B: способ α_ext агента-переводчика. 4 (деф) — прежний минорант; 5 — M5
+  // (регрессия на окне объёма). Любой сбой M5 откатывается на M4 внутри BuildQuoteAgent.
+  const int alpha_method = cex::common::Env::get_int("CE_ALPHA_METHOD", 4) == 5 ? 5 : 4;
+  const int m5_grid_points = std::max(8, static_cast<int>(cex::common::Env::get_int("CE_M5_GRID_POINTS", 32)));
+  const char* m5_cov_env = std::getenv("CE_M5_MIN_COVERAGE");
+  const double m5_min_coverage = m5_cov_env ? std::atof(m5_cov_env) : 0.5;
+  const char* m5_hsm_env = std::getenv("CE_M5_HALF_SPREAD_MULT");
+  const double m5_half_spread_mult = m5_hsm_env ? std::atof(m5_hsm_env) : 0.0;  // 0 ⇒ без полки (деф)
+  int m5_used = 0, m5_fallback = 0, m5_neg_intercept = 0;
+  double m5_ratio_max = 0.0;  // max α_M5/α_M4 по применённым агентам (оценка усиления потока)
+
   struct Book {
     std::string base, quote, venue;
+    std::int64_t ts_ms{0};  // время события кривой (0 ⇒ неизвестно ⇒ age-полка не применяется)
     double tau_ms{0.0};  // τ кривой (v = q/τ) — для согласования скорости с окном батча
     std::vector<domain::ExternalOrderLevel> levels;
+    double v_cal_quote{0.0};  // ADR-077: окно V_cal в ед. котируемой валюты (тег кривой; 0 ⇒ нет)
   };
   std::vector<Book> books;
   // P0 (опорная цена в numeraire) считается ТОЛЬКО из пар base/numeraire —
@@ -736,7 +817,19 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     // Кросс-пара: quote тоже tradeable-актив (не numeraire) — регистрируем его
     // узел asset@venue в графе наравне с base (ADR-064 §Последствия).
     if (quote != numeraire && assets_seen.insert(quote).second) assets_order.push_back(quote);
-    books.push_back({base, quote, venue, c.tau_ms(), std::move(levels)});
+    const auto ts_it = curve_ts_ms.find(venue + "|" + c.instrument().symbol());
+    double v_cal_quote = 0.0;  // ADR-077: тег окна глубины, если venues его выставил
+    {
+      const auto& tags = c.meta().tags();
+      const auto tg = tags.find("depth_window.v_cal_quote");
+      if (tg != tags.end()) {
+        char* end = nullptr;
+        const double v = std::strtod(tg->second.c_str(), &end);
+        if (end != tg->second.c_str() && std::isfinite(v) && v > 0.0) v_cal_quote = v;
+      }
+    }
+    books.push_back({base, quote, venue, ts_it != curve_ts_ms.end() ? ts_it->second : 0,
+                     c.tau_ms(), std::move(levels), v_cal_quote});
   }
   if (books.empty()) return;
   std::map<std::string, double> p0;
@@ -748,10 +841,18 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   out.set_numeraire(numeraire);
   std::map<std::string, std::pair<double, double>> markacc;  // base → (Σ α·anchor, Σ α)
   // 1-й проход: строим валидных агентов, копим max глубину по активу.
-  struct Ag { std::string base, quote, venue; double anchor, depth, dead_zone; };
+  struct Ag {
+    std::string base, quote, venue;
+    double anchor, depth, dead_zone;
+    double dz_age{0.0}, dz_spread{0.0}, dz_commission{0.0}, sigma_pm{0.0};   // ADR-079: из чего сложена полка
+    std::int64_t age_ms{0};
+  };
+  std::vector<fob::marketdata::v1::CeDroppedQuote> dropped_list;             // ADR-079: отброшенные котировки
   std::vector<Ag> agents;
   std::map<std::string, double> max_depth;
   int skipped_no_p0 = 0;
+  int age_applied = 0, age_no_sigma = 0;  // ADR-075 наблюдаемость
+  double age_floor_max_pm = 0.0;
   // Согласование скорости торговли, окна батча и цен: кривая моделирует v = q/τ
   // (τ_eff калибрована по реальному обороту venue). CE-поток за такт = скорость·dt =
   // глубина·(dt/τ). Масштабируем α агента на batch_window/τ_кривой, чтобы позиция
@@ -777,8 +878,46 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     acfg.half_spread_mult = half_spread_mult;          // 0 ⇒ полка нулевая
     acfg.wide_spread_guard_pm = wide_spread_guard_pm;  // тонкие книги сохраняют ½спред
     acfg.commission_in_polka = commission_in_polka;    // ADR-065 Q1: комиссия в порогах, не в полке
+    // ADR-075: age-полка c += k·σ·√age. σ — EWMA пары (ce_asset_volatility, ‰/√с = σ·1000),
+    // возраст — от времени события кривой до закрытия окна. Нет σ/времени ⇒ член нулевой.
+    if (age_dead_zone_k > 0.0 && b.ts_ms > 0) {
+      const auto sg = sigma_by_pair.find(b.base + b.quote);
+      if (sg != sigma_by_pair.end()) {
+        acfg.age_dead_zone_k = age_dead_zone_k;
+        acfg.sigma_pm = sg->second * 1000.0;
+        acfg.snapshot_age_ms = static_cast<double>(std::max<std::int64_t>(0, window_close_ms - b.ts_ms));
+        ++age_applied;
+        age_floor_max_pm = std::max(
+            age_floor_max_pm, age_dead_zone_k * acfg.sigma_pm * std::sqrt(acfg.snapshot_age_ms / 1000.0));
+      } else {
+        ++age_no_sigma;
+      }
+    }
+    acfg.alpha_method = alpha_method;
+    acfg.depth_window_quote = b.v_cal_quote;
+    acfg.m5_grid_points = m5_grid_points;
+    acfg.m5_min_coverage = m5_min_coverage;
+    acfg.m5_half_spread_mult = m5_half_spread_mult;
     const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
-    if (!a.valid) continue;
+    if (!a.valid) {
+      fob::marketdata::v1::CeDroppedQuote dq;   // ADR-079: нулевая глубина — котировка не попадёт в клиринг
+      dq.set_asset(b.base);
+      dq.set_venue(b.venue);
+      if (b.quote != numeraire) dq.set_quote(b.quote);
+      dq.set_reason("invalid_depth");
+      dq.set_age_ms(b.ts_ms > 0 ? std::max<std::int64_t>(0, window_close_ms - b.ts_ms) : 0);
+      dropped_list.push_back(std::move(dq));
+      continue;
+    }
+    if (alpha_method == 5) {
+      if (a.alpha_method_used == 5) {
+        ++m5_used;
+        if (a.m5_negative_intercept) ++m5_neg_intercept;
+        if (a.alpha_m4 > 0.0) m5_ratio_max = std::max(m5_ratio_max, a.alpha_m5 / a.alpha_m4);
+      } else {
+        ++m5_fallback;
+      }
+    }
     // Масштаб скорости: глубина(запас) → скорость·dt = глубина·(dt/τ). τ≤0 или
     // выключено ⇒ прежнее поведение (без масштаба, регрессия).
     double depth = a.depth;
@@ -787,13 +926,30 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
       if (s < 1e-6) s = 1e-6; else if (s > 100.0) s = 100.0;
       depth *= s;
     }
-    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, depth, a.dead_zone_pm});
+    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, depth, a.dead_zone_pm,
+                      a.dz_age_pm, a.dz_spread_pm, a.dz_commission_pm, acfg.sigma_pm,
+                      // возраст снимка известен и при CE_AGE_DEAD_ZONE_K=0 (acfg его тогда не заполняет)
+                      b.ts_ms > 0 ? std::max<std::int64_t>(0, window_close_ms - b.ts_ms) : 0});
     // ADR-064: max глубина копится по ПАРЕ (base|quote), а не по base. Глубины
     // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT) —
     // сравнение «тонкости» валидно только между площадками одной пары.
     const std::string pk = b.base + "|" + b.quote;
     if (depth > max_depth[pk]) max_depth[pk] = depth;
   }
+  if (age_dead_zone_k > 0.0)
+    cex::common::log_json("INFO", "CE clearing: age-aware полка (ADR-075)",
+                          {{"batch_id", batch_id},
+                           {"k", std::to_string(age_dead_zone_k)},
+                           {"applied", std::to_string(age_applied)},
+                           {"no_sigma", std::to_string(age_no_sigma)},
+                           {"max_age_floor_pm", std::to_string(age_floor_max_pm)}});
+  if (alpha_method == 5)
+    cex::common::log_json("INFO", "CE clearing: α по M5 (ADR-077)",
+                          {{"batch_id", batch_id},
+                           {"m5_used", std::to_string(m5_used)},
+                           {"m5_fallback_m4", std::to_string(m5_fallback)},
+                           {"m5_negative_intercept", std::to_string(m5_neg_intercept)},
+                           {"max_alpha_ratio_m5_m4", std::to_string(m5_ratio_max)}});
   if (skipped_no_p0 > 0)
     cex::common::log_json("DEBUG", "CE clearing: кросс-пара без P0_quote пропущена",
                           {{"batch_id", batch_id}, {"skipped", std::to_string(skipped_no_p0)}});
@@ -821,13 +977,31 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     // ADR-064: порог считается по ПАРЕ (base|quote) — иначе кросс-пара (ETH/BTC)
     // всегда «тонкая» против глубокого ETH/USDT (разные валюты котировки).
     const std::string pk = ag.base + "|" + ag.quote;
-    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[pk]) { ++dropped; continue; }
+    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[pk]) {
+      ++dropped;
+      fob::marketdata::v1::CeDroppedQuote dq;   // ADR-079: тонкая котировка и порог глубины
+      dq.set_asset(ag.base);
+      dq.set_venue(ag.venue);
+      if (ag.quote != numeraire) dq.set_quote(ag.quote);
+      dq.set_reason("thin_depth");
+      dq.set_age_ms(ag.age_ms);
+      *dq.mutable_depth() = to_dec(ag.depth);
+      *dq.mutable_threshold() = to_dec(min_ratio * max_depth[pk]);
+      dropped_list.push_back(std::move(dq));
+      continue;
+    }
     auto* q = out.add_quotes();
     q->set_asset(ag.base);
     q->set_venue(ag.venue);
     *q->mutable_anchor() = to_dec(ag.anchor);
     *q->mutable_depth() = to_dec(ag.depth);
     *q->mutable_dead_zone() = to_dec(ag.dead_zone);
+    // ADR-079: из чего сложена полка и откуда возраст/σ (клиринг не читает, только диагностика)
+    *q->mutable_dz_age() = to_dec(ag.dz_age);
+    *q->mutable_dz_spread() = to_dec(ag.dz_spread);
+    *q->mutable_dz_commission() = to_dec(ag.dz_commission);
+    q->set_snapshot_age_ms(ag.age_ms);
+    *q->mutable_sigma_pm() = to_dec(ag.sigma_pm);
     // ADR-064: quote непуст только для кросс-пар; для номинальных пар оставляем
     // пустым (обратная совместимость — "пусто ⇒ numeraire").
     if (ag.quote != numeraire) q->set_quote(ag.quote);
@@ -852,6 +1026,8 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
                            {"kept_quotes", std::to_string(out.quotes_size())},
                            {"min_depth_ratio", std::to_string(min_ratio)}});
 
+  for (const auto& dq : stale_dropped) *out.add_dropped() = dq;   // ADR-079: отброшенные как устаревшие
+  for (const auto& dq : dropped_list) *out.add_dropped() = dq;     // и по глубине / нулевой глубине
   ce_publisher_->Publish(out);
   cex::common::log_json("INFO", "F-05A CE ce.clearing.input",
                         {{"service", "market_data"},
@@ -879,6 +1055,7 @@ bool MarketDataUseCases::UpdateAssetVolatilityLocked(const std::string& asset,
                                                      double* out_sigma,
                                                      long long* out_samples) {
   if (!(mid > 0.0)) return false;
+  std::lock_guard<std::mutex> vol_lg(vol_mu_);  // порядок mu_ → vol_mu_ (см. заголовок)
   VolState& st = vol_state_[asset];
   if (!st.init) {
     st.init = true;
@@ -904,6 +1081,30 @@ bool MarketDataUseCases::UpdateAssetVolatilityLocked(const std::string& asset,
   if (out_sigma) *out_sigma = std::sqrt(std::max(0.0, st.ewma_var));
   if (out_samples) *out_samples = st.samples;
   return true;
+}
+
+void MarketDataUseCases::UpdateVenueVolatility(const std::string& venue_symbol_key, const double mid, const double t_s) {
+  // Порогу устаревания нужна устойчивая σ: берётся max(быстрая 60 с, медленная 300 с), см. DualHorizonVolatility.
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  venue_vol_.try_emplace(venue_symbol_key).first->second.Update(t_s, mid);
+}
+
+std::map<std::string, double> MarketDataUseCases::VenueSigmaSnapshot(long long min_samples) const {
+  std::map<std::string, double> out;
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  for (const auto& [k, est] : venue_vol_) {
+    if (const auto s = est.Sigma(min_samples)) out[k] = *s;
+  }
+  return out;
+}
+
+std::map<std::string, double> MarketDataUseCases::SigmaSnapshot(long long min_samples) const {
+  std::map<std::string, double> out;
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  for (const auto& [sym, st] : vol_state_) {
+    if (st.init && st.samples >= min_samples && st.ewma_var > 0.0) out[sym] = std::sqrt(st.ewma_var);
+  }
+  return out;
 }
 
 std::optional<fob::marketdata::v1::Ticker> MarketDataUseCases::GetLastTicker(

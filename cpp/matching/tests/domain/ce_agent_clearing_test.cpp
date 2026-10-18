@@ -43,7 +43,7 @@ CeClearInput Build(const double m[3], const Params& p) {
   in.num_free = 6;
   auto add = [&](const std::string& nm, CeLeg leg, int u, int v, double anc,
                  double dep, double c) {
-    in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c});
+    in.edges.push_back(CeEdge{nm, leg, u, v, anc, dep, c, CeEdgeDiag{}});
   };
   const int PAIR[3][2] = {{0, 1}, {0, 2}, {1, 2}};
   for (int i = 0; i < 3; ++i) add("T", CeLeg::kQuote, i, 3 + i, m[i], p.aT[i], p.cT[i]);

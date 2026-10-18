@@ -14,6 +14,9 @@ COPY server.js .
 COPY trade_stats_math.js .
 COPY book_vwap.js .
 COPY slope_aggregate.js .
+COPY ce_graph_build.js .
+COPY ce_clearing_view.js .
+COPY venue_stage_merge.js .
 COPY data ./data
 
 EXPOSE 8090

@@ -169,6 +169,27 @@ if(BUILD_TESTING)
   target_compile_options(matching_ce_assembler_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME matching_ce_assembler_test COMMAND matching_ce_assembler_test)
 
+  # F-18 регрессия «практикум ↔ клиринг» (EXP-2026-10-14, ADR-073): циркуляция по циклу,
+  # полки вычитаются из ЭДС, закон Ома, дублирование дельт ноги арбитражёра. Header-only.
+  add_executable(matching_ce_cycle_practicum_test
+    tests/domain/ce_cycle_practicum_test.cpp
+  )
+  target_include_directories(matching_ce_cycle_practicum_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(matching_ce_cycle_practicum_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_ce_cycle_practicum_test COMMAND matching_ce_cycle_practicum_test)
+
+  # ADR-079: снимок решения CE-клиринга (диагностика «почему нет потока»). Header-only.
+  add_executable(matching_ce_clearing_snapshot_test
+    tests/domain/ce_clearing_snapshot_test.cpp
+  )
+  target_include_directories(matching_ce_clearing_snapshot_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(matching_ce_clearing_snapshot_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME matching_ce_clearing_snapshot_test COMMAND matching_ce_clearing_snapshot_test)
+
   # F-05A CE money-path — проекция value→quantity по узлам (ADR-057). Header-only.
   add_executable(matching_ce_projection_test
     tests/domain/ce_position_projection_test.cpp

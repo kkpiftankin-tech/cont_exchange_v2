@@ -21,6 +21,7 @@
 #include "app/solver_metrics.hpp"
 #include "cex/common/kafka.hpp"
 #include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 1a)
+#include "domain/ce_clearing_snapshot.hpp"   // ADR-079: снимок решения CE-клиринга
 #include "domain/flow_order_repository.hpp"
 #include "domain/grouped_solver_bisection.hpp"
 #include "domain/solver_impl.hpp"
@@ -68,7 +69,20 @@ class MatchingLoop {
   };
   std::optional<OrderSnapshot> snapshot_order(const std::string& order_id) const;
 
+  // ADR-079: JSON-снимок ПОСЛЕДНЕГО решения CE-клиринга (потенциалы узлов, рёбра с отклонением/полкой/зазором/потоком,
+  // типовые циклы, отброшенные котировки). Пустая строка — клиринг ещё не считался. Сборка JSON — по запросу
+  // (HTTP /ce/clearing/last), на такт сохраняется только граф и результат.
+  std::string last_ce_clearing_snapshot_json() const;
+
  private:
+  struct CeSnapshotData {
+    domain::CeClearInput graph;
+    domain::CeClearResult res;
+    domain::CeSnapshotMeta meta;
+  };
+  mutable std::mutex ce_snap_mu_;
+  std::shared_ptr<const CeSnapshotData> ce_snap_;
+
   void consume_orders_loop();
   void batch_timer_loop();
   int refresh_batch_interval_ms();

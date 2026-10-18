@@ -6,6 +6,9 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require("./trade_stats_math");
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
+const { buildCeGraph } = require("./ce_graph_build");  // граф CE: узлы asset@venue, рёбра агентов
+const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
+const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
 
 // gRPC client for ledger
@@ -7242,6 +7245,36 @@ async function fetchAgentTradeStats() {
   } catch (e) { return new Map(); }  // нет таблицы/строк — статистику не покажем
 }
 
+// Вкладка «Граф»: позиции на внешних биржах от хеджирования агентов (переводчики и арбитражёры).
+// Тот же источник и тот же момент сброса (trade_stats_reset_at), что у fetchAgentTradeStats: подтверждённые
+// заполнения band-хеджей venue_fill_diagnostics. SQL отдаёт БЕЗЗНАКОВЫЕ суммы по (агент, биржа, символ);
+// знаки и разложение на валюты пары (база/quote) делает buildCeGraph. Результат кэшируется на 10 с: граф
+// опрашивается раз в 3 с, а позиция от хеджей меняется медленно.
+let hedgePosCache = { at: 0, value: { rows: [], sinceMs: 0 } };
+async function fetchHedgePositionRows() {
+  if (Date.now() - hedgePosCache.at < 10000) return hedgePosCache.value;
+  const pool = getPgPool();
+  if (!pool) return hedgePosCache.value;
+  try {
+    const r = await pool.query(
+      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue, symbol,
+              SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
+              SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
+              SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
+              SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional
+         FROM venue_fill_diagnostics
+        WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price IS NOT NULL
+              AND created_at > COALESCE(
+                    (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
+                    to_timestamp(0))
+        GROUP BY 1, 2, 3`);
+    const since = await pool.query(
+      "SELECT (EXTRACT(EPOCH FROM trade_stats_reset_at)*1000)::bigint AS ms FROM f05a_clearing_config WHERE id=1");
+    hedgePosCache = { at: Date.now(), value: { rows: r.rows, sinceMs: Number(since.rows[0] && since.rows[0].ms) || 0 } };
+  } catch (e) { /* нет таблицы/строк — остаётся прежнее значение, позиции от хеджей не покажем */ }
+  return hedgePosCache.value;
+}
+
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
 // дельты ИМЕННО ЭТОГО такта клиринга (batch_id) — ДО→Δ→ПОСЛЕ, через
 // ledger.GetAgentPositionDeltas (без SQL в обход сервиса-владельца). Пустой
@@ -7896,6 +7929,97 @@ async function handleVectorClearing(req, res, pathname, query) {
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —
   // позиция → сдвиг цены от позиции (inventory-skew) → порог q → пробой → хедж-заявка
   // в паре → рассматриваемые публичные сделки → имитируемое (полное/частичное) исполнение.
+  // Граф CE (вкладка «Граф»): узлы — активы на биржах, рёбра — заявки агентов с РЕАЛЬНЫМИ
+  // якорями и наклонами: переводчики из последних сегментов клиринга (vector_flow_segments_history:
+  // mid, α_T, β_T) с inventory-skew по позиции из ledger; арбитражёры — плечо перевода
+  // CE_TRANSFER_ALPHA/C_<актив> и ЭДС (рассогласование цен узлов). Расчёт в ce_graph_build.js.
+  // Позиции у концов ветви (ends) и позиция на внешней бирже от хеджирования (nodes[].hedgePos) —
+  // там же; источники: ledger GetAgentPositions и venue_fill_diagnostics (fetchHedgePositionRows).
+  // ADR-079 — «подтверждающее» отображение РЕШЕНИЯ клиринга и ликвидности бирж (вкладка «Граф»): снимок последнего
+  // CE-такта из matching (GET /ce/clearing/last: потенциалы узлов, по ребру отклонение/полка/зазор/поток/состояние,
+  // типовые циклы, отброшенные котировки) + состояние бирж и опроса из админ-API venues. Ничего не пересчитывается
+  // (ce_clearing_view.js переносит числа и добавляет пояснения словами); нет снимка — честное «нет данных».
+  if (pathname === "/api/vector-clearing/ce-clearing") {
+    // два независимых источника — параллельно (панель опрашивает раз в 3 с, последовательные таймауты суммировались бы)
+    const [solveRes, adminRes] = await Promise.allSettled([
+      fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 3000),
+      fetchJsonWithTimeout(`${VENUES_ADDR}/api/v1/venues`, {}, 3000),
+    ]);
+    let solve = null, solveError = null, adminItems = [];
+    if (solveRes.status === "fulfilled") solve = solveRes.value;
+    else { const e = solveRes.reason || {}; solveError = e.status ? `http_${e.status}` : String(e.message || e); }
+    // состояние бирж необязательно: без него остаётся решение клиринга
+    if (adminRes.status === "fulfilled") {
+      const adminPayload = adminRes.value;
+      adminItems = Array.isArray(adminPayload && adminPayload.items) ? adminPayload.items : [];
+    }
+    return writeJson(res, 200, buildClearingView({ solve, adminItems, solveError, nowMs: Date.now() }));
+  }
+  if (pathname === "/api/vector-clearing/ce-graph") {
+    try {
+      const winS = Math.max(30, Math.min(3600, parseInt(query && query.window_s, 10) || 600));
+      const newestRows = await fetchVectorClearingRows(1);
+      const newestBatch = newestRows && newestRows[0] ? newestRows[0].batch_id : "";
+      const [segRows, positions, deltas, hedgePos] = await Promise.all([
+        chJsonEachRow(
+          "SELECT venue_id, pair, toString(effective_price) AS mid, toString(alpha_t) AS alpha_t,"
+          + " toString(beta_t) AS beta_t, toString(theta) AS theta, toString(anchor) AS anchor_pm, event_time_ms"
+          + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
+          + " WHERE event_time_ms > (toUnixTimestamp(now())-" + winS + ")*1000"
+          + " ORDER BY event_time_ms DESC LIMIT 1 BY venue_id, pair FORMAT JSONEachRow"),
+        fetchAgentPositions(),
+        newestBatch ? fetchAgentPositionDeltas(newestBatch) : Promise.resolve([]),
+        fetchHedgePositionRows(),
+      ]);
+      let gamma = 0, clampPm = 8;
+      const pool = getPgPool();
+      if (pool) {
+        try {
+          const r = await pool.query("SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+          if (r.rows[0]) { gamma = Number(r.rows[0].ce_inv_skew_gamma) || 0; clampPm = Number(r.rows[0].ce_inv_skew_max_pm) || 0; }
+        } catch (_) { /* дефолты */ }
+      }
+      // плечо перевода арбитражёров: те же env, что у matching (CE_TRANSFER_ALPHA_<A>, CE_TRANSFER_C_<A>)
+      const transfer = {};
+      for (const a of ["USDT", "BTC", "ETH", "SOL", "BNB", "XRP"]) {
+        const al = Number(process.env["CE_TRANSFER_ALPHA_" + a] ?? (a === "USDT" ? 18 : 12));
+        const c = Number(process.env["CE_TRANSFER_C_" + a] ?? (a === "USDT" ? 0.05 : 0.25));
+        transfer[a] = { alpha: al, c };
+      }
+      let segs = segRows.map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid), alphaT: Number(r.alpha_t),
+        betaT: Number(r.beta_t), theta: Number(r.theta) || 0.6, eventMs: Number(r.event_time_ms), source: "clearing" }));
+      // ?live=1 — быстрая полоса (ADR-070): для пар с арендой и свежим глубоким стаканом якорь и наклон
+      // пересчитываются ПО ЗАПРОСУ в venues (ComputeSlopeMethods, способ §6.2 = клиринговый) вместо
+      // сегмента клиринга (раз в ~25 с, 20 уровней): α_T = θ·α_ext, β_T = mid²/(10⁴·α_T). Пары без
+      // глубокого стакана остаются на данных клиринга (source="clearing"). Смесь источников даёт
+      // небольшие ложные ЭДС (живой mid против mid клиринга до 25 с давности) — UI помечает источник.
+      let liveCount = 0;
+      if (query && query.live === "1") {
+        const method = await readClearingSlopeMethod();
+        segs = await Promise.all(segs.map(async (sg) => {
+          try {
+            const d = await fetchJsonWithTimeout(
+              `${VENUES_ADDR}/api/v1/venues/${encodeURIComponent(sg.venue)}/slope-curves?symbol=${encodeURIComponent(sg.pair)}&levels=0`, {}, 4000);
+            const m = (d.methods || []).find((x) => Number(x.method) === method);
+            const alphaExt = m ? Number(m.alpha_ext) : 0;
+            if (!(Number(d.mid) > 0) || !(alphaExt > 0)) return sg;
+            const alphaT = sg.theta * alphaExt, mid = Number(d.mid);
+            liveCount += 1;
+            return { ...sg, mid, alphaT, betaT: (mid * mid) / (1e4 * alphaT), eventMs: Number(d.timestamp_ms) || sg.eventMs,
+                     source: "live", levelsBid: d.levels_bid, levelsAsk: d.levels_ask };
+          } catch (_) { return sg; }  // нет глубокого стакана/устарел — остаёмся на клиринге
+        }));
+      }
+      const graph = buildCeGraph({
+        segs,
+        positions, deltas, hedgeFills: hedgePos.rows, cfg: { gamma, clampPm, transfer },
+      });
+      const newest = segs.reduce((m, r) => Math.max(m, Number(r.eventMs) || 0), 0);
+      return writeJson(res, 200, { ...graph, gamma, clampPm, transfer, eventTimeMs: newest, batchId: newestBatch, liveCount, hedgeSinceMs: hedgePos.sinceMs, generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "ce_graph_error", message: String(e.message || e) });
+    }
+  }
   if (pathname === "/api/vector-clearing/agent-detail") {
     const agentId = query && query.agent_id;
     if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
@@ -8343,7 +8467,19 @@ async function handleVenues(req, res, pathname, query) {
           pairs: v.pairs.sort((a, b) => a.symbol.localeCompare(b.symbol))
         };
       }).sort((a, b) => a.venue_id.localeCompare(b.venue_id));
-      return writeJson(res, 200, { window_s: windowSec, venues, generatedAt: new Date().toISOString() });
+      // Этап 0 (EXP-2026-10-15-exchange-requests): тайминги стадий опроса из админ-API venues.
+      // Необязательно: недоступность venues не ломает статистику стаканов (поля станут null).
+      let adminItems = [];
+      try {
+        // Короткий таймаут: подвисший venues не должен задерживать статистику из ClickHouse.
+        const adminPayload = await fetchJsonWithTimeout(`${VENUES_ADDR}/api/v1/venues`, {}, 2000);
+        adminItems = Array.isArray(adminPayload && adminPayload.items) ? adminPayload.items : [];
+      } catch (_) { /* оставляем без таймингов */ }
+      return writeJson(res, 200, {
+        window_s: windowSec,
+        venues: mergeVenueStages(venues, adminItems, nowMs),
+        generatedAt: new Date().toISOString()
+      });
     } catch (e) {
       return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
     }
@@ -9027,6 +9163,8 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/liveness"
         || pathname === "/api/vector-clearing/agent-positions"
         || pathname === "/api/vector-clearing/agent-detail"
+        || pathname === "/api/vector-clearing/ce-graph"
+        || pathname === "/api/vector-clearing/ce-clearing"
         || pathname === "/api/vector-clearing/reset-positions"
         || pathname === "/api/vector-clearing/config"
         || pathname === "/api/vector-clearing/curve") {

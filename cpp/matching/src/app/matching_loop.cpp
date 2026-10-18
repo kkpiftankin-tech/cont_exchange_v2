@@ -1085,6 +1085,7 @@ void MatchingLoop::on_ce_clearing_input(
     // ADR-064: q.quote() — котируемая валюта пары (пусто ⇒ numeraire). Поле
     // используется только v2-сборщиком (AssembleCeGraphV2); v1 его игнорирует.
     double anchor = d2(q.anchor());
+    const double anchor_raw = anchor;   // ADR-079: якорь ДО inventory-skew (для диагностики)
     {  // P_pair = (ref[base]/ref[quote])·exp(σ*_raw/1000), ДО skew. anchor —
        // отклонение цены ПАРЫ: для USDT-пары base/USDT, для кросс-пары base/quote.
        // ref[quote]=1 для numeraire. Ключ копления — пара, не актив.
@@ -1115,8 +1116,16 @@ void MatchingLoop::on_ce_clearing_input(
         anchor -= skew;  // c>0 ⇒ якорь ниже ⇒ поток разворачивается (mean-reversion)
       }
     }
-    quotes.push_back({q.asset(), q.venue(), anchor, d2(q.depth()), d2(q.dead_zone()),
-                       q.quote()});
+    domain::CeQuoteParams qp{q.asset(), q.venue(), anchor, d2(q.depth()), d2(q.dead_zone()), q.quote(), {}};
+    qp.diag.has = true;                               // ADR-079: состав полки, возраст, σ, skew (клиринг их не читает)
+    qp.diag.dz_age = d2(q.dz_age());
+    qp.diag.dz_spread = d2(q.dz_spread());
+    qp.diag.dz_commission = d2(q.dz_commission());
+    qp.diag.sigma_pm = d2(q.sigma_pm());
+    qp.diag.age_ms = q.snapshot_age_ms();
+    qp.diag.anchor_raw = anchor_raw;
+    qp.diag.skew_pm = anchor_raw - anchor;
+    quotes.push_back(std::move(qp));
   }
 
   // F-18 #7 scoped (T-F18-L02, ADR-066 §D3): пишем depth (α_e) per (asset,venue) в
@@ -1195,6 +1204,31 @@ void MatchingLoop::on_ce_clearing_input(
   }
 
   const domain::CeClearResult res = domain::ClearCe(graph);
+
+  {  // ADR-079: сохраняем решение для HTTP-диагностики «почему нет потока» (чтение, на клиринг не влияет)
+    auto snap = std::make_shared<CeSnapshotData>();
+    snap->graph = graph;
+    snap->res = res;
+    snap->meta.batch_id = input.batch_id();
+    snap->meta.event_time_ms = input.event_time_ms();
+    snap->meta.solved_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch()).count();
+    snap->meta.numeraire = numeraire;
+    snap->meta.quotes_received = input.quotes_size();
+    for (const auto& dq : input.dropped()) {
+      domain::CeDroppedInfo di;
+      di.asset = dq.asset();
+      di.venue = dq.venue();
+      di.quote = dq.quote();
+      di.reason = dq.reason();
+      di.age_ms = dq.age_ms();
+      di.depth = d2(dq.depth());
+      di.threshold = d2(dq.threshold());
+      snap->meta.dropped.push_back(std::move(di));
+    }
+    std::lock_guard<std::mutex> lk(ce_snap_mu_);
+    ce_snap_ = std::move(snap);
+  }
 
   // F-18 v2 диагностика (env CE_CLEARING_DEBUG, default OFF): по-рёберная картина
   // клиринга — почему поток f нулевой/ненулевой. Для КАЖДОГО ребра логируем якорь
@@ -2418,6 +2452,17 @@ std::optional<MatchingLoop::OrderSnapshot> MatchingLoop::snapshot_order(
     return std::nullopt;
   }
   return it->second;
+}
+
+
+std::string MatchingLoop::last_ce_clearing_snapshot_json() const {
+  std::shared_ptr<const CeSnapshotData> snap;
+  {
+    std::lock_guard<std::mutex> lk(ce_snap_mu_);
+    snap = ce_snap_;
+  }
+  if (!snap) return {};
+  return domain::BuildCeClearingSnapshotJson(snap->graph, snap->res, snap->meta);
 }
 
 }  // namespace cex::matching::app

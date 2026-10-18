@@ -72,5 +72,11 @@
 | ADR-070 | Быстрая полоса стакана venues — свежий сырой стакан для панели «Торговля» | [proposed](ADR-070-venues-fast-depth-lane-for-raw-book-display.md) |
 | ADR-071 | Inventory-skew для ног CE-арбитражёра — самоограничение позиции сдвигом якоря | [accepted](ADR-071-ce-arbitrageur-inventory-skew.md) |
 | ADR-072 | Прибыль переводчика — клэмп сдвига цены границей прибыли, resting-заявки симулятора, realized/unrealized P&L | [proposed](ADR-072-ce-translator-profit-hedge-price-skew-resting.md) |
+| ADR-073 | CE-арбитражёр без рыночного хеджа — позиция как дисбаланс остатков | [accepted (валидация на dev)](ADR-073-ce-arbitrageur-no-market-hedge.md) |
+| ADR-075 | Синхронные рыночные данные — биржевое время снимка и age-aware якорь | [proposed (механизм подключён, k=0 по умолчанию)](ADR-075-synchronous-market-data-anchors.md) |
+| ADR-076 | Топология графа переводов CE — полная сетка бирж против звезды вокруг дома | [proposed](ADR-076-ce-transfer-graph-topology.md) |
+| ADR-077 | Окно глубины стакана для кривой ликвидности — по объёму сделки, а не по числу уровней | [proposed](ADR-077-liquidity-depth-window-by-volume.md) |
+| ADR-078 | Опрос внешних бирж — фиксированный период на пару, лестница действий при сбое, расчёт отвязан от запросов | [accepted](ADR-078-exchange-polling-scheduler.md) |
+| ADR-079 | Диагностика решения CE-клиринга — снимок последнего такта из matching и показ на вкладке «Граф» с объяснением «почему потока нет» | [proposed](ADR-079-ce-clearing-decision-diagnostics.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

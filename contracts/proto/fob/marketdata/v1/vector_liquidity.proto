@@ -98,6 +98,26 @@ message CeQuoteAgent {
   // Непусто для прямых кросс-пар (напр. "BTC" для пары ETH/BTC): ребро
   // переводчика соединяет asset@venue ↔ quote@venue напрямую, минуя numeraire.
   string quote = 6;
+  // ADR-079 (аддитивно, диагностика «почему нет потока»; клиринг эти поля НЕ читает): из чего сложена полка c
+  // и какой возраст/волатильность дали age-член. c = dz_commission + dz_spread + dz_age.
+  fob.common.v1.Decimal dz_age = 7;         // age-полка ADR-075 k·σ·√возраст, ‰
+  fob.common.v1.Decimal dz_spread = 8;      // член «множитель·½спреда» (ADR-065/077), ‰
+  fob.common.v1.Decimal dz_commission = 9;  // комиссия в полке (CE_COMMISSION_IN_POLKA; обычно 0), ‰
+  int64 snapshot_age_ms = 10;               // возраст кривой на закрытии окна, мс (0 ⇒ неизвестен)
+  fob.common.v1.Decimal sigma_pm = 11;      // σ пары, ‰/√с (0 ⇒ нет оценки)
+}
+
+// ADR-079: котировка, НЕ попавшая в клиринг, и причина. Аддитивно: без неё «пары нет в решении» не отличить
+// от «пара отброшена». reason: "stale" (кривая старше порога устаревания), "thin_depth" (глубина < доли от
+// наибольшей по паре, CE_MIN_DEPTH_RATIO), "invalid_depth" (нулевая глубина).
+message CeDroppedQuote {
+  string asset = 1;
+  string venue = 2;
+  string quote = 3;                      // пусто ⇒ numeraire
+  string reason = 4;
+  int64 age_ms = 5;                      // возраст кривой, мс (0 ⇒ неизвестен)
+  fob.common.v1.Decimal depth = 6;       // α отброшенной котировки (0 ⇒ неизвестна)
+  fob.common.v1.Decimal threshold = 7;   // порог причины: для stale — предел возраста, мс; для thin_depth — минимальная глубина
 }
 message CeAssetMark {
   string asset = 1;
@@ -114,6 +134,7 @@ message CeClearingInput {
   repeated string venues = 6;           // стабильный порядок
   repeated CeQuoteAgent quotes = 7;     // по одному на (asset,venue) с двусторонней книгой
   repeated CeAssetMark marks = 8;       // марки узлов книги μ_a
+  repeated CeDroppedQuote dropped = 9;  // ADR-079: отброшенные котировки и причины (диагностика)
 }
 
 // Flow-сегмент: один столбец W (вектор активов) + границы/поток.
