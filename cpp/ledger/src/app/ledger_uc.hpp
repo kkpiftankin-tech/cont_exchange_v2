@@ -121,6 +121,21 @@ class LedgerUseCases {
   static double BandTotalScale(double vol_scale, double liq_scale,
                                double tr_min, double tr_max);
 
+  // ADR-081: ручная ширина полосы хеджа. true и *out_lim/*out_mkt, только если режим включён и значения
+  // допустимы: kBandManualMin ≤ lim ≤ mkt ≤ kBandManualMax (тыс. USDT). Иначе false — ширина считается расчётом
+  // (плоская от комиссии или по волатильности). Нижняя граница (100 USDT) не даёт хеджировать пыль каждые 3 с,
+  // верхняя (≈ весь USDT-капитал, CE_CAPITAL_SEED_USDT = 1 000 000) — фактически отключить хедж.
+  // Pure/static — юнит-тестируема (ce_band_manual_test).
+  static constexpr double kBandManualMin = 0.1;
+  static constexpr double kBandManualMax = 1000.0;
+  static bool ResolveManualBand(bool manual_on, double q_lim, double q_mkt,
+                                double* out_lim, double* out_mkt);
+
+  // ADR-081: зона исполнения хеджа. Агрессивный тейкер, если |позиция| > Z̄mkt; пассивный мейкер между Z̄lim и Z̄mkt.
+  // Без привязки к комиссии (fee_linked=false, k_band=0) прежнее поведение — всегда агрессив, КРОМЕ ручной ширины:
+  // там Z̄mkt задан оператором и мейкерная зона сохраняется. Pure/static — юнит-тестируема.
+  static bool IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt);
+
   // Existing methods
   fob::ledger::v1::GetBalancesResponse GetBalances(const fob::ledger::v1::GetBalancesRequest& req);
   fob::ledger::v1::ReserveFundsResponse ReserveFunds(const fob::ledger::v1::ReserveFundsRequest& req);
@@ -363,6 +378,10 @@ class LedgerUseCases {
   double band_cfg_sigma_ref_ = 0.0005;    // σ-якорь VolScaleFactor
   double band_cfg_vr_min_ = 0.1;     // клэмп vol-масштаба (мин)
   double band_cfg_vr_max_ = 10.0;    // клэмп vol-масштаба (макс)
+  bool band_cfg_manual_ = false;      // ADR-081: ручная ширина полосы включена и допустима
+  double band_cfg_manual_lim_ = 0.0;  // Z̄lim вручную (k-USDT)
+  double band_cfg_manual_mkt_ = 0.0;  // Z̄mkt вручную (k-USDT)
+  bool band_cfg_manual_bad_logged_ = false;  // предупреждение о недопустимых значениях уже выдано
   std::chrono::steady_clock::time_point band_cfg_last_{};
   bool band_cfg_have_ = false;
 
@@ -495,6 +514,8 @@ class LedgerUseCases {
   struct BandFeeCfg {
     double clim_bps; double cmkt_bps; double k_band; double gamma;
     double q_floor; bool gamma_mode; double sigma_ref; double vol_ratio_min; double vol_ratio_max;
+    // ADR-081: ручная ширина полосы (manual=true только при допустимых значениях, см. ResolveManualBand)
+    bool manual; double manual_q_lim; double manual_q_mkt;
   };
   BandFeeCfg LoadBandFeeConfig();
 

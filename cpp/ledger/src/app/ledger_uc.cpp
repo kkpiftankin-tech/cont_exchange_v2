@@ -354,6 +354,20 @@ double LedgerUseCases::LiqScaleFactor(double depth, double depth_ref, double p,
   return std::min(lr_max, std::max(lr_min, scale));
 }
 
+bool LedgerUseCases::ResolveManualBand(bool manual_on, double q_lim, double q_mkt,
+                                       double* out_lim, double* out_mkt) {
+  if (!manual_on) return false;
+  if (!std::isfinite(q_lim) || !std::isfinite(q_mkt)) return false;
+  if (q_lim < kBandManualMin || q_mkt < q_lim || q_mkt > kBandManualMax) return false;
+  if (out_lim) *out_lim = q_lim;
+  if (out_mkt) *out_mkt = q_mkt;
+  return true;
+}
+
+bool LedgerUseCases::IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt) {
+  return (!fee_linked && !manual) || (abs_position > z_mkt);
+}
+
 double LedgerUseCases::BandTotalScale(double vol_scale, double liq_scale,
                                       double tr_min, double tr_max) {
   // Две независимые оси → один множитель + финальный клэмп (LIQ-2): не даёт двум осям,
@@ -1680,11 +1694,14 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
         std::chrono::duration_cast<std::chrono::milliseconds>(now - band_cfg_last_).count() < 1000)
       return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_, band_cfg_gamma_,
               band_cfg_q_floor_, band_cfg_gamma_mode_, band_cfg_sigma_ref_,
-              band_cfg_vr_min_, band_cfg_vr_max_};
+              band_cfg_vr_min_, band_cfg_vr_max_,
+              band_cfg_manual_, band_cfg_manual_lim_, band_cfg_manual_mkt_};
   }
   double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k, gamma = def_gamma;
   double q_floor = def_floor; bool gamma_mode = def_gmode; double sigma_ref = def_sref;
   double vol_ratio_min = def_vrmin, vol_ratio_max = def_vrmax;
+  bool manual_flag = false; double manual_lim = 0.0, manual_mkt = 0.0;  // ADR-081
+  bool manual_read_ok = false;  // чтение ручных колонок удалось (иначе остаётся последнее известное значение)
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!postgres_dsn_.empty()) {
     std::lock_guard<std::mutex> pk(poll_conn_mu_);  // T-F18-706: переиспользуемое соединение
@@ -1722,9 +1739,44 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
     } catch (const std::exception&) {
       poll_conn_.reset();  // нет колонок порога — остаются env/дефолты (core-4 уже прочитаны)
     }
+    // ADR-081: ручная ширина полосы — ТРЕТИЙ отдельный try (отсутствие колонок на старом томе не ломает чтение выше).
+    try {
+      pqxx::work tx3(poll_conn());
+      const pqxx::row r3 = tx3.exec1(
+          "SELECT ce_band_manual, ce_band_manual_q_lim, ce_band_manual_q_mkt "
+          "FROM f05a_clearing_config WHERE id=1");
+      manual_flag = r3[0].as<bool>();
+      manual_lim = r3[1].as<double>();
+      manual_mkt = r3[2].as<double>();
+      tx3.commit();
+      manual_read_ok = true;
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // нет колонок ручной ширины — режим выключен (поведение как до ADR-081)
+    }
   }
 #endif
+  // ADR-081: допустимые ручные значения; недопустимые при включённом режиме игнорируются с одним предупреждением.
+  double eff_manual_lim = 0.0, eff_manual_mkt = 0.0;
+  bool manual_ok = ResolveManualBand(manual_flag, manual_lim, manual_mkt, &eff_manual_lim, &eff_manual_mkt);
   std::lock_guard<std::mutex> lk(band_cfg_mu_);
+  if (!manual_read_ok && band_cfg_have_) {
+    // обрыв соединения / нет колонок: ручной режим не выключаем молча — держим последнее известное значение
+    manual_ok = band_cfg_manual_;
+    eff_manual_lim = band_cfg_manual_lim_;
+    eff_manual_mkt = band_cfg_manual_mkt_;
+  } else if (manual_flag && !manual_ok) {
+    if (!band_cfg_manual_bad_logged_) {
+      band_cfg_manual_bad_logged_ = true;
+      cex::common::log_json("WARN", "F-18 ручная ширина полосы недопустима — используется расчётная",
+                            {{"q_lim", std::to_string(manual_lim)}, {"q_mkt", std::to_string(manual_mkt)},
+                             {"rule", "0.1 <= q_lim <= q_mkt <= 1000 (тыс. USDT)"}});
+    }
+  } else {
+    band_cfg_manual_bad_logged_ = false;
+  }
+  band_cfg_manual_ = manual_ok;
+  band_cfg_manual_lim_ = eff_manual_lim;
+  band_cfg_manual_mkt_ = eff_manual_mkt;
   band_cfg_clim_bps_ = clim_bps;
   band_cfg_cmkt_bps_ = cmkt_bps;
   band_cfg_k_ = k_band;
@@ -1736,7 +1788,8 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_vr_max_ = vol_ratio_max;
   band_cfg_last_ = std::chrono::steady_clock::now();
   band_cfg_have_ = true;
-  return {clim_bps, cmkt_bps, k_band, gamma, q_floor, gamma_mode, sigma_ref, vol_ratio_min, vol_ratio_max};
+  return {clim_bps, cmkt_bps, k_band, gamma, q_floor, gamma_mode, sigma_ref, vol_ratio_min, vol_ratio_max,
+          manual_ok, eff_manual_lim, eff_manual_mkt};
 }
 
 // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
@@ -1923,7 +1976,8 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   if (is_arbitrageur && asset == numeraire) {
     const auto cfg_n = LoadBandFeeConfig();
     const double floor_n = cfg_n.q_floor;  // фаза 2: пол порога из PG (env fallback в LoadBandFeeConfig)
-    const double z_lim_n = (cfg_n.k_band > 0.0)
+    const double z_lim_n = cfg_n.manual ? cfg_n.manual_q_lim   // ADR-081: ручная ширина
+        : (cfg_n.k_band > 0.0)
         ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 1.0)   // ADR-069: rt=1 на ногу
         : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
     const Decimal q_n{static_cast<int64_t>(std::llround(z_lim_n * 1e6)), 6};
@@ -1987,7 +2041,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     // клэмп total_scale (LIQ-2) — не даёт двум осям (низкая σ + большой α) разогнать
     // порог за диапазон. Обе оси off ⇒ total=1 ⇒ поведение как до фичи (LIQ-3).
     double vol_scale = 1.0, liq_scale = 1.0;
-    if (cfg.gamma_mode) {  // фаза 2: vol-масштаб вкл — из PG
+    if (cfg.gamma_mode && !cfg.manual) {  // фаза 2: vol-масштаб вкл — из PG (в ручном режиме не нужен, ADR-081)
       const std::string symbol = asset + (st.quote.empty() ? numeraire : st.quote);
       double sigma = 0.0; long long ssamples = 0, sage_ms = 0;
       const long long stale_ms = cex::common::Env::get_int("CE_BAND_SIGMA_STALE_MS", 120000);
@@ -2008,7 +2062,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     // F-18 #7 scoped (T-F18-L03, ADR-066 §D3): ликвидностная ось — глубже стакан ⇒ ШИРЕ
     // band. depth=α_e из ce_asset_liquidity (writer matching). Staleness/нет строки ⇒
     // LiqScale=1.0 (нейтрально, LIQ-4). Флаг CE_BAND_LIQ_MODE, независим от γ-моды.
-    if (cex::common::Env::get_bool("CE_BAND_LIQ_MODE", false)) {
+    if (!cfg.manual && cex::common::Env::get_bool("CE_BAND_LIQ_MODE", false)) {
       double depth = 0.0; long long dage_ms = 0;
       const long long dstale_ms = cex::common::Env::get_int("CE_BAND_DEPTH_STALE_MS", 120000);
       if (LoadAssetDepth(asset, venue, &depth, &dage_ms) && depth > 0.0 &&
@@ -2043,7 +2097,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // заглушка (симметричный частный случай φ=½,B=0). Флаг CE_BAND_OMEGA_MODE (деф
   // off ⇒ ω=1, регрессия). Λ/λ недоступны/устарели ⇒ ω=1. Только для арбитражёра.
   double band_omega = 1.0;  // применённый вес ноги (1 = не применён), для лога
-  if (is_arbitrageur && cex::common::Env::get_bool("CE_BAND_OMEGA_MODE", false)) {
+  if (!cfg.manual && is_arbitrageur && cex::common::Env::get_bool("CE_BAND_OMEGA_MODE", false)) {
     double lambda_i = 0.0, lambda_tot = 0.0; long long dage_ms = 0;
     const long long dstale_ms = cex::common::Env::get_int("CE_BAND_DEPTH_STALE_MS", 120000);
     if (LoadAssetDepth(asset, venue, &lambda_i, &dage_ms) && lambda_i > 0.0 &&
@@ -2055,6 +2109,13 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
       z_lim = std::max(q_floor, z_lim * band_omega);
       z_mkt = std::max(z_lim, z_mkt * band_omega);
     }
+  }
+  // ADR-081: ручная ширина полосы переопределяет расчётную целиком (комиссия, волатильность, ликвидность, ω).
+  bool band_manual = false;
+  if (cfg.manual) {
+    z_lim = cfg.manual_q_lim;
+    z_mkt = cfg.manual_q_mkt;  // ≥ z_lim гарантировано ResolveManualBand
+    band_manual = true;
   }
   // Порог входа в хедж = Z̄lim; scale 6 для дробного порога от комиссии.
   const Decimal q{static_cast<int64_t>(std::llround(z_lim * 1e6)), 6};
@@ -2080,7 +2141,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   if (st.last_band_emit_ms != 0 && (ts_ms - st.last_band_emit_ms) < cooldown_ms) return;
   // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
   // При выключенном линке — всегда агрессив (старое поведение).
-  const bool aggressive = !fee_linked || (static_cast<double>(abs_c) > z_mkt);
+  const bool aggressive = IsAggressiveBandZone(fee_linked, band_manual, static_cast<double>(abs_c), z_mkt);
 
   const bool pos_positive = Decimal::cmp(st.position, zero) >= 0;
   // ADR-072 §A (пересмотр 2026-10-12, решение владельца): профит-гейт УДАЛЁН.
@@ -2145,7 +2206,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"z_lim", q.to_string()},                    // порог входа (k-USDT)
                          {"z_mkt", std::to_string(z_mkt)},            // порог агрессии (k-USDT)
                          {"zone", aggressive ? "taker" : "maker"},
-                         {"band_mode", band_dynamic ? "dynamic_gamma" : "flat"},  // D1/D2
+                         {"band_mode", band_manual ? "manual" : (band_dynamic ? "dynamic_gamma" : "flat")},  // ADR-081 / D1/D2
                          {"sigma", std::to_string(band_sigma)},       // σ, применённая (0=плоский)
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)

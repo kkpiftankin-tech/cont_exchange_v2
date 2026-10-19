@@ -79,5 +79,6 @@
 | ADR-078 | Опрос внешних бирж — фиксированный период на пару, лестница действий при сбое, расчёт отвязан от запросов | [accepted](ADR-078-exchange-polling-scheduler.md) |
 | ADR-079 | Диагностика решения CE-клиринга — снимок последнего такта из matching и показ на вкладке «Граф» с объяснением «почему потока нет» | [proposed](ADR-079-ce-clearing-decision-diagnostics.md) |
 | ADR-080 | Внутренний клиринг CE без барьеров — барьер только на внешнем хедже по порогам позиции | [accepted](ADR-080-ce-internal-clearing-without-barriers.md) |
+| ADR-081 | Ширина полосы хеджа CE — ручная установка и автоматический режим по волатильности | [proposed](ADR-081-ce-band-width-manual-and-volatility-modes.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

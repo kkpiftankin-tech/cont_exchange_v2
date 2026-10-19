@@ -31,6 +31,8 @@ Per-method gRPC — в [../grpc/](../grpc/), per-topic Kafka — в [../messagin
 - `POST /v1/deposits/initiate` ([SEQ-F14](../../05-components/sequences/SEQ-F14-UC-F14-01-services.md))
 - `POST /v1/admin/kill-switch` ([SEQ-F16](../../05-components/sequences/SEQ-F16-UC-F16-01-services.md))
 
+Настройки клиринга, ширина полосы хеджа (ручной режим и режим по волатильности) — [vector-clearing-config.md](vector-clearing-config.md) (ADR-081).
+
 Внутренние read-only эндпоинты диагностики CE-клиринга (`GET /ce/clearing/last` в matching и `GET /api/vector-clearing/ce-clearing` в BFF) — [ce-clearing-diagnostics.md](ce-clearing-diagnostics.md) (ADR-079).
 
 WebSocket streams (tickers, batch.outputs, fills) — см. [../../11-operations/deployment-guide.md](../../11-operations/deployment-guide.md) §7.

@@ -8,6 +8,7 @@ const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require("./trade
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph } = require("./ce_graph_build");  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
 
@@ -7766,6 +7767,15 @@ const VECTOR_CLEARING_VIEW_HTML = [
   "</script></body></html>"
 ].join("");
 
+// ADR-081: колонки ширины полосы читаются отдельным запросом — на старом томе их может не быть, тогда режим по умолчанию.
+async function readBandConfig(pool) {
+  try {
+    const r = await pool.query(
+      "SELECT ce_band_manual, ce_band_manual_q_lim, ce_band_manual_q_mkt, ce_band_gamma_mode, ce_band_q_floor, ce_band_sigma_ref, ce_band_vol_ratio_min, ce_band_vol_ratio_max FROM f05a_clearing_config WHERE id=1");
+    return normalizeBandRow(r.rows[0]);
+  } catch (_) { return {}; }
+}
+
 async function handleVectorClearing(req, res, pathname, query) {
   // Runtime-конфиг цикла батч-клиринга (окно/staleness) — GET читает, POST пишет
   // в PG (f05a_clearing_config); market_data полит эту строку. Больше окно =
@@ -7777,12 +7787,18 @@ async function handleVectorClearing(req, res, pathname, query) {
       try {
         const r = await pool.query(
           "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at FROM f05a_clearing_config WHERE id=1");
-        return writeJson(res, 200, r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8, ce_maker_fee_bps: 2 });
+        const core = r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8, ce_maker_fee_bps: 2 };
+        const band = await readBandConfig(pool);   // ADR-081: режимы ширины полосы (колонок может не быть на старом томе)
+        return writeJson(res, 200, { ...core, ...band, ce_band_mode: bandMode(band) });
       } catch (e) {
-        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+        console.error("vector-clearing/config GET:", e && e.message);   // детали только в лог (имена таблиц и адрес БД клиенту не отдаём)
+        return writeJson(res, 502, { error: "pg_error", message: "не удалось прочитать настройки" });
       }
     }
     if (req.method === "POST") {
+      // Операторское действие (ADR-081): отсекаем подделку запроса из браузера. Это не авторизация (см. ADR-081).
+      const gate = checkOperatorRequest(req.headers, String(process.env.OPERATOR_ALLOWED_ORIGINS || "").split(","));
+      if (!gate.ok) return writeJson(res, gate.status, { error: gate.code, message: gate.message });
       let body;
       try { body = await parseBody(req); } catch (e) { return writeJson(res, 400, { error: "bad_body" }); }
       const win = Math.max(100, Math.min(600000, parseInt(body.batch_window_ms, 10) || 1000));
@@ -7811,8 +7827,17 @@ async function handleVectorClearing(req, res, pathname, query) {
       let makerBps = Number(body.ce_maker_fee_bps);
       if (!Number.isFinite(makerBps)) makerBps = 2;
       makerBps = Math.max(0, Math.min(1000, makerBps));
+      // ADR-081: ручная ширина полосы / режим по волатильности. Проверяем ДО записи (невалидное не применяется наполовину);
+      // поля, которых нет в теле, не меняются — старый клиент не затирает новые настройки.
+      const bandBefore = await readBandConfig(pool);
+      const bandParsed = parseBandConfig(body, bandBefore);
+      if (!bandParsed.ok) return writeJson(res, 400, { error: bandParsed.code, message: bandParsed.message });
+      // Основные настройки, поля полосы и аудит — ОДНОЙ транзакцией: сбой любого шага откатывает всё, а изменение полосы
+      // без записи аудита не применяется (аудит оператора обязателен, CLAUDE.md §1.7).
+      const client = await pool.connect();
       try {
-        await pool.query(
+        await client.query("BEGIN");
+        await client.query(
           "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at)"
           + " VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8,now()) ON CONFLICT (id) DO UPDATE SET"
           + " batch_window_ms=EXCLUDED.batch_window_ms, stale_level_ms=EXCLUDED.stale_level_ms,"
@@ -7820,9 +7845,31 @@ async function handleVectorClearing(req, res, pathname, query) {
           + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, slope_method=EXCLUDED.slope_method,"
           + " ce_band_fee_k=EXCLUDED.ce_band_fee_k, ce_maker_fee_bps=EXCLUDED.ce_maker_fee_bps, updated_at=now()",
           [win, stale, fee, skewGamma, skewMaxPm, slopeMethod, bandK, makerBps]);
-        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK, ce_maker_fee_bps: makerBps, applied: true });
+        const bandCols = Object.keys(bandParsed.values);
+        if (bandCols.some((c) => !BAND_FIELDS.includes(c))) throw new Error("band column not in whitelist");   // имена в SQL — только из списка
+        if (bandCols.length > 0) {
+          await client.query(
+            "UPDATE f05a_clearing_config SET " + bandCols.map((c, i) => c + "=$" + (i + 1)).join(", ") + ", updated_at=now() WHERE id=1",
+            bandCols.map((c) => bandParsed.values[c]));
+          // Аудит оператора (ADR-081): кто, откуда, прежний и новый режим, изменившиеся поля. Хранится в PG (переживает
+          // пересоздание контейнера) и дублируется в лог. X-User-Id клиент выставляет сам — пока это не доказательство личности.
+          const fwd = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+          const rec = auditRecord({ user: req.headers["x-user-id"], before: bandBefore, after: bandParsed.values });
+          await client.query(
+            "INSERT INTO operator_audit_log (actor, action, remote_addr, user_agent, details) VALUES ($1,$2,$3,$4,$5::jsonb)",
+            [rec.user, "ce_band_width_change", String(req.headers["x-real-ip"] || fwd || (req.socket && req.socket.remoteAddress) || ""),
+              String(req.headers["user-agent"] || "").slice(0, 300), JSON.stringify(rec)]);
+          console.log(JSON.stringify(rec));
+        }
+        await client.query("COMMIT");
+        const bandAfter = { ...bandBefore, ...bandParsed.values };
+        return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK, ce_maker_fee_bps: makerBps, ...bandAfter, ce_band_mode: bandMode(bandAfter), applied: true });
       } catch (e) {
-        return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+        try { await client.query("ROLLBACK"); } catch (_) { /* соединение уже закрыто */ }
+        console.error("vector-clearing/config POST:", e && e.message);   // детали только в лог
+        return writeJson(res, 502, { error: "pg_error", message: "настройки не сохранены" });
+      } finally {
+        client.release();
       }
     }
     return writeJson(res, 405, { error: "method_not_allowed" });

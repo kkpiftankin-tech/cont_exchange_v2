@@ -1066,6 +1066,27 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10; -- клэмп vol-масштаба (макс)
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
+-- ADR-081: ручная ширина полосы хеджа (тыс. USDT). ce_band_manual=true ⇒ Z̄lim/Z̄mkt берутся отсюда и не зависят от
+-- комиссии, волатильности, ликвидности и веса ноги; иначе ширина считается как раньше (ce_band_gamma_mode — по σ).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual_q_lim NUMERIC(38,18) NOT NULL DEFAULT 5;   -- Z̄lim вручную
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual_q_mkt NUMERIC(38,18) NOT NULL DEFAULT 25;  -- Z̄mkt вручную
+
+-- ADR-081: журнал операторских действий (аудит, CLAUDE.md §1.7). Пишет BFF в одной транзакции с изменением настроек;
+-- запись неизменяема по соглашению (только INSERT). actor — заголовок X-User-Id (клиент выставляет сам, не доказательство личности).
+CREATE TABLE IF NOT EXISTS operator_audit_log (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor       TEXT        NOT NULL,
+    action      TEXT        NOT NULL,           -- например ce_band_width_change
+    remote_addr TEXT,
+    user_agent  TEXT,
+    details     JSONB       NOT NULL            -- режим до/после и изменившиеся поля (прежнее → новое)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_audit_log_ts ON operator_audit_log (ts DESC);
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS slope_method SMALLINT NOT NULL DEFAULT 4;
 ALTER TABLE f05a_clearing_config

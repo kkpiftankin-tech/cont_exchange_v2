@@ -1049,7 +1049,16 @@ function VectorClearingLive() {
   const [cfgSlopeMethod, setCfgSlopeMethod] = useState('4'); // §6.2 способ наклона (1..4) — глобально
   const [cfgBandK, setCfgBandK] = useState('');     // порог хеджа k_band (q = k·φ_rt); 0 = плоский env-порог
   const [cfgMakerBps, setCfgMakerBps] = useState(''); // мейкер clim (bps) — пассивная зона Z̄lim
+  // ADR-081: режим ширины полосы хеджа — 'fee' (от комиссии), 'volatility' (авто по σ), 'manual' (вручную).
+  const [cfgBandMode, setCfgBandMode] = useState('fee');
+  const [cfgManualLim, setCfgManualLim] = useState('');   // Z̄lim вручную, тыс. USDT
+  const [cfgManualMkt, setCfgManualMkt] = useState('');   // Z̄mkt вручную, тыс. USDT
+  const [cfgBandFloor, setCfgBandFloor] = useState('');   // пол ширины, тыс. USDT
+  const [cfgSigmaRef, setCfgSigmaRef] = useState('');     // опорная σ
+  const [cfgVrMin, setCfgVrMin] = useState('');           // нижняя граница множителя волатильности
+  const [cfgVrMax, setCfgVrMax] = useState('');           // верхняя граница множителя волатильности
   const [cfgMsg, setCfgMsg] = useState('');
+  const [cfgLoaded, setCfgLoaded] = useState(false);   // настройки прочитаны с сервера; до этого «Применить» заблокировано
   const [cfgSaving, setCfgSaving] = useState(false);
   const [resetMsg, setResetMsg] = useState('');   // #3 фидбек сброса позиций
   const [resetting, setResetting] = useState(false);
@@ -1065,6 +1074,14 @@ function VectorClearingLive() {
       setCfgSlopeMethod(String(r.data.slope_method ?? 4));
       setCfgBandK(String(r.data.ce_band_fee_k ?? 1.8));
       setCfgMakerBps(String(r.data.ce_maker_fee_bps ?? 2));
+      setCfgBandMode(r.data.ce_band_mode || 'fee');
+      setCfgManualLim(String(r.data.ce_band_manual_q_lim ?? 5));
+      setCfgManualMkt(String(r.data.ce_band_manual_q_mkt ?? 25));
+      setCfgBandFloor(String(r.data.ce_band_q_floor ?? 5));
+      setCfgSigmaRef(String(r.data.ce_band_sigma_ref ?? 0.0005));
+      setCfgVrMin(String(r.data.ce_band_vol_ratio_min ?? 0.1));
+      setCfgVrMax(String(r.data.ce_band_vol_ratio_max ?? 10));
+      setCfgLoaded(true);
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
 
@@ -1076,7 +1093,16 @@ function VectorClearingLive() {
         ce_taker_fee_bps: Number(cfgFeeBps),
         ce_inv_skew_gamma: Number(cfgSkewGamma), ce_inv_skew_max_pm: Number(cfgSkewMaxPm),
         slope_method: parseInt(cfgSlopeMethod, 10),
-        ce_band_fee_k: Number(cfgBandK), ce_maker_fee_bps: Number(cfgMakerBps)
+        ce_band_fee_k: Number(cfgBandK), ce_maker_fee_bps: Number(cfgMakerBps),
+        // ADR-081: режим ширины полосы. Ручной включает ручные границы; авто по волатильности — режим σ и его параметры.
+        ce_band_manual: cfgBandMode === 'manual',
+        ...(cfgBandMode === 'manual'
+          ? { ce_band_manual_q_lim: Number(cfgManualLim), ce_band_manual_q_mkt: Number(cfgManualMkt) }
+          : { ce_band_gamma_mode: cfgBandMode === 'volatility' }),
+        ...(cfgBandMode === 'volatility'
+          ? { ce_band_q_floor: Number(cfgBandFloor), ce_band_sigma_ref: Number(cfgSigmaRef),
+              ce_band_vol_ratio_min: Number(cfgVrMin), ce_band_vol_ratio_max: Number(cfgVrMax) }
+          : {})
       }, { timeout: 8000 });
       setCfgWindowMs(String(r.data.batch_window_ms));
       setCfgStaleMs(String(r.data.stale_level_ms));
@@ -1086,11 +1112,14 @@ function VectorClearingLive() {
       setCfgSlopeMethod(String(r.data.slope_method));
       setCfgBandK(String(r.data.ce_band_fee_k));
       setCfgMakerBps(String(r.data.ce_maker_fee_bps));
+      if (r.data.ce_band_mode) setCfgBandMode(r.data.ce_band_mode);
       setCfgMsg('применено ✓ (ledger/matching/market_data/venues подхватят ≤3с)');
     } catch (e) {
-      setCfgMsg('ошибка: ' + (e.message || 'не сохранено'));
+      const serverMsg = e && e.response && e.response.data && e.response.data.message;
+      setCfgMsg('ошибка: ' + (serverMsg || e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
-  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod, cfgBandK, cfgMakerBps]);
+  }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod, cfgBandK, cfgMakerBps,
+      cfgBandMode, cfgManualLim, cfgManualMkt, cfgBandFloor, cfgSigmaRef, cfgVrMin, cfgVrMax]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -1408,7 +1437,52 @@ function VectorClearingLive() {
             <input type="number" min="0" max="1000" step="0.5" value={cfgMakerBps}
               onChange={(e) => setCfgMakerBps(e.target.value)} />
           </label>
+          <label className="vc-config-field" data-testid="band-mode" title="Как задаётся ширина полосы хеджа — граница |позиции агента|, за которой он отправляет заявку на внешнюю биржу. Вручную: вы задаёте границы напрямую. Авто по волатильности: ширина от комиссии, умноженная на коэффициент по волатильности актива (чем волатильнее, тем уже). От комиссии: ширина от комиссии без поправки на волатильность.">
+            ширина полосы хеджа
+            <select value={cfgBandMode} onChange={(e) => setCfgBandMode(e.target.value)}>
+              <option value="fee">от комиссии (плоская)</option>
+              <option value="volatility">авто по волатильности</option>
+              <option value="manual">вручную</option>
+            </select>
+          </label>
+          {cfgBandMode === 'manual' && (<>
+            <label className="vc-config-field" title="Z̄lim: при |позиции| больше этого значения агент хеджируется пассивной лимитной заявкой. Тысячи USDT, одно значение для всех агентов. Больше значение — реже и крупнее хеджи.">
+              Z̄lim (тыс. USDT)
+              <input type="number" min="0" max="100000" step="0.5" value={cfgManualLim}
+                onChange={(e) => setCfgManualLim(e.target.value)} />
+            </label>
+            <label className="vc-config-field" title="Z̄mkt: при |позиции| больше этого значения агент хеджируется рыночной заявкой (агрессивно). Должно быть не меньше Z̄lim и не больше 100000.">
+              Z̄mkt (тыс. USDT)
+              <input type="number" min="0" max="100000" step="0.5" value={cfgManualMkt}
+                onChange={(e) => setCfgManualMkt(e.target.value)} />
+            </label>
+          </>)}
+          {cfgBandMode === 'volatility' && (<>
+            <label className="vc-config-field" title="Нижняя граница ширины полосы (тыс. USDT): даже при очень высокой волатильности полоса не станет уже этого значения.">
+              пол (тыс. USDT)
+              <input type="number" min="0" max="100000" step="0.5" value={cfgBandFloor}
+                onChange={(e) => setCfgBandFloor(e.target.value)} />
+            </label>
+            <label className="vc-config-field" title="Опорная волатильность σ: при σ актива, равной опорной, ширина равна плоской от комиссии. Выше σ — полоса уже, ниже — шире.">
+              опорная σ
+              <input type="number" min="0" max="1" step="0.00005" value={cfgSigmaRef}
+                onChange={(e) => setCfgSigmaRef(e.target.value)} />
+            </label>
+            <label className="vc-config-field" title="Границы множителя волатильности: во сколько раз ширина может уменьшиться (мин) и увеличиться (макс) относительно плоской.">
+              множитель, мин
+              <input type="number" min="0" max="1000" step="0.1" value={cfgVrMin}
+                onChange={(e) => setCfgVrMin(e.target.value)} />
+            </label>
+            <label className="vc-config-field" title="Верхняя граница множителя волатильности.">
+              множитель, макс
+              <input type="number" min="0" max="1000" step="0.1" value={cfgVrMax}
+                onChange={(e) => setCfgVrMax(e.target.value)} />
+            </label>
+          </>)}
           {(() => {  // превью порога входа Z̄lim (переводчик rt=1) и Z̄mkt из текущих полей
+            if (cfgBandMode === 'manual') {
+              return <span className="vc-config-hint" title="Ручной режим: комиссия, волатильность и ликвидность на ширину не влияют.">ручная ширина: Z̄lim <b>{cfgManualLim}</b> · Z̄mkt <b>{cfgManualMkt}</b> тыс. USDT (для всех агентов)</span>;
+            }
             const k = Number(cfgBandK), clim = Number(cfgMakerBps), cmkt = Number(cfgFeeBps);
             if (!(k > 0) || !(clim >= 0)) return <span className="vc-config-hint">порог: плоский env (k_band=0)</span>;
             const zLim = Math.max(5, k * clim);
@@ -1424,7 +1498,7 @@ function VectorClearingLive() {
               <option value="4">M4 минорант (safe)</option>
             </select>
           </label>
-          <button className="vc-config-apply" onClick={saveConfig} disabled={cfgSaving}>
+          <button className="vc-config-apply" onClick={saveConfig} disabled={cfgSaving || !cfgLoaded} title={cfgLoaded ? '' : 'настройки не загружены с сервера — применять нечего'}>
             {cfgSaving ? '…' : 'Применить'}
           </button>
           {cfgMsg && <span className="vc-config-msg">{cfgMsg}</span>}

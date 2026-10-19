@@ -83,6 +83,21 @@ if (BUILD_TESTING)
   target_compile_options(ce_band_vol_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ce_band_vol_scale_test COMMAND ce_band_vol_scale_test)
 
+  # ADR-081: чистая функция ResolveManualBand (ручная ширина полосы хеджа).
+  add_executable(ce_band_manual_test
+    tests/ce_band_manual_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_manual_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_manual_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_manual_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_manual_test COMMAND ce_band_manual_test)
+
   # F-18 #7 scoped (ADR-066 §D3, T-F18-L04): чистая функция LiqScaleFactor (ликвидностная ось).
   add_executable(ce_band_liq_scale_test
     tests/ce_band_liq_scale_test.cpp
