@@ -7983,9 +7983,17 @@ async function handleVectorClearing(req, res, pathname, query) {
       const transfer = {};
       for (const a of ["USDT", "BTC", "ETH", "SOL", "BNB", "XRP"]) {
         const al = Number(process.env["CE_TRANSFER_ALPHA_" + a] ?? (a === "USDT" ? 18 : 12));
-        const c = Number(process.env["CE_TRANSFER_C_" + a] ?? (a === "USDT" ? 0.05 : 0.25));
+        const c = Number(process.env["CE_TRANSFER_C_" + a] ?? 0);   // дефолт как у matching (env_d(..., 0.0)); ADR-080
         transfer[a] = { alpha: al, c };
       }
+      // Истина — то, что реально в клиринге: полка перевода берётся из снимка последнего решения matching (ADR-079);
+      // env BFF — только запасной источник (иначе при смене CE_TRANSFER_C в matching граф показывал бы старое число).
+      try {
+        const snap = await fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 2000);
+        for (const e of (snap && Array.isArray(snap.edges) ? snap.edges : [])) {
+          if (e.kind === "arbitrageur" && transfer[e.asset] && Number.isFinite(e.dead_zone_pm)) transfer[e.asset].c = e.dead_zone_pm;
+        }
+      } catch (_) { /* снимка нет — остаётся env */ }
       let segs = segRows.map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid), alphaT: Number(r.alpha_t),
         betaT: Number(r.beta_t), theta: Number(r.theta) || 0.6, eventMs: Number(r.event_time_ms), source: "clearing" }));
       // ?live=1 — быстрая полоса (ADR-070): для пар с арендой и свежим глубоким стаканом якорь и наклон
