@@ -21,6 +21,22 @@
 
 namespace cex::matching::infra {
 
+/// true, если строка — каноничный UUID (8-4-4-4-12, hex). Ноги combo — uuid; идентификаторы CE-хеджей
+/// ("ce|band|T_BTC_kraken|BTC|kraken|…") — нет, и передавать их в `$1::uuid` нельзя: PostgreSQL бросает
+/// исключение «invalid input syntax for type uuid» (на каждый неудачный хедж — запись ERROR в логе).
+inline bool IsUuidText(const std::string& s) {
+  if (s.size() != 36) return false;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (c != '-') return false;
+    } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 struct ComboCompensation {
   std::string parent_order_id;
   std::string leg_id;
