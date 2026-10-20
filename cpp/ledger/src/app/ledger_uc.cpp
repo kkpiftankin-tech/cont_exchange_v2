@@ -375,6 +375,28 @@ void LedgerUseCases::ApplyArbScale(double scale, double q_floor, double* z_lim, 
   if (z_mkt) *z_mkt = std::max(*z_lim, *z_mkt * m);
 }
 
+bool LedgerUseCases::has_active_band_hedge_locked(const AgentPositionKey& key) const {
+  for (const auto& kv : band_hedges_) {
+    if (kv.second.key == key) return true;
+  }
+  return false;
+}
+
+void LedgerUseCases::reclaim_orphan_in_flight_locked(const AgentPositionKey& key, AgentPositionState& st,
+                                                     long long ts_ms, const char* reason) {
+  if (st.in_flight.units == 0) return;
+  const auto& [agent_id, asset, venue] = key;
+  const Decimal amount = st.in_flight;
+  st.position = Decimal::add(st.position, amount);   // обязательство возвращается в позицию (знак in_flight = знаку позиции)
+  st.in_flight = Decimal::zero();
+  st.updated_at_ms = ts_ms;
+  if (agent_position_repo_)
+    agent_position_repo_->ApplyHedge(agent_id, asset, venue, amount, Decimal::sub(Decimal::zero(), amount), ts_ms);
+  cex::common::log_json("WARN", "F-18 осиротевший in_flight возвращён в позицию",
+                        {{"agent_id", agent_id}, {"asset", asset}, {"venue", venue},
+                         {"returned_kusdt", amount.to_string()}, {"reason", reason}});
+}
+
 long long LedgerUseCases::BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak) {
   if (base_ms <= 0) return 0;
   if (max_ms <= base_ms || fail_streak <= 0) return base_ms;
@@ -1121,6 +1143,14 @@ void LedgerUseCases::LoadAgentPositionsFromRepo() {
     st.last_batch_id = row.last_batch_id;
     st.updated_at_ms = row.updated_at_ms;
     agent_positions_[AgentPositionKey{row.agent_id, row.asset, row.venue}] = std::move(st);
+  }
+  // Карта живых band-заявок после старта пуста, поэтому сохранённый в БД in_flight осиротел (терминальных отчётов по
+  // заявкам прошлого процесса не будет): возвращаем его в позицию, чтобы он снова хеджировался, а не висел вечно.
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  for (auto& [key, pos_state] : agent_positions_) {
+    if (pos_state.in_flight.units != 0 && !has_active_band_hedge_locked(key))
+      reclaim_orphan_in_flight_locked(key, pos_state, now_ms, "startup");
   }
 }
 
@@ -2016,6 +2046,13 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   if (st.agent_kind != "translator" && !is_arbitrageur) return;
   const auto& [agent_id, asset, venue] = key;
   const Decimal zero = Decimal::zero();
+
+  // Осиротевший in_flight (нет живой заявки, а эмиссия была давно или в этом процессе не было совсем) — вернуть в позицию.
+  if (st.in_flight.units != 0 && !has_active_band_hedge_locked(key)) {
+    const long long orphan_ms = cex::common::Env::get_int("CE_BAND_ORPHAN_INFLIGHT_MS", 300000);
+    if (orphan_ms > 0 && (st.last_band_emit_ms == 0 || (ts_ms - st.last_band_emit_ms) > orphan_ms))
+      reclaim_orphan_in_flight_locked(key, st, ts_ms, st.last_band_emit_ms == 0 ? "no_emission_in_process" : "stale_emission");
+  }
 
   // F-18 (follow-up 1a, §«Счёт дома»/«свобода нумерария»): арбитражёр ПЕРЕНОСА
   // НУМЕРАРИЯ (A_USDT/T_USD, asset == numeraire) НЕ хеджируется рынком — хедж

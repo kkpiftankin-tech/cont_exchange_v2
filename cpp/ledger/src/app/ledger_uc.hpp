@@ -530,6 +530,14 @@ class LedgerUseCases {
   // Для переводчика с |c|−|in_flight| > q: помечает in_flight += избыток (guard от
   // переэмиссии) и эмитит AgentBandBreach (risk строит заявку в паре). Вызывается
   // под mu_ из ApplyPositionDelta для КАЖДОГО затронутого агента.
+  // Утечка in_flight: отправленное в заявки хранится в БД, а карта живых заявок band_hedges_ — только в памяти. После перезапуска
+  // ledger (и при потерянных отчётах) терминального отчёта по такой заявке не будет, и in_flight остаётся навсегда (T_SOL_kraken:
+  // 0,55 тыс. USDT с 19 октября). Осиротевшим считается in_flight без живой заявки агента, если за этот процесс эмиссии не было
+  // (last_band_emit_ms == 0) либо с последней эмиссии прошло больше CE_BAND_ORPHAN_INFLIGHT_MS (по умолчанию 300000; 0 — выкл.).
+  // Такой остаток возвращается в позицию (как неисполненный остаток по таймауту, A7) и снова хеджируется. Требует захваченный mu_.
+  bool has_active_band_hedge_locked(const AgentPositionKey& key) const;
+  void reclaim_orphan_in_flight_locked(const AgentPositionKey& key, AgentPositionState& st, long long ts_ms, const char* reason);
+
   void detect_and_emit_band_breach_locked(const AgentPositionKey& key,
                                           AgentPositionState& st,
                                           const std::string& batch_id,

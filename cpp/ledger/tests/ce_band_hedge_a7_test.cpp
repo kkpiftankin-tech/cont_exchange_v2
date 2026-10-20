@@ -163,10 +163,53 @@ int main() {
     uc.SetBandBreachProducer(&prod);
     // A_USDT (asset==numeraire): base_price=0 (у USDT нет цены). Накопил +50 k-USDT.
     uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("A_USDT_okxbinance", "arbitrageur", "USDT", "binance", 50.0, 0.0)});
-    // z_lim = max(5, 1.8·2·2) = 7.2 (rt=2). Сметание: c→+7.2, in_flight=0 (заявки нет).
-    expect_near(pos_of(uc, "A_USDT_okxbinance", "USDT", "binance"), 7.2, 1e-2, "T4: нумерарий сметён к z_lim=7.2");
+    // z_lim = max(5, 1.8·(2+0.5)) = max(5, 4.5) = 5 (rt=1 на ногу, ADR-069; плата за перевод USDT 0.5 б.п., ADR-080 — пол
+    // удерживает порог). Сметание: c→+5, in_flight=0 (заявки нет).
+    expect_near(pos_of(uc, "A_USDT_okxbinance", "USDT", "binance"), 5.0, 1e-2, "T4: нумерарий сметён к z_lim=5 (пол)");
     expect_near(pos_of(uc, "A_USDT_okxbinance", "USDT", "binance", true), 0.0, 1e-3, "T4: in_flight=0 (нет рыночной заявки)");
   }
+
+  // --- Тесты 5–7: осиротевший in_flight (карта живых заявок в памяти, in_flight в БД) ---
+  setenv("CE_BAND_HEDGE_COOLDOWN_MS", "10000000", 1);   // повторную эмиссию блокируем, чтобы увидеть сам возврат
+  {
+    // 5: заявка отправлена, а регистрации в band_hedges_ нет (перезапуск / потерян отчёт); через >5 минут — возврат в позицию.
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance", true), 25.0, 1e-3, "T5: после эмиссии in_flight = 25");
+    uc.ApplyPositionDelta("b2", 1000 + 400000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.1, 100000.0)});
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance", true), 0.0, 1e-3, "T5: осиротевший in_flight возвращён (0)");
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance"), 30.1, 1e-2, "T5: позиция = 5 + 25 + 0.1");
+  }
+  {
+    // 6: живая заявка зарегистрирована — in_flight не трогаем даже через >5 минут.
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    uc.RememberExecutionIntent(MkBandIntent("T_BTC_binance", "BTC", "binance", 25.0, 100000.0, fob::common::v1::SIDE_SELL));
+    uc.ApplyPositionDelta("b2", 1000 + 400000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.1, 100000.0)});
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance", true), 25.0, 1e-3, "T6: при живой заявке in_flight остаётся 25");
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance"), 5.1, 1e-2, "T6: позиция 5.1");
+  }
+  {
+    // 7: эмиссия была недавно (меньше 5 минут) — заявка может быть ещё в пути, не трогаем.
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    uc.ApplyPositionDelta("b2", 1000 + 60000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.1, 100000.0)});
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance", true), 25.0, 1e-3, "T7: свежая эмиссия — in_flight остаётся");
+  }
+  {
+    // 8: проверка отключена (CE_BAND_ORPHAN_INFLIGHT_MS=0) — in_flight остаётся.
+    setenv("CE_BAND_ORPHAN_INFLIGHT_MS", "0", 1);
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 30.0, 100000.0)});
+    uc.ApplyPositionDelta("b2", 1000 + 400000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.1, 100000.0)});
+    expect_near(pos_of(uc, "T_BTC_binance", "BTC", "binance", true), 25.0, 1e-3, "T8: проверка выключена — in_flight остаётся");
+    unsetenv("CE_BAND_ORPHAN_INFLIGHT_MS");
+  }
+  unsetenv("CE_BAND_HEDGE_COOLDOWN_MS");
 
   if (g_fail == 0) std::cout << "ce_band_hedge_a7_test: OK\n";
   return g_fail == 0 ? 0 : 1;
