@@ -70,16 +70,21 @@ function totalPosition(position, inFlight) {
   return c + (Number.isFinite(f) ? f : 0);
 }
 
-// Базис позиции арбитражёра: стоимость обеих его ног (в единицах актива, ноги src и dst противоположны по знаку)
-// по ценам СВОИХ бирж = q_src·P_src + q_dst·P_dst = q_dst·(P_dst − P_src). Это результат «закрыть позицию сейчас по ценам
-// бирж» при нулевой стоимости перевода; он нереализован — арбитражёр наружу не торгует (ADR-073). Нумерарий (USDT) цены
-// не имеет и базиса не даёт ⇒ 0. Нет цены или количества ⇒ null.
-function arbBasisMtmUsdt(asset, numeraire, qSrc, pSrc, qDst, pDst) {
-  if (asset && asset === numeraire) return 0;
-  const a = Number(qSrc), b = Number(qDst), ps = Number(pSrc), pd = Number(pDst);
+// Стоимость позиции арбитражёра по ценам его бирж V = q_src·P_src + q_dst·P_dst раскладывается на две разные вещи:
+//   открытая позиция (net) = (q_src + q_dst)·(P_src + P_dst)/2 — нетто-количество актива на двух ногах; у зеркальной позиции
+//     (q_src = −q_dst) оно равно 0; растёт, когда ноги исполняются несимметрично (например, хедж одной ноги исполняется, другой
+//     нет); это риск изменения цены, а не результат;
+//   базис = (q_dst − q_src)/2·(P_dst − P_src) — разница цен между биржами на перевозимом объёме.
+// Сумма частей равна V. Нумерарий (USDT) цены не имеет: обе части 0. Нет цены или количества ⇒ null.
+function arbPositionParts(asset, numeraire, qSrc, pSrc, qDst, pDst) {
+  if (asset && asset === numeraire) return { open_position_usdt: 0, basis_usdt: 0 };
   if (qSrc === null || qSrc === undefined || qDst === null || qDst === undefined) return null;
+  const a = Number(qSrc), b = Number(qDst), ps = Number(pSrc), pd = Number(pDst);
   if (!Number.isFinite(a) || !Number.isFinite(b) || !(ps > 0) || !(pd > 0)) return null;
-  return a * ps + b * pd;
+  return {
+    open_position_usdt: (a + b) * (ps + pd) / 2,
+    basis_usdt: ((b - a) / 2) * (pd - ps),
+  };
 }
 
-module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt };
+module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts };

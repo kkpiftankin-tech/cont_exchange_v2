@@ -4,7 +4,7 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
-const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt } = require("./trade_stats_math");
+const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
 const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
@@ -7120,16 +7120,20 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
     // Марка MTM-заработка — цена dst-ноги (площадка выхода); fallback на src.
     const basePrice = Number((dstPos || srcPos || {}).base_price) || 0;
     const price = Number((dstPos || srcPos || {}).reference_price) || 0;
-    // Заработок арбитражёра (ADR-073): наружу он не торгует, поэтому сделок и R/U нет. Измеримо одно — базис позиции:
-    // стоимость ног по ценам своих бирж (q_dst·(P_dst − P_src)); тариф перевоза в клиринге сейчас 0 (ADR-080).
+    // Позиция арбитражёра по ценам бирж раскладывается на базис и открытую позицию (arbPositionParts). Если арбитражёр выходит
+    // наружу (CE_ARB_MARKET_HEDGE=1, ADR-080), у него есть и заработок по сделкам (realized/unrealized ниже); тариф перевоза в
+    // клиринге сейчас 0.
     // Цены ног — по бирже из сегментов клиринга (как на графе): в строке ledger цена актива одна на все биржи и дала бы 0.
     const pOf = typeof venuePriceOf === 'function' ? venuePriceOf : () => null;
-    const basisMtm = arbBasisMtmUsdt(asset, process.env.CE_NUMERAIRE || 'USDT',
+    const posParts = arbPositionParts(asset, process.env.CE_NUMERAIRE || 'USDT',
       sL.after, pOf(asset, srcV), dL.after, pOf(asset, dstV));
     rows.push({
       agent_id: agentId,
       agent_kind: 'arbitrageur',
-      basis_mtm_usdt: basisMtm,
+      // basis_mtm_usdt — только базис (разница цен бирж × перевозимый объём); open_position_usdt — нетто-позиция по активу на двух
+      // ногах (≠ 0, когда ноги исполняются несимметрично): риск цены, а не убыток. Заработок по сделкам — realized/unrealized ниже.
+      basis_mtm_usdt: posParts ? posParts.basis_usdt : null,
+      open_position_usdt: posParts ? posParts.open_position_usdt : null,
       pair: asset === 'USDT' ? 'USDT' : `${asset}/USDT`,
       base: asset,
       quote: asset === 'USDT' ? '' : 'USDT',

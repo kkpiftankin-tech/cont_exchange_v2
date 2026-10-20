@@ -467,27 +467,38 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   // ADR-072 §C: realized (R — закрытые round-trip, НАРАСТАЕТ = заработок) основным,
   // unrealized (U — MTM открытого остатка, болтается с маркой) приглушённым: «R / U».
   const pnlColor = (x) => Number(x) > 1e-9 ? '#5fd08a' : Number(x) < -1e-9 ? '#e06060' : '#9fb2c2';
-  const pnlCell = (a) => {
-    if (a.agent_kind === 'arbitrageur') {
-      // ADR-073: арбитражёр наружу не торгует ⇒ сделок и R/U нет. Измеримо одно — базис позиции: стоимость обеих ног по ценам
-      // своих бирж (если закрыть сейчас). Тариф перевоза в клиринге сейчас 0 (ADR-080), поэтому доход от него нулевой.
-      const m = a.basis_mtm_usdt;
-      if (m == null || !Number.isFinite(Number(m))) return dash;
-      return (
-        <span data-testid="arb-basis" title="Базис позиции (не реализован): стоимость ног арбитражёра по ценам своих бирж, если закрыть позицию сейчас = количество на приёмнике × (цена на приёмнике − цена на источнике). Наружу арбитражёр не торгует (ADR-073), поэтому сделок и реализованной прибыли у него нет. Доход от тарифа перевоза сейчас 0 (ADR-080). Разница цен между биржами по замыслу уходит на счёт дома.">
-          <span style={{ color: pnlColor(m), fontWeight: 600 }}>{sgn(m)}</span>
-          <span style={{ opacity: 0.6, fontSize: '0.85em' }}> базис</span>
-        </span>
-      );
-    }
+  // Заработок по состоявшимся сделкам (R / U) — и у переводчика, и у арбитражёра (арбитражёры выходят на внешнюю биржу, ADR-080).
+  const tradeCell = (a) => {
     const r = a.realized_usdt, u = a.unrealized_usdt;
     const rOk = r != null && Number.isFinite(Number(r));
     const uOk = u != null && Number.isFinite(Number(u));
-    if (!rOk && (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt)))) return dash;
+    if (!rOk && (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt)))) return null;
     return (
       <span title={`realized R (закрытые round-trip, нарастает = заработок) / unrealized U (MTM открытого остатка) по ${a.trade_fills || 0} сделкам, USDT без комиссий`}>
         <span style={{ color: pnlColor(rOk ? r : a.pnl_usdt), fontWeight: 600 }}>{sgn(rOk ? r : a.pnl_usdt)}</span>
         {uOk && <span style={{ color: pnlColor(u), opacity: 0.6, fontSize: '0.85em' }}> / {sgn(u)}</span>}
+      </span>
+    );
+  };
+  const okNum = (x) => x != null && Number.isFinite(Number(x));
+  const pnlCell = (a) => {
+    const trade = tradeCell(a);
+    if (a.agent_kind !== 'arbitrageur') return trade || dash;
+    // Арбитражёр: под заработком по сделкам — две величины его позиции по ценам бирж (НЕ результат): «базис» — разница цен
+    // между биржами на перевозимом объёме; «открытая позиция» — нетто-количество актива на двух ногах (≠ 0, когда ноги
+    // исполняются несимметрично). Открытая позиция — риск изменения цены, а не убыток.
+    const hasPos = okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt);
+    if (!trade && !hasPos) return dash;
+    return (
+      <span data-testid="arb-pnl">
+        {trade || <span title="внешних сделок пока нет" style={{ opacity: 0.4 }}>—</span>}
+        {hasPos && (
+          <span data-testid="arb-basis" style={{ display: 'block', fontSize: '0.8em', opacity: 0.85 }}
+            title="Позиция арбитражёра по ценам его бирж, USDT. Базис = разница цен между биржами на перевозимом объёме (результат разницы цен, не реализован). Открытая позиция = нетто-количество актива на двух ногах × цена: у зеркальной позиции 0, растёт, когда хедж одной ноги исполняется, а другой нет; это риск изменения цены, а не убыток.">
+            базис {okNum(a.basis_mtm_usdt) ? <span style={{ color: pnlColor(a.basis_mtm_usdt) }}>{sgn(a.basis_mtm_usdt)}</span> : '—'}
+            {' · '}открытая позиция {okNum(a.open_position_usdt) ? <span style={{ color: pnlColor(a.open_position_usdt) }}>{sgn(a.open_position_usdt)}</span> : '—'}
+          </span>
+        )}
       </span>
     );
   };
@@ -532,19 +543,20 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const groupHead = (text) => (
     <tr className="vc-group-head"><td colSpan={10}>{text}</td></tr>
   );
-  // Итоги заработка по сделкам (USDT, без комиссий): по группам и вместе.
-  // Итог — по realized (нарастающий заработок); fallback на pnl_usdt (R+U), если R нет.
-  const sumPnl = (arr) => arr.reduce((s, a) => {
-    const v = Number.isFinite(Number(a.realized_usdt)) ? Number(a.realized_usdt)
-            : (Number.isFinite(Number(a.pnl_usdt)) ? Number(a.pnl_usdt) : 0);
-    return s + v;
-  }, 0);
-  const haveStats = rows.some((a) => a.realized_usdt != null || a.pnl_usdt != null || a.basis_mtm_usdt != null);
-  const totT = sumPnl(tRows);
-  // Арбитражёры: сумма базиса позиций (нереализованный, по ценам бирж), а не сделок — сделок у них нет (ADR-073).
-  const totA = aRows.reduce((s, a) => s + (Number.isFinite(Number(a.basis_mtm_usdt)) ? Number(a.basis_mtm_usdt) : 0), 0);
-  const pnlTotal = (v) => (
-    <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)} USDT</b>
+  // Итоги заработка по сделкам (USDT, без комиссий): переводчики, арбитражёры и вместе. R — realized (нарастает = заработок;
+  // fallback на pnl_usdt, если R нет), U — unrealized (MTM открытого остатка). Базис и открытая позиция арбитражёров в заработок
+  // не входят — они показаны отдельно.
+  const realizedOf = (a) => (okNum(a.realized_usdt) ? Number(a.realized_usdt) : (okNum(a.pnl_usdt) ? Number(a.pnl_usdt) : 0));
+  const sumR = (arr) => arr.reduce((acc, a) => acc + realizedOf(a), 0);
+  const sumKey = (arr, key) => arr.reduce((acc, a) => acc + (okNum(a[key]) ? Number(a[key]) : 0), 0);
+  const haveStats = rows.some((a) => okNum(a.realized_usdt) || okNum(a.pnl_usdt) || okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt));
+  const tR = sumR(tRows), tU = sumKey(tRows, 'unrealized_usdt');
+  const aR = sumR(aRows), aU = sumKey(aRows, 'unrealized_usdt');
+  const allR = tR + aR, allU = tU + aU;
+  const arbBasis = sumKey(aRows, 'basis_mtm_usdt'), arbOpen = sumKey(aRows, 'open_position_usdt');
+  const hasArbPos = aRows.some((a) => okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt));
+  const pnlNum = (v) => (
+    <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)}</b>
   );
   const head = (
     <thead><tr>
@@ -589,18 +601,29 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
         ) : <div className="vc-note vc-note-tight">нет арбитражёров</div>}
         {aRows.length > 0 && (
           <div className="vc-note vc-note-tight" data-testid="arb-explain">
-            <b>Почему у арбитражёров нет «заработка по сделкам».</b> Арбитражёр перемещает актив между биржами внутри CE и <b>наружу не торгует</b> (ADR-073),
-            поэтому у него нет сделок, а значит нет реализованной и нереализованной прибыли, как у переводчика. Его доход по замыслу — <b>тариф перевоза</b>
-            в клиринге (сейчас 0: внутренний клиринг без барьеров, ADR-080) плюс <b>изменение разницы цен между биржами</b> на его позиции — её показывает колонка «базис».
-            Сама разница цен между биржами сейчас порядка 0–1 б.п., поэтому и базис — доли USDT. Прибыль от разницы цен по базовому документу уходит на счёт дома, а не агенту.
+            <b>Как читать заработок арбитражёров.</b> Арбитражёр перемещает актив между двумя биржами внутри CE и, как переводчик,
+            <b> выходит на внешнюю биржу</b>, когда его позиция достигает порога (ADR-080). Его заработок — колонка R / U по состоявшимся
+            сделкам; тариф перевоза внутри клиринга сейчас 0. Под ним показаны две величины <b>позиции</b>, а не результата:
+            <b> базис</b> — разница цен между биржами на перевозимом объёме (сейчас доли USDT), и <b>открытая позиция</b> — нетто-количество актива
+            на двух ногах по ценам бирж. У зеркальной позиции она 0; она растёт, когда хедж одной ноги исполняется, а другой нет (на Kraken и
+            Coinbase заявки почти не исполняются), и тогда нога остаётся открытой: это <b>риск изменения цены, а не убыток</b>.
+            Прибыль от разницы цен внутри клиринга по базовому документу уходит на счёт дома, а не агенту.
           </div>
         )}
 
         {haveStats && (
-          <div className="vc-trade-totals">
+          <div className="vc-trade-totals" data-testid="trade-totals">
             <span className="vc-tt-title">Общий заработок по состоявшимся сделкам (USDT, без комиссий):</span>
-            <span>Переводчики ({tRows.length}): {pnlTotal(totT)}</span>
-            <span title="Базис позиций арбитражёров по ценам бирж (нереализованный): наружу они не торгуют, сделок нет">Арбитражёры, базис позиций ({aRows.length}): {pnlTotal(totA)}</span>
+            <span>Переводчики ({tRows.length}): R {pnlNum(tR)} / U {pnlNum(tU)}</span>
+            <span>Арбитражёры ({aRows.length}): R {pnlNum(aR)} / U {pnlNum(aU)}</span>
+            <span className="vc-tt-all" data-testid="total-earnings" title="Сумма заработка по сделкам переводчиков и арбитражёров: R — реализованный, U — нереализованный (MTM открытого остатка). Базис и открытая позиция арбитражёров сюда не входят.">
+              Вместе: R {pnlNum(allR)} / U {pnlNum(allU)} · итого R+U {pnlNum(allR + allU)}
+            </span>
+            {hasArbPos && (
+              <span data-testid="arb-pos-total" title="Не заработок. Базис — результат разницы цен между биржами на перевозимом объёме; открытая позиция — нетто-количество актива на ногах арбитражёров по ценам бирж (риск изменения цены, не убыток).">
+                Позиции арбитражёров (не заработок): базис {pnlNum(arbBasis)} · открытая позиция {pnlNum(arbOpen)}
+              </span>
+            )}
           </div>
         )}
 

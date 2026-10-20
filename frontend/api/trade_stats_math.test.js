@@ -1,7 +1,7 @@
 // Self-contained node-тест (у frontend/api нет jest): `node trade_stats_math.test.js`.
 // Проверяет знаки base/quote/pnl (CALC-F12-HEDGE-PNL) и перевод pnl в USDT.
 const assert = require('assert');
-const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt } = require('./trade_stats_math');
+const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require('./trade_stats_math');
 
 let failed = 0;
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
@@ -78,16 +78,25 @@ check('totalPosition: нет заявок в полёте — просто c', n
 check('totalPosition: нет позиции — null, а не 0', totalPosition(null, 0.5) === null && totalPosition(undefined, 0) === null && totalPosition('x', 1) === null);
 check('totalPosition: знаки одинаковые у c и in_flight (отрицательная позиция)', near(totalPosition(-2.0, -0.55), -2.55));
 
-// --- Базис позиции арбитражёра
+// --- Позиция арбитражёра: открытая позиция и базис раздельно
 {
-  // A_ETH_binanceokx: q_dst = −1.7579 ETH (dst — okx), src — binance: P_src=2398.80, P_dst=2398.66
-  const m = arbBasisMtmUsdt('ETH', 'USDT', 1.7579, 2398.80, -1.7579, 2398.66);
-  check('arbBasisMtmUsdt: q_dst·(P_dst−P_src) = −1.7579·(2398.66−2398.80) = +0.2461 при q_dst<0', near(m, -1.7579 * (2398.66 - 2398.80)));
-  check('arbBasisMtmUsdt: длинная нога на дорогой бирже даёт плюс', arbBasisMtmUsdt('BTC', 'USDT', -0.022, 81819.45, 0.022, 81829.05) > 0);
-  check('arbBasisMtmUsdt: перенос нумерария (USDT) базиса не даёт => 0', arbBasisMtmUsdt('USDT', 'USDT', 1209.5, 1, -1209.5, 1) === 0);
-  check('arbBasisMtmUsdt: нет цены => null', arbBasisMtmUsdt('SOL', 'USDT', -5, 0, 5, 104.7) === null && arbBasisMtmUsdt('SOL', 'USDT', -5, 104.7, 5, null) === null);
-  check('arbBasisMtmUsdt: нет количества => null', arbBasisMtmUsdt('SOL', 'USDT', null, 104.7, 5, 104.7) === null);
-  check('arbBasisMtmUsdt: одинаковые цены => 0', near(arbBasisMtmUsdt('BTC', 'USDT', -1, 80000, 1, 80000), 0));
+  const parts = (...x) => arbPositionParts(...x);
+  // зеркальная позиция: q_src = −q_dst ⇒ открытой позиции нет, весь результат — базис q_dst·(P_dst − P_src)
+  const m = parts('ETH', 'USDT', 1.7579, 2398.80, -1.7579, 2398.66);
+  check('зеркальные ноги: открытая позиция 0', near(m.open_position_usdt, 0, 1e-9));
+  check('зеркальные ноги: базис = q_dst·(P_dst−P_src) = −1.7579·(−0.14)', near(m.basis_usdt, -1.7579 * (2398.66 - 2398.80), 1e-9));
+  check('длинная нога на дорогой бирже даёт плюс базиса', parts('BTC', 'USDT', -0.022, 81819.45, 0.022, 81829.05).basis_usdt > 0);
+  // несимметричные ноги (A_BTC_coinbaseokx с dev): обе короткие ⇒ чистая короткая позиция по активу
+  const n = parts('BTC', 'USDT', -0.132, 81825.0, -0.056, 81826.0);
+  check('обе ноги короткие: открытая позиция ≈ −0.188 BTC × цена', near(n.open_position_usdt, -0.188 * 81825.5, 1e-6));
+  check('сумма частей равна стоимости ног q_src·P_src + q_dst·P_dst',
+    near(n.open_position_usdt + n.basis_usdt, -0.132 * 81825.0 + -0.056 * 81826.0, 1e-6));
+  const r = parts('SOL', 'USDT', 5, 104.69, -3, 104.70);
+  check('произвольные ноги: части в сумме дают стоимость', near(r.open_position_usdt + r.basis_usdt, 5 * 104.69 - 3 * 104.70, 1e-9));
+  check('перенос нумерария (USDT): обе части 0', parts('USDT', 'USDT', 1209.5, 1, -1209.5, 1).open_position_usdt === 0 && parts('USDT', 'USDT', 5, 1, -5, 1).basis_usdt === 0);
+  check('нет цены => null', parts('SOL', 'USDT', -5, 0, 5, 104.7) === null && parts('SOL', 'USDT', -5, 104.7, 5, null) === null);
+  check('нет количества => null', parts('SOL', 'USDT', null, 104.7, 5, 104.7) === null);
+  check('одинаковые цены и зеркальные ноги => 0', near(parts('BTC', 'USDT', -1, 80000, 1, 80000).basis_usdt, 0) && near(parts('BTC', 'USDT', -1, 80000, 1, 80000).open_position_usdt, 0));
 }
 
 if (failed > 0) { console.error(`\n${failed} FAILED`); process.exit(1); }
