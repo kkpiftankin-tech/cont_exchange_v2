@@ -13,7 +13,7 @@ const config = {
   batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.006, ce_inv_skew_max_pm: 8,
   slope_method: 3, ce_band_fee_k: 1.8, ce_maker_fee_bps: 2,
   ce_band_manual: false, ce_band_manual_q_lim: 5, ce_band_manual_q_mkt: 25, ce_band_gamma_mode: false,
-  ce_band_q_floor: 2, ce_band_sigma_ref: 0.00015, ce_band_vol_ratio_min: 0.1, ce_band_vol_ratio_max: 10, ce_band_mode: 'fee',
+  ce_band_q_floor: 2, ce_band_sigma_ref: 0.00015, ce_band_vol_ratio_min: 0.1, ce_band_vol_ratio_max: 10, ce_band_mode: 'fee', ce_band_arb_scale: 2,
 };
 
 beforeEach(() => {
@@ -42,6 +42,24 @@ test('по умолчанию режим «от комиссии»: ручных
   expect(b.ce_band_manual).toBe(false);
   expect(b.ce_band_gamma_mode).toBe(false);
   expect('ce_band_manual_q_lim' in b).toBe(false);
+});
+
+test('множитель порога арбитражёров: подхватывается из базы, правится и отправляется; в ручном режиме скрыт и не отправляется', async () => {
+  const { container } = render(<VectorClearingLive />);
+  const sel = await selectMode(container);
+  const input = () => container.querySelector('[data-testid="arb-scale"] input');
+  await waitFor(() => expect(input()).not.toBeNull());
+  await waitFor(() => expect(input().value).toBe('2'));            // значение из базы
+  fireEvent.change(input(), { target: { value: '3' } });
+  fireEvent.click(screen.getByText('Применить'));
+  await waitFor(() => expect(axios.post).toHaveBeenCalled());
+  expect(postedBody().ce_band_arb_scale).toBe(3);
+  axios.post.mockClear();
+  fireEvent.change(sel, { target: { value: 'manual' } });          // ручной режим: множитель не применяется
+  expect(container.querySelector('[data-testid="arb-scale"]')).toBeNull();
+  fireEvent.click(screen.getByText('Применить'));
+  await waitFor(() => expect(axios.post).toHaveBeenCalled());
+  expect('ce_band_arb_scale' in postedBody()).toBe(false);
 });
 
 test('ручной режим: поля Z̄lim и Z̄mkt отправляются, режим по σ не трогается', async () => {

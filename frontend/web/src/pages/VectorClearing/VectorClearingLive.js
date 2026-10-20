@@ -1078,6 +1078,7 @@ function VectorClearingLive() {
   const [cfgSigmaRef, setCfgSigmaRef] = useState('');     // опорная σ
   const [cfgVrMin, setCfgVrMin] = useState('');           // нижняя граница множителя волатильности
   const [cfgVrMax, setCfgVrMax] = useState('');           // верхняя граница множителя волатильности
+  const [cfgArbScale, setCfgArbScale] = useState('1');    // множитель порога выхода арбитражёров (ADR-081)
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgLoaded, setCfgLoaded] = useState(false);   // настройки прочитаны с сервера; до этого «Применить» заблокировано
   const [cfgSaving, setCfgSaving] = useState(false);
@@ -1102,6 +1103,7 @@ function VectorClearingLive() {
       setCfgSigmaRef(String(r.data.ce_band_sigma_ref ?? 0.0005));
       setCfgVrMin(String(r.data.ce_band_vol_ratio_min ?? 0.1));
       setCfgVrMax(String(r.data.ce_band_vol_ratio_max ?? 10));
+      setCfgArbScale(String(r.data.ce_band_arb_scale ?? 1));
       setCfgLoaded(true);
     } catch (e) { /* PG может быть недоступен — оставляем пустым */ }
   }, []);
@@ -1119,7 +1121,7 @@ function VectorClearingLive() {
         ce_band_manual: cfgBandMode === 'manual',
         ...(cfgBandMode === 'manual'
           ? { ce_band_manual_q_lim: Number(cfgManualLim), ce_band_manual_q_mkt: Number(cfgManualMkt) }
-          : { ce_band_gamma_mode: cfgBandMode === 'volatility' }),
+          : { ce_band_gamma_mode: cfgBandMode === 'volatility', ce_band_arb_scale: Number(cfgArbScale) }),
         ...(cfgBandMode === 'volatility'
           ? { ce_band_q_floor: Number(cfgBandFloor), ce_band_sigma_ref: Number(cfgSigmaRef),
               ce_band_vol_ratio_min: Number(cfgVrMin), ce_band_vol_ratio_max: Number(cfgVrMax) }
@@ -1140,7 +1142,7 @@ function VectorClearingLive() {
       setCfgMsg('ошибка: ' + (serverMsg || e.message || 'не сохранено'));
     } finally { setCfgSaving(false); }
   }, [cfgWindowMs, cfgStaleMs, cfgFeeBps, cfgSkewGamma, cfgSkewMaxPm, cfgSlopeMethod, cfgBandK, cfgMakerBps,
-      cfgBandMode, cfgManualLim, cfgManualMkt, cfgBandFloor, cfgSigmaRef, cfgVrMin, cfgVrMax]);
+      cfgBandMode, cfgManualLim, cfgManualMkt, cfgBandFloor, cfgSigmaRef, cfgVrMin, cfgVrMax, cfgArbScale]);
 
   const rowKey = (it) => `${it.batch_id}|${it.event_time_ms}`;
 
@@ -1466,6 +1468,13 @@ function VectorClearingLive() {
               <option value="manual">вручную</option>
             </select>
           </label>
+          {cfgBandMode !== 'manual' && (
+            <label className="vc-config-field" data-testid="arb-scale" title="Во сколько раз порог выхода на внешнюю биржу у АРБИТРАЖЁРОВ шире расчётного (комиссия + плата за перевод). Позиция арбитражёра нейтральна по активу (длинная нога на одной бирже, короткая на другой), рыночного риска нет, поэтому ему можно держать позицию крупнее, чем переводчику, и выходить наружу реже. 1 — без изменения; переводчиков не касается; в ручном режиме не используется.">
+              множитель порога арбитражёров
+              <input type="number" min="0.1" max="20" step="0.1" value={cfgArbScale}
+                onChange={(e) => setCfgArbScale(e.target.value)} />
+            </label>
+          )}
           {cfgBandMode === 'manual' && (<>
             <label className="vc-config-field" title="Z̄lim: при |позиции| больше этого значения агент хеджируется пассивной лимитной заявкой. Тысячи USDT, одно значение для всех агентов. Больше значение — реже и крупнее хеджи.">
               Z̄lim (тыс. USDT)

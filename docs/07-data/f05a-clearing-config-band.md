@@ -26,12 +26,13 @@ related:
 | `ce_band_manual` | BOOLEAN | false | ручная ширина включена (ADR-081) |
 | `ce_band_manual_q_lim` | NUMERIC(38,18) | 5 | Z̄lim вручную, тыс. USDT |
 | `ce_band_manual_q_mkt` | NUMERIC(38,18) | 25 | Z̄mkt вручную, тыс. USDT |
+| `ce_band_arb_scale` | NUMERIC(38,18) | 1 | множитель порога выхода арбитражёров (ADR-081); допустимо 0,1…20, иначе `ledger` берёт 1 |
 
 Правило режима: `ce_band_manual = true` и значения допустимы (0,1 ≤ Z̄lim ≤ Z̄mkt ≤ 1000 тыс. USDT) — ручной; иначе `ce_band_gamma_mode = true` — по волатильности; иначе от комиссии. Недопустимые ручные значения при включённом режиме `ledger` игнорирует и один раз пишет предупреждение.
 
 Если ручные колонки не удалось прочитать (обрыв соединения или их нет), `ledger` сохраняет последнее известное значение режима, а не выключает его.
 
-Миграция существующего тома: `ALTER TABLE f05a_clearing_config ADD COLUMN IF NOT EXISTS …` для трёх колонок ADR-081 и `CREATE TABLE IF NOT EXISTS operator_audit_log …` (они же в `infra/postgres/init.sql`).
+Миграция существующего тома: `ALTER TABLE f05a_clearing_config ADD COLUMN IF NOT EXISTS …` для четырёх колонок ADR-081 (три ручных и `ce_band_arb_scale`) и `CREATE TABLE IF NOT EXISTS operator_audit_log …` (они же в `infra/postgres/init.sql`).
 
 ## Таблица `operator_audit_log` — журнал операторских действий
 

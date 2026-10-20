@@ -9,6 +9,7 @@ const BAND_FIELDS = [
   'ce_band_manual', 'ce_band_manual_q_lim', 'ce_band_manual_q_mkt',
   'ce_band_gamma_mode', 'ce_band_q_floor', 'ce_band_sigma_ref',
   'ce_band_vol_ratio_min', 'ce_band_vol_ratio_max',
+  'ce_band_arb_scale',        // множитель порога выхода арбитражёров (ADR-081)
 ];
 
 const isAbsent = (v) => v === undefined || v === null || v === '';
@@ -49,6 +50,7 @@ function parseBandConfig(body, current = {}) {
     ['ce_band_sigma_ref', 0, 1, true],
     ['ce_band_vol_ratio_min', 0, 1000, true],
     ['ce_band_vol_ratio_max', 0, 1000, true],
+    ['ce_band_arb_scale', 0.1, 20, false],   // как LedgerUseCases::kArbScaleMin/Max
   ]) {
     const err = numeric(f, lo, hi, open);
     if (err) return err;

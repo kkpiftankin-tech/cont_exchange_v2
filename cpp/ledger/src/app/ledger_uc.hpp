@@ -149,6 +149,16 @@ class LedgerUseCases {
   static void FlatBandWidth(double k_band, double clim_bps, double cmkt_bps, double transfer_bps, double rt,
                             double q_floor, double* z_lim, double* z_mkt);
 
+  // ADR-081: множитель порога выхода арбитражёров. Арбитражёр держит позицию, нейтральную по активу (длинная нога на одной
+  // бирже, короткая на другой): рыночного риска нет, и базовый документ задаёт ему более широкую полосу, чем переводчику (30
+  // против 18). Допустимо kArbScaleMin ≤ множитель ≤ kArbScaleMax; иначе 1 (без изменения). Pure/static — юнит-тестируема.
+  static constexpr double kArbScaleMin = 0.1;
+  static constexpr double kArbScaleMax = 20.0;
+  static double ResolveArbScale(double v);
+  // Применяет множитель к уже посчитанной ширине арбитражёра: z_lim = max(пол, z_lim·m), z_mkt = max(z_lim, z_mkt·m).
+  // z_mkt может быть nullptr (нумерарий — одна граница).
+  static void ApplyArbScale(double scale, double q_floor, double* z_lim, double* z_mkt);
+
   // ADR-081: зона исполнения хеджа. Агрессивный тейкер, если |позиция| > Z̄mkt; пассивный мейкер между Z̄lim и Z̄mkt.
   // Без привязки к комиссии (fee_linked=false, k_band=0) прежнее поведение — всегда агрессив, КРОМЕ ручной ширины:
   // там Z̄mkt задан оператором и мейкерная зона сохраняется. Pure/static — юнит-тестируема.
@@ -399,6 +409,7 @@ class LedgerUseCases {
   bool band_cfg_manual_ = false;      // ADR-081: ручная ширина полосы включена и допустима
   double band_cfg_manual_lim_ = 0.0;  // Z̄lim вручную (k-USDT)
   double band_cfg_manual_mkt_ = 0.0;  // Z̄mkt вручную (k-USDT)
+  double band_cfg_arb_scale_ = 1.0;   // множитель порога арбитражёров (ADR-081)
   bool band_cfg_manual_bad_logged_ = false;  // предупреждение о недопустимых значениях уже выдано
   std::chrono::steady_clock::time_point band_cfg_last_{};
   bool band_cfg_have_ = false;
@@ -535,6 +546,8 @@ class LedgerUseCases {
     double q_floor; bool gamma_mode; double sigma_ref; double vol_ratio_min; double vol_ratio_max;
     // ADR-081: ручная ширина полосы (manual=true только при допустимых значениях, см. ResolveManualBand)
     bool manual; double manual_q_lim; double manual_q_mkt;
+    // ADR-081: множитель порога арбитражёров (1 — без изменения); у переводчиков не применяется
+    double arb_scale;
   };
   BandFeeCfg LoadBandFeeConfig();
 

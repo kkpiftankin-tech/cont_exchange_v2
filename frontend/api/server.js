@@ -7796,11 +7796,17 @@ const VECTOR_CLEARING_VIEW_HTML = [
 
 // ADR-081: колонки ширины полосы читаются отдельным запросом — на старом томе их может не быть, тогда режим по умолчанию.
 async function readBandConfig(pool) {
+  let out;
   try {
     const r = await pool.query(
       "SELECT ce_band_manual, ce_band_manual_q_lim, ce_band_manual_q_mkt, ce_band_gamma_mode, ce_band_q_floor, ce_band_sigma_ref, ce_band_vol_ratio_min, ce_band_vol_ratio_max FROM f05a_clearing_config WHERE id=1");
-    return normalizeBandRow(r.rows[0]);
+    out = normalizeBandRow(r.rows[0]);
   } catch (_) { return {}; }
+  try {   // множитель арбитражёров отдельным запросом: на томе без этой колонки остальные поля полосы всё равно читаются
+    const r2 = await pool.query("SELECT ce_band_arb_scale FROM f05a_clearing_config WHERE id=1");
+    Object.assign(out, normalizeBandRow(r2.rows[0]));
+  } catch (_) { /* колонки нет — множитель не возвращается, ledger считает 1 */ }
+  return out;
 }
 
 async function handleVectorClearing(req, res, pathname, query) {

@@ -132,6 +132,30 @@ int main() {
   check(LedgerUseCases::BandHedgeCooldownMs(0, 30000, 3) == 0, "нулевая база — без паузы");
   check(LedgerUseCases::BandHedgeCooldownMs(3000, 5000, 3) == 5000, "максимум чуть выше базы: 3 с, затем 5 с");
 
+
+  // --- ADR-081: множитель порога арбитражёров.
+  check(LedgerUseCases::ResolveArbScale(2.0) == 2.0 && LedgerUseCases::ResolveArbScale(0.1) == 0.1 && LedgerUseCases::ResolveArbScale(20.0) == 20.0,
+        "множитель в пределах 0.1…20 принимается");
+  check(LedgerUseCases::ResolveArbScale(0.05) == 1.0 && LedgerUseCases::ResolveArbScale(20.5) == 1.0, "вне пределов => 1");
+  check(LedgerUseCases::ResolveArbScale(0.0) == 1.0 && LedgerUseCases::ResolveArbScale(-2.0) == 1.0, "0 и отрицательный => 1");
+  check(LedgerUseCases::ResolveArbScale(std::nan("")) == 1.0 && LedgerUseCases::ResolveArbScale(std::numeric_limits<double>::infinity()) == 1.0,
+        "NaN и inf => 1");
+  zl = 8.1; zm = 22.5;
+  LedgerUseCases::ApplyArbScale(2.0, 2.0, &zl, &zm);
+  check(near(zl, 16.2) && near(zm, 45.0), "множитель 2: 8.1/22.5 => 16.2/45");
+  zl = 8.1; zm = 22.5;
+  LedgerUseCases::ApplyArbScale(1.0, 2.0, &zl, &zm);
+  check(near(zl, 8.1) && near(zm, 22.5), "множитель 1 порог не меняет");
+  zl = 8.1; zm = 22.5;
+  LedgerUseCases::ApplyArbScale(0.1, 5.0, &zl, &zm);
+  check(near(zl, 5.0) && zm >= zl, "множитель 0.1: пол удерживает Z̄lim, Z̄mkt не ниже Z̄lim");
+  zl = 8.1;
+  LedgerUseCases::ApplyArbScale(3.0, 2.0, &zl, nullptr);
+  check(near(zl, 24.3), "нумерарий (одна граница): 8.1 * 3 = 24.3");
+  zl = 8.1; zm = 22.5;
+  LedgerUseCases::ApplyArbScale(std::nan(""), 2.0, &zl, &zm);
+  check(near(zl, 8.1) && near(zm, 22.5), "NaN множитель = 1");
+
   if (g_fail) {
     std::cout << "ce_band_manual_test: " << g_fail << " FAIL\n";
     return 1;

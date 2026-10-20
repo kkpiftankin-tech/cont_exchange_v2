@@ -38,6 +38,18 @@ const cur = { ce_band_manual: false, ce_band_manual_q_lim: 5, ce_band_manual_q_m
   check('мусор вместо булева отклоняется', !parseBandConfig({ ce_band_gamma_mode: 'maybe' }, cur).ok);
 }
 
+// --- множитель порога арбитражёров (ADR-081)
+{
+  check('множитель арбитражёров 2 принимается', parseBandConfig({ ce_band_arb_scale: 2 }, cur).ok && parseBandConfig({ ce_band_arb_scale: 2 }, cur).values.ce_band_arb_scale === 2);
+  check('границы множителя 0.1 и 20 допустимы', parseBandConfig({ ce_band_arb_scale: 0.1 }, cur).ok && parseBandConfig({ ce_band_arb_scale: 20 }, cur).ok);
+  check('множитель ниже 0.1 отклоняется', !parseBandConfig({ ce_band_arb_scale: 0.05 }, cur).ok && !parseBandConfig({ ce_band_arb_scale: 0 }, cur).ok);
+  check('множитель выше 20 отклоняется', !parseBandConfig({ ce_band_arb_scale: 21 }, cur).ok);
+  check('множитель-нечисло отклоняется', !parseBandConfig({ ce_band_arb_scale: 'много' }, cur).ok);
+  const rec = auditRecord({ user: 'u', before: { ...cur, ce_band_arb_scale: 1 }, after: { ce_band_arb_scale: 2 } });
+  check('аудит фиксирует прежний и новый множитель', rec.changed.ce_band_arb_scale.from === 1 && rec.changed.ce_band_arb_scale.to === 2);
+  check('нормализация строки из PG приводит множитель к числу', normalizeBandRow({ ce_band_arb_scale: '2.000000000000000000' }).ce_band_arb_scale === 2);
+}
+
 // --- неприсланные поля не трогаются (старый клиент не затирает новые настройки)
 {
   const r = parseBandConfig({ batch_window_ms: 1000, ce_band_fee_k: 1.8 }, cur);

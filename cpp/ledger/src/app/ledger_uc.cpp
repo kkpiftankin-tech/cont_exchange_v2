@@ -364,6 +364,17 @@ bool LedgerUseCases::ResolveManualBand(bool manual_on, double q_lim, double q_mk
   return true;
 }
 
+double LedgerUseCases::ResolveArbScale(double v) {
+  return (std::isfinite(v) && v >= kArbScaleMin && v <= kArbScaleMax) ? v : 1.0;
+}
+
+void LedgerUseCases::ApplyArbScale(double scale, double q_floor, double* z_lim, double* z_mkt) {
+  const double m = ResolveArbScale(scale);
+  if (z_lim == nullptr) return;
+  *z_lim = std::max(q_floor, *z_lim * m);
+  if (z_mkt) *z_mkt = std::max(*z_lim, *z_mkt * m);
+}
+
 long long LedgerUseCases::BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak) {
   if (base_ms <= 0) return 0;
   if (max_ms <= base_ms || fail_streak <= 0) return base_ms;
@@ -1722,13 +1733,14 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
       return {band_cfg_clim_bps_, band_cfg_cmkt_bps_, band_cfg_k_, band_cfg_gamma_,
               band_cfg_q_floor_, band_cfg_gamma_mode_, band_cfg_sigma_ref_,
               band_cfg_vr_min_, band_cfg_vr_max_,
-              band_cfg_manual_, band_cfg_manual_lim_, band_cfg_manual_mkt_};
+              band_cfg_manual_, band_cfg_manual_lim_, band_cfg_manual_mkt_, band_cfg_arb_scale_};
   }
   double clim_bps = def_clim, cmkt_bps = ref_cmkt, k_band = def_k, gamma = def_gamma;
   double q_floor = def_floor; bool gamma_mode = def_gmode; double sigma_ref = def_sref;
   double vol_ratio_min = def_vrmin, vol_ratio_max = def_vrmax;
   bool manual_flag = false; double manual_lim = 0.0, manual_mkt = 0.0;  // ADR-081
   bool manual_read_ok = false;  // чтение ручных колонок удалось (иначе остаётся последнее известное значение)
+  double arb_scale = 1.0; bool arb_read_ok = false;  // ADR-081: множитель порога арбитражёров
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!postgres_dsn_.empty()) {
     std::lock_guard<std::mutex> pk(poll_conn_mu_);  // T-F18-706: переиспользуемое соединение
@@ -1780,6 +1792,16 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
     } catch (const std::exception&) {
       poll_conn_.reset();  // нет колонок ручной ширины — режим выключен (поведение как до ADR-081)
     }
+    // ADR-081: множитель порога арбитражёров — ЧЕТВЁРТЫЙ отдельный try (нет колонки на старом томе — множитель 1).
+    try {
+      pqxx::work tx4(poll_conn());
+      const pqxx::row r4 = tx4.exec1("SELECT ce_band_arb_scale FROM f05a_clearing_config WHERE id=1");
+      arb_scale = ResolveArbScale(r4[0].as<double>());
+      tx4.commit();
+      arb_read_ok = true;
+    } catch (const std::exception&) {
+      poll_conn_.reset();
+    }
   }
 #endif
   // ADR-081: допустимые ручные значения; недопустимые при включённом режиме игнорируются с одним предупреждением.
@@ -1804,6 +1826,8 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_manual_ = manual_ok;
   band_cfg_manual_lim_ = eff_manual_lim;
   band_cfg_manual_mkt_ = eff_manual_mkt;
+  if (!arb_read_ok && band_cfg_have_) arb_scale = band_cfg_arb_scale_;   // обрыв соединения — держим последнее значение
+  band_cfg_arb_scale_ = arb_scale;
   band_cfg_clim_bps_ = clim_bps;
   band_cfg_cmkt_bps_ = cmkt_bps;
   band_cfg_k_ = k_band;
@@ -1816,7 +1840,7 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_last_ = std::chrono::steady_clock::now();
   band_cfg_have_ = true;
   return {clim_bps, cmkt_bps, k_band, gamma, q_floor, gamma_mode, sigma_ref, vol_ratio_min, vol_ratio_max,
-          manual_ok, eff_manual_lim, eff_manual_mkt};
+          manual_ok, eff_manual_lim, eff_manual_mkt, arb_scale};
 }
 
 // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
@@ -2009,6 +2033,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
     } else if (cfg_n.k_band > 0.0) {
       // ADR-069: rt=1 на ногу; плюс плата за перевод (ADR-080) — та же формула, что у остальных арбитражёров
       FlatBandWidth(cfg_n.k_band, cfg_n.clim_bps, cfg_n.cmkt_bps, TransferFeeBps(asset, numeraire), 1.0, floor_n, &z_lim_n, nullptr);
+      ApplyArbScale(cfg_n.arb_scale, floor_n, &z_lim_n, nullptr);   // ADR-081: множитель порога арбитражёров
     } else {
       z_lim_n = static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
     }
@@ -2065,6 +2090,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   const double band_transfer_bps = (is_arbitrageur && fee_linked && !cfg.manual) ? TransferFeeBps(asset, numeraire) : 0.0;
   if (fee_linked) {
     FlatBandWidth(cfg.k_band, cfg.clim_bps, cfg.cmkt_bps, band_transfer_bps, rt, q_floor, &z_lim, &z_mkt);
+    if (is_arbitrageur) ApplyArbScale(cfg.arb_scale, q_floor, &z_lim, &z_mkt);   // ADR-081: множитель порога арбитражёров
     // F-18 D1+#7 (T-F18-703, ADR-066): динамический масштаб порога по волатильности
     // актива. Γ=γσ²τ ⇒ z=clim/Γ ∝ 1/(γσ²). Якорим к плоскому при σ_ref, γ_ref=1:
     // множитель (σ_ref²/σ²)/γ, clamp [min,max]. Выше σ ⇒ уже полоса (хеджируем раньше
@@ -2249,6 +2275,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)
                          {"omega", std::to_string(band_omega)},       // ADR-069: ω_i=λ_i/Λ (1=не применён)
+                         {"arb_scale", std::to_string((is_arbitrageur && fee_linked && !cfg.manual) ? cfg.arb_scale : 1.0)},  // ADR-081
                          {"fail_streak", std::to_string(st.band_fail_streak)},  // серия неисполненных заявок подряд (рост паузы)
                          {"cooldown_ms", std::to_string(cooldown_ms)},
                          {"transfer_bps", std::to_string(band_transfer_bps)},  // ADR-080: плата за перевод в пороге (0 у переводчика)

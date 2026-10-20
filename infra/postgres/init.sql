@@ -1074,6 +1074,9 @@ ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_manual_q_lim NUMERIC(38,18) NOT NULL DEFAULT 5;   -- Z̄lim вручную
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_manual_q_mkt NUMERIC(38,18) NOT NULL DEFAULT 25;  -- Z̄mkt вручную
+-- ADR-081: множитель порога выхода арбитражёров (1 — без изменения; переводчиков не касается; ручной режим его игнорирует).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_arb_scale NUMERIC(38,18) NOT NULL DEFAULT 1;
 
 -- ADR-081: журнал операторских действий (аудит, CLAUDE.md §1.7). Пишет BFF в одной транзакции с изменением настроек;
 -- запись неизменяема по соглашению (только INSERT). actor — заголовок X-User-Id (клиент выставляет сам, не доказательство личности).
