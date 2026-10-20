@@ -430,3 +430,6 @@
 /* F-18: строка позиции биржи, где сработал хедж (|ПОСЛЕ| > θ) */
 .vc-row-armed { background: #2a2408; }
 .vc-row-armed td { color: #e8d9a0; }
+
+/* Панель «Живые позиции»: заголовок группы (биржа / пара бирж) внутри таблицы агентов */
+.vc-sub-table .vc-group-head td { background: rgba(120, 140, 170, 0.14); font-weight: 600; padding: 4px 8px; border-top: 2px solid rgba(120, 140, 170, 0.35); }

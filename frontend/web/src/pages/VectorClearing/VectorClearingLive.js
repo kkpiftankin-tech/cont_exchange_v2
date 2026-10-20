@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { isAuthenticated } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
+import { groupTranslators, groupArbitrageurs, isIdleAgent, mergeStableRows } from './agentRowsLayout';
 import './VectorClearingLive.css';
 
 // F-05A: живой мониторинг векторного клиринга (ClickHouse vector_clearing_results).
@@ -423,11 +424,19 @@ const reasonBg = (r) => {
 export function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
   const rows = Array.isArray(agentRows) ? agentRows : [];
   const clickable = typeof onSelectAgent === 'function';
-  const rowProps = (a) => clickable ? {
-    onClick: () => onSelectAgent(a.agent_id),
-    style: { cursor: 'pointer', background: a.agent_id === selectedId ? 'rgba(37,99,235,0.12)' : undefined },
-    title: 'клик — разбор агента (цена/порог/хедж/исполнение)'
-  } : {};
+  // Не действующие агенты (нет позиции и не двигались) показываются приглушённо, но на своём месте; агент, пропавший из
+  // последнего ответа, остаётся со своей последней известной позицией (stale).
+  const dimOf = (a) => (a.stale ? 0.4 : (a.inactive || isIdleAgent(a)) ? 0.6 : undefined);
+  const rowProps = (a) => ({
+    ...(clickable ? { onClick: () => onSelectAgent(a.agent_id) } : {}),
+    style: {
+      ...(clickable ? { cursor: 'pointer', background: a.agent_id === selectedId ? 'rgba(37,99,235,0.12)' : undefined } : {}),
+      opacity: dimOf(a),
+    },
+    title: a.stale ? 'нет в последнем ответе — показана последняя известная позиция'
+      : a.inactive ? 'агент в графе клиринга, но позиции у ledger ещё не было'
+      : (clickable ? 'клик — разбор агента (цена/порог/хедж/исполнение)' : undefined),
+  });
   const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
   const dash = <span title="нет данных" style={{ opacity: 0.4 }}>—</span>;
   // Ячейка знакового числа (было/дельта/стало) в валюте ноги; null ⇒ прочерк.
@@ -501,7 +510,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const renderAgent = (a, i, tag) => {
     const L = legsOf(a);
     return L.map((lg, li) => (
-      <tr key={`${a.agent_id || ''}|${tag}|${i}|${li}`} {...rowProps(a)}>
+      <tr key={`${a.agent_id || ''}|${tag}|${li}`} {...rowProps(a)}>
         {li === 0 && <td className="vc-mono" rowSpan={2}>{a.agent_id}{a.venue ? <span style={{ opacity: 0.5 }}> · {a.venue}</span> : ''}</td>}
         <td className="vc-mono">{lg.label}</td>
         <td className="vc-mono">{numCell(lg.before)}</td>
@@ -517,6 +526,12 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   };
   const tRows = rows.filter((a) => a.agent_kind === 'translator');
   const aRows = rows.filter((a) => a.agent_kind === 'arbitrageur');
+  // Группы по биржам и фиксированный порядок — не зависят от хода клиринга (двигался агент или нет).
+  const tGroups = groupTranslators(rows);
+  const aGroups = groupArbitrageurs(rows);
+  const groupHead = (text) => (
+    <tr className="vc-group-head"><td colSpan={10}>{text}</td></tr>
+  );
   // Итоги заработка по сделкам (USDT, без комиссий): по группам и вместе.
   // Итог — по realized (нарастающий заработок); fallback на pnl_usdt (R+U), если R нет.
   const sumPnl = (arr) => arr.reduce((s, a) => {
@@ -549,19 +564,29 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
     <div className="vc-sec">
       <div className="vc-sec-title">{title}</div>
       <div className="vc-sec-body">
-        <div className="vc-sub-head">Переводчики (пара base/quote) — <b>{tRows.length}</b></div>
+        <div className="vc-sub-head">Переводчики по биржам (пара base/quote) — <b>{tRows.length}</b></div>
         {tRows.length > 0 ? (
           <table className="vc-sub-table">{head}
-            <tbody>{tRows.map((a, i) => renderAgent(a, i, 't'))}</tbody>
+            {tGroups.map((g) => (
+              <tbody key={`t|${g.venue}`} data-testid={`t-group-${g.venue}`}>
+                {groupHead(`${g.venue || 'без биржи'} — переводчики: ${g.rows.length}`)}
+                {g.rows.map((a, i) => renderAgent(a, i, 't'))}
+              </tbody>
+            ))}
           </table>
-        ) : <div className="vc-note vc-note-tight">нет переводчиков с позицией</div>}
+        ) : <div className="vc-note vc-note-tight">нет переводчиков</div>}
 
-        <div className="vc-sub-head" style={{ marginTop: 14 }}>Арбитражёры (перевоз актива между площадками) — <b>{aRows.length}</b></div>
+        <div className="vc-sub-head" style={{ marginTop: 14 }}>Арбитражёры по парам бирж (перевоз актива между площадками) — <b>{aRows.length}</b></div>
         {aRows.length > 0 ? (
           <table className="vc-sub-table">{head}
-            <tbody>{aRows.map((a, i) => renderAgent(a, i, 'a'))}</tbody>
+            {aGroups.map((g) => (
+              <tbody key={`a|${g.key}`} data-testid={`a-group-${g.key}`}>
+                {groupHead(`${g.key} — арбитражёры: ${g.rows.length}`)}
+                {g.rows.map((a, i) => renderAgent(a, i, 'a'))}
+              </tbody>
+            ))}
           </table>
-        ) : <div className="vc-note vc-note-tight">нет арбитражёров с позицией</div>}
+        ) : <div className="vc-note vc-note-tight">нет арбитражёров</div>}
         {aRows.length > 0 && (
           <div className="vc-note vc-note-tight" data-testid="arb-explain">
             <b>Почему у арбитражёров нет «заработка по сделкам».</b> Арбитражёр перемещает актив между биржами внутри CE и <b>наружу не торгует</b> (ADR-073),
@@ -1205,7 +1230,9 @@ function VectorClearingLive() {
     try {
       const r = await axios.get(`${API_BASE}/vector-clearing/agent-positions`, { timeout: 10000 });
       const all = Array.isArray(r.data && r.data.agentRows) ? r.data.agentRows : [];
-      setLiveRows(all.filter((a) => Math.abs(Number(a.c_total != null ? a.c_total : a.c_position)) > 1e-9 || a.hasDelta));
+      // Все агенты сразу (в том числе не действующие в этом такте) и без исчезновений между опросами: порядок строк задаёт
+      // сортировка по биржам (agentRowsLayout), а не ход клиринга.
+      setLiveRows((prev) => mergeStableRows(prev, all));
       setLiveAt(new Date());
     } catch (e) { /* недоступно — панель покажет прошлое/пусто */ }
   }, []);

@@ -6,7 +6,8 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt } = require("./trade_stats_math");
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
-const { buildCeGraph, makePriceOf } = require("./ce_graph_build");  // граф CE: узлы asset@venue, рёбра агентов
+const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
+const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
 const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
@@ -7165,7 +7166,8 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
     const ka = kindOrder[a.agent_kind] != null ? kindOrder[a.agent_kind] : 2;
     const kb = kindOrder[b.agent_kind] != null ? kindOrder[b.agent_kind] : 2;
     if (ka !== kb) return ka - kb;
-    if (a.hasDelta !== b.hasDelta) return a.hasDelta ? -1 : 1;
+    // Порядок не зависит от хода клиринга (раньше двигавшиеся в этом такте шли первыми и строки «прыгали»): вид агента, затем
+    // agent_id. Группировку по биржам и итоговый порядок строк задаёт панель (agentRowsLayout.js).
     return String(a.agent_id).localeCompare(String(b.agent_id));
   });
   return rows;
@@ -7997,16 +7999,20 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/agent-positions") {
     const rows = await fetchVectorClearingRows(1);
     const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows] = await Promise.all([
+    const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows, ceSnap] = await Promise.all([
       fetchAgentPositions(),
       newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
       fetchAgentHedgeMap(),
       fetchAgentTradeStats(),
-      fetchCeSegmentRows(600).catch(() => [])   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
+      fetchCeSegmentRows(600).catch(() => []),   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
+      fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 2000).catch(() => null)   // граф клиринга: полный список агентов
     ]);
     // сегменты → {venue, pair, mid} (в запросе поле venue_id), как в маршруте графа
     const venuePriceOf = makePriceOf((segRows || []).map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid) })));
     const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf);
+    // Агенты графа клиринга, у которых в ledger ещё нет строки позиции, показываем нулевыми строками: панель показывает ВСЕХ
+    // агентов сразу, а не только тех, что уже двигались.
+    agentRows.push(...placeholderAgentRows(ceSnap && ceSnap.edges, new Set(agentRows.map((r) => r.agent_id))));
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
   }
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —

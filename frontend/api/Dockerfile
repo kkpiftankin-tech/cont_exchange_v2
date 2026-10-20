@@ -18,6 +18,7 @@ COPY ce_graph_build.js .
 COPY ce_clearing_view.js .
 COPY venue_stage_merge.js .
 COPY band_config.js .
+COPY agent_placeholders.js .
 COPY data ./data
 
 EXPOSE 8090
