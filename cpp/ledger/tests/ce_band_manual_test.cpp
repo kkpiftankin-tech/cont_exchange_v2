@@ -1,9 +1,11 @@
 // ============================================================================
 // ce_band_manual_test.cpp — ADR-081. Unit-тесты чистой функции LedgerUseCases::ResolveManualBand:
 // ручная ширина полосы хеджа допустима только при включённом режиме и 0.1 <= lim <= mkt <= 1000 (тыс. USDT).
-// Pure unit (без PG/Kafka): функция static и зависит только от аргументов.
+// ADR-080 (2026-10-20): плюс TransferFeeBps и FlatBandWidth — плата за перевод в пороге арбитражёра.
+// Pure unit (без PG/Kafka): функции static и зависят только от аргументов и окружения.
 // ============================================================================
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -23,6 +25,8 @@ void check(bool cond, const std::string& name) {
     ++g_fail;
   }
 }
+
+bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) < eps; }
 }  // namespace
 
 int main() {
@@ -53,6 +57,66 @@ int main() {
   check(!LedgerUseCases::IsAggressiveBandZone(true, false, 10.0, 18.0), "привязка к комиссии: между границами => мейкер");
   check(LedgerUseCases::IsAggressiveBandZone(true, false, 19.0, 18.0), "привязка к комиссии: выше Z̄mkt => тейкер");
   check(!LedgerUseCases::IsAggressiveBandZone(true, true, 50.0, 50.0), "граница |c| == Z̄mkt => ещё мейкер");
+
+
+  // --- ADR-080 (уточнение 2026-10-20): плата за перевод между биржами в пороге арбитражёра.
+  unsetenv("CE_TRANSFER_FEE_BPS_BTC");
+  unsetenv("CE_TRANSFER_FEE_BPS_USDT");
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "плата за перевод по умолчанию для актива = 2.5 б.п. (0.25 промилле)");
+  check(LedgerUseCases::TransferFeeBps("USDT", "USDT") == 0.5, "плата за перевод по умолчанию для нумерария = 0.5 б.п. (0.05 промилле)");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "4.0", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 4.0, "env CE_TRANSFER_FEE_BPS_BTC переопределяет");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "abc", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "не число => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "-1", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "отрицательное => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "0", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 0.0, "явный ноль допустим (перевод бесплатный)");
+  unsetenv("CE_TRANSFER_FEE_BPS_BTC");
+
+  double zl = 0.0, zm = 0.0;
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, 0.0, 1.0, 2.0, &zl, &zm);
+  check(near(zl, 3.6) && near(zm, 18.0), "переводчик (плата 0): 3.6 / 18 — как до изменения");
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, 2.5, 1.0, 2.0, &zl, &zm);
+  check(near(zl, 8.1) && near(zm, 22.5), "арбитражёр (плата 2.5 б.п.): 1.8*(2+2.5)=8.1 и 1.8*(10+2.5)=22.5");
+  LedgerUseCases::FlatBandWidth(0.1, 2.0, 10.0, 0.5, 1.0, 5.0, &zl, &zm);
+  check(near(zl, 5.0) && near(zm, 5.0), "пол ширины удерживает порог, Z̄mkt не ниже Z̄lim");
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, -3.0, 1.0, 2.0, &zl, &zm);
+  check(near(zl, 3.6) && near(zm, 18.0), "отрицательная плата не уменьшает порог");
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, 2.5, 1.0, 2.0, &zl, &zm);
+  const double zl_arb = zl;
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, 0.0, 1.0, 2.0, &zl, &zm);
+  check(zl_arb > zl, "плата за перевод делает порог арбитражёра шире, чем у переводчика");
+
+
+  // Доп. случаи из ревью: пустая строка, NaN/inf, мусор в хвосте, границы 1000/1001, независимость активов.
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "пустая строка => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "nan", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "nan => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "inf", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "inf => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "4.0x", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "мусор в хвосте => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "1000", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 1000.0, "граница 1000 допустима");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "1001", 1);
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 2.5, "больше 1000 => значение по умолчанию");
+  setenv("CE_TRANSFER_FEE_BPS_BTC", "7.5", 1);
+  unsetenv("CE_TRANSFER_FEE_BPS_ETH");
+  check(LedgerUseCases::TransferFeeBps("BTC", "USDT") == 7.5 && LedgerUseCases::TransferFeeBps("ETH", "USDT") == 2.5,
+        "переменные активов независимы (BTC задан, ETH по умолчанию)");
+  unsetenv("CE_TRANSFER_FEE_BPS_BTC");
+
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, std::nan(""), 1.0, 2.0, &zl, &zm);
+  check(near(zl, 3.6) && near(zm, 18.0), "NaN плата не ломает порог (как 0)");
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, std::numeric_limits<double>::infinity(), 1.0, 2.0, &zl, &zm);
+  check(near(zl, 3.6) && near(zm, 18.0), "inf плата не ломает порог (как 0)");
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 10.0, 2.5, 2.0, 2.0, &zl, &zm);
+  check(near(zl, 16.2) && near(zm, 45.0), "rt = 2 удваивает порог: 1.8*(2+2.5)*2 и 1.8*(10+2.5)*2");
+  // нумерарий-арбитражёр использует ту же формулу (только мейкерная граница): Z̄lim = k·(clim + плата USDT)
+  LedgerUseCases::FlatBandWidth(1.8, 2.0, 0.0, 0.5, 1.0, 2.0, &zl, nullptr);
+  check(near(zl, 4.5), "нумерарий: 1.8*(2+0.5)=4.5 (плата 0.5 б.п.)");
 
   if (g_fail) {
     std::cout << "ce_band_manual_test: " << g_fail << " FAIL\n";

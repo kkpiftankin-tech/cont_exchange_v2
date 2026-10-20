@@ -131,6 +131,18 @@ class LedgerUseCases {
   static bool ResolveManualBand(bool manual_on, double q_lim, double q_mkt,
                                 double* out_lim, double* out_mkt);
 
+  // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
+  // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
+  // CE_TRANSFER_FEE_BPS_<АКТИВ> (число от 0 до 1000; не задано / пусто / не число / NaN / inf / отрицательно / больше 1000 ⇒ по умолчанию 2,5 б.п. (0,25 ‰ — прежний тариф перевоза
+  // базового документа) для активов и 0,5 б.п. (0,05 ‰) для нумерария. Pure по окружению — юнит-тестируема.
+  static double TransferFeeBps(const std::string& asset, const std::string& numeraire);
+
+  // ADR-080: плоская ширина порога выхода. z_lim = max(пол, k·(clim + плата за перевод)·rt), z_mkt = max(z_lim, k·(cmkt + плата
+  // за перевод)·rt); комиссии и плата в б.п., k в тыс. USDT на б.п. Плата за перевод 0 (переводчик) даёт прежние формулы.
+  // Pure/static — юнит-тестируема (ce_band_manual_test).
+  static void FlatBandWidth(double k_band, double clim_bps, double cmkt_bps, double transfer_bps, double rt,
+                            double q_floor, double* z_lim, double* z_mkt);
+
   // ADR-081: зона исполнения хеджа. Агрессивный тейкер, если |позиция| > Z̄mkt; пассивный мейкер между Z̄lim и Z̄mkt.
   // Без привязки к комиссии (fee_linked=false, k_band=0) прежнее поведение — всегда агрессив, КРОМЕ ручной ширины:
   // там Z̄mkt задан оператором и мейкерная зона сохраняется. Pure/static — юнит-тестируема.

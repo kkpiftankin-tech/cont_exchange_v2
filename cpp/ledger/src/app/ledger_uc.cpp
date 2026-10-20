@@ -364,6 +364,25 @@ bool LedgerUseCases::ResolveManualBand(bool manual_on, double q_lim, double q_mk
   return true;
 }
 
+double LedgerUseCases::TransferFeeBps(const std::string& asset, const std::string& numeraire) {
+  const double def = (asset == numeraire) ? 0.5 : 2.5;
+  const std::string key = "CE_TRANSFER_FEE_BPS_" + asset;
+  const char* v = std::getenv(key.c_str());
+  if (v == nullptr || *v == '\0') return def;
+  char* end = nullptr;
+  const double x = std::strtod(v, &end);
+  if (end == v || *end != '\0' || !std::isfinite(x) || x < 0.0 || x > 1000.0) return def;
+  return x;
+}
+
+void LedgerUseCases::FlatBandWidth(double k_band, double clim_bps, double cmkt_bps, double transfer_bps, double rt,
+                                   double q_floor, double* z_lim, double* z_mkt) {
+  const double fee = (std::isfinite(transfer_bps) && transfer_bps > 0.0) ? transfer_bps : 0.0;
+  const double lim = std::max(q_floor, k_band * (clim_bps + fee) * rt);
+  if (z_lim) *z_lim = lim;
+  if (z_mkt) *z_mkt = std::max(lim, k_band * (cmkt_bps + fee) * rt);  // Z̄mkt ≥ Z̄lim всегда
+}
+
 bool LedgerUseCases::IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt) {
   return (!fee_linked && !manual) || (abs_position > z_mkt);
 }
@@ -1976,10 +1995,15 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   if (is_arbitrageur && asset == numeraire) {
     const auto cfg_n = LoadBandFeeConfig();
     const double floor_n = cfg_n.q_floor;  // фаза 2: пол порога из PG (env fallback в LoadBandFeeConfig)
-    const double z_lim_n = cfg_n.manual ? cfg_n.manual_q_lim   // ADR-081: ручная ширина
-        : (cfg_n.k_band > 0.0)
-        ? std::max(floor_n, cfg_n.k_band * cfg_n.clim_bps * 1.0)   // ADR-069: rt=1 на ногу
-        : static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
+    double z_lim_n = 0.0;
+    if (cfg_n.manual) {
+      z_lim_n = cfg_n.manual_q_lim;   // ADR-081: ручная ширина
+    } else if (cfg_n.k_band > 0.0) {
+      // ADR-069: rt=1 на ногу; плюс плата за перевод (ADR-080) — та же формула, что у остальных арбитражёров
+      FlatBandWidth(cfg_n.k_band, cfg_n.clim_bps, cfg_n.cmkt_bps, TransferFeeBps(asset, numeraire), 1.0, floor_n, &z_lim_n, nullptr);
+    } else {
+      z_lim_n = static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));
+    }
     const Decimal q_n{static_cast<int64_t>(std::llround(z_lim_n * 1e6)), 6};
     st.z_lim = q_n; st.z_mkt = q_n;  // единый источник порога (нумерарий: без тейкер-зоны)
     const Decimal abs_c_n = Decimal::cmp(st.position, zero) >= 0 ? st.position
@@ -2028,9 +2052,11 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   bool band_dynamic = false;    // применён ли D1-масштаб (вола)
   double band_depth = 0.0;      // depth (α_e), применённая к порогу (F-18 #7), для лога
   bool band_liq = false;        // применён ли ликвидностный масштаб
+  // ADR-080: плата за перевод между биржами входит в порог арбитражёра (у переводчика 0): перевод — его собственная издержка.
+  // В лог и в порог плата попадает только когда ширина считается от комиссии: в ручном режиме и при плоском env-пороге её нет.
+  const double band_transfer_bps = (is_arbitrageur && fee_linked && !cfg.manual) ? TransferFeeBps(asset, numeraire) : 0.0;
   if (fee_linked) {
-    z_lim = std::max(q_floor, cfg.k_band * cfg.clim_bps * rt);
-    z_mkt = std::max(z_lim, cfg.k_band * cfg.cmkt_bps * rt);  // Z̄mkt ≥ Z̄lim всегда
+    FlatBandWidth(cfg.k_band, cfg.clim_bps, cfg.cmkt_bps, band_transfer_bps, rt, q_floor, &z_lim, &z_mkt);
     // F-18 D1+#7 (T-F18-703, ADR-066): динамический масштаб порога по волатильности
     // актива. Γ=γσ²τ ⇒ z=clim/Γ ∝ 1/(γσ²). Якорим к плоскому при σ_ref, γ_ref=1:
     // множитель (σ_ref²/σ²)/γ, clamp [min,max]. Выше σ ⇒ уже полоса (хеджируем раньше
@@ -2211,6 +2237,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)
                          {"omega", std::to_string(band_omega)},       // ADR-069: ω_i=λ_i/Λ (1=не применён)
+                         {"transfer_bps", std::to_string(band_transfer_bps)},  // ADR-080: плата за перевод в пороге (0 у переводчика)
                          {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
 
