@@ -364,6 +364,14 @@ bool LedgerUseCases::ResolveManualBand(bool manual_on, double q_lim, double q_mk
   return true;
 }
 
+long long LedgerUseCases::BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak) {
+  if (base_ms <= 0) return 0;
+  if (max_ms <= base_ms || fail_streak <= 0) return base_ms;
+  long long cd = base_ms;
+  for (int i = 0; i < fail_streak && cd < max_ms; ++i) cd *= 2;
+  return cd < max_ms ? cd : max_ms;
+}
+
 double LedgerUseCases::TransferFeeBps(const std::string& asset, const std::string& numeraire) {
   const double def = (asset == numeraire) ? 0.5 : 2.5;
   const std::string key = "CE_TRANSFER_FEE_BPS_" + asset;
@@ -2163,7 +2171,11 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // растёт, хеджи не исполняются, in_flight «утекает». Не переэмитим для агента, пока
   // предыдущий хедж «в полёте» (лик-устойчивая замена in_flight-гарду). За cooldown c
   // копит поток → следующий хедж крупнее (реже, но полнее). Env CE_BAND_HEDGE_COOLDOWN_MS.
-  const long long cooldown_ms = cex::common::Env::get_int("CE_BAND_HEDGE_COOLDOWN_MS", 3000);
+  // Пауза растёт вдвое после каждой заявки, завершившейся без исполнения, до CE_BAND_HEDGE_BACKOFF_MAX_MS (деф. 30 с; 0 — без
+  // роста); любое исполнение сбрасывает серию. Позиция за порогом всё это время остаётся и хеджируется следующей попыткой.
+  const long long cooldown_ms = BandHedgeCooldownMs(
+      cex::common::Env::get_int("CE_BAND_HEDGE_COOLDOWN_MS", 3000),
+      cex::common::Env::get_int("CE_BAND_HEDGE_BACKOFF_MAX_MS", 30000), st.band_fail_streak);
   if (st.last_band_emit_ms != 0 && (ts_ms - st.last_band_emit_ms) < cooldown_ms) return;
   // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
   // При выключенном линке — всегда агрессив (старое поведение).
@@ -2237,6 +2249,8 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)
                          {"omega", std::to_string(band_omega)},       // ADR-069: ω_i=λ_i/Λ (1=не применён)
+                         {"fail_streak", std::to_string(st.band_fail_streak)},  // серия неисполненных заявок подряд (рост паузы)
+                         {"cooldown_ms", std::to_string(cooldown_ms)},
                          {"transfer_bps", std::to_string(band_transfer_bps)},  // ADR-080: плата за перевод в пороге (0 у переводчика)
                          {"kind", is_arbitrageur ? "arbitrageur" : "translator"}});
 }
@@ -2358,6 +2372,12 @@ bool LedgerUseCases::apply_agent_band_report_locked(
   // вычтен при эмиссии), и снимается с in_flight. residual = sent − filled (знаковый,
   // знак позиции). c += residual восстанавливает необслуженную часть для ретрая.
   if (terminal) {
+    // Серия неисполненных заявок подряд (для роста паузы): заявка без единого исполнения — +1, любое исполнение — сброс.
+    if (Decimal::cmp(hedge.filled_value, Decimal::zero()) == 0) {
+      if (st.band_fail_streak < 30) ++st.band_fail_streak;
+    } else {
+      st.band_fail_streak = 0;
+    }
     const Decimal residual = Decimal::sub(hedge.sent_value, hedge.filled_value);
     if (residual.units != 0) {
       st.position = Decimal::add(st.position, residual);       // возврат в позицию

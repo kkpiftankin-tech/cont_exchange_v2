@@ -118,6 +118,20 @@ int main() {
   LedgerUseCases::FlatBandWidth(1.8, 2.0, 0.0, 0.5, 1.0, 2.0, &zl, nullptr);
   check(near(zl, 4.5), "нумерарий: 1.8*(2+0.5)=4.5 (плата 0.5 б.п.)");
 
+
+  // --- Пауза между выходами наружу: рост при неисполненных заявках (против петли повторной отправки).
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 0) == 2000, "серия 0: базовая пауза 2 с");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 1) == 4000, "серия 1: 4 с");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 2) == 8000, "серия 2: 8 с");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 3) == 16000, "серия 3: 16 с");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 4) == 30000, "серия 4: 32 с обрезана до максимума 30 с");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, 30) == 30000, "длинная серия не превышает максимум");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 0, 5) == 2000, "максимум 0 отключает рост");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 2000, 5) == 2000, "максимум равен базе — роста нет");
+  check(LedgerUseCases::BandHedgeCooldownMs(2000, 30000, -3) == 2000, "отрицательная серия — база");
+  check(LedgerUseCases::BandHedgeCooldownMs(0, 30000, 3) == 0, "нулевая база — без паузы");
+  check(LedgerUseCases::BandHedgeCooldownMs(3000, 5000, 3) == 5000, "максимум чуть выше базы: 3 с, затем 5 с");
+
   if (g_fail) {
     std::cout << "ce_band_manual_test: " << g_fail << " FAIL\n";
     return 1;

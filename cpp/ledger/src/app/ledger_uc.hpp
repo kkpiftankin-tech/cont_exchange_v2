@@ -131,6 +131,12 @@ class LedgerUseCases {
   static bool ResolveManualBand(bool manual_on, double q_lim, double q_mkt,
                                 double* out_lim, double* out_mkt);
 
+  // Пауза между выходами агента на внешнюю биржу с экспоненциальным ростом при неисполненных заявках: base · 2^серия, но не
+  // больше max. Без роста (возврат к base): max ≤ base, серия ≤ 0 или base ≤ 0. Нужна против петли «остаток вернулся в позицию
+  // → через паузу отправлен снова», когда лимит не пересекается лентой сделок (Kraken в симуляции: 283 из 348 заявок за 10 минут
+  // у одного агента). Pure/static — юнит-тестируема (ce_band_manual_test).
+  static long long BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak);
+
   // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
   // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
   // CE_TRANSFER_FEE_BPS_<АКТИВ> (число от 0 до 1000; не задано / пусто / не число / NaN / inf / отрицательно / больше 1000 ⇒ по умолчанию 2,5 б.п. (0,25 ‰ — прежний тариф перевоза
@@ -462,6 +468,7 @@ class LedgerUseCases {
     std::string last_batch_id;
     long long updated_at_ms{0};
     long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
+    int band_fail_streak{0};         // заявок подряд, завершённых без единого исполнения (растит паузу, сбрасывается любым исполнением)
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
