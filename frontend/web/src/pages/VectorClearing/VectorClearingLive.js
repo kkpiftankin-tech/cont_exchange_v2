@@ -420,7 +420,7 @@ const reasonBg = (r) => {
 // Две таблицы позиций агентов (переводчики base/quote + арбитражёры источник/приёмник).
 // Переиспользуется: статичный снимок батча (ClearingDetail) и живая панель (кнопка).
 // Money-path/маршрут/ноги считает BFF — здесь только рендер (frontend-no-domain-compute).
-function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
+export function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
   const rows = Array.isArray(agentRows) ? agentRows : [];
   const clickable = typeof onSelectAgent === 'function';
   const rowProps = (a) => clickable ? {
@@ -459,6 +459,18 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
   // unrealized (U — MTM открытого остатка, болтается с маркой) приглушённым: «R / U».
   const pnlColor = (x) => Number(x) > 1e-9 ? '#5fd08a' : Number(x) < -1e-9 ? '#e06060' : '#9fb2c2';
   const pnlCell = (a) => {
+    if (a.agent_kind === 'arbitrageur') {
+      // ADR-073: арбитражёр наружу не торгует ⇒ сделок и R/U нет. Измеримо одно — базис позиции: стоимость обеих ног по ценам
+      // своих бирж (если закрыть сейчас). Тариф перевоза в клиринге сейчас 0 (ADR-080), поэтому доход от него нулевой.
+      const m = a.basis_mtm_usdt;
+      if (m == null || !Number.isFinite(Number(m))) return dash;
+      return (
+        <span data-testid="arb-basis" title="Базис позиции (не реализован): стоимость ног арбитражёра по ценам своих бирж, если закрыть позицию сейчас = количество на приёмнике × (цена на приёмнике − цена на источнике). Наружу арбитражёр не торгует (ADR-073), поэтому сделок и реализованной прибыли у него нет. Доход от тарифа перевоза сейчас 0 (ADR-080). Разница цен между биржами по замыслу уходит на счёт дома.">
+          <span style={{ color: pnlColor(m), fontWeight: 600 }}>{sgn(m)}</span>
+          <span style={{ opacity: 0.6, fontSize: '0.85em' }}> базис</span>
+        </span>
+      );
+    }
     const r = a.realized_usdt, u = a.unrealized_usdt;
     const rOk = r != null && Number.isFinite(Number(r));
     const uOk = u != null && Number.isFinite(Number(u));
@@ -512,8 +524,10 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
             : (Number.isFinite(Number(a.pnl_usdt)) ? Number(a.pnl_usdt) : 0);
     return s + v;
   }, 0);
-  const haveStats = rows.some((a) => a.realized_usdt != null || a.pnl_usdt != null);
-  const totT = sumPnl(tRows), totA = sumPnl(aRows), totAll = totT + totA;
+  const haveStats = rows.some((a) => a.realized_usdt != null || a.pnl_usdt != null || a.basis_mtm_usdt != null);
+  const totT = sumPnl(tRows);
+  // Арбитражёры: сумма базиса позиций (нереализованный, по ценам бирж), а не сделок — сделок у них нет (ADR-073).
+  const totA = aRows.reduce((s, a) => s + (Number.isFinite(Number(a.basis_mtm_usdt)) ? Number(a.basis_mtm_usdt) : 0), 0);
   const pnlTotal = (v) => (
     <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)} USDT</b>
   );
@@ -523,7 +537,7 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
       <th title="валюта/нога агента (отдельная строка на каждую)">нога</th>
       <th title="позиция ДО этого такта клиринга">было</th>
       <th title="Δ позиции в ЭТОМ такте">дельта</th>
-      <th title="позиция ПОСЛЕ такта (= было + дельта)">стало</th>
+      <th title="позиция ПОСЛЕ такта (= было + дельта), считается от полной позиции c + отправленное в заявках (in_flight) — так же, как на вкладке «Граф»">стало</th>
       <th title="сколько отправлено на биржу (band-хедж заявка, target_qty)">отправлено</th>
       <th title="сколько исполнилось по результатам симуляции (filled_qty)">исполнено</th>
       <th title="кол-во БАЗОВОЙ валюты по состоявшимся сделкам (signed: BUY +, SELL −); без комиссий">сделки: база</th>
@@ -548,13 +562,20 @@ function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
             <tbody>{aRows.map((a, i) => renderAgent(a, i, 'a'))}</tbody>
           </table>
         ) : <div className="vc-note vc-note-tight">нет арбитражёров с позицией</div>}
+        {aRows.length > 0 && (
+          <div className="vc-note vc-note-tight" data-testid="arb-explain">
+            <b>Почему у арбитражёров нет «заработка по сделкам».</b> Арбитражёр перемещает актив между биржами внутри CE и <b>наружу не торгует</b> (ADR-073),
+            поэтому у него нет сделок, а значит нет реализованной и нереализованной прибыли, как у переводчика. Его доход по замыслу — <b>тариф перевоза</b>
+            в клиринге (сейчас 0: внутренний клиринг без барьеров, ADR-080) плюс <b>изменение разницы цен между биржами</b> на его позиции — её показывает колонка «базис».
+            Сама разница цен между биржами сейчас порядка 0–1 б.п., поэтому и базис — доли USDT. Прибыль от разницы цен по базовому документу уходит на счёт дома, а не агенту.
+          </div>
+        )}
 
         {haveStats && (
           <div className="vc-trade-totals">
             <span className="vc-tt-title">Общий заработок по состоявшимся сделкам (USDT, без комиссий):</span>
             <span>Переводчики ({tRows.length}): {pnlTotal(totT)}</span>
-            <span>Арбитражёры ({aRows.length}): {pnlTotal(totA)}</span>
-            <span className="vc-tt-all">Вместе: {pnlTotal(totAll)}</span>
+            <span title="Базис позиций арбитражёров по ценам бирж (нереализованный): наружу они не торгуют, сделок нет">Арбитражёры, базис позиций ({aRows.length}): {pnlTotal(totA)}</span>
           </div>
         )}
 

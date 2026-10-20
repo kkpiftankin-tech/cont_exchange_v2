@@ -4,9 +4,9 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
-const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt } = require("./trade_stats_math");
+const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt } = require("./trade_stats_math");
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
-const { buildCeGraph } = require("./ce_graph_build");  // граф CE: узлы asset@venue, рёбра агентов
+const { buildCeGraph, makePriceOf } = require("./ce_graph_build");  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
 const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
@@ -6928,7 +6928,7 @@ async function fetchVenueFillDiagnostics(batchId) {
 // c·1000/цена_пары (единицы base). Одна нога +, другая − (в ОДНОЙ строке).
 // Арбитражёр перевозит ОДИН актив — у него одна нога (актив), пары нет.
 // Домен-математику держим в BFF (не в браузере, [frontend-no-domain-compute]).
-function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
+function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf) {
   const hm = hedgeMap instanceof Map ? hedgeMap : new Map();
   const ts = tradeStats instanceof Map ? tradeStats : new Map();
   const keyOf = (p) => (p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '');
@@ -6963,8 +6963,15 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
     const cDel = del ? Number(del.delta) : null;
     // F-18: было → дельта → стало ЭТОГО такта (ledger GetAgentPositionDeltas). Если
     // агент не двигался (нет del) — было=стало=текущая позиция, дельта=0.
-    const cBefore = del ? Number(del.position_before) : cPos;
-    const cAfter = del ? Number(del.position_after) : cPos;
+    // Ноги считаем от ПОЛНОЙ позиции c + in_flight — так же, как вкладка «Граф» (иначе у агента с заявкой «в полёте» экраны
+    // показывают разные ноги). Дельта такта (cDel) от in_flight не зависит.
+    // «Стало» — ТЕКУЩАЯ полная позиция (как на графе: он тоже берёт текущую строку ledger); запись дельты такта фиксирует
+    // позицию на момент клиринга, ДО эмиссии хеджа этого такта, и расходилась бы с графом на величину хеджа. «Было» =
+    // стало − дельта (при c+in_flight эмиссия хеджа сумму не меняет: избыток переходит из c в in_flight). Нет текущей
+    // строки (агент только в дельтах) — прежний расчёт по записи дельты.
+    const cAfter = (cTotal != null) ? cTotal : totalPosition(del ? Number(del.position_after) : cPos, inFlight);
+    const cBefore = (cTotal != null && cDel != null && Number.isFinite(cDel)) ? cTotal - cDel
+      : (cTotal != null ? cTotal : totalPosition(del ? Number(del.position_before) : cPos, inFlight));
     // Разложение стоимости val (k-USDT) на ноги В СВОИХ валютах пары (money-path,
     // ADR-057). value_USDT = val·1000. base_qty = value/P_base, quote_qty = value/P_quote,
     // где P_quote = P_base/reference_price. Переводчик: SELL base ⇒ base−, quote+ (при c>0);
@@ -7101,8 +7108,10 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
     const legVals = (p, d) => {
       const price = p ? Number(p.reference_price) : 0;
       const after = p ? Number(p.position) : (d ? Number(d.position_after) : null);
-      const before = d ? Number(d.position_before) : after;
       const delta = d ? Number(d.delta) : null;
+      // «Было» = стало − дельта такта (как у переводчика): стало берётся из текущей строки ledger, запись дельты — на момент клиринга.
+      const before = (after != null && Number.isFinite(after) && delta != null && Number.isFinite(delta)) ? after - delta
+        : (d ? Number(d.position_before) : after);
       return { after: qtyOf(after, price), before: qtyOf(before, price), delta: qtyOf(delta, price) };
     };
     const sL = legVals(srcPos, delSrc), dL = legVals(dstPos, delDst);
@@ -7110,9 +7119,16 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
     // Марка MTM-заработка — цена dst-ноги (площадка выхода); fallback на src.
     const basePrice = Number((dstPos || srcPos || {}).base_price) || 0;
     const price = Number((dstPos || srcPos || {}).reference_price) || 0;
+    // Заработок арбитражёра (ADR-073): наружу он не торгует, поэтому сделок и R/U нет. Измеримо одно — базис позиции:
+    // стоимость ног по ценам своих бирж (q_dst·(P_dst − P_src)); тариф перевоза в клиринге сейчас 0 (ADR-080).
+    // Цены ног — по бирже из сегментов клиринга (как на графе): в строке ledger цена актива одна на все биржи и дала бы 0.
+    const pOf = typeof venuePriceOf === 'function' ? venuePriceOf : () => null;
+    const basisMtm = arbBasisMtmUsdt(asset, process.env.CE_NUMERAIRE || 'USDT',
+      sL.after, pOf(asset, srcV), dL.after, pOf(asset, dstV));
     rows.push({
       agent_id: agentId,
       agent_kind: 'arbitrageur',
+      basis_mtm_usdt: basisMtm,
       pair: asset === 'USDT' ? 'USDT' : `${asset}/USDT`,
       base: asset,
       quote: asset === 'USDT' ? '' : 'USDT',
@@ -7153,6 +7169,17 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats) {
     return String(a.agent_id).localeCompare(String(b.agent_id));
   });
   return rows;
+}
+
+// Последние сегменты клиринга по (биржа, пара) за winS секунд: mid пары на бирже — основа цен активов по биржам
+// (граф и панель «Живые позиции»).
+async function fetchCeSegmentRows(winS) {
+  return chJsonEachRow(
+    "SELECT venue_id, pair, toString(effective_price) AS mid, toString(alpha_t) AS alpha_t,"
+    + " toString(beta_t) AS beta_t, toString(theta) AS theta, toString(anchor) AS anchor_pm, event_time_ms"
+    + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
+    + " WHERE event_time_ms > (toUnixTimestamp(now())-" + Number(winS) + ")*1000"
+    + " ORDER BY event_time_ms DESC LIMIT 1 BY venue_id, pair FORMAT JSONEachRow");
 }
 
 async function fetchAgentPositions() {
@@ -7964,13 +7991,16 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/agent-positions") {
     const rows = await fetchVectorClearingRows(1);
     const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas, hedgeMap, tradeStats] = await Promise.all([
+    const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows] = await Promise.all([
       fetchAgentPositions(),
       newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
       fetchAgentHedgeMap(),
-      fetchAgentTradeStats()
+      fetchAgentTradeStats(),
+      fetchCeSegmentRows(600).catch(() => [])   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
     ]);
-    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats);
+    // сегменты → {venue, pair, mid} (в запросе поле venue_id), как в маршруте графа
+    const venuePriceOf = makePriceOf((segRows || []).map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid) })));
+    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf);
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
   }
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —
@@ -8008,12 +8038,7 @@ async function handleVectorClearing(req, res, pathname, query) {
       const newestRows = await fetchVectorClearingRows(1);
       const newestBatch = newestRows && newestRows[0] ? newestRows[0].batch_id : "";
       const [segRows, positions, deltas, hedgePos] = await Promise.all([
-        chJsonEachRow(
-          "SELECT venue_id, pair, toString(effective_price) AS mid, toString(alpha_t) AS alpha_t,"
-          + " toString(beta_t) AS beta_t, toString(theta) AS theta, toString(anchor) AS anchor_pm, event_time_ms"
-          + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
-          + " WHERE event_time_ms > (toUnixTimestamp(now())-" + winS + ")*1000"
-          + " ORDER BY event_time_ms DESC LIMIT 1 BY venue_id, pair FORMAT JSONEachRow"),
+        fetchCeSegmentRows(winS),
         fetchAgentPositions(),
         newestBatch ? fetchAgentPositionDeltas(newestBatch) : Promise.resolve([]),
         fetchHedgePositionRows(),

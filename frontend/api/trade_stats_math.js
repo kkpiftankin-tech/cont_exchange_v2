@@ -58,4 +58,28 @@ function tradedBasketUsdt(tradedBase, tradedQuote, basePrice, price) {
   return baseLeg + quoteLeg;
 }
 
-module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt };
+// Полная позиция агента (модель A7): c — неотправленный остаток, in_flight — уже отправленное в заявки; истинное
+// обязательство = c + in_flight (обе величины одного знака), в тыс. USDT. Ровно так считает вкладка «Граф» (ce_graph_build.cOf),
+// поэтому панель «Позиции» обязана брать ту же сумму, иначе ноги агента с заявкой «в полёте» на экранах расходятся.
+// position не число ⇒ null (нет данных остаётся «нет данных», а не нулём); in_flight не число ⇒ 0.
+function totalPosition(position, inFlight) {
+  if (position === null || position === undefined) return null;
+  const c = Number(position);
+  if (!Number.isFinite(c)) return null;
+  const f = Number(inFlight);
+  return c + (Number.isFinite(f) ? f : 0);
+}
+
+// Базис позиции арбитражёра: стоимость обеих его ног (в единицах актива, ноги src и dst противоположны по знаку)
+// по ценам СВОИХ бирж = q_src·P_src + q_dst·P_dst = q_dst·(P_dst − P_src). Это результат «закрыть позицию сейчас по ценам
+// бирж» при нулевой стоимости перевода; он нереализован — арбитражёр наружу не торгует (ADR-073). Нумерарий (USDT) цены
+// не имеет и базиса не даёт ⇒ 0. Нет цены или количества ⇒ null.
+function arbBasisMtmUsdt(asset, numeraire, qSrc, pSrc, qDst, pDst) {
+  if (asset && asset === numeraire) return 0;
+  const a = Number(qSrc), b = Number(qDst), ps = Number(pSrc), pd = Number(pDst);
+  if (qSrc === null || qSrc === undefined || qDst === null || qDst === undefined) return null;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !(ps > 0) || !(pd > 0)) return null;
+  return a * ps + b * pd;
+}
+
+module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbBasisMtmUsdt };

@@ -1,6 +1,6 @@
 // Self-contained node-тест: `node ce_graph_build.test.js`.
 const assert = require('assert');
-const { buildCeGraph } = require('./ce_graph_build');
+const { buildCeGraph, makePriceOf } = require('./ce_graph_build');
 let failed = 0;
 const near = (a, b, e = 1e-9) => Math.abs(a - b) <= e * Math.max(1, Math.abs(b));
 const check = (n, c) => { if (c) console.log('[OK] ' + n); else { console.error('[FAIL] ' + n); failed++; } };
@@ -119,6 +119,17 @@ check('узел без агентов с позициями: ноль, а не n
 // стоимостная сходимость: Σ(cePos·цена) по узлам ≈ 0 для замкнутых пар (переводчик: −v + v; арбитражёр: −leg + leg по своим ценам)
 const valSum = ge.nodes.reduce((sum, n) => sum + n.cePos.qty * (n.priceUsdt || 0), 0);
 check('Σ позиций агентов в USDT-стоимости по узлам ≈ 0 (замкнутость), |Σ| < 20 USDT на разницу цен BTC между биржами', Math.abs(valSum) < 20);
+
+
+// --- Цена актива по бирже (общая для графа и панели «Живые позиции»)
+{
+  const priceOf = makePriceOf(segs);
+  check('priceOf: USDT = 1', priceOf('USDT', 'v1') === 1);
+  check('priceOf: прямая пара — своя цена на каждой бирже', priceOf('BTC', 'v1') === 80000 && priceOf('BTC', 'v2') === 80080);
+  check('priceOf: разница цен между биржами сохраняется (иначе базис арбитражёра был бы 0)', priceOf('BTC', 'v2') - priceOf('BTC', 'v1') === 80);
+  check('priceOf: нет данных — null', priceOf('XRP', 'v1') === null && priceOf('BTC', 'нет-такой-биржи') === null);
+  check('priceOf: пустые сегменты — null, без падения', makePriceOf([])('BTC', 'v1') === null && makePriceOf(undefined)('BTC', 'v1') === null);
+}
 
 assert.strictEqual(failed, 0, failed + ' failed');
 console.log('ce_graph_build tests passed');

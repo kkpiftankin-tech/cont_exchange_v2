@@ -27,14 +27,13 @@
 // (venue_fill_diagnostics, ce|band|<агент>|…) с момента сброса статистики. Пара X/Y: X += BUY−SELL
 // (кол-во базы), Y += выручка SELL − затраты BUY (в единицах quote). Разбивка по виду агента (T_/A_).
 // hedgeFills — строки {agent_id, venue, symbol, buy_base, sell_base, buy_notional, sell_notional}.
-function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [], cfg = {} }) {
-  const gamma = Number(cfg.gamma) || 0, clampPm = Number(cfg.clampPm) || 0;
-  const transfer = cfg.transfer || {};
+// Цена актива на бирже в USDT по сегментам клиринга (mid пары на бирже): USDT = 1; прямая пара X/USDT; иначе одна
+// кросс-пара X/Q × цена Q. Нет данных ⇒ null. Общая для графа и панели «Живые позиции»: оба экрана берут цены по бирже
+// из одних и тех же сегментов (в строке ledger цена актива одна на все биржи и разницу между биржами не отражает).
+function makePriceOf(segs) {
   const good = (s) => s && s.venue && /^[A-Z0-9]+\/[A-Z0-9]+$/.test(String(s.pair || '')) && Number(s.mid) > 0;
-  const S = segs.filter(good);
-
+  const S = (segs || []).filter(good);
   const byKey = new Map(S.map((s) => [`${s.venue}|${s.pair}`, s]));
-  // цена актива на бирже в USDT: USDT=1; прямая пара X/USDT; иначе одна кросс-пара X/Q × цена Q.
   const priceOf = (asset, venue, depth = 0) => {
     if (asset === 'USDT') return 1;
     const direct = byKey.get(`${venue}|${asset}/USDT`);
@@ -48,6 +47,15 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
     }
     return null;
   };
+  return priceOf;
+}
+
+function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [], cfg = {} }) {
+  const gamma = Number(cfg.gamma) || 0, clampPm = Number(cfg.clampPm) || 0;
+  const transfer = cfg.transfer || {};
+  const good = (s) => s && s.venue && /^[A-Z0-9]+\/[A-Z0-9]+$/.test(String(s.pair || '')) && Number(s.mid) > 0;
+  const S = segs.filter(good);
+  const priceOf = makePriceOf(S);
 
   const posByAgent = new Map();
   for (const p of positions) {
@@ -178,4 +186,4 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
   return { nodes, edges, venues, assets, pairs };
 }
 
-module.exports = { buildCeGraph };
+module.exports = { buildCeGraph, makePriceOf };
