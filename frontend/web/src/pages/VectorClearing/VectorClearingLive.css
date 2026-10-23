@@ -433,3 +433,13 @@
 
 /* Панель «Живые позиции»: заголовок группы (биржа / пара бирж) внутри таблицы агентов */
 .vc-sub-table .vc-group-head td { background: rgba(120, 140, 170, 0.14); font-weight: 600; padding: 4px 8px; border-top: 2px solid rgba(120, 140, 170, 0.35); }
+
+/* Панель «Живые позиции»: разделение внутренней биржи CE (слева) и внешних бирж (справа) */
+.vc-sub-table th.vc-grp-int,
+.vc-sub-table th.vc-grp-ext { text-align: center; font-size: 12px; letter-spacing: 0.02em; border-bottom: 2px solid #243244; }
+.vc-sub-table th.vc-grp-int { color: #7fb4d8; background: rgba(79, 176, 216, 0.08); }
+.vc-sub-table th.vc-grp-ext { color: #d8b27f; background: rgba(224, 168, 74, 0.08); }
+.vc-sub-table th.vc-ext-start,
+.vc-sub-table td.vc-ext-start { border-left: 2px solid #34495c; }
+.vc-ru-legend ul { margin: 4px 0 4px 18px; padding: 0; }
+.vc-ru-legend li { margin: 2px 0; }

@@ -17,8 +17,13 @@ COPY slope_aggregate.js .
 COPY ce_graph_build.js .
 COPY ce_clearing_view.js .
 COPY venue_stage_merge.js .
+COPY venue_liquidity_view.js .
 COPY band_config.js .
 COPY agent_placeholders.js .
+COPY hedge_orders_view.js .
+COPY agent_pnl_history.js .
+COPY ce_surplus_accum.js .
+COPY system_pnl.js .
 COPY data ./data
 
 EXPOSE 8090

@@ -68,6 +68,36 @@ if (BUILD_TESTING)
   target_compile_options(ce_band_hedge_a7_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ce_band_hedge_a7_test COMMAND ce_band_hedge_a7_test)
 
+  # ADR-082 шаг 2: потолок размера хедж-заявки по обороту ленты биржи (чистые функции + эмиссия с подставным источником ν).
+  add_executable(ce_order_cap_test
+    tests/ce_order_cap_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_order_cap_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_order_cap_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_order_cap_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_order_cap_test COMMAND ce_order_cap_test)
+
+  # ADR-084: физический перевод связки между биржами (порог, сумма, срок, исполнение, ApplyNodeTransfer, boot_id).
+  add_executable(ce_link_transfer_test
+    tests/ce_link_transfer_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_link_transfer_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_link_transfer_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_link_transfer_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_link_transfer_test COMMAND ce_link_transfer_test)
+
   # F-18 D1+#7 (T-F18-703/706): чистая функция VolScaleFactor (динамический порог).
   add_executable(ce_band_vol_scale_test
     tests/ce_band_vol_scale_test.cpp

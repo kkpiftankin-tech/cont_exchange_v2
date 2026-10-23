@@ -200,6 +200,48 @@ CREATE INDEX IF NOT EXISTS idx_child_orders_venue ON child_orders (venue_id, sta
 CREATE INDEX IF NOT EXISTS idx_child_orders_hedge_flow ON child_orders (hedge_flow_id);
 CREATE INDEX IF NOT EXISTS idx_child_orders_venue_order_id
   ON child_orders (venue_id, venue_order_id) WHERE venue_order_id IS NOT NULL;
+-- Панель «Живые позиции» (BFF) берёт заявки агентов за последние 2 часа: окно по времени делает запрос индексным.
+CREATE INDEX IF NOT EXISTS idx_child_orders_created ON child_orders (created_at);
+
+-- ce_agent_pnl_history: история заработка агента CE во времени (график по клику на агента в «Живых позициях»).
+-- Единственный писатель — BFF (frontend/api/server.js, семплер раз в PNL_HISTORY_SAMPLE_MS, деф. 60 с): пишет те же R и U
+-- (USDT, без комиссий), что видны в колонке «заработок R / U». Только отображение: в ledger/risk не читается. Хранение —
+-- PNL_HISTORY_RETENTION_DAYS (деф. 7), BFF сам убирает старше. Схему BFF также создаёт при старте (IF NOT EXISTS).
+-- Описание: docs/07-data/ce-agent-pnl-history.md.
+CREATE TABLE IF NOT EXISTS ce_agent_pnl_history (
+  agent_id        TEXT NOT NULL,
+  ts              TIMESTAMPTZ NOT NULL,
+  realized_usdt   NUMERIC(38, 12),
+  unrealized_usdt NUMERIC(38, 12),
+  trade_fills     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, ts)
+);
+-- ADR-083: выгода участника в клиринге (CALC-CE-CLEARING-SURPLUS) — приращение за интервал и число тактов (учтено / ожидалось).
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_inc_usdt NUMERIC(38, 12);
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts INTEGER;
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts_expected INTEGER;
+CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts);   -- сумма выгоды с момента сброса и часовая очистка читают таблицу по времени без agent_id
+
+-- ce_system_pnl_baseline / ce_system_pnl_history: прибыль системы CE по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083).
+-- Единственный писатель — BFF (frontend/api/server.js, тот же семплер раз в минуту). База (остатки и цены) задаётся при первом замере и
+-- при сбросе статистики сделок. Только отображение: ledger и matching таблиц не читают. Описание: docs/07-data/ce-system-pnl.md.
+CREATE TABLE IF NOT EXISTS ce_system_pnl_baseline (
+  id       INTEGER PRIMARY KEY CHECK (id = 1),
+  ts       TIMESTAMPTZ NOT NULL,
+  reset_ms BIGINT NOT NULL,
+  q0       JSONB NOT NULL,
+  m0       JSONB NOT NULL,
+  boot_id  TEXT,                                   -- запуск ledger на момент базы (ADR-084): смена = ledger перезапущен, остатки бирж обнулились
+  carry    JSONB NOT NULL DEFAULT '{}'::jsonb      -- накопленные торговый результат и переоценка, перенесённые через перезапуск ledger
+);
+CREATE TABLE IF NOT EXISTS ce_system_pnl_history (
+  ts               TIMESTAMPTZ PRIMARY KEY,
+  trading_usdt     NUMERIC(38, 12) NOT NULL,
+  revaluation_usdt NUMERIC(38, 12) NOT NULL,
+  mtm_change_usdt  NUMERIC(38, 12) NOT NULL,
+  mtm_usdt         NUMERIC(38, 12) NOT NULL,
+  skipped          INTEGER NOT NULL DEFAULT 0
+);
 
 -- venue_fill_diagnostics: per hedge-order sim-fill attempt (ADR-060) — почему
 -- симулятор исполнил / не исполнил заявку. Захватывается в момент матчинга
@@ -226,6 +268,24 @@ CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
 CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_batch ON venue_fill_diagnostics (batch_id);
 CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_hedge ON venue_fill_diagnostics (hedge_flow_id);
 CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_created ON venue_fill_diagnostics (created_at DESC);
+
+-- venue_liquidity_stats: измерение ликвидности внешних бирж по парам (ADR-082, шаг 0) — оборот ленты
+-- публичных сделок ν и коэффициент исполнения f хедж-заявок. Пишет venues раз в CE_LIQ_STATS_PUBLISH_MS
+-- (UPSERT по (venue, symbol)); читают BFF (экран «Внешние биржи») и — позже, за флагами — market_data
+-- (глубина агента), ledger (потолок размера заявки, порог). Числа double: метрики, в ledger-деньги не попадают.
+CREATE TABLE IF NOT EXISTS venue_liquidity_stats (
+  venue            TEXT NOT NULL,
+  symbol           TEXT NOT NULL,                       -- канонический ключ ленты (BTCUSDT, ETHBTC, ...)
+  tape_quote_per_s DOUBLE PRECISION NOT NULL DEFAULT 0, -- оборот ленты, валюты котирования в секунду (EWMA, τ=CE_TAPE_EWMA_TAU_S)
+  tape_samples     BIGINT NOT NULL DEFAULT 0,           -- сколько чтений ленты вошло в оценку (0 — оценки ещё нет)
+  fill_coef        DOUBLE PRECISION NOT NULL DEFAULT 1, -- f ∈ [0,1]: исполнено/запрошено по хедж-заявкам (τ=CE_FILL_COEF_TAU_S); нет заявок ⇒ 1
+  fill_weight      DOUBLE PRECISION NOT NULL DEFAULT 0, -- вес оценки f: запрошенный объём заявок (база) с забыванием
+  fill_orders      BIGINT NOT NULL DEFAULT 0,           -- сколько заявок вошло в f
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (venue, symbol)
+);
+-- ADR-082 шаг 1: число заявок в f с забыванием на момент записи (вес доверия к f у потребителя; убывает без новых заявок).
+ALTER TABLE venue_liquidity_stats ADD COLUMN IF NOT EXISTS fill_orders_eff DOUBLE PRECISION NOT NULL DEFAULT 0;
 
 -- execution_reports_raw: optional landing zone for normalized ExecutionReport
 -- events before aggregation into ClickHouse `execution_reports`. Useful for:

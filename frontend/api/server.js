@@ -4,13 +4,18 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
-const { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require("./trade_stats_math");
+const { combineTradeStats, combineTradeStatsByVenue, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require("./trade_stats_math");
+const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
+const { pnlSamples, buildPnlHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента во времени
+const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
+const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
 const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
 const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
+const { buildLiquidityStatsView } = require("./venue_liquidity_view");  // ADR-082: ν и f бирж по парам
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
 
 // gRPC client for ledger
@@ -6923,6 +6928,296 @@ async function fetchVenueFillDiagnostics(batchId) {
   }
 }
 
+// Живые строки панели «Позиции агентов»: ТЕКУЩИЕ позиции всех переводчиков/арбитражёров + дельты самого свежего такта + заявки на
+// внешние биржи + статистика сделок. Одна функция для маршрута /agent-positions и для семплера истории заработка (оба обязаны
+// видеть ровно одни и те же числа).
+async function loadLiveAgentRows() {
+  const rows = await fetchVectorClearingRows(1);
+  const newest = rows && rows[0] ? rows[0].batch_id : "";
+  const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows, ceSnap, surplusTotals] = await Promise.all([
+    fetchAgentPositions(),
+    newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
+    fetchAgentHedgeMap(),
+    fetchAgentTradeStats(),
+    fetchCeSegmentRows(600).catch(() => []),   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
+    fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 2000).catch(() => null),   // граф клиринга: полный список агентов
+    fetchAgentSurplusTotals().catch(() => new Map())   // накопленная выгода участников в клиринге (с момента сброса статистики)
+  ]);
+  // сегменты → {venue, pair, mid} (в запросе поле venue_id), как в маршруте графа
+  const venuePriceOf = makePriceOf((segRows || []).map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid) })));
+  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf);
+  // Агенты графа клиринга, у которых в ledger ещё нет строки позиции, показываем нулевыми строками: панель показывает ВСЕХ
+  // агентов сразу, а не только тех, что уже двигались.
+  agentRows.push(...placeholderAgentRows(ceSnap && ceSnap.edges, new Set(agentRows.map((r) => r.agent_id))));
+  // выгода участника в клиринге (CALC-CE-CLEARING-SURPLUS): записанное в историю + ещё не записанная часть текущей минуты
+  // записанное + «в пути» (сброшено, запись ещё идёт) + ещё не сброшенная часть копилки; все три читаются синхронно, поэтому значение не мигает
+  const recMap = surplusTotalsCache.value;
+  const flightMap = surplusInflight ? surplusInflight.agents : null;
+  for (const r of agentRows) {
+    const rec = recMap.get(r.agent_id);
+    const flight = flightMap ? flightMap.get(r.agent_id) : null;
+    const live = surplusAcc.perAgent.get(r.agent_id);
+    if (rec || flight || live) {
+      r.surplus_usdt = (rec ? rec.surplus : 0) + (flight ? flight.surplus : 0) + (live ? live.surplus : 0);
+      r.surplus_coverage = rec ? rec.coverage : null;
+    }
+  }
+  return { agentRows, newest };
+}
+
+// ── История заработка агентов: семплер раз в PNL_HISTORY_SAMPLE_MS (деф. 60 с; 0 — выключен) пишет R и U каждого агента в PG
+// ce_agent_pnl_history, хранение PNL_HISTORY_RETENTION_DAYS (деф. 7). Пишутся те же числа, что видит панель (loadLiveAgentRows).
+// BFF здесь единственный писатель таблицы; сбой семплера не влияет на ответы панели. ──
+const PNL_HISTORY_SAMPLE_MS = Math.max(0, parseInt(process.env.PNL_HISTORY_SAMPLE_MS || "60000", 10) || 0);
+const PNL_HISTORY_RETENTION_DAYS = Math.max(1, parseInt(process.env.PNL_HISTORY_RETENTION_DAYS || "7", 10) || 7);
+let pnlSamplerBusy = false;
+let pnlLastPruneMs = 0;
+let pnlTableReady = false;
+async function ensurePnlHistoryTable(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS ce_agent_pnl_history (
+       agent_id        TEXT NOT NULL,
+       ts              TIMESTAMPTZ NOT NULL,
+       realized_usdt   NUMERIC(38, 12),
+       unrealized_usdt NUMERIC(38, 12),
+       trade_fills     INTEGER NOT NULL DEFAULT 0,
+       PRIMARY KEY (agent_id, ts))`);
+  // ADR-083: выгода участника в клиринге — приращение за интервал и число тактов (учтено / ожидалось) + индекс по времени.
+  // ALTER берёт эксклюзивную блокировку даже когда колонка есть, поэтому сначала проверяем каталог и меняем схему, только если надо,
+  // с коротким lock_timeout (иначе DDL встанет в очередь за долгим SELECT и заблокирует всё, что идёт за ним).
+  const cols = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'ce_agent_pnl_history'");
+  const have = new Set(cols.rows.map((r) => r.column_name));
+  const need = [["surplus_inc_usdt", "NUMERIC(38, 12)"], ["surplus_tacts", "INTEGER"], ["surplus_tacts_expected", "INTEGER"]].filter(([c]) => !have.has(c));
+  const idx = await pool.query("SELECT 1 FROM pg_indexes WHERE tablename = 'ce_agent_pnl_history' AND indexname = 'idx_ce_pnl_hist_ts'");
+  if (need.length || idx.rowCount === 0) {
+    const c = await pool.connect();
+    try {
+      await c.query("SET lock_timeout = '3s'");
+      for (const [col, typ] of need) await c.query(`ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS ${col} ${typ}`);
+      if (idx.rowCount === 0) await c.query("CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts)");
+    } finally { try { await c.query("RESET lock_timeout"); } catch (_) { /* соединение */ } c.release(); }
+  }
+}
+
+// ── Выгода участников в клиринге (CALC-CE-CLEARING-SURPLUS): опрос последнего снимка matching раз в CE_SURPLUS_POLL_MS (деф. 700 мс,
+// такт ≈ 1,08 с; 0 — выключен), каждый такт учитывается один раз по batchId; копилка сбрасывается проходом записи истории. ──
+const CE_SURPLUS_POLL_MS = Math.max(0, parseInt(process.env.CE_SURPLUS_POLL_MS || "700", 10) || 0);
+const surplusAcc = createAccumulator();
+let surplusInflight = null;   // сброшенная из копилки, но ещё не попавшая в итоги часть (пока идёт запись): панель добавляет её, чтобы значение не мигало
+let surplusPollBusy = false;
+async function pollSurplusOnce() {
+  if (surplusPollBusy) return;
+  surplusPollBusy = true;
+  try {
+    const snap = await fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 1500);
+    accumulateTact(surplusAcc, snap);
+  } catch (_) { /* нет снимка — такт пропущен, доля учтённых тактов это покажет */ }
+  finally { surplusPollBusy = false; }
+}
+// Накопленная с момента сброса статистики выгода по участникам из истории (кэш 10 с; параллельные вызовы делят один запрос;
+// после ошибки повтор не раньше чем через 10 с).
+let surplusTotalsCache = { at: 0, value: new Map(), ok: false };
+let surplusTotalsInflight = null;
+function fetchAgentSurplusTotals(force) {
+  if (!force && Date.now() - surplusTotalsCache.at < 10000) return Promise.resolve(surplusTotalsCache.value);
+  if (!surplusTotalsInflight) surplusTotalsInflight = loadAgentSurplusTotals().finally(() => { surplusTotalsInflight = null; });
+  return surplusTotalsInflight;
+}
+// После записи истории: дождаться идущего запроса (он мог стартовать до записи) и прочитать итоги заново; true — итоги свежие.
+async function refreshSurplusTotalsAfterWrite() {
+  if (surplusTotalsInflight) { try { await surplusTotalsInflight; } catch (_) { /* учтено внутри */ } }
+  await fetchAgentSurplusTotals(true);
+  return surplusTotalsCache.ok;
+}
+async function loadAgentSurplusTotals() {
+  const pool = getPgPool();
+  if (!pool) return surplusTotalsCache.value;
+  try {
+    const r = await pool.query(
+      `SELECT agent_id, SUM(surplus_inc_usdt)::float8 AS surplus,
+              SUM(surplus_tacts)::float8 AS seen, SUM(surplus_tacts_expected)::float8 AS expected
+         FROM ce_agent_pnl_history
+        WHERE surplus_inc_usdt IS NOT NULL
+          AND ts > COALESCE((SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1), to_timestamp(0))
+        GROUP BY agent_id`);
+    const m = new Map();
+    for (const x of r.rows) m.set(x.agent_id, { surplus: Number(x.surplus) || 0, coverage: Number(x.expected) > 0 ? Math.min(1, Number(x.seen) / Number(x.expected)) : null });
+    surplusTotalsCache = { at: Date.now(), value: m, ok: true };
+  } catch (e) { surplusTotalsCache = { ...surplusTotalsCache, at: Date.now(), ok: false }; }   // таблицы/колонок ещё нет — прежнее значение, повтор через 10 с
+  return surplusTotalsCache.value;
+}
+// ── Прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083): раз в проход семплера читаем остатки биржи из ledger
+// (GetExchangeBalances: активы минус обязательства перед клиентами), оцениваем по ценам бирж и раскладываем изменение стоимости
+// остатков с момента базы на торговый результат и переоценку запасов. База (остатки и цены) хранится в PG и меняется при сбросе
+// статистики сделок. Только отображение: ledger и matching таблиц не читают. ──
+let sysPnlTablesReady = false;
+async function ensureSystemPnlTables(pool) {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS ce_system_pnl_baseline (
+       id       INTEGER PRIMARY KEY CHECK (id = 1),
+       ts       TIMESTAMPTZ NOT NULL,
+       reset_ms BIGINT NOT NULL,
+       q0       JSONB NOT NULL,
+       m0       JSONB NOT NULL,
+       boot_id  TEXT,
+       carry    JSONB NOT NULL DEFAULT '{}'::jsonb)`);
+  // ADR-084: идентификатор запуска ledger и перенос накопленного через его перезапуск (таблица из одной строки — блокировка пренебрежимо мала)
+  await pool.query("ALTER TABLE ce_system_pnl_baseline ADD COLUMN IF NOT EXISTS boot_id TEXT");
+  await pool.query("ALTER TABLE ce_system_pnl_baseline ADD COLUMN IF NOT EXISTS carry JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS ce_system_pnl_history (
+       ts               TIMESTAMPTZ PRIMARY KEY,
+       trading_usdt     NUMERIC(38, 12) NOT NULL,
+       revaluation_usdt NUMERIC(38, 12) NOT NULL,
+       mtm_change_usdt  NUMERIC(38, 12) NOT NULL,
+       mtm_usdt         NUMERIC(38, 12) NOT NULL,
+       skipped          INTEGER NOT NULL DEFAULT 0)`);
+}
+// Остатки по валютам {ccy: число} и цены {ccy: USDT}. Ошибка ledger или ClickHouse пробрасывается: без остатков или без цен считать нечего,
+// а подставлять нули нельзя. Кэш 10 с и общий запрос для параллельных вызовов (маршрут опрашивают браузеры, ClickHouse на dev нагружен).
+let sysInputsCache = { at: 0, value: null };
+let sysInputsInflight = null;
+function currentSystemPnlInputs() {
+  if (sysInputsCache.value && Date.now() - sysInputsCache.at < 10000) return Promise.resolve(sysInputsCache.value);
+  if (!sysInputsInflight) {
+    sysInputsInflight = loadSystemPnlInputs()
+      .then((v) => { sysInputsCache = { at: Date.now(), value: v }; return v; })
+      .finally(() => { sysInputsInflight = null; });
+  }
+  return sysInputsInflight;
+}
+async function loadSystemPnlInputs() {
+  const led = initLedgerClient();
+  if (!led) throw new Error("ledger_unavailable");
+  const resp = await grpcCall(led, "GetExchangeBalances", { currencies: [] });
+  // десятичное из gRPC: нечисловое значение не превращаем в 0 (иначе остаток выглядел бы нулевым и дал ложный результат), валюту пропускаем
+  const dn = (d) => (d && d.units !== undefined && d.units !== null && Number.isFinite(Number(d.units))) ? Number(d.units) / Math.pow(10, Number(d.scale) || 0) : null;
+  const q = {};
+  for (const b of (resp && resp.balances) || []) {
+    const a = dn(b.assets_total), c = dn(b.client_liability);
+    if (a === null || c === null) continue;
+    q[b.currency] = a - c;
+  }
+  const segRows = await fetchCeSegmentRows(600);
+  return { q, m: assetUsdMids(segRows, Object.keys(q), Date.now()), boot_id: String((resp && resp.boot_id) || "") };
+}
+async function tradeStatsResetMs(pool) {
+  const r = await pool.query("SELECT (EXTRACT(EPOCH FROM trade_stats_reset_at)*1000)::bigint AS ms FROM f05a_clearing_config WHERE id=1");
+  return Number(r.rows[0] && r.rows[0].ms) || 0;
+}
+async function loadSystemPnlBaseline(pool) {
+  const r = await pool.query("SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, reset_ms::text AS reset_ms, q0, m0, boot_id, carry FROM ce_system_pnl_baseline WHERE id = 1");
+  if (!r.rows[0]) return null;
+  const x = r.rows[0];
+  return { ts_ms: Number(x.ts_ms), reset_ms: Number(x.reset_ms), q0: x.q0 || {}, m0: x.m0 || {}, boot_id: x.boot_id || "", carry: x.carry || {} };
+}
+async function sampleSystemPnlOnce(pool, nowMs) {
+  if (!sysPnlTablesReady) { await ensureSystemPnlTables(pool); sysPnlTablesReady = true; }
+  const inp = await currentSystemPnlInputs();
+  let base = await loadSystemPnlBaseline(pool);
+  const resetMs = await tradeStatsResetMs(pool);
+  const act = decideBaseline({ base, resetMs, q: inp.q, m: inp.m, bootId: inp.boot_id });
+  if (act === 'wait') return;   // базу пока задать нельзя (нет остатков или нет цены у валюты с остатком): иначе переоценка запасов осталась бы нулевой
+  if (act === 'create' || act === 'rebase') {
+    // create — первый замер или сброс статистики сделок: накопленное обнуляется. rebase — перезапуск ledger (сменился boot_id): остатки бирж
+    // обнулились, поэтому берём новую базу, а накопленное до перезапуска переносим последней записанной точкой (она уже включает прежний перенос).
+    let carry = { trading: 0, revaluation: 0 };
+    if (act === 'rebase') {
+      const last = await pool.query(
+        "SELECT trading_usdt::float8 AS t, revaluation_usdt::float8 AS v FROM ce_system_pnl_history WHERE ts >= to_timestamp($1::float8 / 1000.0) ORDER BY ts DESC LIMIT 1", [base.ts_ms]);
+      carry = last.rows[0] ? { trading: Number(last.rows[0].t) || 0, revaluation: Number(last.rows[0].v) || 0 } : (base.carry || carry);
+    }
+    await pool.query(
+      `INSERT INTO ce_system_pnl_baseline (id, ts, reset_ms, q0, m0, boot_id, carry) VALUES (1, $1, $2, $3::jsonb, $4::jsonb, $5, $6::jsonb)
+       ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts, reset_ms = EXCLUDED.reset_ms, q0 = EXCLUDED.q0, m0 = EXCLUDED.m0,
+         boot_id = EXCLUDED.boot_id, carry = EXCLUDED.carry`,
+      [new Date(nowMs).toISOString(), resetMs, JSON.stringify(inp.q), JSON.stringify(inp.m), inp.boot_id || null, JSON.stringify(carry)]);
+    base = { ts_ms: nowMs, reset_ms: resetMs, q0: inp.q, m0: inp.m, boot_id: inp.boot_id, carry };
+    if (act === 'rebase') console.log(`[system-pnl] ledger restarted (boot_id ${inp.boot_id}): new baseline, carried T=${carry.trading.toFixed(2)} V=${carry.revaluation.toFixed(2)}`);
+  }
+  const r = computeSystemPnl({ q: inp.q, q0: base.q0, m: inp.m, m0: base.m0, carry: base.carry });
+  if (r.skipped.length) return;   // часть валют не оценена (нет свежей цены): точку не пишем, иначе на графике будет ступенька
+  await pool.query(
+    `INSERT INTO ce_system_pnl_history (ts, trading_usdt, revaluation_usdt, mtm_change_usdt, mtm_usdt, skipped)
+     VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT DO NOTHING`,
+    [new Date(nowMs).toISOString(), r.trading, r.revaluation, r.mtm_change, r.mtm]);
+}
+// Свой семплер, независимый от истории агентов: зависший ledger или ClickHouse не должен задерживать запись агентов и наоборот.
+let sysPnlBusy = false;
+let sysPnlLastPruneMs = 0;
+async function runSystemPnlSample() {
+  if (sysPnlBusy) return;
+  const pool = getPgPool();
+  if (!pool) return;
+  sysPnlBusy = true;
+  try {
+    const nowMs = Date.now();
+    await Promise.race([
+      sampleSystemPnlOnce(pool, nowMs),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 20000).unref()),
+    ]);
+    if (nowMs - sysPnlLastPruneMs > 3600 * 1000) {
+      sysPnlLastPruneMs = nowMs;
+      await pool.query("DELETE FROM ce_system_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
+    }
+  } catch (e) {
+    console.error("[system-pnl] sample failed:", e.message || e);
+  } finally { sysPnlBusy = false; }
+}
+
+async function samplePnlHistoryOnce() {
+  if (pnlSamplerBusy) return;   // предыдущий проход ещё идёт — пропускаем такт
+  const pool = getPgPool();
+  if (!pool) return;
+  pnlSamplerBusy = true;
+  let drained = null;
+  try {
+    if (!pnlTableReady) { await ensurePnlHistoryTable(pool); pnlTableReady = true; }   // PG мог быть недоступен при старте BFF
+    const { agentRows } = await loadLiveAgentRows();
+    const nowMs = Date.now();
+    drained = drainTacts(surplusAcc);   // выгода за интервал с прошлой записи (по тактам клиринга)
+    surplusInflight = drained;          // до записи и обновления итогов панель добавляет эту часть сама
+    const samples = pnlSamples(agentRows.filter((a) => !a.stale && !a.inactive), nowMs, drained);
+    if (samples.length) {
+      await pool.query(
+        `INSERT INTO ce_agent_pnl_history (agent_id, ts, realized_usdt, unrealized_usdt, trade_fills, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected)
+         SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::int[], $6::numeric[], $7::int[], $8::int[])
+         ON CONFLICT (agent_id, ts) DO UPDATE SET
+           surplus_inc_usdt = CASE WHEN EXCLUDED.surplus_inc_usdt IS NULL THEN ce_agent_pnl_history.surplus_inc_usdt
+                                   ELSE COALESCE(ce_agent_pnl_history.surplus_inc_usdt, 0) + EXCLUDED.surplus_inc_usdt END,
+           surplus_tacts = CASE WHEN EXCLUDED.surplus_tacts IS NULL THEN ce_agent_pnl_history.surplus_tacts
+                                ELSE COALESCE(ce_agent_pnl_history.surplus_tacts, 0) + EXCLUDED.surplus_tacts END,
+           surplus_tacts_expected = CASE WHEN EXCLUDED.surplus_tacts_expected IS NULL THEN ce_agent_pnl_history.surplus_tacts_expected
+                                         ELSE COALESCE(ce_agent_pnl_history.surplus_tacts_expected, 0) + EXCLUDED.surplus_tacts_expected END`,
+        [samples.map((x) => x.agent_id), samples.map((x) => new Date(x.ts_ms).toISOString()),
+         samples.map((x) => x.realized), samples.map((x) => x.unrealized), samples.map((x) => x.fills),
+         samples.map((x) => x.surplus_inc), samples.map((x) => x.surplus_tacts), samples.map((x) => x.surplus_expected)]);
+    }
+    // записано: обновляем итоги панели и только тогда снимаем «в пути» (если обновить не удалось — «в пути» остаётся, пока итоги не обновятся)
+    const wasWritten = drained;
+    drained = null;
+    if (await refreshSurplusTotalsAfterWrite()) { if (surplusInflight === wasWritten) surplusInflight = null; }
+    if (nowMs - pnlLastPruneMs > 3600 * 1000) {   // раз в час убираем записи старше срока хранения
+      pnlLastPruneMs = nowMs;
+      await pool.query("DELETE FROM ce_agent_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
+    }
+  } catch (e) {
+    if (drained) { restoreTacts(surplusAcc, drained); if (surplusInflight === drained) surplusInflight = null; }   // выгода не теряется: уйдёт со следующим проходом
+    console.error("[pnl-history] sample failed:", e.message || e);
+  } finally { pnlSamplerBusy = false; }
+}
+function startPnlHistorySampler() {
+  if (!(PNL_HISTORY_SAMPLE_MS > 0)) { console.log("[pnl-history] sampler disabled (PNL_HISTORY_SAMPLE_MS=0)"); return; }
+  const pool = getPgPool();
+  if (!pool) { console.log("[pnl-history] no postgres — sampler not started"); return; }
+  console.log(`[pnl-history] sampler every ${PNL_HISTORY_SAMPLE_MS} ms, retention ${PNL_HISTORY_RETENTION_DAYS} d, surplus poll ${CE_SURPLUS_POLL_MS} ms`);
+  if (CE_SURPLUS_POLL_MS > 0) setInterval(pollSurplusOnce, CE_SURPLUS_POLL_MS).unref();
+  setInterval(samplePnlHistoryOnce, PNL_HISTORY_SAMPLE_MS).unref();
+  setInterval(runSystemPnlSample, PNL_HISTORY_SAMPLE_MS).unref();   // прибыль системы по остаткам (свой семплер)
+  setTimeout(runSystemPnlSample, 5000).unref();                      // первая база сразу после старта, а не через минуту
+  // таблицы истории агентов создаёт первый успешный проход samplePnlHistoryOnce, таблицы системы — первый проход runSystemPnlSample
+}
+
 // Money-path разложение позиции агента на ДВЕ ноги пары (ADR-057): переводчик
 // торгует base/quote — при SELL (c>0) он short base / long quote (base−, quote+),
 // при BUY наоборот. Величины: quote-нога = c·1000 (USDT-стоимость), base-нога =
@@ -7070,6 +7365,7 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
+          trade_by_venue: t.by_venue || {},   // сделки по биржам (панель показывает их в строке ноги)
           pnl_usdt: rpu,                                                     // R+U (MTM корзины)
           unrealized_usdt: (rpu != null && rfair != null) ? rpu - rfair : null, // U = R+U − R
           pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),   // диагностика: fill vs лимит
@@ -7157,6 +7453,7 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
+          trade_by_venue: t.by_venue || {},   // база/квота отдельно на источнике и приёмнике
           pnl_usdt: rpu,
           realized_usdt: rlz,
           unrealized_usdt: (rpu != null && rlz != null) ? rpu - rlz : null,
@@ -7215,73 +7512,78 @@ async function fetchAgentPositions() {
   }
 }
 
-// F-18: заявки агентов — последняя band-хедж-заявка каждого агента из
-// venue_fill_diagnostics (hedge_flow_id = "ce|band|<agent_id>|..."): target_qty
-// (сколько отправлено на биржу) + filled_qty (сколько исполнилось по симуляции).
-// Один запрос DISTINCT ON по agent_id (из hedge_flow_id) ⇒ latest per agent.
-async function fetchAgentHedgeMap() {
+// F-18: заявки агентов — последняя band-хедж-заявка агента на каждой бирже из child_orders (hedge_flow_id =
+// "ce|band|<agent_id>|<asset>|<venue>"): qty (сколько отправлено на биржу) + filled_qty (сколько исполнено). Берём child_orders,
+// а не venue_fill_diagnostics: диагностика фиксирует только ПЕРВЫЙ такт заявки, а резидентные лимиты (ADR-067) дозаполняются
+// позже, и исполнение по диагностике занижено в разы. Один запрос DISTINCT ON (агент, биржа) ⇒ последняя заявка; окно 2 часа
+// делает его индексным (idx_child_orders_created). Кэш 3 с: панель опрашивает раз в 3 с, заявки меняются медленнее.
+let hedgeMapCache = { at: 0, value: new Map() };
+let hedgeMapInflight = null;
+function fetchAgentHedgeMap() {
+  if (Date.now() - hedgeMapCache.at < 3000) return Promise.resolve(hedgeMapCache.value);
+  if (!hedgeMapInflight) hedgeMapInflight = loadAgentHedgeMap().finally(() => { hedgeMapInflight = null; });   // параллельные вызовы делят один запрос
+  return hedgeMapInflight;
+}
+async function loadAgentHedgeMap() {
   const pool = getPgPool();
-  if (!pool) return new Map();
+  if (!pool) return hedgeMapCache.value;
   try {
     const r = await pool.query(
-      `SELECT DISTINCT ON (split_part(hedge_flow_id,'|',3))
-              split_part(hedge_flow_id,'|',3) AS agent_id,
-              symbol, side, target_qty::text AS target_qty, filled_qty::text AS filled_qty,
-              status, reason, (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms
-         FROM venue_fill_diagnostics
+      `SELECT DISTINCT ON (split_part(hedge_flow_id,'|',3), venue_id)
+              split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue,
+              symbol, side,
+              qty::text AS target_qty, filled_qty::text AS filled_qty, status,
+              (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms
+         FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%'
-          AND created_at > now() - interval '2 hours'  -- «последняя» заявка живого агента;
-          -- окно делает запрос индексным (idx created_at) вместо seqscan+disk-sort 599K строк
-          -- (5с→25мс). Агента НЕ скрывает: панель строит по позициям (gRPC), это лишь sent/filled.
-        ORDER BY split_part(hedge_flow_id,'|',3), created_at DESC`);
-    const m = new Map();
-    for (const row of r.rows) {
-      m.set(row.agent_id, {
-        hedge_symbol: row.symbol, hedge_side: row.side,
-        hedge_sent: Number(row.target_qty) || 0,    // отправлено на биржу (qty заявки)
-        hedge_filled: Number(row.filled_qty) || 0,  // исполнено по симуляции
-        hedge_status: row.status, hedge_reason: row.reason,
-        hedge_ms: Number(row.created_ms) || 0,
-      });
-    }
-    return m;
-  } catch (e) { return new Map(); }  // нет таблицы/строк — заявки просто не покажем
+          AND created_at > now() - interval '2 hours'
+        ORDER BY split_part(hedge_flow_id,'|',3), venue_id, created_at DESC`);
+    hedgeMapCache = { at: Date.now(), value: buildHedgeMap(r.rows) };
+    return hedgeMapCache.value;
+  } catch (e) { return hedgeMapCache.value; }  // сбой PG — остаётся прошлое значение (пустое, если заявок ещё не было)
 }
 
-// F-18: статистика по СОСТОЯВШИМСЯ сделкам агента (ВСЕ исполненные band-хеджи с момента
-// старта — кумулятив, переживает reset позиций/рестарт). Без комиссий (владелец).
-// SQL отдаёт БЕЗЗНАКОВЫЕ per-side суммы (однозначно); знаковую комбинацию (s=+1 SELL/
-// −1 BUY, CALC-F12-HEDGE-PNL, p_int=limit_price) делает combineTradeStats (чистая,
-// покрыта trade_stats_math.test.js). Перевод E_quote→USDT — в buildAgentRows.
-async function fetchAgentTradeStats() {
+// F-18: статистика по СОСТОЯВШИМСЯ сделкам агента (ВСЕ исполненные band-хеджи с момента сброса — кумулятив, переживает reset
+// позиций/рестарт). Без комиссий (владелец). Источник — child_orders (накопленное исполнение каждой заявки, включая дозаполнение
+// резидентных лимитов ADR-067; до 2026-10-22 брали venue_fill_diagnostics, она видит только первый такт). SQL отдаёт БЕЗЗНАКОВЫЕ
+// per-side суммы по (агент, биржа) (однозначно); знаковую комбинацию (s=+1 SELL/−1 BUY, CALC-F12-HEDGE-PNL, p_int=limit price)
+// делает combineTradeStatsByVenue (чистая, покрыта trade_stats_math.test.js): итог по агенту + разбивка по биржам (ноги
+// арбитражёра). Перевод E_quote→USDT — в buildAgentRows. Кэш 10 с: запрос читает всю таблицу заявок (~1,4 с), данные меняются медленно.
+let tradeStatsCache = { at: 0, value: new Map() };
+let tradeStatsInflight = null;
+function fetchAgentTradeStats() {
+  if (Date.now() - tradeStatsCache.at < 10000) return Promise.resolve(tradeStatsCache.value);
+  if (!tradeStatsInflight) tradeStatsInflight = loadAgentTradeStats().finally(() => { tradeStatsInflight = null; });   // полный скан ~1,4 с: один запрос на всех ожидающих
+  return tradeStatsInflight;
+}
+async function loadAgentTradeStats() {
   const pool = getPgPool();
-  if (!pool) return new Map();
+  if (!pool) return tradeStatsCache.value;
   try {
     const r = await pool.query(
-      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id,
+      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue,
               SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
               SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
               SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
               SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional,
-              SUM(CASE WHEN side='BUY'  THEN (avg_price-limit_price)*filled_qty ELSE 0 END)::float8 AS buy_pnlbase,
-              SUM(CASE WHEN side='SELL' THEN (avg_price-limit_price)*filled_qty ELSE 0 END)::float8 AS sell_pnlbase,
+              SUM(CASE WHEN side='BUY'  AND price IS NOT NULL THEN (avg_price-price)*filled_qty ELSE 0 END)::float8 AS buy_pnlbase,
+              SUM(CASE WHEN side='SELL' AND price IS NOT NULL THEN (avg_price-price)*filled_qty ELSE 0 END)::float8 AS sell_pnlbase,
               COUNT(*) AS fills
-         FROM venue_fill_diagnostics
+         FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0
-              AND avg_price IS NOT NULL AND limit_price IS NOT NULL
+              AND avg_price IS NOT NULL
               AND created_at > COALESCE(
                     (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
                     to_timestamp(0))
-        GROUP BY 1`);
-    const m = new Map();
-    for (const row of r.rows) m.set(row.agent_id, combineTradeStats(row));
-    return m;
-  } catch (e) { return new Map(); }  // нет таблицы/строк — статистику не покажем
+        GROUP BY 1, 2`);
+    tradeStatsCache = { at: Date.now(), value: combineTradeStatsByVenue(r.rows) };
+    return tradeStatsCache.value;
+  } catch (e) { return tradeStatsCache.value; }  // сбой PG — прошлая статистика, а не пустая: иначе U=null и график ложно падает до R
 }
 
 // Вкладка «Граф»: позиции на внешних биржах от хеджирования агентов (переводчики и арбитражёры).
-// Тот же источник и тот же момент сброса (trade_stats_reset_at), что у fetchAgentTradeStats: подтверждённые
-// заполнения band-хеджей venue_fill_diagnostics. SQL отдаёт БЕЗЗНАКОВЫЕ суммы по (агент, биржа, символ);
+// Тот же источник и тот же момент сброса (trade_stats_reset_at), что у fetchAgentTradeStats: итоговые
+// заполнения band-хеджей из child_orders (с дозаполнением резидентных лимитов). SQL отдаёт БЕЗЗНАКОВЫЕ суммы по (агент, биржа, символ);
 // знаки и разложение на валюты пары (база/quote) делает buildCeGraph. Результат кэшируется на 10 с: граф
 // опрашивается раз в 3 с, а позиция от хеджей меняется медленно.
 let hedgePosCache = { at: 0, value: { rows: [], sinceMs: 0 } };
@@ -7291,12 +7593,12 @@ async function fetchHedgePositionRows() {
   if (!pool) return hedgePosCache.value;
   try {
     const r = await pool.query(
-      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue, symbol,
+      `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue, replace(symbol,'/','') AS symbol,
               SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
               SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
               SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
               SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional
-         FROM venue_fill_diagnostics
+         FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price IS NOT NULL
               AND created_at > COALESCE(
                     (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
@@ -7937,6 +8239,9 @@ async function handleVectorClearing(req, res, pathname, query) {
             + " VALUES (1, now(), now()) ON CONFLICT (id) DO UPDATE SET"
             + " trade_stats_reset_at=now(), updated_at=now()");
           statsReset = true;
+          tradeStatsCache.at = 0; hedgeMapCache.at = 0; hedgePosCache.at = 0; surplusTotalsCache.at = 0;
+          drainTacts(surplusAcc); surplusInflight = null;   // выгода до сброса не засчитывается после него
+          try { await pool.query("DELETE FROM ce_system_pnl_baseline"); } catch (_) { /* таблицы ещё нет */ }   // база прибыли системы будет задана заново при ближайшем замере   // следующий ответ панели считается уже после метки сброса
         } catch (e) { /* метка опциональна — позиции всё равно сброшены */ }
       }
       return writeJson(res, 200, { cleared: Number(resp && resp.cleared) || 0,
@@ -8001,23 +8306,66 @@ async function handleVectorClearing(req, res, pathname, query) {
   // всех переводчиков/арбитражёров + дельты самого свежего такта. Независимо от
   // выбранного статичного батча — этот эндпоинт всегда отдаёт «сейчас».
   if (pathname === "/api/vector-clearing/agent-positions") {
-    const rows = await fetchVectorClearingRows(1);
-    const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows, ceSnap] = await Promise.all([
-      fetchAgentPositions(),
-      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
-      fetchAgentHedgeMap(),
-      fetchAgentTradeStats(),
-      fetchCeSegmentRows(600).catch(() => []),   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
-      fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 2000).catch(() => null)   // граф клиринга: полный список агентов
-    ]);
-    // сегменты → {venue, pair, mid} (в запросе поле venue_id), как в маршруте графа
-    const venuePriceOf = makePriceOf((segRows || []).map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid) })));
-    const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf);
-    // Агенты графа клиринга, у которых в ledger ещё нет строки позиции, показываем нулевыми строками: панель показывает ВСЕХ
-    // агентов сразу, а не только тех, что уже двигались.
-    agentRows.push(...placeholderAgentRows(ceSnap && ceSnap.edges, new Set(agentRows.map((r) => r.agent_id))));
+    const { agentRows, newest } = await loadLiveAgentRows();
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
+  }
+  // История заработка агента во времени (график по клику на агента): R, U и R+U, записанные семплером раз в минуту.
+  // Прибыль системы по реальным остаткам: текущие значения (торговый результат, переоценка запасов, по валютам) и ряд за окно.
+  if (pathname === "/api/vector-clearing/system-pnl") {
+    const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      let base = null, current = null, currentError = null, rows = [];
+      try {
+        base = await loadSystemPnlBaseline(pool);
+        const resetMs = await tradeStatsResetMs(pool);
+        if (base && base.reset_ms !== resetMs) base = null;   // база от прошлого сброса статистики не годится: новая будет задана замером
+        if (base) {
+          rows = (await pool.query(
+            `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, trading_usdt, revaluation_usdt, mtm_change_usdt
+               FROM ce_system_pnl_history
+              WHERE ts > now() - make_interval(hours => $1) AND ts >= to_timestamp($2::float8 / 1000.0) ORDER BY ts`, [hours, resetMs])).rows;   // с метки сброса, не с момента базы: после перезапуска ledger ряд непрерывен (точки включают перенос)
+        }
+      } catch (e) {
+        if (!(e && (e.code === "42P01" || e.code === "42703"))) throw e;   // нет таблиц или колонок boot_id/carry (старая схема, семплер дополнит) — учёт ещё не начат; остальные ошибки PG — это ошибка, а не «нет данных»
+      }
+      if (base) {
+        try {
+          const inp = await currentSystemPnlInputs();
+          // ledger перезапущен, а семплер ещё не задал новую базу (до минуты): остатки обнулились, и расчёт по старой базе показал бы скачок на их величину
+          if (ledgerRestarted(base, inp.boot_id)) currentError = "ledger_restarted";
+          else if (Object.keys(inp.q).length) current = computeSystemPnl({ q: inp.q, q0: base.q0, m: inp.m, m0: base.m0, carry: base.carry });
+        } catch (e) { currentError = (e && e.message === "ledger_unavailable") ? "ledger_unavailable" : "inputs_unavailable"; }
+      }
+      const points = downsamplePoints(rows.map((r) => ({
+        t: Number(r.ts_ms), trading: Number(r.trading_usdt), revaluation: Number(r.revaluation_usdt), mtm_change: Number(r.mtm_change_usdt),
+      })), 500);
+      return writeJson(res, 200, {
+        window_hours: hours, baseline_ms: base ? base.ts_ms : null, current, current_error: currentError, points, has_data: points.length > 0,
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      return writeJson(res, 502, { error: "system_pnl_error", message: String(e.message || e) });
+    }
+  }
+  if (pathname === "/api/vector-clearing/agent-pnl-history") {
+    const agentId = String((query && query.agent_id) || "").slice(0, 120);
+    if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
+    const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      const r = await pool.query(
+        `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, realized_usdt, unrealized_usdt,
+                surplus_inc_usdt, surplus_tacts, surplus_tacts_expected
+           FROM ce_agent_pnl_history
+          WHERE agent_id = $1 AND ts > now() - make_interval(hours => $2)
+          ORDER BY ts`, [agentId, hours]);
+      return writeJson(res, 200, { ...buildPnlHistoryDto(agentId, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+    }
   }
   // Drill-down по ОДНОМУ агенту (клик в живой панели): полный жизненный цикл —
   // позиция → сдвиг цены от позиции (inventory-skew) → порог q → пробой → хедж-заявка
@@ -8027,7 +8375,7 @@ async function handleVectorClearing(req, res, pathname, query) {
   // mid, α_T, β_T) с inventory-skew по позиции из ledger; арбитражёры — плечо перевода
   // CE_TRANSFER_ALPHA/C_<актив> и ЭДС (рассогласование цен узлов). Расчёт в ce_graph_build.js.
   // Позиции у концов ветви (ends) и позиция на внешней бирже от хеджирования (nodes[].hedgePos) —
-  // там же; источники: ledger GetAgentPositions и venue_fill_diagnostics (fetchHedgePositionRows).
+  // там же; источники: ledger GetAgentPositions и child_orders (fetchHedgePositionRows).
   // ADR-079 — «подтверждающее» отображение РЕШЕНИЯ клиринга и ликвидности бирж (вкладка «Граф»): снимок последнего
   // CE-такта из matching (GET /ce/clearing/last: потенциалы узлов, по ребру отклонение/полка/зазор/поток/состояние,
   // типовые циклы, отброшенные котировки) + состояние бирж и опроса из админ-API venues. Ничего не пересчитывается
@@ -8578,6 +8926,26 @@ async function handleVenues(req, res, pathname, query) {
       });
     } catch (e) {
       return writeJson(res, 502, { error: "clickhouse_error", message: String(e.message || e) });
+    }
+  }
+
+  // ADR-082 (шаг 0): измерение ликвидности бирж по парам — оборот ленты публичных сделок ν и коэффициент
+  // исполнения f хедж-заявок. Строки пишет venues (venue_liquidity_stats); здесь только чтение и разметка
+  // (venue_liquidity_view.js), домен не пересчитываем. Нет данных ⇒ пустой список, а не выдуманные числа.
+  if (req.method === "GET" && pathname === "/api/venues/liquidity-stats") {
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      const r = await pool.query(
+        "SELECT venue, symbol, tape_quote_per_s, tape_samples, fill_coef, fill_weight, fill_orders, updated_at"
+        + " FROM venue_liquidity_stats ORDER BY venue, symbol");
+      return writeJson(res, 200, {
+        venues: buildLiquidityStatsView(r.rows, nowMs),
+        generatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      // Таблицы может не быть до первой выкладки venues (EnsureSchema создаёт её при старте).
+      return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
   }
 
@@ -9258,6 +9626,8 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/detail"
         || pathname === "/api/vector-clearing/liveness"
         || pathname === "/api/vector-clearing/agent-positions"
+        || pathname === "/api/vector-clearing/agent-pnl-history"
+        || pathname === "/api/vector-clearing/system-pnl"
         || pathname === "/api/vector-clearing/agent-detail"
         || pathname === "/api/vector-clearing/ce-graph"
         || pathname === "/api/vector-clearing/ce-clearing"
@@ -9644,4 +10014,5 @@ server.listen(PORT, () => {
   }
   console.log(`[frontend-api] ledger gRPC target: ${LEDGER_ADDR}`);
   console.log(`[frontend-api] venues HTTP target: ${VENUES_ADDR}`);
+  startPnlHistorySampler();
 });

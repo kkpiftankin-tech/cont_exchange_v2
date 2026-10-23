@@ -45,6 +45,17 @@ grpc::Status GrpcLedgerService::GetNodeBalances(
   return grpc::Status::OK;
 }
 
+grpc::Status GrpcLedgerService::ApplyNodeTransfer(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::ApplyNodeTransferRequest* request,
+    google::protobuf::Empty* /*response*/) {
+  // Повтор с тем же transfer_id — успех без эффекта (идемпотентность контракта); некорректная заявка — INVALID_ARGUMENT.
+  if (uc_->ApplyNodeTransfer(*request) == app::LedgerUseCases::TransferResult::kInvalid)
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "transfer_id, asset, from_venue, to_venue обязательны; from_venue != to_venue; qty > 0");
+  return grpc::Status::OK;
+}
+
 grpc::Status GrpcLedgerService::GetAgentPositions(
     grpc::ServerContext* /*context*/,
     const fob::ledger::v1::GetAgentPositionsRequest* request,

@@ -101,3 +101,27 @@ check('totalPosition: знаки одинаковые у c и in_flight (отр�
 
 if (failed > 0) { console.error(`\n${failed} FAILED`); process.exit(1); }
 console.log('\n[OK] trade_stats_math: all passed');
+
+// --- combineTradeStatsByVenue: итог по агенту и разбивка по биржам (арбитражёр: источник и приёмник)
+{
+  const { combineTradeStatsByVenue } = require('./trade_stats_math');
+  const rows = [
+    // арбитражёр: купил 1 BTC на src по 100, продал 1 BTC на dst по 102
+    { agent_id: 'A_BTC_srcdst', venue: 'src', buy_base: 1, sell_base: 0, buy_notional: 100, sell_notional: 0, buy_pnlbase: 0, sell_pnlbase: 0, fills: 1 },
+    { agent_id: 'A_BTC_srcdst', venue: 'dst', buy_base: 0, sell_base: 1, buy_notional: 0, sell_notional: 102, buy_pnlbase: 0, sell_pnlbase: 0, fills: 1 },
+    { agent_id: 'T_BTC_x', venue: 'x', buy_base: 2, sell_base: 0, buy_notional: 200, sell_notional: 0, buy_pnlbase: 0, sell_pnlbase: 0, fills: 4 },
+    { venue: 'orphan' },
+  ];
+  const m = combineTradeStatsByVenue(rows);
+  const a = m.get('A_BTC_srcdst');
+  console.log(a && a.trade_fills === 2 && a.traded_base === 0 && a.traded_quote === 2 ? '[OK] арбитражёр: итог по двум биржам (база 0, квота +2)' : '[FAIL] арбитражёр итог');
+  console.log(a && Math.abs(a.realized_quote - 2) < 1e-9 ? '[OK] R считается на общем закрытом объёме: 1·(102−100)=2' : '[FAIL] R общий');
+  console.log(a && a.by_venue.src.traded_base === 1 && a.by_venue.src.traded_quote === -100 && a.by_venue.dst.traded_base === -1 && a.by_venue.dst.traded_quote === 102
+    ? '[OK] разбивка: src +1 база/−100 квота, dst −1 база/+102 квота' : '[FAIL] by_venue');
+  const t1 = m.get('T_BTC_x');
+  console.log(t1 && t1.traded_base === 2 && t1.by_venue.x.trade_fills === 4 ? '[OK] переводчик: одна биржа' : '[FAIL] переводчик');
+  console.log(m.size === 2 ? '[OK] строка без agent_id пропущена' : '[FAIL] orphan');
+  console.log(combineTradeStatsByVenue(null).size === 0 ? '[OK] не массив → пусто' : '[FAIL] null');
+  if (!(a && a.trade_fills === 2 && t1 && m.size === 2)) process.exit(1);
+}
+

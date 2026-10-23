@@ -6,7 +6,7 @@ feature: F-18
 status: proposed # формула определена в ADR-072 §C; код пока считает только агрегат R+U (tradedBasketUsdt)
 code:
   - frontend/api/trade_stats_math.js#tradedBasketUsdt (сейчас только агрегат R+U; раздельные R/U — цель ADR-072)
-  - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price из venue_fill_diagnostics)
+  - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price — child_orders с 2026-10-22; прежде venue_fill_diagnostics)
   - frontend/api/server.js#buildAgentRows (pnl_usdt)
 tests: [] # цель — frontend/api/trade_stats_math.test.js (тождество C2) + ledger unit на кумулятивный R
 ui:
@@ -16,7 +16,7 @@ sources:
   - docs/04-domain/calculations/CALC-CE-ANCHOR.md
   - docs/04-domain/calculations/CALC-F12-HEDGE-PNL.md
   - incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md
-updated_at: 2026-10-08
+updated_at: 2026-10-22
 ---
 
 # Прибыль переводчика: realized / unrealized P&L
@@ -88,6 +88,15 @@ realized_vs_fair` → BFF `fetchAgentPositions`/`buildAgentRows` (quote→USDT) 
 `/vector-clearing` колонка «заработок R / U» (R — ledger vs-fair; U = (R+U)−R,
 `tradedBasketUsdt`).
 
+## 5а. Как R и U показаны на экране (2026-10-22)
+
+Панель «Живые позиции» объясняет оба числа простыми словами прямо под таблицами (блок «Что такое R и U»), а в шапке колонки подписано «R реализ. · U нереализ.».
+
+- **R — реализованный заработок.** Уже зафиксирован сделками и сам не меняется без новых сделок. У переводчика — накопленная по каждой сделке разница между ценой исполнения и справедливой ценой клиринга $F_0$ (продажа дороже $F_0$ — плюс, покупка дешевле — плюс). У арбитражёра — прибыль на закрытом объёме: $\min(B,S)\cdot(\bar p_S-\bar p_B)$.
+- **U — нереализованный результат.** Итог всех сделок агента по текущим ценам клиринга минус R: $U=(R{+}U)-R$. Меняется с рынком, пока позиция открыта.
+- Всё в USDT, без комиссий. Сброс статистики сделок обнуляет оба ряда.
+- **График во времени.** По клику на агента BFF отдаёт ряд R, U и R + U, записанный раз в минуту (`docs/07-data/ce-agent-pnl-history.md`, `docs/06-api/rest/agent-pnl-history.md`). Значения те же, что в колонке, поэтому график не может разойтись с таблицей.
+
 ## 6. Открытые вопросы / caveats
 
 1. **Частичные филлы — приближение (N1).** `average_price` в репорте — кумулятивный
@@ -105,3 +114,7 @@ realized_vs_fair` → BFF `fetchAgentPositions`/`buildAgentRows` (quote→USDT) 
    при необходимости переживать рестарт.
 4. **Арбитражёр.** fair_price не публикуется (нет QUOTE-fair) ⇒ realized_vs_fair=0;
    его кросс-спред — отдельная величина (не покрыта этой карточкой).
+
+## Поправка 2026-10-22 (цены заявок в child_orders)
+
+R и U этой карточки читают `avg_price` из `child_orders`. С 08:04 до 18:21 UTC цены части заявок были записаны неверно (нулём у частично исполненных и истёкших резидентных заявок; ценой последнего тика у заявок с несколькими fill'ами), из-за чего U переводчиков «разъезжалось» (например, T_SOL_okx +26,7 тыс., T_SOL_binance −12,2 тыс.). Исправлено в `ApplyReport` (накопленный VWAP) и восстановлено по ClickHouse (8480 строк, резервная копия `child_orders_avgfix_backup_20261022`): см. `docs/07-data/child-orders.md`. История `ce_agent_pnl_history` (R и U) за это окно хранит прежние числа.

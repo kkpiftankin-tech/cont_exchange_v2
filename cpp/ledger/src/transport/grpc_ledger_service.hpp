@@ -71,6 +71,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                                const fob::ledger::v1::GetNodeBalancesRequest* request,
                                fob::ledger::v1::GetNodeBalancesResponse* response) override;
 
+  // ADR-057/084: перевод актива между узлами (идемпотентно по transfer_id; исполнение через CE_TRANSFER_ETA_BATCHES тактов).
+  grpc::Status ApplyNodeTransfer(grpc::ServerContext* context,
+                                 const fob::ledger::v1::ApplyNodeTransferRequest* request,
+                                 google::protobuf::Empty* response) override;
+
   // F-18 v2 (T-F18-203, ADR-061 §7): знаковые накопленные позиции CE-агентов.
   grpc::Status GetAgentPositions(grpc::ServerContext* context,
                                  const fob::ledger::v1::GetAgentPositionsRequest* request,

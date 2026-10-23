@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <deque>
+#include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -15,6 +17,7 @@
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/uuid.hpp"   // boot_id_ (ADR-084)
 #include "app/persistence_ports.hpp"
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
@@ -137,6 +140,24 @@ class LedgerUseCases {
   // у одного агента). Pure/static — юнит-тестируема (ce_band_manual_test).
   static long long BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak);
 
+  // ADR-082 (шаг 2): потолок размера хедж-заявки по обороту ленты публичных сделок биржи. Q ≤ π·ν·T_ord: ν — оборот ленты в USDT
+  // в секунду, π — доля оборота, которую готовы занять, T_ord — время жизни заявки (с). Результат в тыс. USDT; ν ≤ 0, π ≤ 0, T_ord ≤ 0
+  // или нечисловой вход ⇒ 0 (ограничения нет). Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double TapeCapK(double nu_usdt_per_s, double pi, double t_ord_s);
+  // Объём заявки (тыс. USDT) после ограничения. cap_k ≤ 0 или нечисловой (потолка нет) ⇒ весь избыток. Потолок не ниже min_k (пыль:
+  // заявку мельче min_k отдельно не отправляем). Если после заявки остаётся меньше min_k (остаток слишком мал для отдельной заявки),
+  // отдаётся весь избыток. Результат в (0, excess_k] при excess_k > 0. Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double CappedOrderSizeK(double excess_k, double cap_k, double min_k);
+  // Бюджет ленты на новую заявку (тыс. USDT): доля оборота за время жизни заявки за вычетом уже живых заявок по той же бирже и паре,
+  // но не ниже min_k (иначе при занятой ленте агент не отправлял бы ничего). Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double TapeBudgetK(double cap_total_k, double live_k, double min_k);
+
+  // ADR-082 (шаг 2): источник оборота ленты ν биржи по паре. true и *nu_quote_per_s (валюта котирования пары в секунду), *samples
+  // (чтений ленты в оценке), *age_ms (возраст измерения), если данные есть. Пусто (деф.) ⇒ PG venue_liquidity_stats; тест подставляет свой.
+  using TapeSource = std::function<bool(const std::string& venue, const std::string& symbol, double* nu_quote_per_s,
+                                        long long* samples, long long* age_ms)>;
+  void SetVenueTapeSource(TapeSource source) { tape_source_ = std::move(source); }
+
   // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
   // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
   // CE_TRANSFER_FEE_BPS_<АКТИВ> (число от 0 до 1000; не задано / пусто / не число / NaN / inf / отрицательно / больше 1000 ⇒ по умолчанию 2,5 б.п. (0,25 ‰ — прежний тариф перевоза
@@ -163,6 +184,26 @@ class LedgerUseCases {
   // Без привязки к комиссии (fee_linked=false, k_band=0) прежнее поведение — всегда агрессив, КРОМЕ ручной ширины:
   // там Z̄mkt задан оператором и мейкерная зона сохраняется. Pure/static — юнит-тестируема.
   static bool IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt);
+
+  // ADR-084: физический перевод связки между биржами.
+  // Порог перевода Z̄_A = max(пол, k_band·c_tr), тыс. USDT; c_tr — плата за перевод в б.п. (рыночных комиссий нет). Это тот же вид, что
+  // у Z̄lim = c_lim/Γ в «Кривых» §6.4, с k_band переводчика вместо 1/Γ_A связки (калибровка MVP). k_band ≤ 0 или нечисло ⇒ только пол.
+  // Pure/static — юнит-тестируема (ce_link_transfer_test).
+  static double TransferThresholdK(double k_band, double transfer_bps, double q_floor);
+  // Сумма перевода X, тыс. USDT: min(c_dst − Z_targ, |c_src|). 0 (перевода нет), если нога назначения не положительна, нога источника не
+  // отрицательна, X ≤ 0 или X < min_x. Pure/static, Decimal без double.
+  static cex::common::Decimal TransferAmountK(const cex::common::Decimal& c_dst, const cex::common::Decimal& c_src,
+                                              const cex::common::Decimal& z_targ, const cex::common::Decimal& min_x);
+  // Штуки актива, уходящие с источника: X·1000/P, округление ВНИЗ до 8 знаков (не больше, чем покрывает сумма). 0 при P ≤ 0 или X ≤ 0.
+  static cex::common::Decimal TransferUnits(const cex::common::Decimal& x_k, const cex::common::Decimal& price);
+  // Результат постановки перевода в очередь.
+  enum class TransferResult { kQueued, kDuplicate, kInvalid };
+  // ADR-057/084: заявка на перевод актива между узлами. Идемпотентна по transfer_id. Ставит перевод в очередь; исполнение (списание с
+  // from_venue, приход на to_venue за вычетом платы CE_TRANSFER_SIM_FEE_BPS) — через CE_TRANSFER_ETA_BATCHES тактов клиринга.
+  TransferResult ApplyNodeTransfer(const fob::ledger::v1::ApplyNodeTransferRequest& req);
+  // Диагностика и тесты: число переводов в очереди; накопленный остаток паритета связки (штуки актива, double — метрика, не учёт).
+  size_t PendingTransferCount();
+  double LinkParityResidual(const std::string& agent_id, const std::string& asset);
 
   // Existing methods
   fob::ledger::v1::GetBalancesResponse GetBalances(const fob::ledger::v1::GetBalancesRequest& req);
@@ -425,6 +466,18 @@ class LedgerUseCases {
   std::mutex sigma_mu_;
   std::map<std::string, SigmaEntry> sigma_cache_;
 
+  // ADR-082 (шаг 2): кэш оборота ленты ν по (venue|symbol) из venue_liquidity_stats (writer — venues), TTL 5 с.
+  struct TapeEntry {
+    double nu_quote_per_s = 0.0;
+    long long samples = 0;
+    long long age_ms = 0;  // возраст измерения на момент чтения
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex tape_mu_;
+  std::map<std::string, TapeEntry> tape_cache_;
+  TapeSource tape_source_;
+
   // F-18 #7 scoped (T-F18-L03): кэш глубины стакана depth per (asset,venue) для
   // ликвидностной оси band (паттерн SigmaEntry; depth — конфиг, без samples-guard).
   struct DepthEntry {
@@ -478,11 +531,19 @@ class LedgerUseCases {
     std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
     std::string last_batch_id;
     long long updated_at_ms{0};
+    long long last_price_ms{0};      // t последней дельты с ценой (last_price/base_price): перепроверка остатка (ADR-082) не эмитит по устаревшей цене
     long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
     int band_fail_streak{0};         // заявок подряд, завершённых без единого исполнения (растит паузу, сбрасывается любым исполнением)
+    cex::common::Decimal transfer_moved{0, 0};  // ADR-084: Σ сдвигов позиции переводом (приход +X, уход −X), тыс. USDT; монитор W·c: (W·c)_n + moved_n = 0
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // ADR-082 (шаг 2): агенты, у которых потолок по ленте оставил остаток над порогом. Проверка пробоя вызывается только по дельтам
+  // позиции агента, поэтому без перепроверки остаток мог бы зависнуть (агент без новых дельт). ApplyPositionDelta перепроверяет
+  // этих агентов на каждом такте; запись снимается, когда остаток ушёл или позиция вернулась в полосу. Под mu_.
+  std::set<AgentPositionKey> cap_pending_;
+  // Сумма находящихся в полёте заявок (|in_flight|, тыс. USDT) по бирже и паре (котируемая; пусто = нумерарий). Под mu_.
+  double LiveInFlightK(const std::string& asset, const std::string& venue, const std::string& quote) const;
 
   // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): диагностика «закрытого учёта» —
   // P&L системы = MTM реальных остатков (venue_balances_+house) минус baseline K_0,
@@ -523,6 +584,26 @@ class LedgerUseCases {
     cex::common::Decimal plan_fact_gap{0, 0};
   };
   std::map<std::string, AgentBandHedge> band_hedges_;
+  // ADR-084: очередь смоделированных переводов связки. Остатки бирж и очередь живут в памяти ledger и обнуляются вместе при перезапуске.
+  struct PendingTransfer {
+    std::string transfer_id, agent_id, asset, from_venue, to_venue;
+    cex::common::Decimal qty{0, 0};      // штуки актива, уходят с источника
+    cex::common::Decimal fee_qty{0, 0};  // удержанная плата (штуки), приход = qty − fee_qty
+    cex::common::Decimal x_k{0, 0};      // сумма перевода, тыс. USDT (для связки; 0 у прямой заявки ApplyNodeTransfer)
+    std::uint64_t due_tact{0};           // исполнить, когда tact_seq_ достиг этого значения
+    long long queued_ms{0};
+  };
+  std::deque<PendingTransfer> pending_transfers_;
+  std::unordered_set<std::string> transfer_ids_seen_;   // идемпотентность по transfer_id (ограничено, как pos_delta_applied_)
+  std::uint64_t tact_seq_{0};                            // номер такта клиринга (+1 на каждый новый batch_id)
+  std::map<std::string, double> link_parity_residual_;   // "agent|asset" → Σ r (штуки), диагностика остатка паритета (ADR-083 п.1)
+  std::string boot_id_ = cex::common::uuid_v4();         // идентификатор запуска: остатки бирж в памяти обнуляются при перезапуске
+  TransferResult queue_transfer_locked(const PendingTransfer& t_in);
+  void settle_due_transfers_locked(long long ts_ms);
+  // Порог перевода связки (тыс. USDT) по текущей конфигурации; записывает его в z_lim/z_mkt позиции для отображения.
+  double link_transfer_threshold_locked(const std::string& asset, AgentPositionState& st);
+  // Если нога назначения связки вышла за порог — поставить перевод в очередь и сдвинуть обе ноги к нулю на X.
+  void maybe_queue_link_transfer_locked(const AgentPositionKey& key, const std::string& batch_id, long long ts_ms);
   // Вариант 2 (2026-09-17): продюсер топика ce.agent.band.breach. Не владеет.
   // При null событие пробоя не эмитится (band выключен / нет продюсера).
   cex::common::KafkaProducer* band_breach_producer_{nullptr};
@@ -564,6 +645,11 @@ class LedgerUseCases {
   // наличии строки. TTL-кэш ~1с per symbol (как band_cfg). Пустой DSN/нет строки → false.
   bool LoadAssetSigma(const std::string& symbol, double* out_sigma,
                       long long* out_samples, long long* out_age_ms);
+  // ADR-082 (шаг 2): оборот ленты ν биржи по паре из venue_liquidity_stats (writer — venues). Зеркало LoadAssetSigma: TTL-кэш,
+  // переиспользуемое соединение; staleness и минимум чтений проверяет вызывающий. Нет строки / пустой DSN / ошибка PG ⇒ false
+  // (ограничения размера нет). Если задан tape_source_, берёт данные из него.
+  bool LoadVenueTape(const std::string& venue, const std::string& symbol, double* out_nu_quote_per_s,
+                     long long* out_samples, long long* out_age_ms);
   // F-18 #7 scoped (T-F18-L03): читает depth (α_e) из ce_asset_liquidity по (asset,venue)
   // (writer — matching, T-F18-L02). Возвращает true + *out_depth/*out_age_ms при наличии
   // строки. TTL-кэш ~1с per (asset|venue). Пустой DSN/нет строки → false (ledger → LiqScale=1.0).

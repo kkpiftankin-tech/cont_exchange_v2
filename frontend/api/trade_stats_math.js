@@ -87,4 +87,38 @@ function arbPositionParts(asset, numeraire, qSrc, pSrc, qDst, pDst) {
   };
 }
 
-module.exports = { combineTradeStats, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts };
+// Статистика сделок с разбивкой по биржам: rows — строки SQL, сгруппированные по (agent_id, venue), с теми же беззнаковыми суммами,
+// что принимает combineTradeStats. Итог по агенту — combineTradeStats от СУММЫ сырых значений по всем биржам (R считается на общем
+// закрытом объёме, как раньше); by_venue[venue] — количества сделок именно на этой бирже (панель показывает их в строке ноги
+// арбитражёра: сколько базовой и котируемой валюты сделано на источнике и на приёмнике). Map(agent_id → статистика + by_venue).
+const RAW_KEYS = ['buy_base', 'sell_base', 'buy_notional', 'sell_notional', 'buy_pnlbase', 'sell_pnlbase', 'fills'];
+function combineTradeStatsByVenue(rows) {
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  const sums = new Map();      // agent_id → суммы по всем биржам
+  const perVenue = new Map();  // agent_id → Map(venue → сырые суммы)
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || !r.agent_id) continue;
+    const venue = r.venue || '';
+    if (!sums.has(r.agent_id)) { sums.set(r.agent_id, {}); perVenue.set(r.agent_id, new Map()); }
+    const tot = sums.get(r.agent_id);
+    const pv = perVenue.get(r.agent_id);
+    if (!pv.has(venue)) pv.set(venue, {});
+    const cell = pv.get(venue);
+    for (const k of RAW_KEYS) {
+      tot[k] = n(tot[k]) + n(r[k]);
+      cell[k] = n(cell[k]) + n(r[k]);
+    }
+  }
+  const out = new Map();
+  for (const [agentId, tot] of sums) {
+    const by = {};
+    for (const [venue, cell] of perVenue.get(agentId)) {
+      const c = combineTradeStats(cell);
+      by[venue] = { traded_base: c.traded_base, traded_quote: c.traded_quote, trade_fills: c.trade_fills };
+    }
+    out.set(agentId, { ...combineTradeStats(tot), by_venue: by });
+  }
+  return out;
+}
+
+module.exports = { combineTradeStats, combineTradeStatsByVenue, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts };

@@ -279,6 +279,9 @@ message GetExchangeBalancesResponse {
   fob.common.v1.EventMeta meta = 1;
   repeated ExchangeCurrencyBalance balances = 2;
   string house_account_id = 3;                 // '__ce_house__'
+  // Идентификатор запуска ledger. Остатки внешних бирж ledger хранит в памяти и обнуляет при перезапуске; смена boot_id позволяет
+  // потребителю (BFF, прибыль системы по остаткам, ADR-084) задать новую базу вместо ложного торгового результата. Аддитивное поле.
+  string boot_id = 4;
 }
 
 // F-18 §11: снапшот позиции биржи по одному клирингу (старая → Δ → новая).

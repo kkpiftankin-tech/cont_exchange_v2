@@ -66,6 +66,18 @@ using cex::common::Decimal;
 
 namespace {
 
+/// Число из окружения; не задано / пусто / не число / NaN / inf ⇒ def. Для параметров-метрик (пороги, доли), не для денег.
+double env_double(const char* name, double def) {
+  const char* v = std::getenv(name);
+  if (v == nullptr || *v == '\0') return def;
+  char* end = nullptr;
+  const double x = std::strtod(v, &end);
+  return (end == v || *end != '\0' || !std::isfinite(x)) ? def : x;
+}
+
+/// Decimal со scale 6 из числа (пороги в тыс. USDT).
+Decimal dec6(double x) { return Decimal{static_cast<int64_t>(std::llround(x * 1e6)), 6}; }
+
 /// True если report.error содержит хотя бы code, message или details.
 /// Используется при normalize_execution_status для defaulting на REJECTED.
 bool has_non_empty_error(const fob::execution::v1::ExecutionReport& report) {
@@ -397,6 +409,41 @@ void LedgerUseCases::reclaim_orphan_in_flight_locked(const AgentPositionKey& key
                          {"returned_kusdt", amount.to_string()}, {"reason", reason}});
 }
 
+double LedgerUseCases::TapeCapK(double nu_usdt_per_s, double pi, double t_ord_s) {
+  if (!std::isfinite(nu_usdt_per_s) || !std::isfinite(pi) || !std::isfinite(t_ord_s)) return 0.0;
+  if (nu_usdt_per_s <= 0.0 || pi <= 0.0 || t_ord_s <= 0.0) return 0.0;
+  return pi * nu_usdt_per_s * t_ord_s / 1000.0;
+}
+
+double LedgerUseCases::CappedOrderSizeK(double excess_k, double cap_k, double min_k) {
+  if (!std::isfinite(excess_k) || excess_k <= 0.0) return excess_k;
+  if (!std::isfinite(cap_k) || cap_k <= 0.0) return excess_k;   // потолка нет
+  const double lo = (std::isfinite(min_k) && min_k > 0.0) ? min_k : 0.0;
+  const double cap = std::max(cap_k, lo);
+  if (excess_k <= cap + lo) return excess_k;   // уложились, либо остаток после потолка был бы пылью
+  return cap;
+}
+
+double LedgerUseCases::TapeBudgetK(double cap_total_k, double live_k, double min_k) {
+  const double lo = (std::isfinite(min_k) && min_k > 0.0) ? min_k : 0.0;
+  if (!std::isfinite(cap_total_k) || cap_total_k <= 0.0) return lo;
+  const double live = (std::isfinite(live_k) && live_k > 0.0) ? live_k : 0.0;
+  return std::max(cap_total_k - live, lo);
+}
+
+double LedgerUseCases::LiveInFlightK(const std::string& asset, const std::string& venue, const std::string& quote) const {
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const std::string want = quote.empty() ? numeraire : quote;
+  double sum = 0.0;
+  for (const auto& [key, st] : agent_positions_) {
+    if (std::get<1>(key) != asset || std::get<2>(key) != venue) continue;
+    const std::string q = st.quote.empty() ? numeraire : st.quote;
+    if (q != want) continue;
+    sum += std::fabs(static_cast<double>(st.in_flight));
+  }
+  return sum;
+}
+
 long long LedgerUseCases::BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak) {
   if (base_ms <= 0) return 0;
   if (max_ms <= base_ms || fail_streak <= 0) return base_ms;
@@ -422,6 +469,29 @@ void LedgerUseCases::FlatBandWidth(double k_band, double clim_bps, double cmkt_b
   const double lim = std::max(q_floor, k_band * (clim_bps + fee) * rt);
   if (z_lim) *z_lim = lim;
   if (z_mkt) *z_mkt = std::max(lim, k_band * (cmkt_bps + fee) * rt);  // Z̄mkt ≥ Z̄lim всегда
+}
+
+double LedgerUseCases::TransferThresholdK(double k_band, double transfer_bps, double q_floor) {
+  const double fee = (std::isfinite(transfer_bps) && transfer_bps > 0.0) ? transfer_bps : 0.0;
+  const double by_cost = (std::isfinite(k_band) && k_band > 0.0) ? k_band * fee : 0.0;
+  return std::max(q_floor, by_cost);
+}
+
+Decimal LedgerUseCases::TransferAmountK(const Decimal& c_dst, const Decimal& c_src, const Decimal& z_targ, const Decimal& min_x) {
+  const Decimal zero = Decimal::zero();
+  if (Decimal::cmp(c_dst, zero) <= 0 || Decimal::cmp(c_src, zero) >= 0) return zero;  // нужна положительная нога назначения и отрицательная источника
+  const Decimal x = Decimal::min(Decimal::sub(c_dst, z_targ), Decimal::sub(zero, c_src));
+  if (Decimal::cmp(x, zero) <= 0 || Decimal::cmp(x, min_x) < 0) return zero;
+  return x;
+}
+
+Decimal LedgerUseCases::TransferUnits(const Decimal& x_k, const Decimal& price) {
+  const Decimal zero = Decimal::zero();
+  if (Decimal::cmp(x_k, zero) <= 0 || Decimal::cmp(price, zero) <= 0) return zero;
+  const Decimal num = Decimal::mul(x_k, Decimal{1000, 0});  // тыс. USDT → USDT
+  Decimal u = Decimal::div(num, price, 8);                  // half-up до 8 знаков
+  if (Decimal::cmp(Decimal::mul(u, price), num) > 0) u = Decimal::sub(u, Decimal{1, 8});  // вниз: штук не больше, чем покрывает сумма
+  return Decimal::cmp(u, zero) > 0 ? u : zero;
 }
 
 bool LedgerUseCases::IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt) {
@@ -748,6 +818,10 @@ fob::ledger::v1::GetExchangeBalancesResponse LedgerUseCases::GetExchangeBalances
   *resp.mutable_meta() = req.meta();
   resp.mutable_meta()->set_source("ledger");
   resp.set_house_account_id(kHouseAccountId);
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+    resp.set_boot_id(boot_id_);   // ADR-084: остатки бирж обнуляются при перезапуске; потребитель по смене boot_id задаёт новую базу
+  }
 
   // Опциональный фильтр по валютам.
   std::unordered_set<std::string> want;
@@ -814,6 +888,12 @@ fob::ledger::v1::GetNodeBalancesResponse LedgerUseCases::GetNodeBalances(
   const auto keep = [&](const std::string& a) { return want.empty() || want.count(a) > 0; };
 
   std::lock_guard<std::mutex> lg(mu_);
+  // ADR-084: приход смоделированных переводов (информационно; в qty он попадёт при исполнении перевода).
+  std::map<std::pair<std::string, std::string>, Decimal> incoming;
+  for (const auto& t : pending_transfers_) {
+    auto& v = incoming[{t.asset, t.to_venue}];
+    v = Decimal::add(v, Decimal::sub(t.qty, t.fee_qty));
+  }
   // Внешние venue: qty = total по (venue, asset).
   for (const auto& [venue, vb] : venue_balances_) {
     for (const auto& [ccy, e] : vb) {
@@ -822,6 +902,8 @@ fob::ledger::v1::GetNodeBalancesResponse LedgerUseCases::GetNodeBalances(
       n->set_asset(ccy);
       n->set_venue(venue);
       *n->mutable_qty() = e.total.to_proto();
+      const auto in_it = incoming.find({ccy, venue});
+      if (in_it != incoming.end()) *n->mutable_in_transit() = in_it->second.to_proto();
     }
   }
   // Узел CE-house: собственный капитал биржи (accounts['__ce_house__']).
@@ -939,8 +1021,9 @@ void LedgerUseCases::ComputeAndLogSystemInvariantsLocked() {
   std::vector<Decimal> cif_values;
   cif_values.reserve(agent_positions_.size());
   for (const auto& [key, st] : agent_positions_) {
+    // ADR-084: перевод сдвигает позицию ноги на X без клиринга; поправка transfer_moved возвращает инвариант (W·c)_n + moved_n = 0.
     node_sum[{std::get<1>(key), std::get<2>(key)}] =
-        Decimal::add(node_sum[{std::get<1>(key), std::get<2>(key)}], st.position);
+        Decimal::add(node_sum[{std::get<1>(key), std::get<2>(key)}], Decimal::add(st.position, st.transfer_moved));
     cif_values.push_back(Decimal::add(st.position, st.in_flight));
   }
   double wc_eps = 1.0;  // Env не имеет get_double — парсим строку с фолбэком
@@ -972,6 +1055,183 @@ void LedgerUseCases::ComputeAndLogSystemInvariantsLocked() {
        {"invariant_cif", "not_instrumented"}});
 }
 
+// ============================================================================
+// ADR-084: физический перевод связки между биржами (смоделированный).
+//
+// Связка закрывает накопленный перекос запасов переводом актива, а не рыночными заявками (ADR-083). Положительная нога связки —
+// биржа назначения (дефицит запаса), отрицательная — источник. Перевод ставится в очередь, обе ноги сдвигаются к нулю на X сразу
+// (как эмиссия хеджа сокращает c), остатки бирж двигаются при наступлении срока: источник −x, назначение +x·(1−fee). До этого
+// приход виден в NodeBalance.in_transit (информационно: в Σ по валюте не входит, оба остатка меняются одновременно).
+// ============================================================================
+LedgerUseCases::TransferResult LedgerUseCases::queue_transfer_locked(const PendingTransfer& t_in) {
+  const Decimal zero = Decimal::zero();
+  if (t_in.transfer_id.empty() || t_in.asset.empty() || t_in.from_venue.empty() || t_in.to_venue.empty() ||
+      t_in.from_venue == t_in.to_venue || Decimal::cmp(t_in.qty, zero) <= 0) {
+    cex::common::log_json("WARN", "F-18 node transfer rejected",
+                          {{"transfer_id", t_in.transfer_id}, {"asset", t_in.asset}, {"from", t_in.from_venue},
+                           {"to", t_in.to_venue}, {"qty", t_in.qty.to_string()}});
+    return TransferResult::kInvalid;
+  }
+  if (transfer_ids_seen_.count(t_in.transfer_id)) return TransferResult::kDuplicate;
+  if (transfer_ids_seen_.size() > 5000) {   // ограничение памяти: забываем исполненные, но не переводы в очереди (иначе их повтор прошёл бы дважды)
+    transfer_ids_seen_.clear();
+    for (const auto& pt : pending_transfers_) transfer_ids_seen_.insert(pt.transfer_id);
+  }
+  transfer_ids_seen_.insert(t_in.transfer_id);
+
+  PendingTransfer t = t_in;
+  // Плата, удерживаемая при приходе: доля qty = bps/10⁴ (bps·100 в шестых долях), округление half-up до 8 знаков.
+  const double fee_bps = std::min(1000.0, std::max(0.0, env_double("CE_TRANSFER_SIM_FEE_BPS", 0.0)));
+  t.fee_qty = Decimal::div(Decimal::mul(t.qty, Decimal{static_cast<int64_t>(std::llround(fee_bps * 100.0)), 6}), Decimal{1, 0}, 8);
+  const long long eta = std::max<long long>(0, cex::common::Env::get_int("CE_TRANSFER_ETA_BATCHES", 3));
+  t.due_tact = tact_seq_ + static_cast<std::uint64_t>(eta);
+  t.queued_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  ensure_venue_balance_locked(t.from_venue, t.asset);
+  ensure_venue_balance_locked(t.to_venue, t.asset);
+  pending_transfers_.push_back(t);
+  cex::common::log_json("INFO", "F-18 node transfer queued",
+                        {{"transfer_id", t.transfer_id}, {"agent_id", t.agent_id}, {"asset", t.asset}, {"from", t.from_venue},
+                         {"to", t.to_venue}, {"qty", t.qty.to_string()}, {"fee_qty", t.fee_qty.to_string()},
+                         {"x_kusdt", t.x_k.to_string()}, {"due_tact", std::to_string(t.due_tact)}, {"eta_batches", std::to_string(eta)}});
+  if (eta == 0) settle_due_transfers_locked(t.queued_ms);
+  return TransferResult::kQueued;
+}
+
+void LedgerUseCases::settle_due_transfers_locked(long long ts_ms) {
+  for (auto it = pending_transfers_.begin(); it != pending_transfers_.end();) {
+    if (it->due_tact > tact_seq_) { ++it; continue; }
+    auto& from = ensure_venue_balance_locked(it->from_venue, it->asset);
+    auto& to = ensure_venue_balance_locked(it->to_venue, it->asset);
+    const auto now = std::chrono::system_clock::now();
+    from.total = Decimal::sub(from.total, it->qty);
+    from.available = Decimal::sub(from.total, from.reserved);
+    from.updated_at = now;
+    to.total = Decimal::add(to.total, Decimal::sub(it->qty, it->fee_qty));
+    to.available = Decimal::sub(to.total, to.reserved);
+    to.updated_at = now;
+    cex::common::log_json("INFO", "F-18 node transfer settled",
+                          {{"transfer_id", it->transfer_id}, {"agent_id", it->agent_id}, {"asset", it->asset},
+                           {"from", it->from_venue}, {"to", it->to_venue}, {"qty", it->qty.to_string()},
+                           {"fee_qty", it->fee_qty.to_string()}, {"from_total", from.total.to_string()},
+                           {"to_total", to.total.to_string()}, {"queued_ms", std::to_string(it->queued_ms)},
+                           {"settled_ms", std::to_string(ts_ms)}});
+    it = pending_transfers_.erase(it);
+  }
+}
+
+LedgerUseCases::TransferResult LedgerUseCases::ApplyNodeTransfer(const fob::ledger::v1::ApplyNodeTransferRequest& req) {
+  PendingTransfer t;
+  t.transfer_id = req.transfer_id();
+  t.asset = req.asset();
+  t.from_venue = req.from_venue();
+  t.to_venue = req.to_venue();
+  t.qty = Decimal::from_proto(req.qty());
+  if (t.qty.scale < 0 || t.qty.scale > 12) {   // внешнее значение: аномальный масштаб не должен нагружать арифметику под mu_
+    cex::common::log_json("WARN", "F-18 node transfer rejected",
+                          {{"transfer_id", t.transfer_id}, {"reason", "qty_scale_out_of_range"}, {"scale", std::to_string(t.qty.scale)}});
+    return TransferResult::kInvalid;
+  }
+  std::lock_guard<std::mutex> lg(mu_);
+  return queue_transfer_locked(t);
+}
+
+size_t LedgerUseCases::PendingTransferCount() {
+  std::lock_guard<std::mutex> lg(mu_);
+  return pending_transfers_.size();
+}
+
+double LedgerUseCases::LinkParityResidual(const std::string& agent_id, const std::string& asset) {
+  std::lock_guard<std::mutex> lg(mu_);
+  const auto it = link_parity_residual_.find(agent_id + "|" + asset);
+  return it == link_parity_residual_.end() ? 0.0 : it->second;
+}
+
+double LedgerUseCases::link_transfer_threshold_locked(const std::string& asset, AgentPositionState& st) {
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const auto cfg = LoadBandFeeConfig();
+  double z;
+  if (cfg.manual) {
+    z = cfg.manual_q_lim;   // ADR-081: ручная ширина переопределяет расчётную целиком
+  } else if (cfg.k_band > 0.0) {
+    z = TransferThresholdK(cfg.k_band, TransferFeeBps(asset, numeraire), cfg.q_floor);   // без ce_band_arb_scale, волатильности, ликвидности и ω
+  } else {
+    z = static_cast<double>(cex::common::Env::get_int("CE_AGENT_BAND_Q_ARBITRAGEUR", 30));   // линк выключен: плоский env-порог
+  }
+  st.z_lim = dec6(z);
+  st.z_mkt = st.z_lim;   // у перевода одна граница; UI показывает её как порог связки
+  return z;
+}
+
+void LedgerUseCases::maybe_queue_link_transfer_locked(const AgentPositionKey& key, const std::string& batch_id, long long ts_ms) {
+  if (!cex::common::Env::get_bool("CE_ARB_TRANSFER_ENABLED", false)) return;
+  const auto it = agent_positions_.find(key);
+  if (it == agent_positions_.end()) return;
+  AgentPositionState& st = it->second;
+  const auto& [agent_id, asset, venue] = key;
+  if (st.agent_kind != "arbitrageur") return;
+  if (asset == cex::common::Env::get_string("CE_NUMERAIRE", "USDT")) return;   // перенос нумерария сметается в дом (detect_and_emit_band_breach_locked)
+
+  const double z_bar = link_transfer_threshold_locked(asset, st);
+  const Decimal zero = Decimal::zero();
+  if (Decimal::cmp(st.position, zero) <= 0) return;              // источник (отрицательная нога) сам перевод не запускает
+  if (Decimal::cmp(st.position, dec6(z_bar)) <= 0) return;       // строго больше порога
+
+  // Зеркальная нога: тот же агент и актив, другая биржа, отрицательная позиция (при нескольких — самая отрицательная).
+  AgentPositionState* mirror = nullptr;
+  std::string mirror_venue;
+  for (auto m = agent_positions_.lower_bound(AgentPositionKey{agent_id, asset, ""});
+       m != agent_positions_.end() && std::get<0>(m->first) == agent_id && std::get<1>(m->first) == asset; ++m) {
+    if (std::get<2>(m->first) == venue) continue;
+    if (Decimal::cmp(m->second.position, zero) < 0 && (mirror == nullptr || Decimal::cmp(m->second.position, mirror->position) < 0)) {
+      mirror = &m->second;
+      mirror_venue = std::get<2>(m->first);
+    }
+  }
+  if (mirror == nullptr) return;
+  if (st.base_price.units == 0 || mirror->base_price.units == 0) return;   // нет цен — не размерить
+
+  double frac = env_double("CE_TRANSFER_TARGET_FRAC", 0.5);
+  if (!(frac >= 0.0 && frac < 1.0)) frac = 0.5;   // при доле ≥ 1 перевод ничего не сбрасывал бы
+  const Decimal z_targ = dec6(frac * z_bar);
+  const Decimal min_x = dec6(std::max(0.0, env_double("CE_TRANSFER_MIN_K", 0.05)));
+  const Decimal x_k = TransferAmountK(st.position, mirror->position, z_targ, min_x);
+  if (Decimal::cmp(x_k, zero) <= 0) return;
+  const Decimal units = TransferUnits(x_k, mirror->base_price);   // штуки по цене источника на момент постановки
+  if (Decimal::cmp(units, zero) <= 0) return;
+
+  PendingTransfer t;
+  t.transfer_id = "xfer|" + agent_id + "|" + asset + "|" + venue + "|" + batch_id;   // детерминирован: повтор такта даст тот же id
+  t.agent_id = agent_id;
+  t.asset = asset;
+  t.from_venue = mirror_venue;
+  t.to_venue = venue;
+  t.qty = units;
+  t.x_k = x_k;
+  const Decimal dst_before = st.position, src_before = mirror->position;
+  if (queue_transfer_locked(t) != TransferResult::kQueued) return;   // повтор или некорректная заявка: позиции не трогаем
+
+  st.position = Decimal::sub(st.position, x_k);
+  mirror->position = Decimal::add(mirror->position, x_k);
+  st.transfer_moved = Decimal::add(st.transfer_moved, x_k);              // приход +X
+  mirror->transfer_moved = Decimal::sub(mirror->transfer_moved, x_k);    // уход −X
+  st.updated_at_ms = ts_ms;
+  mirror->updated_at_ms = ts_ms;
+  if (agent_position_repo_) {
+    agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::sub(zero, x_k), zero, ts_ms);
+    agent_position_repo_->ApplyHedge(agent_id, asset, mirror_venue, x_k, zero, ts_ms);
+  }
+  // Остаток паритета (в штуках): ушло x по цене источника, а по стоимости на назначении нужно X·1000/P_d. Метрика, не учёт.
+  const double ps = static_cast<double>(mirror->base_price), pd = static_cast<double>(st.base_price);
+  const double r = static_cast<double>(x_k) * 1000.0 * (1.0 / ps - 1.0 / pd);
+  link_parity_residual_[agent_id + "|" + asset] += r;
+  cex::common::log_json("INFO", "F-18 link transfer decision",
+                        {{"agent_id", agent_id}, {"asset", asset}, {"to", venue}, {"from", mirror_venue},
+                         {"threshold_kusdt", std::to_string(z_bar)}, {"x_kusdt", x_k.to_string()}, {"units", units.to_string()},
+                         {"dst_before", dst_before.to_string()}, {"dst_after", st.position.to_string()},
+                         {"src_before", src_before.to_string()}, {"src_after", mirror->position.to_string()},
+                         {"p_src", std::to_string(ps)}, {"p_dst", std::to_string(pd)}, {"parity_residual_units", std::to_string(r)}});
+}
+
 void LedgerUseCases::ApplyPositionDelta(
     const std::string& batch_id, long long ts_ms,
     const std::vector<std::pair<std::string, Decimal>>& node_deltas,
@@ -980,6 +1240,8 @@ void LedgerUseCases::ApplyPositionDelta(
   std::lock_guard<std::mutex> lg(mu_);
   if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id (ОБА пути)
   pos_delta_applied_.insert(batch_id);
+  ++tact_seq_;                          // ADR-084: номер такта клиринга; срок перевода считается в тактах
+  settle_due_transfers_locked(ts_ms);   // исполнить переводы, срок которых наступил
 
   // ADR-057 поправка 3: ce.position.delta — ПЛАН. Копится в ce_committed_ (in-flight),
   // НЕ в house-факт. house двигают только подтверждения (execution.venue). Стоячая позиция
@@ -1027,9 +1289,11 @@ void LedgerUseCases::ApplyPositionDelta(
   std::vector<AgentDeltaRecord> batch_records;
   batch_records.reserve(agent_deltas.size());
 
+  std::set<AgentPositionKey> touched_keys;   // ADR-082: агенты, обработанные в этом такте (перепроверка остатков их не повторяет)
   for (const auto& ad : agent_deltas) {
     if (ad.agent_id.empty()) continue;  // defensive: вызывающая сторона уже фильтрует
     const AgentPositionKey key{ad.agent_id, ad.asset, ad.venue};
+    touched_keys.insert(key);
     auto& st = agent_positions_[key];
     const Decimal position_before = st.position;  // ДО применения дельты ЭТОГО такта
     if (!ad.agent_kind.empty()) st.agent_kind = ad.agent_kind;  // не перетираем известный kind пустым
@@ -1039,6 +1303,7 @@ void LedgerUseCases::ApplyPositionDelta(
     // Нулевую (price_used не пришёл) не затираем последней валидной.
     if (ad.price_used.units != 0) {
       st.last_price = ad.price_used;   // цена ПАРЫ (СО skew)
+      st.last_price_ms = ts_ms;        // ADR-082: свежесть цены для перепроверки остатка
       // ADR-072: F_0 обновляем ВМЕСТЕ с last_price (не независимо): если matching
       // перестал слать fair_price (откат/CE_AGENT_POS=0), F_0 сбрасывается в 0 ⇒
       // клэмп отключается (фолбэк), а не срабатывает против УСТАРЕВШЕГО F_0.
@@ -1081,6 +1346,31 @@ void LedgerUseCases::ApplyPositionDelta(
     // Вариант 2: позиция «устоялась» этим тактом — проверяем полосу и, при
     // пробое, помечаем in_flight + эмитим AgentBandBreach (risk строит заявку).
     detect_and_emit_band_breach_locked(key, st, batch_id, ts_ms);
+  }
+
+  // ADR-084: после того как все дельты такта применены (обе ноги связки уже обновлены), проверить перевод ВСЕХ связок, а не только затронутых
+  // этим тактом: matching не шлёт запись при нулевом потоке, а позиция над порогом (накоплена до включения флага, подтянута из PG после
+  // перезапуска, не ушла из-за минимума суммы) должна уйти и без новой дельты.
+  if (cex::common::Env::get_bool("CE_ARB_TRANSFER_ENABLED", false)) {
+    std::vector<AgentPositionKey> link_keys;
+    for (const auto& [lk, lst] : agent_positions_)
+      if (lst.agent_kind == "arbitrageur") link_keys.push_back(lk);
+    for (const auto& lk : link_keys) maybe_queue_link_transfer_locked(lk, batch_id, ts_ms);
+  }
+
+  // ADR-082 (шаг 2): перепроверка агентов, которым потолок по ленте оставил остаток над порогом, но дельт в этом такте нет — иначе
+  // остаток ушёл бы наружу только при следующей дельте. Сама проверка соблюдает паузу между заявками агента.
+  if (!cap_pending_.empty()) {
+    const std::vector<AgentPositionKey> pending(cap_pending_.begin(), cap_pending_.end());
+    for (const auto& pk : pending) {
+      if (touched_keys.count(pk) != 0) continue;
+      const auto pit = agent_positions_.find(pk);
+      if (pit == agent_positions_.end()) { cap_pending_.erase(pk); continue; }
+      // Цена агента приходит только с его дельтами; по цене старше порога заявку (объём и лимит) не строим — ждём свежей дельты.
+      const long long price_max_age_ms = cex::common::Env::get_int("CE_ORDER_CAP_SWEEP_PRICE_MAX_AGE_MS", 30000);
+      if (pit->second.last_price_ms == 0 || (price_max_age_ms > 0 && ts_ms - pit->second.last_price_ms > price_max_age_ms)) continue;
+      detect_and_emit_band_breach_locked(pk, pit->second, batch_id, ts_ms);
+    }
   }
 
   // Снимаем снапшот такта, только если он реально затронул позиции агентов —
@@ -1220,7 +1510,9 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
     st.position = Decimal::zero();
     st.in_flight = Decimal::zero();
     st.realized_vs_fair = Decimal::zero();  // сброс = чистый старт наблюдения: обнуляем и накопленный заработок
+    st.transfer_moved = Decimal::zero();    // ADR-084: поправка монитора W·c относится к позиции, которой больше нет
     st.updated_at_ms = ts_ms;
+    cap_pending_.erase(key);  // ADR-082: отметка остатка после потолка по ленте — только у сброшенного агента
     ++cleared;
   }
   band_hedges_.clear();  // in_flight guard — с нуля, чтобы новые пробои эмитились
@@ -1930,6 +2222,64 @@ bool LedgerUseCases::LoadAssetSigma(const std::string& symbol, double* out_sigma
 #endif
 }
 
+// ADR-082 (шаг 2): оборот ленты ν биржи по паре из venue_liquidity_stats. Зеркало LoadAssetSigma (TTL-кэш, общее соединение).
+bool LedgerUseCases::LoadVenueTape(const std::string& venue, const std::string& symbol, double* out_nu_quote_per_s,
+                                   long long* out_samples, long long* out_age_ms) {
+  if (tape_source_) return tape_source_(venue, symbol, out_nu_quote_per_s, out_samples, out_age_ms);
+  const std::string key = venue + "|" + symbol;
+  {
+    std::lock_guard<std::mutex> lk(tape_mu_);
+    const auto it = tape_cache_.find(key);
+    if (it != tape_cache_.end() &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - it->second.fetched).count() < 5000) {
+      // Отрицательный кэш: пары нет в таблице или таблицы/PG нет — не ходим в базу под mu_ на каждой попытке эмиссии.
+      if (!it->second.have) return false;
+      if (out_nu_quote_per_s) *out_nu_quote_per_s = it->second.nu_quote_per_s;
+      if (out_samples) *out_samples = it->second.samples;
+      if (out_age_ms) *out_age_ms = it->second.age_ms;
+      return true;
+    }
+  }
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (postgres_dsn_.empty()) return false;
+  TapeEntry e;
+  {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);
+    try {
+      pqxx::work tx(poll_conn());
+      const pqxx::result res = tx.exec_params(
+          "SELECT tape_quote_per_s, tape_samples, "
+          "  CAST(EXTRACT(EPOCH FROM (now()-updated_at))*1000 AS BIGINT) "
+          "FROM venue_liquidity_stats WHERE venue=$1 AND symbol=$2 LIMIT 1",
+          venue, symbol);
+      tx.commit();
+      if (!res.empty()) {
+        e.nu_quote_per_s = res[0][0].as<double>(0.0);
+        e.samples = res[0][1].as<long long>(0);
+        e.age_ms = res[0][2].as<long long>(0);
+        e.have = true;
+      }
+    } catch (const std::exception&) {
+      poll_conn_.reset();  // таблицы может не быть до первого старта venues с шагом 0 — потолка нет
+    }
+  }  // poll_conn_mu_ отпущен до записи в кэш (локи не вложены)
+  e.fetched = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lk(tape_mu_);
+    tape_cache_[key] = e;   // в том числе отрицательная запись (have = false)
+  }
+  if (!e.have) return false;
+  if (out_nu_quote_per_s) *out_nu_quote_per_s = e.nu_quote_per_s;
+  if (out_samples) *out_samples = e.samples;
+  if (out_age_ms) *out_age_ms = e.age_ms;
+  return true;
+#else
+  (void)venue; (void)symbol; (void)out_nu_quote_per_s; (void)out_samples; (void)out_age_ms;
+  return false;
+#endif
+}
+
 // F-18 #7 scoped (T-F18-L03): читает depth (α_e) из ce_asset_liquidity по (asset,venue).
 // Зеркало LoadAssetSigma: TTL-кэш ~1с, poll_conn_ переиспользуемое, staleness — на стороне
 // вызывающего. Ключ кэша — "asset|venue". Нет строки/пустой DSN → false → LiqScale=1.0.
@@ -2099,7 +2449,9 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // позиция арбитражёра = дисбаланс остатков между площадками, разворот потока —
   // сдвигом γ_A (ce_arb_inv_skew_gamma, ADR-071), а не хеджем. Деф true = поведение
   // ADR-069 (хедж есть) — ноль изменений без явного включения владельцем/экспертом.
-  if (is_arbitrageur && !cex::common::Env::get_bool("CE_ARB_MARKET_HEDGE", true))
+  // ADR-084: при включённом переводе связки он заменяет рыночный хедж независимо от CE_ARB_MARKET_HEDGE.
+  if (is_arbitrageur && (cex::common::Env::get_bool("CE_ARB_TRANSFER_ENABLED", false) ||
+                         !cex::common::Env::get_bool("CE_ARB_MARKET_HEDGE", true)))
     return;  // без эмиссии: позиция копится как дисбаланс, разворачивается skew γ_A
              // (эффект наблюдаем по W·c=0 и отсутствию band-хеджей A_*; лог не спамим)
 
@@ -2228,7 +2580,10 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // (наследие модели B, где c включал всё) → excess≈0 → эмитились крохи, backlog запирался
   // в in_flight и позиция росла (F-18 fix). in_flight-гард не нужен: c сам исключает in-flight.
   const Decimal excess = Decimal::sub(abs_c, q);
-  if (Decimal::cmp(excess, zero) <= 0) return;  // c в no-action зоне (весь остаток в полосе)
+  if (Decimal::cmp(excess, zero) <= 0) {  // c в no-action зоне (весь остаток в полосе)
+    cap_pending_.erase(key);               // ADR-082: остаток после потолка ушёл или позиция вернулась в полосу
+    return;
+  }
   // Cooldown эмиссии (F-18): под A7 c пиннится к band, поток каждый такт даёт пробой —
   // без гарда эмиссия (6+/с·агентов) обгоняет консьюмер venues_exec (~3/с) → бэклог
   // растёт, хеджи не исполняются, in_flight «утекает». Не переэмитим для агента, пока
@@ -2244,6 +2599,60 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // При выключенном линке — всегда агрессив (старое поведение).
   const bool aggressive = IsAggressiveBandZone(fee_linked, band_manual, static_cast<double>(abs_c), z_mkt);
 
+  // ADR-082 (шаг 2, за флагом CE_ORDER_CAP_TAPE, по умолчанию выключен): заявки агентов по одной бирже и паре вместе не занимают
+  // больше доли π оборота ленты за время жизни заявки: бюджет = π·ν·T_ord − уже живые заявки (|in_flight| всех агентов этой биржи
+  // и пары), но не ниже CE_ORDER_CAP_MIN_K. Остаток остаётся в позиции за порогом и уходит следующими заявками (cap_pending_
+  // перепроверяется каждый такт). Ограничение снимается целиком (жёсткий выход), если позиция в зоне агрессивного сброса
+  // (|c| > Z̄mkt) или избыток не меньше CE_ORDER_CAP_HARD_MULT бюджетов ленты: мёртвая лента или поток, который лента не вмещает,
+  // не должны держать позицию над порогом бесконечно. Нет свежей ν (нет строки, старше CE_ORDER_CAP_TAPE_MAX_AGE_S, меньше
+  // CE_ORDER_CAP_TAPE_MIN_SAMPLES чтений) или нет цены для пересчёта в USDT ⇒ без ограничения (прежнее поведение). ν и бюджет —
+  // метрики (double); в Decimal переводится только итоговый объём, один и тот же в позиции, in_flight и событии пробоя.
+  Decimal emit = excess;
+  double order_cap_k = 0.0;   // бюджет ленты π·ν·T_ord (тыс. USDT), 0 = не применялся (для лога)
+  double order_live_k = 0.0;  // уже живые заявки по бирже и паре (тыс. USDT), для лога
+  bool order_hard_stop = false;  // ограничение снято жёстким выходом, для лога
+  if (cex::common::Env::get_bool("CE_ORDER_CAP_TAPE", false)) {
+    const std::string cap_quote = st.quote.empty() ? numeraire : st.quote;
+    double nu_quote = 0.0;
+    long long tape_samples = 0, tape_age_ms = 0;
+    const long long max_age_ms = cex::common::Env::get_int("CE_ORDER_CAP_TAPE_MAX_AGE_S", 300) * 1000;
+    const long long min_samples = cex::common::Env::get_int("CE_ORDER_CAP_TAPE_MIN_SAMPLES", 5);
+    if (LoadVenueTape(venue, asset + cap_quote, &nu_quote, &tape_samples, &tape_age_ms) && nu_quote > 0.0 &&
+        tape_samples >= min_samples && tape_age_ms >= 0 && tape_age_ms < max_age_ms) {
+      // Оборот ленты в валюте котирования пары; цена котируемой валюты в USDT = P(base, USDT) / P(base, quote).
+      double quote_usdt = 1.0;
+      bool convertible = true;
+      if (cap_quote != numeraire) {
+        convertible = st.base_price.units != 0 && st.last_price.units != 0;
+        if (convertible) quote_usdt = static_cast<double>(st.base_price) / static_cast<double>(st.last_price);
+      }
+      if (convertible) {
+        const auto env_d = [](const char* name, double def) {
+          const char* v = std::getenv(name);
+          return v ? std::atof(v) : def;
+        };
+        order_cap_k = TapeCapK(nu_quote * quote_usdt, env_d("CE_ORDER_CAP_PI", 0.2), env_d("CE_ORDER_CAP_T_ORD_S", 120.0));
+        if (order_cap_k > 0.0) {
+          const double excess_d = static_cast<double>(excess);
+          const double min_k = std::max(0.01, env_d("CE_ORDER_CAP_MIN_K", 0.25));
+          const double hard_mult = env_d("CE_ORDER_CAP_HARD_MULT", 5.0);
+          order_live_k = LiveInFlightK(asset, venue, cap_quote);
+          order_hard_stop = aggressive || (hard_mult > 0.0 && excess_d >= hard_mult * order_cap_k);
+          if (!order_hard_stop) {
+            const double emit_d = CappedOrderSizeK(excess_d, TapeBudgetK(order_cap_k, order_live_k, min_k), min_k);
+            if (emit_d < excess_d) {
+              const Decimal capped{static_cast<int64_t>(std::llround(emit_d * 1e6)), 6};
+              emit = Decimal::cmp(capped, excess) > 0 ? excess : capped;   // округление не должно превысить избыток
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (Decimal::cmp(emit, excess) < 0) cap_pending_.insert(key);   // остаток над порогом: перепроверять каждый такт
+  else cap_pending_.erase(key);
+
   const bool pos_positive = Decimal::cmp(st.position, zero) >= 0;
   // ADR-072 §A (пересмотр 2026-10-12, решение владельца): профит-гейт УДАЛЁН.
   // Прежде гейт держал позицию в maker-зоне на структурно-убыточных vs fair биржах
@@ -2256,7 +2665,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // Теперь: хеджируем КАЖДЫЙ пробой (|c|>z_lim); убыток vs fair на плохих биржах мелкий
   // и регулярный, позиция держится у полосы; заработок по-прежнему меряется realized_vs_fair.
   // c>0 ⇒ реализуем накопленный поток SELL; c<0 ⇒ BUY. in_flight того же знака.
-  const Decimal in_flight_delta = pos_positive ? excess : Decimal::sub(zero, excess);
+  const Decimal in_flight_delta = pos_positive ? emit : Decimal::sub(zero, emit);
   // Модель A7 (док CE_algorithm_v2 §A7): отправленное УХОДИТ из позиции в заявку —
   // c уменьшается на избыток СРАЗУ (c→±q), избыток учитывается в in_flight. По
   // исполнению c не трогаем; по таймауту неисполненный остаток возвращается в c
@@ -2279,7 +2688,7 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   breach.set_quote(st.quote.empty() ? std::string("USDT") : st.quote);
   breach.set_venue(venue);
   breach.set_side(pos_positive ? "SELL" : "BUY");
-  *breach.mutable_excess_value() = excess.to_proto();     // модуль, k-USDT
+  *breach.mutable_excess_value() = emit.to_proto();       // модуль, k-USDT (с потолком ADR-082, если применён)
   *breach.mutable_base_price() = st.base_price.to_proto(); // P(base) USDT
   // ADR-072 (пересмотр 2026-10-08): лимит хеджа = ЦЕНА БИРЖИ (st.last_price, узловая
   // клиринговая цена со skew) — переводчик физически торгует по цене СВОЕЙ площадки,
@@ -2300,7 +2709,12 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   cex::common::log_json("INFO", "F-18 band breach emitted",
                         {{"agent_id", agent_id}, {"asset", asset}, {"quote", st.quote},
                          {"venue", venue}, {"side", pos_positive ? "SELL" : "BUY"},
-                         {"excess_value", excess.to_string()},
+                         {"excess_value", emit.to_string()},
+                         {"excess_total", excess.to_string()},        // весь избыток над порогом (ADR-082: уходит частями)
+                         {"order_cap_k", std::to_string(order_cap_k)}, // ADR-082 шаг 2: бюджет ленты, тыс. USDT (0 = не применён)
+                         {"order_live_k", std::to_string(order_live_k)},     // уже живые заявки по бирже и паре
+                         {"order_hard_stop", order_hard_stop ? "1" : "0"},   // ограничение снято жёстким выходом
+                         {"capped", Decimal::cmp(emit, excess) < 0 ? "1" : "0"},
                          {"fair_price", st.fair_price.to_string()},   // ADR-072: F_0 ДО skew
                          {"skewed_price", st.last_price.to_string()}, // цена пары СО skew
                          {"hedge_limit", hedge_limit.to_string()},    // лимит после клэмпа A1
@@ -2449,6 +2863,9 @@ bool LedgerUseCases::apply_agent_band_report_locked(
       if (agent_position_repo_)
         agent_position_repo_->ApplyHedge(agent_id, asset, venue, residual,
                                          Decimal::sub(Decimal::zero(), residual), ts_ms);
+      // ADR-082: вернувшийся остаток (заявка не исполнена или исполнена частично) агент без новых дельт иначе не отправил бы до
+      // следующей дельты; при включённом бюджете ленты ставим отметку перепроверки (пауза и её рост после неисполнения соблюдаются).
+      if (cex::common::Env::get_bool("CE_ORDER_CAP_TAPE", false)) cap_pending_.insert(hedge.key);
     }
     // F-18 #6 (T-F18-804): итоговая расчётная band-комиссия зоны за жизнь заявки —
     // наблюдаемость (net = gross hedge PnL − band_fee_estimated). Отдельно от real

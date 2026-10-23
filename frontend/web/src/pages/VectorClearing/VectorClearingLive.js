@@ -6,6 +6,8 @@ import axios from 'axios';
 import { isAuthenticated } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import { groupTranslators, groupArbitrageurs, isIdleAgent, mergeStableRows } from './agentRowsLayout';
+import AgentPnlChart from './AgentPnlChart';
+import SystemPnlBlock from './SystemPnlBlock';
 import './VectorClearingLive.css';
 
 // F-05A: живой мониторинг векторного клиринга (ClickHouse vector_clearing_results).
@@ -435,7 +437,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
     },
     title: a.stale ? 'нет в последнем ответе — показана последняя известная позиция'
       : a.inactive ? 'агент в графе клиринга, но позиции у ledger ещё не было'
-      : (clickable ? 'клик — разбор агента (цена/порог/хедж/исполнение)' : undefined),
+      : (clickable ? 'клик — график заработка агента во времени и разбор (цена/порог/хедж/исполнение)' : undefined),
   });
   const sgn = (n) => (Number(n) > 1e-9 ? '+' : '') + fmtNum(n);
   const dash = <span title="нет данных" style={{ opacity: 0.4 }}>—</span>;
@@ -446,17 +448,23 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const deltaCell = (v, hasDelta) => (!hasDelta || v == null)
     ? <span title="агент не двигался в этом такте" style={{ opacity: 0.35 }}>0</span>
     : numCell(v);
-  // Заявка агента: сколько отправлено на биржу (target_qty) и сколько исполнилось по
-  // симуляции (filled_qty). Цвет исполнения: зелёный=полностью, янтарь=частично, красный=0.
-  const hedgeSent = (a) => (a.hedge_status == null) ? dash : (
-    <span title={`заявка: ${a.hedge_symbol || ''} ${a.hedge_side || ''}, статус ${a.hedge_status}`}>{fmtNum(a.hedge_sent)}</span>
-  );
-  const hedgeFilled = (a) => {
-    if (a.hedge_status == null) return dash;
-    const s = Number(a.hedge_sent) || 0, f = Number(a.hedge_filled) || 0;
+  // Заявка агента на внешнюю биржу: сколько отправлено (target_qty) и сколько исполнилось (накопленно, с дозаполнением
+  // резидентных лимитов). Показывается в строке той валюты, которую заявка торгует (BTC/USDT → в строке BTC), в единицах этой
+  // валюты. h: объект заявки | null (заявки нет — прочерк) | undefined (в этой строке заявки быть не может — пусто).
+  // Цвет исполнения: зелёный=полностью, янтарь=частично, красный=0.
+  const unitTag = (cur) => <span style={{ opacity: 0.6, fontSize: '0.85em' }}> {cur}</span>;
+  const hedgeSent = (h, cur) => {
+    if (h === undefined) return null;
+    if (h === null) return dash;
+    return <span title={`заявка: ${h.symbol || ''} ${h.side || ''}, статус ${h.status}`}>{fmtNum(h.sent)}{unitTag(cur)}</span>;
+  };
+  const hedgeFilled = (h, cur) => {
+    if (h === undefined) return null;
+    if (h === null) return dash;
+    const s = Number(h.sent) || 0, f = Number(h.filled) || 0;
     const col = f <= 1e-12 ? '#e06060' : (f + 1e-9 >= s ? '#5fd08a' : '#e0b84a');
     const lbl = f <= 1e-12 ? 'не исполнено' : (f + 1e-9 >= s ? 'полностью' : 'частично');
-    return <span style={{ color: col }} title={`${lbl} (${a.hedge_status})`}>{fmtNum(f)}</span>;
+    return <span style={{ color: col }} title={`${lbl} (${h.status})`}>{fmtNum(f)}{unitTag(cur)}</span>;
   };
   // Статистика по СОСТОЯВШИМСЯ сделкам (без комиссий): кол-во валюты (signed) и заработок USDT.
   const tradeQty = (v, cur) => (v == null || !Number.isFinite(Number(v))) ? dash : (
@@ -474,7 +482,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
     const uOk = u != null && Number.isFinite(Number(u));
     if (!rOk && (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt)))) return null;
     return (
-      <span title={`realized R (закрытые round-trip, нарастает = заработок) / unrealized U (MTM открытого остатка) по ${a.trade_fills || 0} сделкам, USDT без комиссий`}>
+      <span title={`R — реализованный (зафиксирован сделками) / U — нереализованный (остаток по текущим ценам) по ${a.trade_fills || 0} сделкам, USDT без комиссий. Клик по агенту — график во времени`}>
         <span style={{ color: pnlColor(rOk ? r : a.pnl_usdt), fontWeight: 600 }}>{sgn(rOk ? r : a.pnl_usdt)}</span>
         {uOk && <span style={{ color: pnlColor(u), opacity: 0.6, fontSize: '0.85em' }}> / {sgn(u)}</span>}
       </span>
@@ -502,22 +510,65 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
       </span>
     );
   };
-  // Две ноги агента (по валюте): переводчик base/quote; арбитражёр asset@src / asset@dst.
+  // Выгода участника в клиринге (CALC-CE-CLEARING-SURPLUS): накоплена BFF по тактам с момента сброса статистики. Это оценка относительно
+  // кривой агента, а не деньги в кассе; не складывается с R и U.
+  const usd2 = (v) => Number(v).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const surplusCell = (a) => {
+    if (a.surplus_usdt == null || !Number.isFinite(Number(a.surplus_usdt))) return dash;
+    const cov = a.surplus_coverage != null && Number.isFinite(Number(a.surplus_coverage)) ? Math.round(100 * Number(a.surplus_coverage)) : null;
+    return (
+      <span style={{ color: '#b58cff' }} title={`Выгода участника в клиринге по теории (w²/2α по тактам), накоплено с сброса статистики, USDT. Оценка относительно кривой агента, не деньги в кассе.${cov != null ? ' Учтено ' + cov + ' % тактов.' : ''}`}>
+        {usd2(a.surplus_usdt)}
+      </span>
+    );
+  };
+  // Две ноги агента (по валюте): переводчик base/quote; арбитражёр asset@src / asset@dst. К каждой ноге BFF-данные внешней стороны:
+  //   hedge — заявка этой ноги (объект | null «заявки нет» | undefined «в этой строке заявки не бывает»);
+  //   trades — состоявшиеся сделки в единицах валют строки: [{ v, cur }] (переводчик — одна величина, арбитражёр — база и квота биржи ноги).
   const legsOf = (a) => {
+    const quoteCur = a.quote || 'USDT';
+    const top = (a.hedge_status == null) ? null : {
+      symbol: a.hedge_symbol, side: a.hedge_side, sent: a.hedge_sent, filled: a.hedge_filled, status: a.hedge_status,
+    };
     if (a.agent_kind === 'arbitrageur') {
       const r = a.arb || {};
+      const hv = a.hedge_by_venue;          // последняя заявка на каждой из бирж агента
+      const tb = a.trade_by_venue;          // сделки по биржам: { venue: { traded_base, traded_quote } }
+      const hedgeAt = (venue) => {
+        if (hv) return hv[venue] || null;
+        return top && a.hedge_venue === venue ? top : null;   // снимок без разбивки по биржам: верхняя заявка → нога её биржи
+      };
+      const tradesAt = (venue, first) => {
+        if (tb) {
+          const t = tb[venue];
+          return t ? [{ v: t.traded_base, cur: a.base }, { v: t.traded_quote, cur: quoteCur }] : null;
+        }
+        // нет разбивки по биржам — суммарные сделки целиком в первой строке
+        return first ? [{ v: a.traded_base, cur: a.base }, { v: a.traded_quote, cur: quoteCur }] : null;
+      };
       return [
-        { label: `${a.base}@${r.src || '?'}`, before: r.bleg_src, delta: r.dleg_src, after: r.leg_src },
-        { label: `${a.base}@${r.dst || '?'}`, before: r.bleg_dst, delta: r.dleg_dst, after: r.leg_dst },
+        { label: `${a.base}@${r.src || '?'}`, cur: a.base, before: r.bleg_src, delta: r.dleg_src, after: r.leg_src, hedge: hedgeAt(r.src), trades: tradesAt(r.src, true) },
+        { label: `${a.base}@${r.dst || '?'}`, cur: a.base, before: r.bleg_dst, delta: r.dleg_dst, after: r.leg_dst, hedge: hedgeAt(r.dst), trades: tradesAt(r.dst, false) },
       ];
     }
+    // Переводчик: заявка торгует символ BASE/QUOTE — показываем её в строке базовой валюты символа (BTC/USDT → строка BTC).
+    const labels = [a.base, quoteCur];
+    const hs = String(a.hedge_symbol || '');
+    // символ приходит как BASE/QUOTE; без разделителя (BTCUSDT) базой считается та валюта строки, с которой символ начинается
+    const hedgedCur = hs.includes('/') ? hs.split('/')[0] : (labels.find((l) => hs.startsWith(l)) || a.base);
+    const hedgedIdx = Math.max(0, labels.indexOf(hedgedCur));
+    const hedgeOf = (idx) => (idx === hedgedIdx ? top : (top ? undefined : (idx === 0 ? null : undefined)));
     return [
-      { label: a.base, before: a.pos_base_before, delta: a.delta_base, after: a.pos_base },
-      { label: a.quote || 'USDT', before: a.pos_quote_before, delta: a.delta_quote, after: a.pos_quote },
+      { label: a.base, cur: a.base, before: a.pos_base_before, delta: a.delta_base, after: a.pos_base, hedge: hedgeOf(0), trades: [{ v: a.traded_base, cur: a.base }] },
+      { label: quoteCur, cur: quoteCur, before: a.pos_quote_before, delta: a.delta_quote, after: a.pos_quote, hedge: hedgeOf(1), trades: [{ v: a.traded_quote, cur: quoteCur }] },
     ];
   };
-  // Агент = ДВЕ строки (по ноге/валюте). agent_id + заявки (отправлено/исполнено) —
-  // rowSpan=2 (общие для агента). было → дельта → стало — по каждой ноге отдельно.
+  // Состоявшиеся сделки одной строки: база и квота (арбитражёр — обе на бирже ноги, друг под другом), в одном столбце.
+  const tradesCell = (lg) => (
+    !lg.trades ? dash : lg.trades.map((t, k) => <div key={k}>{tradeQty(t.v, t.cur)}</div>)
+  );
+  // Агент = ДВЕ строки (по ноге/валюте). Слева — внутренняя биржа CE (было → дельта → стало по каждой ноге), справа — внешняя
+  // (заявка и сделки — в строке своей валюты; заработок общий по агенту, rowSpan=2).
   const renderAgent = (a, i, tag) => {
     const L = legsOf(a);
     return L.map((lg, li) => (
@@ -527,10 +578,10 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
         <td className="vc-mono">{numCell(lg.before)}</td>
         <td className="vc-mono">{deltaCell(lg.delta, a.hasDelta)}</td>
         <td className="vc-mono"><b>{numCell(lg.after)}</b></td>
-        {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeSent(a)}</td>}
-        {li === 0 && <td className="vc-mono" rowSpan={2}>{hedgeFilled(a)}</td>}
-        {li === 0 && <td className="vc-mono" rowSpan={2}>{tradeQty(a.traded_base, a.base)}</td>}
-        {li === 0 && <td className="vc-mono" rowSpan={2}>{tradeQty(a.traded_quote, a.quote || 'USDT')}</td>}
+        {li === 0 && <td className="vc-mono" rowSpan={2} data-testid="surplus-cell">{surplusCell(a)}</td>}
+        <td className="vc-mono vc-ext-start" data-testid="hedge-sent">{hedgeSent(lg.hedge, lg.cur)}</td>
+        <td className="vc-mono" data-testid="hedge-filled">{hedgeFilled(lg.hedge, lg.cur)}</td>
+        <td className="vc-mono" data-testid="leg-trades">{tradesCell(lg)}</td>
         {li === 0 && <td className="vc-mono" rowSpan={2}>{pnlCell(a)}</td>}
       </tr>
     ));
@@ -549,28 +600,50 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const realizedOf = (a) => (okNum(a.realized_usdt) ? Number(a.realized_usdt) : (okNum(a.pnl_usdt) ? Number(a.pnl_usdt) : 0));
   const sumR = (arr) => arr.reduce((acc, a) => acc + realizedOf(a), 0);
   const sumKey = (arr, key) => arr.reduce((acc, a) => acc + (okNum(a[key]) ? Number(a[key]) : 0), 0);
-  const haveStats = rows.some((a) => okNum(a.realized_usdt) || okNum(a.pnl_usdt) || okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt));
+  const haveStats = rows.some((a) => okNum(a.realized_usdt) || okNum(a.pnl_usdt) || okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt) || okNum(a.surplus_usdt));
   const tR = sumR(tRows), tU = sumKey(tRows, 'unrealized_usdt');
   const aR = sumR(aRows), aU = sumKey(aRows, 'unrealized_usdt');
   const allR = tR + aR, allU = tU + aU;
   const arbBasis = sumKey(aRows, 'basis_mtm_usdt'), arbOpen = sumKey(aRows, 'open_position_usdt');
+  const tSur = sumKey(tRows, 'surplus_usdt'), aSur = sumKey(aRows, 'surplus_usdt');
+  const haveSurplus = rows.some((a) => okNum(a.surplus_usdt));
   const hasArbPos = aRows.some((a) => okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt));
   const pnlNum = (v) => (
     <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)}</b>
   );
+  // Двухъярусная шапка: слева — внутренняя биржа CE (позиция агента в клиринге), справа — внешние биржи (хедж и результат).
   const head = (
-    <thead><tr>
-      <th>agent_id</th>
-      <th title="валюта/нога агента (отдельная строка на каждую)">нога</th>
-      <th title="позиция ДО этого такта клиринга">было</th>
-      <th title="Δ позиции в ЭТОМ такте">дельта</th>
-      <th title="позиция ПОСЛЕ такта (= было + дельта), считается от полной позиции c + отправленное в заявках (in_flight) — так же, как на вкладке «Граф»">стало</th>
-      <th title="сколько отправлено на биржу (band-хедж заявка, target_qty)">отправлено</th>
-      <th title="сколько исполнилось по результатам симуляции (filled_qty)">исполнено</th>
-      <th title="кол-во БАЗОВОЙ валюты по состоявшимся сделкам (signed: BUY +, SELL −); без комиссий">сделки: база</th>
-      <th title="кол-во КОТИРУЕМОЙ валюты по состоявшимся сделкам (signed); без комиссий">сделки: квота</th>
-      <th title="заработок USDT: realized R (закрытые round-trip, нарастает) / unrealized U (MTM открытого остатка); без комиссий">заработок R / U</th>
-    </tr></thead>
+    <thead>
+      <tr>
+        <th rowSpan={2}>agent_id</th>
+        <th rowSpan={2} title="валюта/нога агента (отдельная строка на каждую)">нога</th>
+        <th colSpan={4} className="vc-grp-int" data-testid="grp-internal"
+          title="Внутренняя биржа CE: позиция агента в клиринге Continuous Exchange. Считается внутри CE, на внешние биржи не уходит.">
+          Внутренняя биржа CE — позиция агента
+        </th>
+        <th colSpan={4} className="vc-grp-ext vc-ext-start" data-testid="grp-external"
+          title="Внешняя биржа: заявки агента на реальные биржи (хедж, когда позиция вышла за полосу) и состоявшиеся сделки. Строка = валюта заявки.">
+          Внешняя биржа — хедж и результат
+        </th>
+      </tr>
+      <tr>
+        <th title="позиция ДО этого такта клиринга">было</th>
+        <th title="Δ позиции в ЭТОМ такте">дельта</th>
+        <th title="позиция ПОСЛЕ такта (= было + дельта), считается от полной позиции c + отправленное в заявках (in_flight) — так же, как на вкладке «Граф»">стало</th>
+        <th data-testid="surplus-head" title="Выгода участника в клиринге по теории: S = w²/(2α) за такт, накоплено с момента сброса статистики, USDT. Узкое звено цикла получает больше. Оценка относительно кривой агента, не деньги в кассе: деньгами становится при закрытии позиции (хедж у переводчика, физический перевод у связки).">
+          выгода по теории
+          <div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>S, USDT</div>
+        </th>
+        <th className="vc-ext-start" title="сколько отправлено на биржу (band-хедж заявка, target_qty). Показано в строке той валюты, которую торгует заявка: заявка по BTC/USDT — в строке BTC">отправлено</th>
+        <th title="сколько исполнилось по результатам симуляции (накопленно, с дозаполнением резидентных лимитов). Та же строка, что у «отправлено»">исполнено</th>
+        <th title="состоявшиеся сделки агента, количество валюты строки (знаковое: покупка +, продажа −); без комиссий. В строке базовой валюты — база, в строке котируемой — квота; у арбитражёра в каждой строке обе валюты его биржи">сделки</th>
+        <th data-testid="ru-head"
+          title="Заработок в USDT, без комиссий. R — реализованный (уже зафиксирован сделками), U — нереализованный (оценка остатка по текущим ценам, меняется с рынком). R + U — итог. Подробно — в пояснении под таблицами.">
+          заработок R / U ⓘ
+          <div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>R реализ. · U нереализ.</div>
+        </th>
+      </tr>
+    </thead>
   );
   return (
     <div className="vc-sec">
@@ -599,6 +672,25 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
             ))}
           </table>
         ) : <div className="vc-note vc-note-tight">нет арбитражёров</div>}
+        <div className="vc-note vc-note-tight vc-ru-legend" data-testid="ru-explain">
+          <b>Что такое R и U в колонке «заработок».</b> Оба числа — USDT, считаются по состоявшимся сделкам агента, <b>без комиссий</b>.
+          <ul>
+            <li>
+              <b>R — реализованный заработок</b>: уже зафиксирован сделками, сам по себе не меняется, пока нет новых сделок.
+              У переводчика это накопленная по каждой сделке разница между ценой исполнения и справедливой ценой клиринга: продажа дороже
+              справедливой цены — плюс, покупка дешевле — плюс. У арбитражёра — прибыль на закрытом объёме: меньшее из купленного и
+              проданного × (средняя цена продажи − средняя цена покупки).
+            </li>
+            <li>
+              <b>U — нереализованный результат</b>: оценка того, что ещё «висит» — итог всех сделок агента по <i>текущим</i> ценам клиринга
+              минус R. Меняется вместе с рынком, пока позиция открыта, и может уйти в минус или плюс, не став заработком.
+            </li>
+            <li><b>R + U</b> — полный результат по текущим ценам. График по клику на агента показывает оба ряда во времени.</li>
+          </ul>
+          Базис и открытая позиция арбитражёров (под R / U) — это позиция, а не заработок.
+          <br /><b>Выгода по теории (S)</b> — отдельная колонка во внутренней группе: сколько участник выигрывает в клиринге каждый такт, w²/(2α), накоплено с сброса статистики. Это оценка относительно его кривой, а не деньги в кассе;
+          у связки, которая больше не торгует на внешних биржах (ADR-083), это основной показатель работы.
+        </div>
         {aRows.length > 0 && (
           <div className="vc-note vc-note-tight" data-testid="arb-explain">
             <b>Как читать заработок арбитражёров.</b> Арбитражёр перемещает актив между двумя биржами внутри CE и, как переводчик,
@@ -619,6 +711,11 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
             <span className="vc-tt-all" data-testid="total-earnings" title="Сумма заработка по сделкам переводчиков и арбитражёров: R — реализованный, U — нереализованный (MTM открытого остатка). Базис и открытая позиция арбитражёров сюда не входят.">
               Вместе: R {pnlNum(allR)} / U {pnlNum(allU)} · итого R+U {pnlNum(allR + allU)}
             </span>
+            {haveSurplus && (
+              <span data-testid="surplus-totals" title="Выгода участников в клиринге по теории, накоплено с сброса статистики. Не деньги в кассе и не складывается с R и U.">
+                Выгода в клиринге (теория): переводчики <b style={{ color: '#b58cff' }}>{usd2(tSur)}</b> · арбитражёры <b style={{ color: '#b58cff' }}>{usd2(aSur)}</b>
+              </span>
+            )}
             {hasArbPos && (
               <span data-testid="arb-pos-total" title="Не заработок. Базис — результат разницы цен между биржами на перевозимом объёме; открытая позиция — нетто-количество актива на ногах арбитражёров по ценам бирж (риск изменения цены, не убыток).">
                 Позиции арбитражёров (не заработок): базис {pnlNum(arbBasis)} · открытая позиция {pnlNum(arbOpen)}
@@ -628,10 +725,11 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
         )}
 
         <div className="vc-note vc-note-tight">
-          Каждый агент — <b>две строки (по валюте/ноге)</b>: <b>было → дельта → стало</b> этого такта.
-          <b> Переводчик</b> — пара base/quote (одна нога +, другая −). <b>Арбитражёр</b> — актив на источнике (−) и приёмнике (+); «v3» в id — площадка <code>uniswap_v3</code>.
-          <b> Отправлено/исполнено</b> — последняя band-хедж-заявка агента: сколько ушло на биржу и сколько исполнилось по симуляции (<span style={{ color: '#5fd08a' }}>полностью</span> / <span style={{ color: '#e0b84a' }}>частично</span> / <span style={{ color: '#e06060' }}>не исполнено</span>).
-          <b> Сделки (база/квота/заработок USDT)</b> — по ВСЕМ состоявшимся сделкам агента (CALC-F12-HEDGE-PNL, без комиссий): кол-во каждой валюты (знаковое) и заработок в USDT (<span style={{ color: '#5fd08a' }}>+</span>/<span style={{ color: '#e06060' }}>−</span>). Ноги/заявки/сделки считает BFF (money-path, ADR-057).
+          Каждый агент — <b>две строки (по валюте/ноге)</b>. <b>Слева — внутренняя биржа CE</b>: <b>было → дельта → стало</b> этого такта.
+          <b> Справа — внешние биржи</b>: заявка и сделки стоят в строке той валюты, которую торгует заявка (по BTC/USDT — в строке BTC).
+          <b> Переводчик</b> — пара base/quote (одна нога +, другая −). <b>Арбитражёр</b> — актив на источнике (−) и приёмнике (+); «v3» в id — площадка <code>uniswap_v3</code>; его заявки и сделки показаны по бирже каждой ноги.
+          <b> Отправлено/исполнено</b> — последняя band-хедж-заявка: сколько ушло на биржу и сколько исполнилось по симуляции (<span style={{ color: '#5fd08a' }}>полностью</span> / <span style={{ color: '#e0b84a' }}>частично</span> / <span style={{ color: '#e06060' }}>не исполнено</span>).
+          <b> Сделки</b> — по ВСЕМ состоявшимся сделкам агента (CALC-F12-HEDGE-PNL, без комиссий): количество валюты строки (знаковое: покупка +, продажа −); база и квота теперь в одном столбце — в строке базовой валюты база, в строке котируемой квота. Ноги/заявки/сделки считает BFF (money-path, ADR-057).
         </div>
       </div>
     </div>
@@ -1597,9 +1695,14 @@ function VectorClearingLive() {
             </div>
             {liveRows == null
               ? <div className="vc-note vc-note-tight">загрузка живых позиций…</div>
-              : <AgentPositionsTables agentRows={liveRows}
-                  title="Позиции агентов — ЖИВОЙ просмотр (money-path) · клик по строке — разбор агента"
-                  onSelectAgent={selectAgent} selectedId={selAgent} />}
+              : (
+                <>
+                  <SystemPnlBlock />
+                  <AgentPositionsTables agentRows={liveRows}
+                    title="Позиции агентов — ЖИВОЙ просмотр (money-path) · клик по строке — разбор агента"
+                    onSelectAgent={selectAgent} selectedId={selAgent} />
+                </>
+              )}
           </div>
         )}
 
@@ -1625,6 +1728,7 @@ function VectorClearingLive() {
                 <button onClick={() => selectAgent(selAgent)} style={{ marginLeft: 'auto', padding: '3px 12px', borderRadius: 6, fontSize: 13, cursor: 'pointer', border: '1px solid #2a4a5a', background: 'transparent', color: '#9fb2c2' }}>✕ закрыть</button>
               </div>
               <div style={{ padding: '8px 12px' }}>
+                <AgentPnlChart agentId={selAgent} />
                 <AgentDrillDown detail={agentDetail} />
               </div>
             </div>

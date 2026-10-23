@@ -2,14 +2,28 @@
 
 ## Status
 
-Planned (контракт добавлен в `contracts/proto/fob/ledger/v1/ledger.proto`; реализация — T-CEA-201, ADR-057)
+Implemented (2026-10-22, [ADR-084](../../03-architecture/adr/ADR-084-ce-link-physical-transfer.md)): смоделированный перевод в ledger. Контракт — `contracts/proto/fob/ledger/v1/ledger.proto`, первоначальное решение — T-CEA-201, ADR-057.
 
 ## Purpose
 
-Применить **перевод валюты между узлами** (действие связки-арбитражёра, ADR-055): списать с
-`from_venue`, зачислить в `in_transit` `to_venue`. Идемпотентно по `transfer_id`. Перевод
+Применить **перевод валюты между узлами** (действие связки-арбитражёра, ADR-055). Заявка ставится в очередь
+ledger и исполняется через `CE_TRANSFER_ETA_BATCHES` тактов клиринга (по умолчанию 3): остаток `from_venue`
+уменьшается на `qty`, остаток `to_venue` увеличивается на `qty·(1 − fee)`, где `fee = CE_TRANSFER_SIM_FEE_BPS / 10⁴`
+(по умолчанию 0). До исполнения приход виден в `NodeBalance.in_transit` назначения (справка: в `qty` и в сумму по
+валюте он не входит). Идемпотентно по `transfer_id`. Перевод
 **не меняет** актив-агрегат `Z_a` (меняет только географию), но меняет исполнимость ног на
 конкретных площадках (ADR-057 §5, тождество (Ф4)).
+
+## Поведение и ошибки
+
+| Случай | Результат |
+| --- | --- |
+| корректная заявка | `OK`, поставлена в очередь |
+| повтор с тем же `transfer_id` | `OK`, без эффекта (идемпотентность) |
+| пустой `transfer_id`, `asset`, `from_venue` или `to_venue`; `from_venue = to_venue`; `qty ≤ 0`; масштаб `qty` вне 0…12 | `INVALID_ARGUMENT` |
+| перезапуск ledger | очередь и остатки бирж (в памяти) обнуляются вместе |
+
+Внутри ledger тот же путь использует решение связки: при `CE_ARB_TRANSFER_ENABLED=1` ledger сам ставит перевод с `transfer_id = xfer|агент|актив|назначение|batch_id` (порог, сумма и защиты — ADR-084, карточка [CALC-CE-LINK-TRANSFER](../../04-domain/calculations/CALC-CE-LINK-TRANSFER.md)). Журнал: `F-18 link transfer decision`, `F-18 node transfer queued`, `F-18 node transfer settled`.
 
 ## Transport
 
