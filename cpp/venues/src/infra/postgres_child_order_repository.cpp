@@ -248,8 +248,16 @@ bool PostgresChildOrderRepository::ApplyReport(
         tx.exec_params(
             R"SQL(
 UPDATE child_orders
-   SET filled_qty    = $3::NUMERIC,
-       avg_price     = $4::NUMERIC,
+   SET avg_price     = COALESCE(CASE
+         -- нет цены (или нулевая) в отчёте либо объём не вырос (терминальный отчёт без нового fill, повторная доставка): цену не трогаем
+         WHEN COALESCE(NULLIF($4,'')::NUMERIC, 0) <= 0 OR $3::NUMERIC <= filled_qty THEN avg_price
+         -- первый fill (или строка, где цена уже затёрта нулём): цена этого отчёта
+         WHEN filled_qty <= 0 OR avg_price IS NULL OR avg_price = 0 THEN NULLIF($4,'')::NUMERIC
+         -- накопленный VWAP: average_price отчёта — цена прироста объёма (ledger читает его так же), filled_qty отчёта — накопленный.
+         -- Везде NULLIF(...)::NUMERIC: приведение пустой строки в недостижимой ветви иначе упало бы при свёртке констант планировщиком.
+         ELSE (avg_price * filled_qty + NULLIF($4,'')::NUMERIC * ($3::NUMERIC - filled_qty)) / $3::NUMERIC
+       END, 0),
+       filled_qty    = GREATEST(filled_qty, $3::NUMERIC),
        venue_order_id = COALESCE(NULLIF($5,''), venue_order_id),
        status        = $6,
        error_code    = COALESCE(NULLIF($7,''), error_code),
@@ -263,7 +271,7 @@ UPDATE child_orders
             report.has_filled_qty() ? DecimalToString(report.filled_qty())
                                     : std::string{"0"},
             report.has_average_price() ? DecimalToString(report.average_price())
-                                       : std::string{"0"},
+                                       : std::string{},   // нет цены ⇒ пустая строка: SQL оставляет прежнюю avg_price
             report.venue_order_id(),
             new_status,
             report.has_error() ? report.error().code() : std::string{},
