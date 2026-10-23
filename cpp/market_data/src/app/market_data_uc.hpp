@@ -2,6 +2,7 @@
 
 #include "cex/common/data_validity.hpp"
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -24,6 +25,7 @@
 #include "domain/ports/i_order_book_storage.hpp"
 #include "domain/ports/i_snapshot_storage.hpp"
 #include "domain/ports/i_snapshot_publisher.hpp"
+#include "domain/fill_depth_scale.hpp"  // ADR-082 шаг 1: снимок измерений f по биржам и парам
 #include "domain/vectorize.hpp"   // F-05A: VectorizeConfig (T-F05A-205)
 #include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 persister)
 #include "app/compute_market_data.hpp"
@@ -118,6 +120,14 @@ class MarketDataUseCases {
     vol_repo_ = repo;
     if (halflife_sec > 0.0) vol_halflife_sec_ = halflife_sec;
     if (write_period_sec > 0.0) vol_write_period_sec_ = write_period_sec;
+  }
+  // ADR-082 шаг 1: масштабировать глубину котировок агентов коэффициентом исполнения биржи f. Пустая функция (деф) ⇒ глубина
+  // как раньше, ноль изменений. source отдаёт снимок измерений (не должен блокироваться на базе: читатель держит его в памяти).
+  // cfg: f_min — нижняя граница множителя, n0 — псевдо-заявки с f=1 в сжатии к единице, ref_min — нижняя граница опорного f
+  // при нормировке на лучшую биржу актива.
+  void SetVenueFillSource(std::function<domain::VenueFillSnapshot()> source, const domain::FillDepthScaleConfig& cfg) {
+    fill_source_ = std::move(source);
+    fill_depth_cfg_ = cfg;
   }
   void OnVectorClearingResult(
       const fob::marketdata::v1::VectorClearingResult& result);
@@ -255,6 +265,8 @@ class MarketDataUseCases {
   mutable std::mutex vol_mu_;
   std::unordered_map<std::string, VolState> vol_state_;  // под vol_mu_
   infra::PostgresAssetVolatilityRepository* vol_repo_{nullptr};
+  std::function<domain::VenueFillSnapshot()> fill_source_;  // ADR-082 шаг 1; пусто ⇒ выключено
+  domain::FillDepthScaleConfig fill_depth_cfg_{};
   double vol_halflife_sec_{60.0};
   double vol_write_period_sec_{15.0};
   // Обновляет EWMA-σ по новому mid (ПОД mu_). Возвращает true, если по троттлингу

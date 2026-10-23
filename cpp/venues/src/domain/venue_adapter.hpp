@@ -214,6 +214,19 @@ struct VenueOrderResult {
   uint32_t latency_ms{0};
 };
 
+// ADR-082: измерение ликвидности одной пары. symbol — канонический ключ ленты адаптера (BTCUSDT, ETHBTC, ...).
+struct VenueLiquidityStat {
+  std::string symbol;
+  double tape_quote_per_s{0.0};  // оборот ленты, валюты котирования в секунду
+  int64_t tape_samples{0};       // чтений ленты в оценке (0 — оценки ещё нет)
+  int64_t tape_reads{0};         // всего чтений ленты (включая пропущенные выборки); для прогрева и обнаружения изменений
+  double fill_coef{1.0};         // коэффициент исполнения f ∈ [0, 1]; нет заявок ⇒ 1
+  double fill_weight{0.0};       // запрошенный объём заявок в f (с забыванием), базовая валюта
+  int64_t fill_orders{0};        // заявок в f
+  double fill_orders_eff{0.0};   // заявок в f с забыванием на момент снимка
+  double age_s{0.0};             // только для затравки после перезапуска: сколько секунд назад значения записаны в таблицу
+};
+
 struct VenueAdapterRuntimeConfig {
   std::optional<std::string> ws_url;
   std::optional<std::string> rest_base_url;
@@ -278,6 +291,14 @@ class VenueAdapter {
     (void)venue_symbol;
     return -1;
   }
+
+  // ADR-082 (шаг 0): измерения ликвидности по парам биржи — оборот ленты публичных сделок ν и коэффициент исполнения f.
+  // Пусто, если адаптер не ведёт ленту (DEX/AMM, sim). Только наблюдаемость: на торговые решения самого venues не влияет.
+  virtual std::vector<VenueLiquidityStat> LiquidityStats() const { return {}; }
+
+  // ADR-082 (шаг 1): затравить оценки ν и f сохранёнными значениями после перезапуска, чтобы они не начинались с нуля (иначе после
+  // каждой выкладки первые заявки дают шумный f, а множитель глубины агента скачет). Применяется только к ещё не тронутым оценкам.
+  virtual void SeedLiquidityStats(const std::vector<VenueLiquidityStat>& seeds) { (void)seeds; }
 };
 
 }  // namespace cex::venues::domain

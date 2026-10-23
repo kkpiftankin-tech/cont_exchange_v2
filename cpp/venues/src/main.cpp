@@ -25,6 +25,7 @@
 #include "infra/postgres_child_order_repository.hpp"
 #include "infra/postgres_hedgeflow_repository.hpp"
 #include "infra/postgres_fill_diagnostics_repository.hpp"
+#include "infra/postgres_liquidity_stats_repository.hpp"
 #include "infra/postgres_sim_session_repository.hpp"
 #include "infra/postgres_venue_config_repository.hpp"
 #include "infra/sim_session_pg_codec.hpp"
@@ -178,6 +179,23 @@ int main() {
       cex::common::log_json("WARN", "Failed to ensure venue_fill_diagnostics schema");
     }
     loop.SetFillDiagnosticsSink(fill_diag_repo.get());
+  }
+
+  // ADR-082 (шаг 0) — слой измерения ликвидности бирж: оборот ленты ν и коэффициент исполнения f по парам пишутся раз в
+  // CE_LIQ_STATS_PUBLISH_MS в venue_liquidity_stats. Только наблюдаемость (на торговлю venues не влияет). Объявлен после loop ⇒
+  // разрушается раньше loop (поток-писатель останавливается до уничтожения адаптеров, которых он опрашивает).
+  std::unique_ptr<cex::venues::infra::PostgresLiquidityStatsRepository> liquidity_stats_repo;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    liquidity_stats_repo =
+        std::make_unique<cex::venues::infra::PostgresLiquidityStatsRepository>(
+            *venues_postgres_dsn, [&loop]() { return loop.CollectLiquidityStats(); },
+            cex::common::Env::get_int("CE_LIQ_STATS_PUBLISH_MS", 10000));
+    if (!liquidity_stats_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure venue_liquidity_stats schema");
+    }
+    // ADR-082 (шаг 1): оценки ν и f не начинаются с нуля после перезапуска. Первая запись репозитория — через CE_LIQ_STATS_PUBLISH_MS,
+    // поэтому затравка успевает до неё.
+    loop.SeedLiquidityStats(liquidity_stats_repo->LoadAll());
   }
 
   // F-20 DoD-3 — SimSession Manager. PG persistence (sim_sessions) + a

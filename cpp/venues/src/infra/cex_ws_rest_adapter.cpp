@@ -1670,6 +1670,62 @@ int64_t CexWsRestAdapter::TradesReadAgeMs(const std::string& venue_symbol) const
   return std::max<int64_t>(0, age.count());
 }
 
+// ADR-082 (шаг 1): затравка после перезапуска. Сохранённые значения старше часа для ν не берём (рынок успел смениться); f и число
+// заявок приводим к текущему моменту забыванием за время простоя. Трогаем только нетронутые оценки: если чтения ленты или заявки уже
+// были, свежие данные важнее сохранённых.
+void CexWsRestAdapter::apply_liquidity_seed_locked(SymbolBookState& state, const domain::VenueLiquidityStat& seed,
+                                                   const SteadyClock::time_point now) {
+  const double tape_seed_max_age_s = static_cast<double>(cex::common::Env::get_int("CE_TAPE_SEED_MAX_AGE_S", 3600));
+  const double age_s = std::max(0.0, seed.age_s);
+  if (!state.tape.initialized && state.tape.reads == 0 && seed.tape_samples > 0 && age_s <= tape_seed_max_age_s) {
+    state.tape.Seed(seed.tape_quote_per_s, seed.tape_samples);
+  }
+  if (state.fill.orders == 0 && state.fill.den <= 0.0 && seed.fill_orders > 0 && seed.fill_weight > 0.0) {
+    const double tau = static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800));
+    const double d = tau > 0.0 ? std::exp(-age_s / tau) : 1.0;
+    const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+    const double den = seed.fill_weight * d;
+    state.fill.Seed(seed.fill_coef * den, den, seed.fill_orders_eff * d, seed.fill_orders, now_s);
+  }
+}
+
+void CexWsRestAdapter::SeedLiquidityStats(const std::vector<domain::VenueLiquidityStat>& seeds) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const SteadyClock::time_point now = now_fn_();
+  for (const auto& seed : seeds) {
+    const std::string key = canon_trade_key(seed.symbol);
+    const auto it = books_.find(key);
+    if (it != books_.end()) {
+      apply_liquidity_seed_locked(it->second, seed, now);
+    } else {
+      liq_seeds_[key] = seed;
+    }
+  }
+}
+
+// ADR-082 (шаг 0): снимок измерений ликвидности по парам. Пары без единого измерения (ни чтения ленты, ни заявок) пропускаем.
+std::vector<domain::VenueLiquidityStat> CexWsRestAdapter::LiquidityStats() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const double now_s = std::chrono::duration<double>(now_fn_().time_since_epoch()).count();
+  const double fill_tau_s = static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800));
+  std::vector<domain::VenueLiquidityStat> out;
+  out.reserve(books_.size());
+  for (const auto& [symbol, st] : books_) {
+    if (st.tape.samples == 0 && st.fill.orders == 0) continue;
+    domain::VenueLiquidityStat row;
+    row.symbol = symbol;
+    row.tape_quote_per_s = st.tape.rate_per_s;
+    row.tape_samples = st.tape.samples;
+    row.tape_reads = st.tape.reads;
+    row.fill_coef = st.fill.Value();
+    row.fill_weight = st.fill.WeightAt(now_s, fill_tau_s);
+    row.fill_orders = st.fill.orders;
+    row.fill_orders_eff = st.fill.OrdersEff(now_s, fill_tau_s);
+    out.push_back(std::move(row));
+  }
+  return out;
+}
+
 bool CexWsRestAdapter::OnWsTextMessage(const std::string& payload) {
   const SteadyClock::time_point now = now_fn_();
   std::lock_guard<std::mutex> lock(mu_);
@@ -2617,9 +2673,11 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
   // регистрируем/обновляем резидентную заявку, чтобы доматчить её на следующих
   // снапшотах (progress_resting_orders_locked). marketable (тейкер, MARKET) и
   // TIF_IOC уже терминальны выше (single_shot) и сюда не попадают.
+  bool registered_resting = false;
   if (!marketable && intent.tif() == fob::common::v1::TIF_GTC &&
       (out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_NEW ||
        out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED)) {
+    registered_resting = true;
     RestingBandOrder& entry = resting_band_orders_[intent.intent_id()];
     entry.intent = intent;
     entry.canon_key = key;
@@ -2630,6 +2688,14 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
         ? filled : entry.cumulative_filled;
     const int64_t timeout_ms = intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000;
     entry.deadline = now + std::chrono::milliseconds(timeout_ms);
+  }
+
+  // ADR-082: коэффициент исполнения f — доля исполненного объёма от запрошенного по хедж-заявкам пары. Заявку, ушедшую в
+  // резидентные (GTC), учтёт progress_resting_orders_locked на терминальном исходе (иначе f занижен: доисполнение не видно).
+  // Учитываются только заявки, реально сопоставленные с лентой (есть лента, есть цена или рыночная, есть объём): отказ по
+  // входным данным f не характеризует.
+  if (!registered_resting && have_book && (limit.units != 0 || marketable) && target.units > 0) {
+    record_hedge_fill_locked(key, intent.intent_id(), filled, target, now);
   }
 
   cex::common::log_json("INFO", "Sim fill vs real trades",
@@ -2822,8 +2888,38 @@ void CexWsRestAdapter::progress_resting_orders_locked(
       if (out_followups) out_followups->emplace_back(intent, report);
     }
 
+    // ADR-082: терминальный исход резидентной заявки — единственный момент, когда известен итоговый объём для f.
+    if (terminal) {
+      record_hedge_fill_locked(entry.canon_key, intent.intent_id(), entry.cumulative_filled, entry.target, now);
+    }
     it = terminal ? resting_band_orders_.erase(it) : std::next(it);
   }
+}
+
+// ADR-082 (шаг 0): учесть терминальный исход хедж-заявки в коэффициенте исполнения f пары. Под mu_. Один intent_id учитывается
+// не более одного раза (повторная доставка не удваивает вес); неизвестная лента или нулевой объём — не учитываем.
+void CexWsRestAdapter::record_hedge_fill_locked(const std::string& canon_key, const std::string& intent_id,
+                                                const cex::common::Decimal& filled,
+                                                const cex::common::Decimal& target,
+                                                const SteadyClock::time_point now) {
+  if (target.units <= 0) return;
+  const auto book = books_.find(canon_key);
+  if (book == books_.end()) return;
+  // Прогрев: пока лента пары прочитана меньше CE_FILL_COEF_WARMUP_SAMPLES раз после старта, буфер сделок пуст или неполон и заявка
+  // не находит объёма по причине холодного старта, а не тонкой биржи. Такие заявки в f не входят (иначе после каждой выкладки
+  // venues f занижен, а множитель глубины агента режет и толстые биржи). Сама заявка исполняется как обычно.
+  if (book->second.tape.reads < cex::common::Env::get_int("CE_FILL_COEF_WARMUP_SAMPLES", 3)) return;
+  if (!intent_id.empty()) {
+    if (!fill_counted_ids_.insert(intent_id).second) return;  // уже учтена
+    fill_counted_order_.push_back(intent_id);
+    while (fill_counted_order_.size() > kFillCountedCap) {
+      fill_counted_ids_.erase(fill_counted_order_.front());
+      fill_counted_order_.pop_front();
+    }
+  }
+  const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+  book->second.fill.Add(static_cast<double>(filled), static_cast<double>(target), now_s,
+                        static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800)));
 }
 
 bool CexWsRestAdapter::apply_ws_ticker_event_locked(
@@ -3047,8 +3143,16 @@ void CexWsRestAdapter::parse_rest_trades_locked(
 
   // Ключ канонизируем идентично матчеру ApplyRealTradeFillLocked (совпадение ключей).
   SymbolBookState& state = books_[canon_trade_key(venue_symbol)];
+  if (!liq_seeds_.empty()) {
+    const auto seed = liq_seeds_.find(canon_trade_key(venue_symbol));
+    if (seed != liq_seeds_.end()) {
+      apply_liquidity_seed_locked(state, seed->second, now);
+      liq_seeds_.erase(seed);
+    }
+  }
   // Мерим ФАКТИЧЕСКИЙ период чтения ленты (интервал между вызовами, EMA): окно
   // устаревания = N·период (см. effective_trade_window_locked). Вызов = один читок.
+  double tape_dt_s = 0.0;  // ADR-082: интервал с прошлого чтения; 0 ⇒ первое чтение (в нём вся история, не приращение)
   if (state.last_trades_read.time_since_epoch().count() != 0) {
     const double dt_ms =
         std::chrono::duration<double, std::milli>(now - state.last_trades_read).count();
@@ -3056,10 +3160,13 @@ void CexWsRestAdapter::parse_rest_trades_locked(
       state.read_interval_ms = (state.read_interval_ms > 0.0)
                                    ? 0.6 * state.read_interval_ms + 0.4 * dt_ms
                                    : dt_ms;
+    tape_dt_s = dt_ms / 1000.0;
   }
   state.last_trades_read = now;
   int64_t max_key = state.last_trade_key;
   int accepted = 0;
+  double tape_batch_quote = 0.0;  // ADR-082: объём НОВЫХ сделок этого чтения в валюте котирования (метрика, double)
+  std::vector<std::pair<int64_t, double>> tape_rows;  // (биржевое время мс, объём в валюте котирования) принятых сделок
   for (const auto& r : rows) {
     if (r.key != 0 && r.key <= state.last_trade_key) continue;  // уже видели
     int64_t price_u = 0, qty_u = 0;
@@ -3069,10 +3176,41 @@ void CexWsRestAdapter::parse_rest_trades_locked(
                         cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now, r.exch_ms};
     state.recent_trades.push_back(tp);
     state.context_trades.push_back(tp);  // ценовой контекст (#3), без time-прунинга
+    const double row_quote = static_cast<double>(tp.price) * static_cast<double>(tp.qty);
+    tape_batch_quote += row_quote;
+    tape_rows.emplace_back(r.exch_ms, row_quote);
     if (r.key > max_key) max_key = r.key;
     ++accepted;
   }
   state.last_trade_key = max_key;
+  // ADR-082: оборот ленты ν. Пустое чтение — выборка 0 (оценка затухает на тихой бирже); первое чтение выборки не даёт.
+  // Если выдача упёрлась в лимит запроса (все строки новые, их ровно столько, сколько можно получить), между чтениями часть
+  // сделок не видна и «объём / время между чтениями» занижает оборот в разы. Тогда скорость берётся по охваченному интервалу
+  // биржевого времени: сделки после самой старой строки, делённые на её разницу с самой новой (для потока сделок это несмещённая
+  // оценка). Если биржевого времени в строках нет (Coinbase), выборку пропускаем: она была бы смещена вниз.
+  if (tape_dt_s > 0.0) {
+    ++state.tape.reads;
+    const double tape_tau = static_cast<double>(cex::common::Env::get_int("CE_TAPE_EWMA_TAU_S", 900));
+    const bool saturated = rows.size() >= kTradesRequestLimit && accepted == static_cast<int>(rows.size());
+    if (!saturated) {
+      state.tape.Update(tape_batch_quote, tape_dt_s, tape_tau);
+    } else {
+      int64_t min_ms = 0, max_ms = 0;
+      for (const auto& [ms, q] : tape_rows) {
+        (void)q;
+        if (ms <= 0) continue;
+        if (min_ms == 0 || ms < min_ms) min_ms = ms;
+        if (ms > max_ms) max_ms = ms;
+      }
+      if (max_ms > min_ms) {
+        double after_oldest = 0.0;
+        for (const auto& [ms, q] : tape_rows) {
+          if (ms > min_ms) after_oldest += q;
+        }
+        state.tape.UpdateRate(after_oldest / (static_cast<double>(max_ms - min_ms) / 1000.0), tape_dt_s, tape_tau);
+      }
+    }
+  }
   while (state.context_trades.size() > 60) state.context_trades.pop_front();
   // Эвикт по окну (= N·период чтения) и ёмкости.
   const auto window = effective_trade_window_locked(state);

@@ -12,6 +12,7 @@ import useInterval from '../../hooks/useInterval';
 import VenuesPageShell from './VenuesPageShell';
 import VenuesListTable from './VenuesListTable';
 import VenueStatsPanel from './VenueStatsPanel';
+import VenueLiquidityPanel from './VenueLiquidityPanel';
 import {
   STATUS_ORDER,
   computeSummaryCards,
@@ -109,6 +110,8 @@ const ExternalVenuesList = () => {
       </section>
 
       <VenueStatsPanel />
+
+      <VenueLiquidityPanel />
 
       <section className="venues-toolbar">
         <div className="venues-filter-group">

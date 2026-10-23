@@ -11,12 +11,14 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "infra/cex_local_lob_assembler.hpp"
 #include "app/execution_report_sink.hpp"
 #include "app/fill_diagnostics_sink.hpp"
+#include "domain/liquidity_stats.hpp"
 #include "domain/poll_planner.hpp"
 #include "domain/venue_adapter.hpp"
 
@@ -233,6 +235,13 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   // Читает books_[canon_trade_key(venue_symbol)].last_trades_read под mu_.
   int64_t TradesReadAgeMs(const std::string& venue_symbol) const override;
 
+  // ADR-082 (шаг 0): оборот ленты ν и коэффициент исполнения f по парам биржи (под mu_). Пары без данных пропускаются.
+  std::vector<domain::VenueLiquidityStat> LiquidityStats() const override;
+
+  // ADR-082 (шаг 1): затравка оценок ν и f сохранёнными значениями. Пары, по которым ещё нет состояния ленты, ждут первого
+  // чтения ленты (liq_seeds_); уже существующие, но нетронутые, затравливаются сразу.
+  void SeedLiquidityStats(const std::vector<domain::VenueLiquidityStat>& seeds) override;
+
   // F-18/ADR-060: приёмник диагностики sim-fill (venue_fill_diagnostics → Clearing).
   // Опционален (nullptr ⇒ не пишем). Устанавливается в venues main. Не владеет.
   void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) { diag_sink_ = sink; }
@@ -298,6 +307,10 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     SteadyClock::time_point last_ce_fill_at{};
     // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.
     int64_t last_trade_key{0};
+    // ADR-082 (шаг 0): измерение ликвидности. tape — оборот ленты (валюта котирования/с, EWMA по чтениям);
+    // fill — коэффициент исполнения f по хедж-заявкам (доля исполненного объёма, с забыванием).
+    domain::TapeRateEstimator tape;
+    domain::FillCoefficient fill;
   };
 
   // F-18 #5/ADR-067 (T-F18-803): резидентная (GTC) мейкер-заявка band-хеджа,
@@ -445,6 +458,22 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   app::FillDiagnosticsSink* diag_sink_{nullptr};  // ADR-060 sim-fill диагностика, не владеет
   // F-18 #5/ADR-067: резидентные (GTC) мейкер-заявки band-хеджа, ключ = intent_id.
   std::unordered_map<std::string, RestingBandOrder> resting_band_orders_;
+
+  // ADR-082: коэффициент исполнения f учитывается ОДИН раз на терминальный исход заявки. intent_id уже учтённых
+  // заявок хранится в ограниченной очереди: повторная доставка того же intent_id (Kafka at-least-once) вес не удваивает.
+  static constexpr std::size_t kFillCountedCap = 8192;
+  // Сколько последних сделок просит у биржи rest_trades_url (limit/count во всех профилях). Должно совпадать с URL: по нему
+  // определяется, что выдача ленты упёрлась в лимит (ADR-082, оценка оборота ν).
+  static constexpr std::size_t kTradesRequestLimit = 100;
+  std::unordered_set<std::string> fill_counted_ids_;
+  std::deque<std::string> fill_counted_order_;
+  // Отложенные затравки по каноническому ключу ленты (под mu_); снимаются при первом чтении ленты пары.
+  std::unordered_map<std::string, domain::VenueLiquidityStat> liq_seeds_;
+  void apply_liquidity_seed_locked(SymbolBookState& state, const domain::VenueLiquidityStat& seed,
+                                   SteadyClock::time_point now);
+  void record_hedge_fill_locked(const std::string& canon_key, const std::string& intent_id,
+                                const cex::common::Decimal& filled, const cex::common::Decimal& target,
+                                SteadyClock::time_point now);
   app::ExecutionReportSink* report_sink_{nullptr};  // follow-up отчёты, не владеет
 
   TokenBucket rest_bucket_;

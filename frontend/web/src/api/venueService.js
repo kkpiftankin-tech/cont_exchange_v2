@@ -237,6 +237,12 @@ export const getVenueStats = async (windowS = 600) => {
   return response.data;
 };
 
+// ADR-082: оборот ленты и коэффициент исполнения хеджа по парам бирж (PG venue_liquidity_stats через BFF).
+export const getVenueLiquidityStats = async () => {
+  const response = await api.get('/venues/liquidity-stats');
+  return response.data;
+};
+
 // Порог устаревания venue-снапшота (runtime, из UI). venues поллит PG.
 export const getVenueStaleConfig = async () => {
   const response = await api.get('/venues/config');

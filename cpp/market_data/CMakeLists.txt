@@ -63,6 +63,7 @@ add_executable(market_data
         # infra/postgres
         src/infra/postgres/pg_market_data_config.cpp
         src/infra/postgres/postgres_asset_volatility_repository.cpp
+        src/infra/postgres/pg_venue_liquidity_reader.cpp
         # transport
         src/transport/grpc_market_data_service.cpp
         src/transport/mappers/order_book.cpp
@@ -116,6 +117,7 @@ if (BUILD_TESTING)
             src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
             src/infra/postgres/pg_market_data_config.cpp
             src/infra/postgres/postgres_asset_volatility_repository.cpp
+            src/infra/postgres/pg_venue_liquidity_reader.cpp
     )
 
     target_include_directories(market_data_uc_test PRIVATE
@@ -161,6 +163,16 @@ if (BUILD_TESTING)
     )
     target_compile_options(market_data_agent_builder_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME market_data_agent_builder_test COMMAND market_data_agent_builder_test)
+
+    # ADR-082 шаг 1: множитель глубины агента по коэффициенту исполнения f (domain/fill_depth_scale.hpp, header-only).
+    add_executable(market_data_fill_depth_scale_test
+            tests/fill_depth_scale_test.cpp
+    )
+    target_include_directories(market_data_fill_depth_scale_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_fill_depth_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_fill_depth_scale_test COMMAND market_data_fill_depth_scale_test)
 
     # F-05A (T-F05A-205): curve→levels + proto mapping (needs contracts_proto).
     add_executable(market_data_vectorize_wiring_test
@@ -214,6 +226,7 @@ if (BUILD_TESTING)
                 src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
                 src/infra/postgres/pg_market_data_config.cpp
                 src/infra/postgres/postgres_asset_volatility_repository.cpp
+                src/infra/postgres/pg_venue_liquidity_reader.cpp
         )
         target_include_directories(market_data_integration_test PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src

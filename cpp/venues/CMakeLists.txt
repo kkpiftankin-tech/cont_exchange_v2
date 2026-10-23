@@ -54,6 +54,7 @@ add_executable(venues
   src/infra/postgres_hedgeflow_repository.cpp
   src/infra/postgres_child_order_repository.cpp
   src/infra/postgres_fill_diagnostics_repository.cpp
+  src/infra/postgres_liquidity_stats_repository.cpp
   src/infra/sim_session_pg_codec.cpp
   src/infra/postgres_sim_session_repository.cpp
   src/app/sim_session_manager.cpp
@@ -725,4 +726,16 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_trades_fetch_scheduler_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_trades_fetch_scheduler_test COMMAND venues_trades_fetch_scheduler_test)
+
+  # ADR-082 (шаг 0): чистые оценщики ликвидности — оборот ленты ν и коэффициент исполнения f.
+  add_executable(venues_liquidity_stats_test
+    tests/liquidity_stats_test.cpp
+  )
+
+  target_include_directories(venues_liquidity_stats_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_compile_options(venues_liquidity_stats_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_liquidity_stats_test COMMAND venues_liquidity_stats_test)
 endif()

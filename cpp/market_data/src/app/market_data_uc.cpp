@@ -1,8 +1,10 @@
 #include "app/market_data_uc.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <thread>
 
 #include <pqxx/pqxx>  // ADR-050/052: runtime-конфиг окна клиринга из Postgres
@@ -21,6 +23,7 @@
 #include "app/ports/i_ce_clearing_publisher.hpp"  // F-05A CE (вариант A)
 #include "app/ports/i_vectorized_publisher.hpp"
 #include "domain/agent_builder.hpp"  // F-05A CE §A1
+#include "domain/fill_depth_scale.hpp"  // ADR-082 шаг 1
 #include "app/ports/i_vector_segment_storage.hpp"
 #include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
@@ -972,6 +975,16 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   }
   std::set<std::string> kept_venues;
   int dropped = 0;
+  // ADR-082 шаг 1: множитель глубины по коэффициенту исполнения биржи f. Применяется ПОСЛЕ фильтра тонких: фильтр сравнивает
+  // сырую глубину с максимумом по паре (оценка надёжности книги), а f должен уменьшить кривую тонкой биржи, не выкинув её из
+  // клиринга целиком. Читатель выключен (nullptr) ⇒ ни одного обращения, прежнее поведение.
+  domain::VenueFillSnapshot liq_snapshot;
+  const domain::FillDepthScaleConfig& fill_cfg = fill_depth_cfg_;
+  const bool depth_fill = static_cast<bool>(fill_source_);
+  if (depth_fill) liq_snapshot = fill_source_();
+  int fill_scaled = 0;
+  double fill_scale_min = 1.0;
+  std::string fill_scale_list;
   for (const auto& ag : agents) {
     // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража).
     // ADR-064: порог считается по ПАРЕ (base|quote) — иначе кросс-пара (ETH/BTC)
@@ -990,11 +1003,25 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
       dropped_list.push_back(std::move(dq));
       continue;
     }
+    double depth_out = ag.depth;
+    if (depth_fill) {
+      const double sc = domain::ResolveFillDepthScale(liq_snapshot, ag.venue, ag.base, ag.quote, fill_cfg);
+      if (sc < 1.0) {
+        depth_out = ag.depth * sc;
+        ++fill_scaled;
+        fill_scale_min = std::min(fill_scale_min, sc);
+        if (fill_scale_list.size() < 400) {
+          char buf[64];
+          std::snprintf(buf, sizeof(buf), "%s|%s/%s=%.2f;", ag.venue.c_str(), ag.base.c_str(), ag.quote.c_str(), sc);
+          fill_scale_list += buf;
+        }
+      }
+    }
     auto* q = out.add_quotes();
     q->set_asset(ag.base);
     q->set_venue(ag.venue);
     *q->mutable_anchor() = to_dec(ag.anchor);
-    *q->mutable_depth() = to_dec(ag.depth);
+    *q->mutable_depth() = to_dec(depth_out);
     *q->mutable_dead_zone() = to_dec(ag.dead_zone);
     // ADR-079: из чего сложена полка и откуда возраст/σ (клиринг не читает, только диагностика)
     *q->mutable_dz_age() = to_dec(ag.dz_age);
@@ -1005,9 +1032,23 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     // ADR-064: quote непуст только для кросс-пар; для номинальных пар оставляем
     // пустым (обратная совместимость — "пусто ⇒ numeraire").
     if (ag.quote != numeraire) q->set_quote(ag.quote);
-    markacc[ag.base].first += ag.depth * ag.anchor;
-    markacc[ag.base].second += ag.depth;
+    markacc[ag.base].first += depth_out * ag.anchor;
+    markacc[ag.base].second += depth_out;
     kept_venues.insert(ag.venue);
+  }
+  if (depth_fill) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_fill_log_ms{0};
+    std::int64_t prev = last_fill_log_ms.load();
+    if (window_close_ms - prev >= 60000 && last_fill_log_ms.compare_exchange_strong(prev, window_close_ms)) {
+      cex::common::log_json("INFO", "CE clearing: глубина × коэффициент исполнения f (ADR-082)",
+                            {{"batch_id", batch_id},
+                             {"scaled_quotes", std::to_string(fill_scaled)},
+                             {"quotes", std::to_string(out.quotes_size())},
+                             {"min_scale", std::to_string(fill_scale_min)},
+                             {"snapshot_pairs", std::to_string(liq_snapshot.size())},
+                             {"scales", fill_scale_list}});
+    }
   }
   if (out.quotes_size() == 0) return;
   for (const auto& a : assets_order) {

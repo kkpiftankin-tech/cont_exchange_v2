@@ -16,6 +16,7 @@
 #include "app/execute_on_venue.hpp"
 #include "app/execution_report_sink.hpp"
 #include "app/fill_diagnostics_sink.hpp"
+#include "app/liquidity_stats_sink.hpp"
 #include "app/liquidity_curve_producer.hpp"
 #include "app/sim_execution_assembler.hpp"
 #include "app/sim_session_registry.hpp"
@@ -188,6 +189,14 @@ class VenuesLoop : public ExecutionReportSink {
   // построены). DEX/AMM (uniswap) идёт через отдельный адаптер и здесь не
   // покрывается. nullptr допустим (диагностика отключена).
   void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink);
+
+  // ADR-082 (шаг 0): снимок измерений ликвидности (оборот ленты ν, коэффициент исполнения f) по всем адаптерам. Потокобезопасен
+  // (каждый адаптер берёт свой mu_); вызывается периодическим писателем PostgresLiquidityStatsRepository из своего потока.
+  std::vector<LiquidityStatRow> CollectLiquidityStats() const;
+
+  // ADR-082 (шаг 1): затравить оценки ν и f сохранёнными строками таблицы (после перезапуска). Вызывается один раз из main сразу
+  // после создания репозитория, до первой записи.
+  void SeedLiquidityStats(const std::vector<LiquidityStatRow>& rows);
 
   // F-18 #5/ADR-067 (T-F18-803) — реализация ExecutionReportSink: публикует
   // follow-up отчёт резидентного (GTC) мейкер-лимита ТЕМ ЖЕ кодпутём

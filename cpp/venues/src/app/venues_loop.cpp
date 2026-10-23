@@ -2111,6 +2111,52 @@ void VenuesLoop::SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) {
                         {{"cex_adapters", std::to_string(attached)}});
 }
 
+void VenuesLoop::SeedLiquidityStats(const std::vector<LiquidityStatRow>& rows) {
+  std::unordered_map<std::string, std::vector<domain::VenueLiquidityStat>> by_venue;
+  for (const auto& r : rows) {
+    domain::VenueLiquidityStat st;
+    st.symbol = r.symbol;
+    st.tape_quote_per_s = r.tape_quote_per_s;
+    st.tape_samples = r.tape_samples;
+    st.fill_coef = r.fill_coef;
+    st.fill_weight = r.fill_weight;
+    st.fill_orders = r.fill_orders;
+    st.fill_orders_eff = r.fill_orders_eff;
+    st.age_s = r.age_s;
+    by_venue[r.venue].push_back(std::move(st));
+  }
+  std::size_t seeded = 0;
+  for (const auto& adapter : adapters_) {
+    const auto it = by_venue.find(adapter->VenueId());
+    if (it == by_venue.end()) continue;
+    adapter->SeedLiquidityStats(it->second);
+    seeded += it->second.size();
+  }
+  cex::common::log_json("INFO", "Liquidity stats seeded from venue_liquidity_stats (ADR-082)",
+                        {{"rows", std::to_string(rows.size())}, {"seeded", std::to_string(seeded)}});
+}
+
+std::vector<LiquidityStatRow> VenuesLoop::CollectLiquidityStats() const {
+  std::vector<LiquidityStatRow> rows;
+  for (const auto& adapter : adapters_) {
+    const std::string venue = adapter->VenueId();
+    for (const auto& st : adapter->LiquidityStats()) {
+      LiquidityStatRow row;
+      row.venue = venue;
+      row.symbol = st.symbol;
+      row.tape_quote_per_s = st.tape_quote_per_s;
+      row.tape_samples = st.tape_samples;
+      row.tape_reads = st.tape_reads;
+      row.fill_coef = st.fill_coef;
+      row.fill_weight = st.fill_weight;
+      row.fill_orders = st.fill_orders;
+      row.fill_orders_eff = st.fill_orders_eff;
+      rows.push_back(std::move(row));
+    }
+  }
+  return rows;
+}
+
 // F-18 #5/ADR-067 (T-F18-803): единый код-путь публикации ExecutionReport (вынесен
 // из exec_consume_loop). Normalize → liquidity_curve → Kafka Publish → PG child_orders
 // → PG hedgeflows (порядок важен) → traffic → лог. Вызывается для first-shot отчёта и

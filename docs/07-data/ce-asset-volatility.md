@@ -43,7 +43,7 @@ related:
 | --- | --- | --- |
 | `asset` | TEXT | Нормализованный **символ пары** (`BTCUSDT`/`ETHBTC`/`SOLUSDT` — `snap.asset` writer'а, слэш убран), часть PK. Ledger строит ключ как `agent.asset + quote` (quote пуст ⇒ numeraire) |
 | `venue` | TEXT | Площадка; `''` = агрегат по площадкам (первый срез per-asset), часть PK |
-| `sigma` | NUMERIC(38,18) | σ лог-доходности mid (**безразмерная доля** за окно), EWMA |
+| `sigma` | NUMERIC(38,18) | σ лог-доходности mid (**доля на корень секунды**, 1/√с, как r²/Δt), EWMA |
 | `window_sec` | INT | Окно/полупериод EWMA (диагностика, не влияет на чтение) |
 | `samples` | INT | Сколько тиков вошло — доверие к σ (мало → ledger fallback) |
 | `updated_at` | TIMESTAMPTZ | Свежесть; старше порога → ledger fallback на `ce_band_fee_k` |
@@ -52,7 +52,7 @@ PK `(asset, venue)`. Индекс по `updated_at DESC` (staleness-монито
 
 ## Единицы и σ→порог
 
-`sigma` — безразмерная доля (σ лог-доходности за окно оценки). Масштаб к горизонту τ и перевод в
+`sigma` — доля на корень секунды, 1/√с (σ лог-доходности mid, оценка r²/Δt по тактам; не доля за окно). Масштаб к горизонту τ и перевод в
 порог — на стороне ledger: `Γ = γ·σ²·τ` (γ = `f05a_clearing_config.gamma`, τ = env `CE_BAND_TAU_SEC`,
 дефолт = `CE_IMPACT_TAU_SEC`=5с), затем `z_lim[k-USDT] = clim/Γ` с калибровочной константой
 `CE_BAND_GAMMA0` (при σ_ref порог ≈ текущий ~18@10bps). Детали — ADR-066 §«D1: дизайн».

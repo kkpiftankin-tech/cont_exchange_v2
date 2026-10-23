@@ -11,6 +11,8 @@
 // ============================================================================
 #include <grpcpp/grpcpp.h>
 #include <algorithm>
+#include <cstdlib>
+#include <memory>
 
 #include "cex/common/defer.hpp"
 #include "cex/common/env.hpp"
@@ -31,6 +33,7 @@
 #include "infra/market_data_stream_hub.hpp"
 #include "infra/order_book_channel.hpp"
 #include "infra/postgres/pg_market_data_config.hpp"
+#include "infra/postgres/pg_venue_liquidity_reader.hpp"  // ADR-082 шаг 1
 #include "infra/postgres/postgres_asset_volatility_repository.hpp"  // F-18 D1+#7 (T-F18-702)
 #include "transport/grpc_market_data_service.hpp"
 
@@ -102,6 +105,9 @@ int main() {
       "host=postgres port=5432 dbname=exchange user=exchange password=exchange");
   cex::market_data::infra::PgMarketDataConfig pg_config(pg_conn);
 
+  // ADR-082 шаг 1: читатель f бирж объявлен ДО uc, чтобы пережить его (uc держит функцию-источник, вызывающую читателя).
+  std::unique_ptr<cex::market_data::infra::PgVenueLiquidityReader> liquidity_reader;
+
   // ── Use Cases ────────────────────────────────────────────────────────────
   cex::market_data::app::MarketDataUseCases uc(
       &batch_storage,
@@ -131,6 +137,31 @@ int main() {
       vector_clearing_storage(ch_cfg);
   vector_clearing_storage.EnsureSchema();
   uc.SetVectorClearingResultStorage(&vector_clearing_storage);
+
+  // ── ADR-082 шаг 1: глубина котировок агентов × коэффициент исполнения биржи f ──
+  // За флагом CE_DEPTH_FILL_COEF (деф 0 ⇒ читатель не создаётся, поведение прежнее). f и число заявок пишет venues в
+  // venue_liquidity_stats; фоновый читатель раз в CE_DEPTH_FILL_REFRESH_MS обновляет снимок, окно клиринга базу не ждёт.
+  if (cex::common::Env::get_bool("CE_DEPTH_FILL_COEF", false)) {
+    liquidity_reader = std::make_unique<cex::market_data::infra::PgVenueLiquidityReader>(
+        pg_conn, cex::common::Env::get_int("CE_DEPTH_FILL_REFRESH_MS", 10000),
+        cex::common::Env::get_int("CE_DEPTH_FILL_MAX_AGE_S", 300));
+    const char* fmin_env = std::getenv("CE_DEPTH_FILL_MIN");
+    const char* n0_env = std::getenv("CE_DEPTH_FILL_N0");
+    // f_min не ниже 0,01: нулевая глубина дала бы нулевую марку актива; n0 не отрицателен.
+    const char* ref_env = std::getenv("CE_DEPTH_FILL_REF_MIN");
+    const char* ref_orders_env = std::getenv("CE_DEPTH_FILL_REF_ORDERS");
+    cex::market_data::domain::FillDepthScaleConfig fill_cfg;
+    fill_cfg.f_min = std::min(1.0, std::max(0.01, fmin_env ? std::atof(fmin_env) : 0.1));
+    fill_cfg.n0 = std::max(0.0, n0_env ? std::atof(n0_env) : 5.0);
+    fill_cfg.ref_min = std::min(1.0, std::max(0.0, ref_env ? std::atof(ref_env) : 0.5));
+    fill_cfg.ref_min_orders = std::max(0.0, ref_orders_env ? std::atof(ref_orders_env) : 5.0);
+    auto* reader = liquidity_reader.get();
+    uc.SetVenueFillSource([reader]() { return reader->Snapshot(); }, fill_cfg);
+    cex::common::log_json("INFO", "CE depth × fill coefficient enabled (ADR-082)",
+                          {{"f_min", std::to_string(fill_cfg.f_min)}, {"n0", std::to_string(fill_cfg.n0)},
+                           {"ref_min", std::to_string(fill_cfg.ref_min)},
+                           {"ref_min_orders", std::to_string(fill_cfg.ref_min_orders)}});
+  }
 
   // ── F-18 D1+#7 (T-F18-702): σ волатильности актива → ce_asset_volatility ──
   // market_data считает EWMA σ лог-доходностей mid, пишет в PG (троттлинг).

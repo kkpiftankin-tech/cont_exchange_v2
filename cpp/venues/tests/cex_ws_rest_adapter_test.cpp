@@ -1,3 +1,4 @@
+#include <cmath>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -26,6 +27,7 @@ namespace {
 using json = nlohmann::json;
 using cex::venues::domain::VenueConnectionStatus;
 using cex::venues::domain::VenueFeedChannel;
+using cex::venues::domain::VenueLiquidityStat;
 using cex::venues::domain::VenueSnapshotRequest;
 using cex::venues::domain::VenueSubscription;
 using cex::venues::infra::CexWsRestAdapter;
@@ -62,6 +64,11 @@ class FakeRestClient final : public ICexRestClient {
     get_timeouts.push_back(timeout_ms);
     last_get_url = url;
     if (response_body == nullptr || http_code == nullptr) return false;
+    if (route_trades_response && url.find("/trades") != std::string::npos) {
+      *response_body = trades_response;
+      *http_code = 200;
+      return get_ok;
+    }
     if (route_ticker_response &&
         (url.find("/ticker/24hr") != std::string::npos ||
          url.find("/stats") != std::string::npos ||
@@ -97,6 +104,8 @@ class FakeRestClient final : public ICexRestClient {
   long get_http_code{200};
   std::string get_response;
   bool route_ticker_response{false};
+  bool route_trades_response{false};  // лента публичных сделок (ADR-060) отдаётся отдельным телом
+  std::string trades_response;
   uint32_t last_get_timeout_ms{0};
   std::vector<uint32_t> get_timeouts;
   long ticker_http_code{200};
@@ -2072,6 +2081,377 @@ bool TestSimulatedSendOrderDoesNotPost() {
   return ok;
 }
 
+// ADR-082 (шаг 0): оборот ленты ν и коэффициент исполнения f в адаптере. Проверяет: первое чтение ленты выборки не даёт;
+// объём считается только по НОВЫМ сделкам; пустое чтение затухает; f учитывается один раз на терминальный исход
+// (повторная доставка того же intent_id веса не удваивает), резидентная GTC-заявка — на терминальном исходе, не на первом тике.
+bool TestLiquidityStatsTapeAndFill() {
+  // Прогрев f в тесте короче боевого: к моменту первой заявки лента прочитана 3 раза (2 выборки ν).
+  setenv("CE_FILL_COEF_WARMUP_SAMPLES", "2", 1);
+  struct EnvGuard { ~EnvGuard() { unsetenv("CE_FILL_COEF_WARMUP_SAMPLES"); } } env_guard;
+  FakeClock clock;
+  // Нулевой момент steady_clock адаптер трактует как «ещё не читали» (у реальных часов он недостижим) — стартуем позже.
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+  rest->trades_response =
+      R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000},)"
+      R"({"id":2,"price":"100.20","qty":"2.000","time":1700000001000}])";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  // 1) Первое чтение ленты: вся история, выборки ν нет, заявок нет ⇒ пар в снимке нет.
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "first snapshot must succeed")) return false;
+  if (!Check(adapter.LiquidityStats().empty(), "first tape read must not create a sample")) return false;
+
+  // 2) Второе чтение через 10 с: одна НОВАЯ сделка 4,000 × 100,20 = 400,8 ⇒ ν = 40,08 в секунду.
+  clock.AdvanceMs(10000);
+  rest->trades_response =
+      R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000},)"
+      R"({"id":2,"price":"100.20","qty":"2.000","time":1700000001000},)"
+      R"({"id":3,"price":"100.20","qty":"4.000","time":1700000010000}])";
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "second snapshot must succeed")) return false;
+  auto stats = adapter.LiquidityStats();
+  if (!Check(stats.size() == 1 && stats[0].symbol == "BTCUSDT", "one pair BTCUSDT expected")) return false;
+  if (!Check(stats[0].tape_samples == 1 && stats[0].tape_reads == 1 && std::fabs(stats[0].tape_quote_per_s - 40.08) < 1e-6,
+             "only the new trade must count: 400.8 / 10 s = 40.08")) return false;
+  if (!Check(stats[0].fill_orders == 0 && stats[0].fill_coef == 1.0, "no orders yet ⇒ f = 1, orders = 0")) return false;
+
+  // 3) Чтение без новых сделок: выборка 0, оценка затухает в exp(-10/900).
+  clock.AdvanceMs(10000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "third snapshot must succeed")) return false;
+  stats = adapter.LiquidityStats();
+  if (!Check(stats[0].tape_samples == 2 &&
+                 std::fabs(stats[0].tape_quote_per_s - 40.08 * std::exp(-10.0 / 900.0)) < 1e-6,
+             "empty read must decay the estimate")) return false;
+
+  // 4) IOC-продажа 14,000 по лимиту 100,00: лента даёт 1+2+4 = 7,000 ⇒ исполнено 7 из 14 ⇒ f = 0,5.
+  auto ioc = BuyLimitIntent();
+  ioc.set_intent_id("ioc-1");
+  ioc.set_side(fob::common::v1::SIDE_SELL);
+  ioc.set_tif(fob::common::v1::TIF_IOC);
+  ioc.mutable_target_qty()->set_units(14000);
+  ioc.mutable_limit_price()->set_units(10000);
+  const auto r1 = adapter.SendOrder(ioc);
+  if (!Check(r1.accepted && r1.filled_qty.units == 7000, "IOC order must fill 7.000 of 14.000")) return false;
+  stats = adapter.LiquidityStats();
+  if (!Check(stats[0].fill_orders == 1 && std::fabs(stats[0].fill_coef - 0.5) < 1e-9 &&
+                 std::fabs(stats[0].fill_weight - 14.0) < 1e-9,
+             "f must be 7/14 with weight 14")) return false;
+  if (!Check(std::fabs(stats[0].fill_orders_eff - 1.0) < 1e-9, "one fresh order ⇒ n_eff = 1")) return false;
+
+  // 5) Повторная доставка того же intent_id: заявка не учитывается второй раз.
+  (void)adapter.SendOrder(ioc);
+  stats = adapter.LiquidityStats();
+  if (!Check(stats[0].fill_orders == 1 && std::fabs(stats[0].fill_weight - 14.0) < 1e-9,
+             "redelivered intent_id must not be counted twice")) return false;
+
+  // 6) Резидентная GTC-заявка (лента израсходована ⇒ NEW): на первом тике в f не входит.
+  auto gtc = BuyLimitIntent();
+  gtc.set_intent_id("gtc-1");
+  gtc.set_side(fob::common::v1::SIDE_SELL);
+  gtc.set_tif(fob::common::v1::TIF_GTC);
+  gtc.mutable_target_qty()->set_units(5000);
+  gtc.mutable_limit_price()->set_units(10000);
+  gtc.set_timeout_ms(20000);
+  const auto r2 = adapter.SendOrder(gtc);
+  if (!Check(r2.status == fob::execution::v1::EXECUTION_REPORT_STATUS_NEW, "GTC order must rest (NEW)")) return false;
+  stats = adapter.LiquidityStats();
+  if (!Check(stats[0].fill_orders == 1, "resting order must not count on its first tick")) return false;
+
+  // 7) Дедлайн заявки прошёл: на следующем чтении ленты она терминальна (EXPIRED, исполнено 0 из 5) ⇒ входит в f.
+  clock.AdvanceMs(25000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot after deadline must succeed")) return false;
+  stats = adapter.LiquidityStats();
+  if (!Check(stats[0].fill_orders == 2, "resting order must count once at its terminal outcome")) return false;
+  const double d = std::exp(-25.0 / 1800.0);  // забывание заявки ioc-1 за 25 с
+  if (!Check(std::fabs(stats[0].fill_orders_eff - (d + 1.0)) < 1e-9, "n_eff must be decayed first order + fresh one")) {
+    return false;
+  }
+  const double expect = (7.0 * d + 0.0) / (14.0 * d + 5.0);
+  if (!Check(std::fabs(stats[0].fill_coef - expect) < 1e-6, "f after terminal GTC must follow the decay formula")) {
+    return false;
+  }
+  return true;
+}
+
+// ADR-082 (шаг 1): затравка оценок сохранёнными значениями после перезапуска. Пара без состояния ленты ждёт первого чтения; f и n_eff
+// приводятся к текущему моменту забыванием за время простоя; ν после затравки сглаживается относительно сохранённого значения.
+bool TestLiquiditySeedsAppliedLazilyAndDecayed() {
+  FakeClock clock;
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+  rest->trades_response = R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000}])";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  // Сохранено 30 минут назад (τ = 1800 с): f = 0,5, вес 10, n_eff 20, заявок 40; ν = 100 USDT/с по 30 чтениям.
+  VenueLiquidityStat seed;
+  seed.symbol = "BTCUSDT";
+  seed.tape_quote_per_s = 100.0;
+  seed.tape_samples = 30;
+  seed.fill_coef = 0.5;
+  seed.fill_weight = 10.0;
+  seed.fill_orders = 40;
+  seed.fill_orders_eff = 20.0;
+  seed.age_s = 1800.0;
+  adapter.SeedLiquidityStats({seed});
+  if (!Check(adapter.LiquidityStats().empty(), "pending seed must not appear before the first tape read")) return false;
+
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "first snapshot must succeed")) return false;
+  auto stats = adapter.LiquidityStats();
+  const double d = std::exp(-1800.0 / 1800.0);
+  if (!Check(stats.size() == 1 && stats[0].tape_samples == 30 && std::fabs(stats[0].tape_quote_per_s - 100.0) < 1e-9,
+             "tape must start from the seeded value")) return false;
+  if (!Check(std::fabs(stats[0].fill_coef - 0.5) < 1e-9 && stats[0].fill_orders == 40 &&
+                 std::fabs(stats[0].fill_weight - 10.0 * d) < 1e-9 && std::fabs(stats[0].fill_orders_eff - 20.0 * d) < 1e-9,
+             "f keeps its ratio, weight and n_eff decay over the downtime")) return false;
+  if (!Check(stats[0].tape_reads == 0, "seeding must not count as a tape read")) return false;
+
+  // Второе чтение через 10 с без новых сделок: сглаживание от затравки (100), а не сырая выборка 0.
+  clock.AdvanceMs(10000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "second snapshot must succeed")) return false;
+  stats = adapter.LiquidityStats();
+  return Check(std::fabs(stats[0].tape_quote_per_s - 100.0 * std::exp(-10.0 / 900.0)) < 1e-6 && stats[0].tape_samples == 31,
+               "first sample after seeding must be smoothed from the seed");
+}
+
+// ADR-082 (шаг 1): затравка не перетирает уже измеренное (ν при начатых чтениях ленты), применяется сразу, если состояние ленты
+// пары уже есть, и не берёт значение ν старше порога возраста.
+bool TestLiquiditySeedsOnlyUntouchedAndByAge() {
+  FakeClock clock;
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+  rest->trades_response = R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000}])";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  // Три чтения: ν уже измеряется (инициализирована второй выборкой), состояние ленты существует.
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot 1")) return false;
+  clock.AdvanceMs(10000);
+  rest->trades_response =
+      R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000},)"
+      R"({"id":2,"price":"100.20","qty":"3.000","time":1700000010000}])";
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot 2")) return false;
+  const double measured = adapter.LiquidityStats()[0].tape_quote_per_s;  // 300.6 / 10 = 30.06
+  if (!Check(std::fabs(measured - 30.06) < 1e-6, "measured tape rate before seeding")) return false;
+
+  VenueLiquidityStat seed;
+  seed.symbol = "BTCUSDT";
+  seed.tape_quote_per_s = 999.0;
+  seed.tape_samples = 50;
+  seed.fill_coef = 0.25;
+  seed.fill_weight = 8.0;
+  seed.fill_orders = 12;
+  seed.fill_orders_eff = 6.0;
+  seed.age_s = 0.0;
+  adapter.SeedLiquidityStats({seed});  // состояние ленты уже есть ⇒ применяется сразу, но ν измеряется ⇒ не перетирается
+  auto stats = adapter.LiquidityStats();
+  if (!Check(std::fabs(stats[0].tape_quote_per_s - measured) < 1e-9 && stats[0].tape_samples == 1,
+             "seed must not overwrite a measured tape rate")) return false;
+  if (!Check(std::fabs(stats[0].fill_coef - 0.25) < 1e-9 && stats[0].fill_orders == 12,
+             "untouched fill estimate must be seeded immediately")) return false;
+
+  // Второй раз затравка не применяется: заявки уже учтены в оценке (orders > 0).
+  VenueLiquidityStat other = seed;
+  other.fill_coef = 0.9;
+  other.fill_orders = 99;
+  adapter.SeedLiquidityStats({other});
+  stats = adapter.LiquidityStats();
+  return Check(std::fabs(stats[0].fill_coef - 0.25) < 1e-9 && stats[0].fill_orders == 12, "a seeded estimate must not be seeded twice");
+}
+
+// ν старше порога возраста не затравливается, f затравливается с забыванием.
+bool TestTapeSeedIgnoredWhenTooOld() {
+  FakeClock clock;
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+  rest->trades_response = R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000}])";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  VenueLiquidityStat seed;
+  seed.symbol = "BTCUSDT";
+  seed.tape_quote_per_s = 500.0;
+  seed.tape_samples = 40;
+  seed.fill_coef = 0.5;
+  seed.fill_weight = 10.0;
+  seed.fill_orders = 20;
+  seed.fill_orders_eff = 10.0;
+  seed.age_s = 7200.0;  // два часа: ν старше порога (3600 с), f забыт в e^-4
+  adapter.SeedLiquidityStats({seed});
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot")) return false;
+  const auto stats = adapter.LiquidityStats();
+  const double d = std::exp(-7200.0 / 1800.0);
+  return Check(stats.size() == 1 && stats[0].tape_samples == 0, "tape older than the age limit must not be seeded") &&
+         Check(std::fabs(stats[0].fill_coef - 0.5) < 1e-9 && std::fabs(stats[0].fill_orders_eff - 10.0 * d) < 1e-9 &&
+                   std::fabs(stats[0].fill_weight - 10.0 * d) < 1e-9,
+               "f keeps its ratio while weight and n_eff are forgotten over the downtime");
+}
+
+// ADR-082: пока лента пары не прочитана достаточно раз (холодный старт), заявка в f не входит, но исполняется как обычно.
+bool TestFillNotCountedDuringTapeWarmup() {
+  FakeClock clock;
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+  rest->trades_response = R"([{"id":1,"price":"100.20","qty":"1.000","time":1700000000000}])";
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "snapshot must succeed")) return false;
+
+  auto ioc = BuyLimitIntent();
+  ioc.set_intent_id("warmup-1");
+  ioc.set_side(fob::common::v1::SIDE_SELL);
+  ioc.set_tif(fob::common::v1::TIF_IOC);
+  ioc.mutable_target_qty()->set_units(1000);
+  ioc.mutable_limit_price()->set_units(10000);
+  const auto r = adapter.SendOrder(ioc);
+  if (!Check(r.accepted && r.filled_qty.units == 1000, "order must still execute during warm-up")) return false;
+  return Check(adapter.LiquidityStats().empty(), "warm-up order must not enter f (no stats rows yet)");
+}
+
+// ADR-082: выдача ленты упёрлась в лимит запроса (100 сделок, все новые) — между чтениями часть сделок не видна, и ν считается по
+// охваченному интервалу биржевого времени, а не по времени между чтениями.
+bool TestLiquidityStatsSaturatedTapeUsesCoveredSpan() {
+  FakeClock clock;
+  clock.AdvanceMs(1000000);
+  auto* rest = new FakeRestClient();
+  auto* ws = new FakeWsSession();
+  rest->get_response = DepthSnapshotJson();
+  rest->route_trades_response = true;
+
+  // сделки id from..from+99, по 1,000 × 100,00 каждая, биржевое время растёт на 100 мс
+  const auto trades_json = [](const int first_id, const int64_t first_ms) {
+    std::ostringstream oss;
+    oss << "[";
+    for (int i = 0; i < 100; ++i) {
+      if (i > 0) oss << ",";
+      oss << R"({"id":)" << (first_id + i) << R"(,"price":"100.00","qty":"1.000","time":)" << (first_ms + 100 * i) << "}";
+    }
+    oss << "]";
+    return oss.str();
+  };
+
+  CexWsRestAdapterConfig cfg;
+  cfg.ws_url = "wss://stream.binance.com:9443/ws";
+  cfg.rest_base_url = "https://api.binance.com";
+  cfg.simulate_orders = true;
+  cfg.sim_match_real_trades = true;
+  cfg.rest_requests_per_sec = 1000.0;
+  cfg.rest_burst = 1000.0;
+  cfg.market_price_scale = 2;
+  cfg.market_qty_scale = 3;
+
+  CexWsRestAdapter adapter(
+      cfg,
+      std::unique_ptr<ICexRestClient>(rest),
+      std::unique_ptr<ICexWsSession>(ws),
+      [&clock] { return clock.now; });
+  if (!Check(adapter.Connect(), "Connect must succeed")) return false;
+
+  rest->trades_response = trades_json(1, 1700000000000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "first snapshot must succeed")) return false;
+
+  // Через 30 с пришло ещё 100 новых сделок (101..200), все новые ⇒ выдача насыщена. Охвачено 9,9 с биржевого времени:
+  // сделки после самой старой — 99 штук по 100,00 ⇒ 9900 / 9,9 = 1000 в секунду (по времени между чтениями вышло бы 10000/30 = 333).
+  clock.AdvanceMs(30000);
+  rest->trades_response = trades_json(101, 1700000030000);
+  if (!Check(adapter.RequestSnapshot(BtcReq()).has_value(), "second snapshot must succeed")) return false;
+  const auto stats = adapter.LiquidityStats();
+  if (!Check(stats.size() == 1 && stats[0].tape_samples == 1 && stats[0].tape_reads == 1,
+             "saturated read must give one sample and one counted read")) return false;
+  return Check(std::fabs(stats[0].tape_quote_per_s - 1000.0) < 1e-6,
+               "saturated read must use the covered exchange-time span: 9900 / 9.9 s = 1000");
+}
+
 bool TestCircuitBreakerBlocksExternalCallsUntilCooldown() {
   FakeClock clock;
   auto* rest = new FakeRestClient();
@@ -2415,6 +2795,12 @@ int main() {
   ok = TestGapTriggersResetAndSnapshotReinit() && ok;
   ok = TestSendOrderPayloadAndRateLimitError() && ok;
   ok = TestSimulatedSendOrderDoesNotPost() && ok;
+  ok = TestLiquidityStatsTapeAndFill() && ok;
+  ok = TestLiquidityStatsSaturatedTapeUsesCoveredSpan() && ok;
+  ok = TestFillNotCountedDuringTapeWarmup() && ok;
+  ok = TestLiquiditySeedsAppliedLazilyAndDecayed() && ok;
+  ok = TestLiquiditySeedsOnlyUntouchedAndByAge() && ok;
+  ok = TestTapeSeedIgnoredWhenTooOld() && ok;
   ok = TestCircuitBreakerBlocksExternalCallsUntilCooldown() && ok;
   ok = TestDecimalParserEdgeCases() && ok;
   ok = TestPendingDiffBufferOverflowUsesLatestChainOnly() && ok;
