@@ -1004,9 +1004,12 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   trust_cfg.t_stale_s = std::max(0.0, env_d("CE_TRUST_TSTALE_S", 60.0));
   trust_cfg.psi_min = std::min(0.99, std::max(0.0, env_d("CE_TRUST_PSI_MIN", 0.05)));
   const bool trust_on = trust_cfg.mode != domain::TrustMode::kOff;
-  const double cap_w_t_k = env_d("CE_CAPITAL_W_T_K", 0.0);        // W_T, тыс. USDT на переводчика
+  // W_T — капитал конкретного переводчика (базовый документ), поэтому задаётся по ключу «биржа|пара» (CE_CAPITAL_W_T_K_BY_KEY, например
+  // "binance|BTCUSDT:3000,okx|ETHUSDT:1500"); CE_CAPITAL_W_T_K — запасное значение для пар без записи, 0 ⇒ у таких пар предела нет.
+  const double cap_w_t_k = env_d("CE_CAPITAL_W_T_K", 0.0);        // запасное W_T, тыс. USDT
+  const domain::CapitalByKey cap_by_key = domain::ParseCapitalByKey(cex::common::Env::get_string("CE_CAPITAL_W_T_K_BY_KEY", ""));
   const double cap_gamma = env_d("CE_CAPITAL_GAMMA_PM", 0.0);     // γ, 1/‰
-  const bool cap_on = cap_w_t_k > 0.0 && cap_gamma > 0.0;
+  const bool cap_on = (cap_w_t_k > 0.0 || !cap_by_key.w_t_k.empty()) && cap_gamma > 0.0;
   // Предел возраста режима LINEAR — константа CE_TRUST_TSTALE_S. Опция CE_TRUST_TSTALE_ADAPTIVE=1 берёт его из адаптивного порога по σ площадки,
   // которым векторный путь жёстко исключает устаревшие кривые (CE_STALE_EPS_PM, ADR-078): вес доходит до нуля там же, где данные отсекаются.
   // По умолчанию выключена: на dev этот порог упирается в нижнюю границу 10 с, а обычный возраст снимков из-за периода опроса 3–9 с — 4–9 с,
@@ -1048,15 +1051,20 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     }
     // ADR-085: σ площадки (‰/√с; ключ как у векторного пути: venue|BASEQUOTE) для уценки DISP и капитального предела.
     double sigma_pm_venue = 0.0;
+    const std::string pair_key = ag.venue + "|" + ag.base + ag.quote;
     if (trust_on || cap_on) {
-      if (const auto sg = venue_sigma.find(ag.venue + "|" + ag.base + ag.quote); sg != venue_sigma.end()) sigma_pm_venue = sg->second * 1000.0;
+      if (const auto sg = venue_sigma.find(pair_key); sg != venue_sigma.end()) sigma_pm_venue = sg->second * 1000.0;
     }
     // Капитальный предел — внешнее ограничение тактовой глубины; только для котировок к номиналу: у кросс-пары глубина в валюте её
     // котировки, и W_T в тыс. USDT с ней не сравнима (ADR-064). Нет σ площадки или такта ⇒ предела нет (без данных глубину не режем).
     double cap_flow = std::numeric_limits<double>::infinity();
     if (cap_on && ag.quote == numeraire) {
-      if (sigma_pm_venue > 0.0) cap_flow = domain::CapitalDepthCap(cap_w_t_k, cap_gamma, sigma_pm_venue, tact_s);
-      if (!std::isfinite(cap_flow)) ++cap_no_data;
+      // Капитал именно этого переводчика; нет ни записи по ключу, ни запасного значения (или явный 0) ⇒ у пары предела нет и это не «нет данных».
+      const double w_t_k = domain::ResolveCapitalW(cap_by_key, pair_key, cap_w_t_k);
+      if (w_t_k > 0.0) {
+        if (sigma_pm_venue > 0.0) cap_flow = domain::CapitalDepthCap(w_t_k, cap_gamma, sigma_pm_venue, tact_s);
+        if (!std::isfinite(cap_flow)) ++cap_no_data;
+      }
     }
     double fill_scale = 1.0;
     if (depth_fill) {
@@ -1166,6 +1174,8 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
                              {"trust_min_weight", std::to_string(trust_min)},
                              {"age_floor_k_adr075", std::to_string(age_dead_zone_k)},   // k>0 вместе с уценкой — двойной учёт возраста
                              {"capital_on", cap_on ? "1" : "0"},
+                             {"capital_by_key", std::to_string(cap_by_key.w_t_k.size())},          // записей капитала по «бирже|паре»
+                             {"capital_by_key_malformed", std::to_string(cap_by_key.malformed)},   // нечитаемых записей (опечатка в настройке)
                              {"capital_applied", std::to_string(cap_applied)},
                              {"capital_min_ratio", std::to_string(cap_ratio_min)},
                              {"capital_no_data", std::to_string(cap_no_data)},   // нет σ площадки или такта: предел не применён

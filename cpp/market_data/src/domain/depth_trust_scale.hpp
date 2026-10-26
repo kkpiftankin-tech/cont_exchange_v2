@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <string>
 
 namespace cex::market_data::domain {
@@ -83,6 +85,50 @@ inline double CapitalDepthCap(const double w_t_k, const double gamma_per_pm, con
   if (!std::isfinite(w_t_k) || !std::isfinite(gamma_per_pm) || !std::isfinite(sigma_pm) || !std::isfinite(tau_s)) return inf;
   if (!(w_t_k > 0.0) || !(gamma_per_pm > 0.0) || !(sigma_pm > 0.0) || !(tau_s > 0.0)) return inf;
   return w_t_k / (gamma_per_pm * sigma_pm * sigma_pm * tau_s);
+}
+
+// Капитал W_T по ключу «биржа|пара» (venue|BASEQUOTE, тот же ключ, что у ς площадки). В базовом документе W_T — капитал конкретного участника
+// («сколько риска в единицу времени выдерживает счёт»), а у переводчика на каждую биржу и пару свой счёт, поэтому единая константа для всех
+// грубее модели: она бьёт по самой ликвидной бирже (ADR-085, пробы на dev). Нет записи по ключу ⇒ запасное значение; запасное 0 ⇒ предела нет.
+struct CapitalByKey {
+  std::map<std::string, double> w_t_k;  // ключ → W_T, тыс. USDT; явный 0 = «у этой пары предела нет»
+  int malformed{0};                     // сколько записей отброшено как нечитаемые (опечатка видна в журнале)
+};
+
+// Разбор «binance|BTCUSDT:3000, okx|ETHUSDT:1500»: записи через «,» или «;», ключ и значение делит ПОСЛЕДНЕЕ «:», пробелы по краям не важны.
+// Значение — конечное число ≥ 0 целиком; пустой ключ, нет «:», мусор, отрицательное или нечисловое значение ⇒ запись отбрасывается и считается
+// в malformed. Повтор ключа — побеждает последняя запись.
+inline CapitalByKey ParseCapitalByKey(const std::string& spec) {
+  const auto trim = [](const std::string& s) {
+    const auto b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::string();
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+  };
+  CapitalByKey r;
+  std::size_t pos = 0;
+  while (pos <= spec.size()) {
+    const std::size_t next = spec.find_first_of(",;", pos);
+    const std::string item = trim(spec.substr(pos, next == std::string::npos ? std::string::npos : next - pos));
+    pos = next == std::string::npos ? spec.size() + 1 : next + 1;
+    if (item.empty()) continue;
+    const std::size_t colon = item.rfind(':');
+    const std::string key = colon == std::string::npos ? std::string() : trim(item.substr(0, colon));
+    const std::string val = colon == std::string::npos ? std::string() : trim(item.substr(colon + 1));
+    char* end = nullptr;
+    const double w = val.empty() ? 0.0 : std::strtod(val.c_str(), &end);
+    if (key.empty() || val.empty() || end == val.c_str() || *end != '\0' || !std::isfinite(w) || w < 0.0) {
+      ++r.malformed;
+      continue;
+    }
+    r.w_t_k[key] = w;
+  }
+  return r;
+}
+
+// W_T для котировки: запись по ключу, иначе запасное значение (CE_CAPITAL_W_T_K).
+inline double ResolveCapitalW(const CapitalByKey& by_key, const std::string& key, const double default_w_t_k) {
+  const auto it = by_key.w_t_k.find(key);
+  return it != by_key.w_t_k.end() ? it->second : default_w_t_k;
 }
 
 // Итоговая глубина переводчика: α = w·f·min{α_база, cap}. Предел идёт ПЕРВЫМ, чтобы вес и множитель исполнения действовали и тогда, когда он

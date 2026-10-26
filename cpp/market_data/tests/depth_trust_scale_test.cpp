@@ -12,7 +12,10 @@ namespace {
 
 using cex::market_data::domain::AgeTrustWeight;
 using cex::market_data::domain::CapitalDepthCap;
+using cex::market_data::domain::CapitalByKey;
 using cex::market_data::domain::ComposeDepth;
+using cex::market_data::domain::ParseCapitalByKey;
+using cex::market_data::domain::ResolveCapitalW;
 using cex::market_data::domain::TrustDropThresholdMs;
 using cex::market_data::domain::ParseTrustMode;
 using cex::market_data::domain::TrustExcluded;
@@ -188,12 +191,36 @@ bool TestCapitalCapDisabled() {
          Check(CapitalDepthCap(nan, 0.1, 2.0, 0.5) == inf, "NaN -> no cap") && Check(CapitalDepthCap(10.0, 0.1, -2.0, 0.5) == inf, "negative sigma -> no cap");
 }
 
+// Капитал по ключу «биржа|пара»: у каждого переводчика свой W_T (базовый документ: капитал участника), запасное значение — для остальных.
+bool TestCapitalByKey() {
+  const CapitalByKey m = ParseCapitalByKey(" binance|BTCUSDT:3000 , okx|ETHUSDT:1500.5;kraken|SOLUSDT:0 ");
+  const bool parsed = Check(m.malformed == 0 && m.w_t_k.size() == 3, "three entries parsed, separators , and ; and spaces tolerated") &&
+                      Check(Near(m.w_t_k.at("binance|BTCUSDT"), 3000.0) && Near(m.w_t_k.at("okx|ETHUSDT"), 1500.5), "values parsed");
+  // запись по ключу важнее запасного; нет записи ⇒ запасное; явный 0 ⇒ у пары предела нет, даже при положительном запасном
+  const bool resolved = Check(Near(ResolveCapitalW(m, "binance|BTCUSDT", 1000.0), 3000.0), "key overrides the default") &&
+                        Check(Near(ResolveCapitalW(m, "okx|SOLUSDT", 1000.0), 1000.0), "absent key falls back to the default") &&
+                        Check(ResolveCapitalW(m, "kraken|SOLUSDT", 1000.0) == 0.0, "explicit 0 means no cap for this pair") &&
+                        Check(ResolveCapitalW(m, "okx|SOLUSDT", 0.0) == 0.0, "no default and no key: no capital, no cap");
+  // нечитаемые записи отбрасываются и считаются; хорошие рядом сохраняются
+  const CapitalByKey bad = ParseCapitalByKey("binance|BTCUSDT:abc,okx|ETHUSDT:-5,:100,nocolon,kraken|SOLUSDT:nan,coinbase|BTCUSDT:inf,okx|BTCUSDT:7x,good|ETHUSDT:42");
+  const bool malformed = Check(bad.malformed == 7 && bad.w_t_k.size() == 1 && Near(bad.w_t_k.at("good|ETHUSDT"), 42.0), "bad entries dropped and counted, good kept");
+  // пусто, повтор ключа (побеждает последняя), значение без пробела до разделителя
+  const bool edge = Check(ParseCapitalByKey("").w_t_k.empty() && ParseCapitalByKey("").malformed == 0, "empty spec: nothing, nothing malformed") &&
+                    Check(Near(ParseCapitalByKey("a|B:1,a|B:2").w_t_k.at("a|B"), 2.0), "duplicate key: last wins") &&
+                    Check(ParseCapitalByKey(" , ;").malformed == 0, "blank items are not errors");
+  // предел по ключу: тот же W_T, разный ς ⇒ разный предел; без капитала (W_T=0) предела нет
+  const bool cap = Check(Near(CapitalDepthCap(ResolveCapitalW(m, "binance|BTCUSDT", 1000.0), 60.0, 0.06, 1.0), 3000.0 / (60.0 * 0.0036), 1e-6),
+                         "cap from the per-key W_T: 3000/(60*0.06^2*1) = 13888.9") &&
+                   Check(std::isinf(CapitalDepthCap(ResolveCapitalW(m, "kraken|SOLUSDT", 1000.0), 60.0, 0.1, 1.0)), "explicit 0 gives no cap");
+  return parsed && resolved && malformed && edge && cap;
+}
+
 }  // namespace
 
 int main() {
   const bool ok = TestParseMode() && TestLinearPageExample() && TestDispPageExample() && TestLinearBounds() && TestDispMonotoneAndCalm() &&
                   TestNeutralInputs() && TestHingeAndExclusion() && TestDispTailNeedsHinge() && TestDispSpecialistExample() &&
-                  TestLinearAdaptiveLimitArithmetic() && TestCapitalCapPageExample() && TestComposeDepthBaseDocExample() && TestComposeDepthOrder() && TestComposeDepthNeutral() && TestDropThreshold() && TestEdgeInputs() && TestCapitalCapDisabled();
+                  TestLinearAdaptiveLimitArithmetic() && TestCapitalCapPageExample() && TestComposeDepthBaseDocExample() && TestComposeDepthOrder() && TestComposeDepthNeutral() && TestDropThreshold() && TestEdgeInputs() && TestCapitalCapDisabled() && TestCapitalByKey();
   if (!ok) return 1;
   std::cout << "all passed\n";
   return 0;
