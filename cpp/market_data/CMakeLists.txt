@@ -174,6 +174,26 @@ if (BUILD_TESTING)
     target_compile_options(market_data_fill_depth_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME market_data_fill_depth_scale_test COMMAND market_data_fill_depth_scale_test)
 
+    # ADR-085: уценка устаревших котировок и капитальный предел глубины агента (domain/depth_trust_scale.hpp, header-only).
+    add_executable(market_data_depth_trust_scale_test
+            tests/depth_trust_scale_test.cpp
+    )
+    target_include_directories(market_data_depth_trust_scale_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_depth_trust_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_depth_trust_scale_test COMMAND market_data_depth_trust_scale_test)
+
+    # Защита входа CE-клиринга от несогласованности активов и площадок (domain/ce_input_guard.hpp, header-only).
+    add_executable(market_data_ce_input_guard_test
+            tests/ce_input_guard_test.cpp
+    )
+    target_include_directories(market_data_ce_input_guard_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_ce_input_guard_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_ce_input_guard_test COMMAND market_data_ce_input_guard_test)
+
     # F-05A (T-F05A-205): curve→levels + proto mapping (needs contracts_proto).
     add_executable(market_data_vectorize_wiring_test
             tests/vectorize_wiring_test.cpp

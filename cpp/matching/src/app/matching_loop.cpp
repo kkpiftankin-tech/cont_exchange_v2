@@ -51,6 +51,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -543,7 +544,15 @@ void MatchingLoop::consume_orders_loop() {
               cex::common::log_json("ERROR", "Failed to parse CeClearingInput");
               return;
             }
-            on_ce_clearing_input(ce_in);
+            try {
+              on_ce_clearing_input(ce_in);
+            } catch (const std::out_of_range& e) {
+              // Несогласованный вход (котировка на актив или площадку вне списков ⇒ std::out_of_range в node_index.at при сборке графа) не должен
+              // ронять процесс: иначе после перезапуска то же сообщение читается снова и matching падает по кругу (инцидент 2026-10-26).
+              // Перехватывается только этот класс исключений; прочие по-прежнему завершают процесс и сообщение читается повторно.
+              cex::common::log_json("ERROR", "CE clearing input rejected",
+                                    {{"batch_id", ce_in.batch_id()}, {"error", e.what()}});
+            }
             return;
           }
 

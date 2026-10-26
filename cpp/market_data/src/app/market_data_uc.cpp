@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <thread>
 
 #include <pqxx/pqxx>  // ADR-050/052: runtime-конфиг окна клиринга из Postgres
@@ -24,6 +25,8 @@
 #include "app/ports/i_vectorized_publisher.hpp"
 #include "domain/agent_builder.hpp"  // F-05A CE §A1
 #include "domain/fill_depth_scale.hpp"  // ADR-082 шаг 1
+#include "domain/depth_trust_scale.hpp"  // ADR-085: уценка устаревших котировок, капитальный предел
+#include "domain/ce_input_guard.hpp"  // защита входа CE-клиринга от несогласованности
 #include "app/ports/i_vector_segment_storage.hpp"
 #include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
@@ -985,6 +988,46 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   int fill_scaled = 0;
   double fill_scale_min = 1.0;
   std::string fill_scale_list;
+  // ADR-085: уценка устаревших котировок (CE_TRUST_MODE) и капитальный предел глубины (CE_CAPITAL_W_T_K, CE_CAPITAL_GAMMA_PM). Оба выключены
+  // по умолчанию ⇒ ни одного обращения к σ, прежнее поведение. Как и f, применяются ПОСЛЕ фильтра тонких котировок: фильтр сравнивает сырую
+  // глубину с максимумом по паре (оценка надёжности книги), а вес и предел уменьшают кривую в клиринге. Основание — «Кривые котирования»
+  // §2.3 (уценка: глубина падает с возрастом источника до нуля) и ур. (6.2): α_T = min{θα_ext, W_T/(γσ²τ)}.
+  const auto env_d = [](const char* name, const double def) {
+    const char* v = std::getenv(name);
+    if (v == nullptr || *v == '\0') return def;
+    char* end = nullptr;
+    const double x = std::strtod(v, &end);
+    return (end == v || *end != '\0' || !std::isfinite(x)) ? def : x;
+  };
+  domain::TrustScaleConfig trust_cfg;
+  trust_cfg.mode = domain::ParseTrustMode(cex::common::Env::get_string("CE_TRUST_MODE", "OFF"));
+  trust_cfg.t_stale_s = std::max(0.0, env_d("CE_TRUST_TSTALE_S", 60.0));
+  trust_cfg.psi_min = std::min(0.99, std::max(0.0, env_d("CE_TRUST_PSI_MIN", 0.05)));
+  const bool trust_on = trust_cfg.mode != domain::TrustMode::kOff;
+  const double cap_w_t_k = env_d("CE_CAPITAL_W_T_K", 0.0);        // W_T, тыс. USDT на переводчика
+  const double cap_gamma = env_d("CE_CAPITAL_GAMMA_PM", 0.0);     // γ, 1/‰
+  const bool cap_on = cap_w_t_k > 0.0 && cap_gamma > 0.0;
+  // Предел возраста режима LINEAR — константа CE_TRUST_TSTALE_S. Опция CE_TRUST_TSTALE_ADAPTIVE=1 берёт его из адаптивного порога по σ площадки,
+  // которым векторный путь жёстко исключает устаревшие кривые (CE_STALE_EPS_PM, ADR-078): вес доходит до нуля там же, где данные отсекаются.
+  // По умолчанию выключена: на dev этот порог упирается в нижнюю границу 10 с, а обычный возраст снимков из-за периода опроса 3–9 с — 4–9 с,
+  // поэтому вес обычных котировок падал до 0,1–0,6 (замер 2026-10-26, ADR-085).
+  const bool trust_adaptive = cex::common::Env::get_bool("CE_TRUST_TSTALE_ADAPTIVE", false);
+  const double trust_eps = trust_adaptive ? std::max(0.0, env_d("CE_STALE_EPS_PM", 0.0)) / 1000.0 : 0.0;
+  const double trust_lo_s = std::max(0.1, env_d("CE_STALE_MIN_S", 10.0));
+  const double trust_hi_s = std::max(trust_lo_s, env_d("CE_STALE_MAX_S", 180.0));
+  // σ0 режима DISP: явное CE_TRUST_SIG0_PM, иначе привязка к допуску жёсткого предела σ0 = ε/z, при которой T_ς совпадает с возрастом
+  // ValidAgeSeconds (вес 1/2 ровно на нём); нет и допуска ⇒ 0,5‰ (дискретность тика).
+  {
+    const double sig0_env = env_d("CE_TRUST_SIG0_PM", 0.0);
+    trust_cfg.sig0_pm = sig0_env > 0.0 ? sig0_env : (trust_eps > 0.0 ? 1000.0 * trust_eps / cex::common::kValidityZ : 0.5);
+  }
+  const bool need_venue_sigma = cap_on || trust_cfg.mode == domain::TrustMode::kDisp || (trust_on && trust_eps > 0.0);
+  const std::map<std::string, double> venue_sigma =
+      need_venue_sigma ? VenueSigmaSnapshot(cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20)) : std::map<std::string, double>{};
+  const double tact_s = batch_window_ms / 1000.0;   // τ капитального предела — длительность такта клиринга
+  int trust_applied = 0, trust_excluded = 0, trust_zero_depth = 0, cap_applied = 0, cap_no_data = 0;
+  double trust_min = 1.0, cap_ratio_min = 1.0;
+  std::set<std::string> trust_excluded_assets;   // активы, у которых хотя бы одну котировку убрал вес или нулевая глубина
   for (const auto& ag : agents) {
     // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража).
     // ADR-064: порог считается по ПАРЕ (base|quote) — иначе кросс-пара (ETH/BTC)
@@ -1003,11 +1046,23 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
       dropped_list.push_back(std::move(dq));
       continue;
     }
-    double depth_out = ag.depth;
+    // ADR-085: σ площадки (‰/√с; ключ как у векторного пути: venue|BASEQUOTE) для уценки DISP и капитального предела.
+    double sigma_pm_venue = 0.0;
+    if (trust_on || cap_on) {
+      if (const auto sg = venue_sigma.find(ag.venue + "|" + ag.base + ag.quote); sg != venue_sigma.end()) sigma_pm_venue = sg->second * 1000.0;
+    }
+    // Капитальный предел — внешнее ограничение тактовой глубины; только для котировок к номиналу: у кросс-пары глубина в валюте её
+    // котировки, и W_T в тыс. USDT с ней не сравнима (ADR-064). Нет σ площадки или такта ⇒ предела нет (без данных глубину не режем).
+    double cap_flow = std::numeric_limits<double>::infinity();
+    if (cap_on && ag.quote == numeraire) {
+      if (sigma_pm_venue > 0.0) cap_flow = domain::CapitalDepthCap(cap_w_t_k, cap_gamma, sigma_pm_venue, tact_s);
+      if (!std::isfinite(cap_flow)) ++cap_no_data;
+    }
+    double fill_scale = 1.0;
     if (depth_fill) {
       const double sc = domain::ResolveFillDepthScale(liq_snapshot, ag.venue, ag.base, ag.quote, fill_cfg);
       if (sc < 1.0) {
-        depth_out = ag.depth * sc;
+        fill_scale = sc;
         ++fill_scaled;
         fill_scale_min = std::min(fill_scale_min, sc);
         if (fill_scale_list.size() < 400) {
@@ -1016,6 +1071,54 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
           fill_scale_list += buf;
         }
       }
+    }
+    double trust_weight = 1.0;
+    if (trust_on && ag.age_ms > 0) {
+      double t_stale_s = trust_cfg.t_stale_s;
+      if (trust_cfg.mode == domain::TrustMode::kLinear && trust_eps > 0.0 && sigma_pm_venue > 0.0)
+        t_stale_s = cex::common::HardStaleLimitSeconds(std::optional<double>(sigma_pm_venue / 1000.0), trust_eps, trust_lo_s, trust_hi_s,
+                                                       trust_cfg.t_stale_s);
+      trust_weight = domain::AgeTrustWeight(trust_cfg, static_cast<double>(ag.age_ms) / 1000.0, t_stale_s, sigma_pm_venue);
+      if (domain::TrustExcluded(trust_cfg, trust_weight)) {
+        // Вес дошёл до нуля: котировка устарела настолько, что её кривая не должна влиять (нулевая глубина в клиринг не идёт).
+        ++trust_excluded;
+        trust_excluded_assets.insert(ag.base);
+        fob::marketdata::v1::CeDroppedQuote dq;
+        dq.set_asset(ag.base);
+        dq.set_venue(ag.venue);
+        if (ag.quote != numeraire) dq.set_quote(ag.quote);
+        dq.set_reason("stale");
+        dq.set_age_ms(ag.age_ms);
+        *dq.mutable_threshold() = to_dec(domain::TrustDropThresholdMs(trust_cfg, t_stale_s, sigma_pm_venue));
+        dropped_list.push_back(std::move(dq));
+        continue;
+      }
+      if (trust_weight < 1.0) {
+        ++trust_applied;
+        trust_min = std::min(trust_min, trust_weight);
+      }
+    }
+    // α = w·f·min{θα_ext, cap}: порядок — в domain::ComposeDepth. Выключено ⇒ множители 1 и предела нет, глубина совпадает бит в бит.
+    const domain::DepthComposition comp = domain::ComposeDepth(ag.depth, cap_flow, fill_scale, trust_weight);
+    double depth_out = comp.depth;
+    if (comp.capped) {
+      ++cap_applied;
+      if (ag.depth > 0.0) cap_ratio_min = std::min(cap_ratio_min, cap_flow / ag.depth);
+    }
+    // Нулевую глубину в клиринг не передаём (в отчёте ReportCe слагаемое f²/(2·depth) при нуле даёт 0/0): после всех множителей глубина ниже
+    // разрешения to_dec (1e-8) — исключение, как у ветки invalid_depth. Только при включённых механизмах: выключено — прежнее поведение.
+    if ((trust_on || cap_on) && !(depth_out >= 1e-8)) {
+      ++trust_zero_depth;
+      trust_excluded_assets.insert(ag.base);
+      fob::marketdata::v1::CeDroppedQuote dq;
+      dq.set_asset(ag.base);
+      dq.set_venue(ag.venue);
+      if (ag.quote != numeraire) dq.set_quote(ag.quote);
+      dq.set_reason("invalid_depth");
+      dq.set_age_ms(ag.age_ms);
+      *dq.mutable_depth() = to_dec(std::isfinite(depth_out) ? depth_out : 0.0);  // NaN в to_dec — неопределённое поведение llround
+      dropped_list.push_back(std::move(dq));
+      continue;
     }
     auto* q = out.add_quotes();
     q->set_asset(ag.base);
@@ -1050,8 +1153,35 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
                              {"scales", fill_scale_list}});
     }
   }
+  if (trust_on || cap_on) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_trust_log_ms{0};
+    std::int64_t prev = last_trust_log_ms.load();
+    if (window_close_ms - prev >= 60000 && last_trust_log_ms.compare_exchange_strong(prev, window_close_ms)) {
+      cex::common::log_json("INFO", "CE clearing: уценка устаревших котировок и капитальный предел (ADR-085)",
+                            {{"batch_id", batch_id},
+                             {"trust_mode", trust_on ? (trust_cfg.mode == domain::TrustMode::kLinear ? "LINEAR" : "DISP") : "OFF"},
+                             {"trust_applied", std::to_string(trust_applied)},
+                             {"trust_excluded", std::to_string(trust_excluded)},
+                             {"trust_min_weight", std::to_string(trust_min)},
+                             {"age_floor_k_adr075", std::to_string(age_dead_zone_k)},   // k>0 вместе с уценкой — двойной учёт возраста
+                             {"capital_on", cap_on ? "1" : "0"},
+                             {"capital_applied", std::to_string(cap_applied)},
+                             {"capital_min_ratio", std::to_string(cap_ratio_min)},
+                             {"capital_no_data", std::to_string(cap_no_data)},   // нет σ площадки или такта: предел не применён
+                             {"zero_depth_dropped", std::to_string(trust_zero_depth)},
+                             {"quotes", std::to_string(out.quotes_size())}});
+    }
+  }
   if (out.quotes_size() == 0) return;
-  for (const auto& a : assets_order) {
+  // Активы, на которые ссылается хотя бы одна оставшаяся котировка — и как базовый, и как котируемая валюта кросс-пары (ETH/BTC ссылается на BTC).
+  std::vector<domain::CeQuoteRef> quote_refs;
+  quote_refs.reserve(static_cast<std::size_t>(out.quotes_size()));
+  for (const auto& q : out.quotes()) quote_refs.push_back({q.asset(), q.quote(), q.venue()});
+  const std::set<std::string> referenced_assets = domain::ReferencedAssets(quote_refs, numeraire);
+  // Актив, на который не осталось ссылок ни в одной роли (все его котировки убрал вес или нулевая глубина), в клиринг не идёт. Убирать актив,
+  // на который ссылается кросс-пара, нельзя: matching не найдёт узел и упадёт (инцидент 2026-10-26).
+  for (const auto& a : domain::SelectClearingAssets(assets_order, trust_excluded_assets, referenced_assets)) {
     out.add_assets(a);
     auto* m = out.add_marks();
     m->set_asset(a);
@@ -1069,6 +1199,29 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
 
   for (const auto& dq : stale_dropped) *out.add_dropped() = dq;   // ADR-079: отброшенные как устаревшие
   for (const auto& dq : dropped_list) *out.add_dropped() = dq;     // и по глубине / нулевой глубине
+  {
+    // Защита: вход, в котором котировка ссылается на актив или площадку вне списков, роняет matching (node_index.at → std::out_of_range → terminate,
+    // а после перезапуска то же сообщение читается снова). Такой вход не публикуем.
+    const std::vector<std::string> out_assets(out.assets().begin(), out.assets().end());
+    const std::vector<std::string> out_venues(out.venues().begin(), out.venues().end());
+    // Номинал по умолчанию тот же, что подставляет matching при пустом numeraire входа.
+    const int bad = domain::FindInconsistentQuote(out_assets, out_venues, numeraire.empty() ? std::string("USDT") : numeraire, quote_refs);
+    if (bad >= 0) {
+      // не чаще раза в минуту: окно клиринга идёт каждую секунду, а устойчивая ошибка дала бы десятки тысяч строк в сутки
+      static std::atomic<std::int64_t> last_guard_log_ms{0};
+      static std::atomic<std::int64_t> rejected_windows{0};  // сколько окон отклонено с запуска процесса: молчаливый стоп должен быть виден в журнале
+      const std::int64_t rejected = rejected_windows.fetch_add(1) + 1;
+      std::int64_t prev_guard = last_guard_log_ms.load();
+      if (window_close_ms - prev_guard >= 60000 && last_guard_log_ms.compare_exchange_strong(prev_guard, window_close_ms)) {
+        const auto& q = out.quotes(bad);
+        cex::common::log_json("ERROR", "CE clearing: вход несогласован (котировка ссылается на актив или площадку вне списков), не публикуется",
+                              {{"batch_id", batch_id}, {"asset", q.asset()}, {"quote", q.quote()}, {"venue", q.venue()},
+                               {"assets", std::to_string(out.assets_size())}, {"venues", std::to_string(out.venues_size())},
+                               {"rejected_windows_total", std::to_string(rejected)}});
+      }
+      return;
+    }
+  }
   ce_publisher_->Publish(out);
   cex::common::log_json("INFO", "F-05A CE ce.clearing.input",
                         {{"service", "market_data"},
