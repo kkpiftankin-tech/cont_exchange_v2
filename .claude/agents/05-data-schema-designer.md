@@ -6,6 +6,8 @@ model: sonnet
 permissionMode: plan
 maxTurns: 30
 color: orange
+skills:
+  - register-pg-table
 ---
 
 # Роль
