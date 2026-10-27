@@ -1,0 +1,2615 @@
+generated_by: tools/registry/build.py
+note: Сгенерировано, не редактировать руками. Этап 2 (ADR-086/IN-019), сужен — см.
+  docstring build.py.
+nodes:
+  requirement:
+  - id: FR-ORDER-001
+    type: requirement
+    class: normative
+    title: Поддержка типов заявок
+    path: docs/02-system/functional-requirements.md
+    features: []
+  - id: FR-ORDER-002
+    type: requirement
+    class: normative
+    title: Параметры заявки
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-02
+  - id: FR-ORDER-003
+    type: requirement
+    class: normative
+    title: Управление заявкой
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-03
+  - id: FR-ORDER-004
+    type: requirement
+    class: normative
+    title: Exchange-provider (F2-17, v2/IN-015)
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-02
+  - id: FR-MM-001
+    type: requirement
+    class: normative
+    title: Публикация и обновление кривых
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-10
+  - id: FR-MM-002
+    type: requirement
+    class: normative
+    title: Контроль инвентори
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-10
+  - id: FR-CLEAR-001
+    type: requirement
+    class: normative
+    title: Непрерывный клиринг
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-04
+  - id: FR-CLEAR-002
+    type: requirement
+    class: normative
+    title: Детерминированность
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-15
+  - id: FR-MD-001
+    type: requirement
+    class: normative
+    title: Внутренние данные
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05
+  - id: FR-MD-002
+    type: requirement
+    class: normative
+    title: Внешние данные
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-11
+  - id: FR-RISK-001
+    type: requirement
+    class: normative
+    title: Pre-trade контроль
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-07
+  - id: FR-RISK-002
+    type: requirement
+    class: normative
+    title: Post-trade мониторинг
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-08
+  - id: FR-RISK-003
+    type: requirement
+    class: normative
+    title: Kill-switch
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-16
+  - id: FR-LEDGER-001
+    type: requirement
+    class: normative
+    title: Балансы и резервы
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-02
+    - F-03
+    - F-06
+  - id: FR-LEDGER-002
+    type: requirement
+    class: normative
+    title: Применение fills
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-04
+    - F-06
+  - id: FR-LEDGER-003
+    type: requirement
+    class: normative
+    title: Депозиты и выводы
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-14
+  - id: FR-HEDGE-001
+    type: requirement
+    class: normative
+    title: Формирование намерения
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-12
+  - id: FR-HEDGE-002
+    type: requirement
+    class: normative
+    title: Размещение и учёт
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-12
+  - id: FR-REPORT-001
+    type: requirement
+    class: normative
+    title: Post-trade отчёт
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-13
+  - id: FR-REPORT-002
+    type: requirement
+    class: normative
+    title: Регуляторная выгрузка
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-13
+    - F-17
+  - id: FR-OPS-001
+    type: requirement
+    class: normative
+    title: Мониторинг
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-16
+    - F-17
+  - id: FR-OPS-002
+    type: requirement
+    class: normative
+    title: Управление параметрами
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-16
+  - id: FR-AUTH-001
+    type: requirement
+    class: normative
+    title: Регистрация и логин
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-01
+  - id: FR-AUTH-002
+    type: requirement
+    class: normative
+    title: Роли
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-01
+  - id: FR-F05A-001
+    type: requirement
+    class: normative
+    title: 'Получать внешние order levels (CEX/DEX/AMM): `venue_id`, `source_order_id`,
+      `pair`, `side`, `price`, `quantity`, `remain'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-002
+    type: requirement
+    class: normative
+    title: 'Нормализовать level: проверить pair, определить base/quote, вычислить
+      `P_eff = P ± fees ± latency_buffer ± slippage_buff'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-003
+    type: requirement
+    class: normative
+    title: Построить упорядоченный `AssetBasis` для всех активов из внешних levels
+      и активных F-04/F-09 заявок.
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-004
+    type: requirement
+    class: normative
+    title: 'Построить `w_i`: bid `w=e_X−P_eff·e_Y`, ask `w=−e_X+P_eff·e_Y` (R-F05A-001).'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-005
+    type: requirement
+    class: normative
+    title: Построить flow-сегмент `(w_i, p^L=0, p^H=dHL, q=min(Q,rateCap), Q^max=Q)`.
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-006
+    type: requirement
+    class: normative
+    title: 'Собрать solver input: `W`, `pH`, `dHL`, `q`, `D=diag(dHL/q)`, `source_map`
+      (no synthetic pair book, R-F05A-002).'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-007
+    type: requirement
+    class: normative
+    title: 'Решить QP: `max_x [xᵀpH − ½xᵀDx]` при `Wx=0`, `0≤x≤q` (ADR-048).'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-008
+    type: requirement
+    class: normative
+    title: Проверить residual `r=Wx`, требовать `‖r‖ < tolerance` либо явный surplus.
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-009
+    type: requirement
+    class: normative
+    title: 'Сформировать исполнения: `executed_asset_vector = x_i·w_i`; source-trace
+      сохранён.'
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-010
+    type: requirement
+    class: normative
+    title: 'Представить результат как F-09 `ExecutionGroup` (`execution.mode = multileg_vector_solver`,
+      ссылки на vectorized source '
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  - id: FR-F05A-011
+    type: requirement
+    class: normative
+    title: Публиковать `batch.outputs` / `fills` / `execution.groups` / `marketdata.snapshots`;
+      surplus по `surplus_policy` (ADR-04
+    path: docs/02-system/functional-requirements.md
+    features:
+    - F-05A
+  feature:
+  - id: F-01
+    type: feature
+    class: normative
+    title: Registration & Authentication
+    path: docs/02-system/features/F-01-auth-and-identity/feature.yaml
+    lifecycle: planned
+    status:
+      docs: partial
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-AUTH-001
+    - FR-AUTH-002
+  - id: F-02
+    type: feature
+    class: normative
+    title: Create FlowOrder
+    path: docs/02-system/features/F-02-create-floworder/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-ORDER-001
+    - FR-ORDER-002
+    - FR-ORDER-004
+    - FR-LEDGER-001
+  - id: F-03
+    type: feature
+    class: normative
+    title: FlowOrder Lifecycle (Amend / Cancel)
+    path: docs/02-system/features/F-03-order-lifecycle/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-ORDER-003
+    - FR-LEDGER-001
+  - id: F-04
+    type: feature
+    class: normative
+    title: Batch Clearing Cycle
+    path: docs/02-system/features/F-04-batch-clearing/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-CLEAR-001
+    - FR-LEDGER-002
+  - id: F-05
+    type: feature
+    class: normative
+    title: Live Market Data
+    path: docs/02-system/features/F-05-live-market-data/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-MD-001
+  - id: F-05A
+    type: feature
+    class: normative
+    title: Vectorized External Liquidity for F-09 Batch/Combo Clearing
+    path: docs/02-system/features/F-05A-vectorized-external-liquidity/feature.yaml
+    lifecycle: planned
+    status:
+      docs: complete
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-F05A-001
+    - FR-F05A-002
+    - FR-F05A-003
+    - FR-F05A-004
+    - FR-F05A-005
+    - FR-F05A-006
+    - FR-F05A-007
+    - FR-F05A-008
+    - FR-F05A-009
+    - FR-F05A-010
+    - FR-F05A-011
+  - id: F-06
+    type: feature
+    class: normative
+    title: Positions / PnL / Margin
+    path: docs/02-system/features/F-06-positions-pnl-margin/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-LEDGER-001
+    - FR-LEDGER-002
+  - id: F-07
+    type: feature
+    class: normative
+    title: Pre-trade Risk Control
+    path: docs/02-system/features/F-07-pretrade-risk/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-RISK-001
+  - id: F-08
+    type: feature
+    class: normative
+    title: Post-trade Risk Monitoring & Liquidations
+    path: docs/02-system/features/F-08-posttrade-risk-and-liquidations/feature.yaml
+    lifecycle: planned
+    status:
+      docs: partial
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-RISK-002
+  - id: F-09
+    type: feature
+    class: normative
+    title: Batch, Combo and Multi-leg Orders
+    path: docs/02-system/features/F-09-batch-combo-orders/feature.yaml
+    lifecycle: active
+    status:
+      docs: complete
+      code: done
+      runtime: dev
+    parentRequirements:
+    - FR-ORDER-001
+  - id: F-10
+    type: feature
+    class: normative
+    title: Market-Maker Liquidity Curves
+    path: docs/02-system/features/F-10-mm-curves/feature.yaml
+    lifecycle: planned
+    status:
+      docs: partial
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-MM-001
+    - FR-MM-002
+  - id: F-11
+    type: feature
+    class: normative
+    title: External Venues / LOB to FOB
+    path: docs/02-system/features/F-11-external-venues-lob-to-fob/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-MD-002
+  - id: F-12
+    type: feature
+    class: normative
+    title: Execution Hedge
+    path: docs/02-system/features/F-12-execution-hedge/feature.yaml
+    lifecycle: active
+    status:
+      docs: complete
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-HEDGE-001
+    - FR-HEDGE-002
+  - id: F-13
+    type: feature
+    class: normative
+    title: Post-Trade Report
+    path: docs/02-system/features/F-13-posttrade-report/feature.yaml
+    lifecycle: planned
+    status:
+      docs: partial
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-REPORT-001
+    - FR-REPORT-002
+  - id: F-14
+    type: feature
+    class: normative
+    title: Deposit & Withdraw
+    path: docs/02-system/features/F-14-deposit-withdraw/feature.yaml
+    lifecycle: planned
+    status:
+      docs: partial
+      code: none
+      runtime: none
+    parentRequirements:
+    - FR-LEDGER-003
+  - id: F-15
+    type: feature
+    class: normative
+    title: Backtest / Replay
+    path: docs/02-system/features/F-15-backtest-replay/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-CLEAR-002
+  - id: F-16
+    type: feature
+    class: normative
+    title: Operator Console & Kill-Switch
+    path: docs/02-system/features/F-16-operator-console/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-RISK-003
+    - FR-OPS-001
+    - FR-OPS-002
+  - id: F-17
+    type: feature
+    class: normative
+    title: Monitoring & Alerting (Observability)
+    path: docs/02-system/features/F-17-monitoring-and-alerts/feature.yaml
+    lifecycle: active
+    status:
+      docs: partial
+      code: partial
+      runtime: dev
+    parentRequirements:
+    - FR-REPORT-002
+    - FR-OPS-001
+  - id: F-18
+    type: feature
+    class: normative
+    title: CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent
+      Position & Band Hedge
+    path: docs/02-system/features/F-18-ce-capital-position-hedge/feature.yaml
+    lifecycle: active
+    status:
+      docs: complete
+      code: partial
+      runtime: dev
+    parentRequirements: []
+  - id: F-20
+    type: feature
+    class: normative
+    title: Live Venue Simulator
+    path: docs/02-system/features/F-20-live-venue-simulator/feature.yaml
+    lifecycle: active
+    status:
+      docs: complete
+      code: partial
+      runtime: dev
+    parentRequirements: []
+  uc:
+  - id: UC-F01-01
+    type: uc
+    class: normative
+    title: Аутентификация пользователя
+    path: docs/02-system/use-cases/UC-F01-01-authenticate-user/use-case.md
+    feature: F-01
+    status: active
+    systemSequence: sequences/SEQ-UC-F01-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F01-UC-F01-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F01-01-authenticate-user
+  - id: UC-F02-01
+    type: uc
+    class: normative
+    title: Создать одноактивную потоковую заявку
+    path: docs/02-system/use-cases/UC-F02-01-create-flow-order/use-case.md
+    feature: F-02
+    status: active
+    systemSequence: sequences/SEQ-UC-F02-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F02-UC-F02-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F02-01-create-flow-order
+  - id: UC-F03-01
+    type: uc
+    class: normative
+    title: Изменить или отменить FlowOrder
+    path: docs/02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md
+    feature: F-03
+    status: active
+    systemSequence: sequences/SEQ-UC-F03-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F03-UC-F03-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F03-01-amend-cancel-order
+  - id: UC-F04-01
+    type: uc
+    class: normative
+    title: Выполнить цикл batch clearing
+    path: docs/02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md
+    feature: F-04
+    status: active
+    systemSequence: sequences/SEQ-UC-F04-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F04-01-run-batch-clearing
+  - id: UC-F05-01
+    type: uc
+    class: normative
+    title: Получить поток live market data
+    path: docs/02-system/use-cases/UC-F05-01-stream-market-data/use-case.md
+    feature: F-05
+    status: active
+    systemSequence: sequences/SEQ-UC-F05-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05-UC-F05-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F05-01-stream-market-data
+  - id: UC-F05A-01
+    type: uc
+    class: normative
+    title: Vectorize External Order Book
+    path: docs/02-system/use-cases/UC-F05A-01-vectorize-external-orderbook/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-01-vectorize-external-orderbook
+  - id: UC-F05A-02
+    type: uc
+    class: normative
+    title: Run Vector Clearing with F-09 Solver
+    path: docs/02-system/use-cases/UC-F05A-02-vector-clearing/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-02-vector-clearing
+  - id: UC-F05A-03
+    type: uc
+    class: normative
+    title: Display Vector Liquidity in UI
+    path: docs/02-system/use-cases/UC-F05A-03-display-vector-liquidity/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-03-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-03-display-vector-liquidity
+  - id: UC-F05A-04
+    type: uc
+    class: normative
+    title: Validate Algorithm on Real Exchange Order Books
+    path: docs/02-system/use-cases/UC-F05A-04-validate-real-orderbooks/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-04-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-04-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-04-validate-real-orderbooks
+  - id: UC-F05A-05
+    type: uc
+    class: normative
+    title: Replay Vector Clearing Scenario
+    path: docs/02-system/use-cases/UC-F05A-05-replay-vector-clearing/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-05-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-05-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-05-replay-vector-clearing
+  - id: UC-F05A-06
+    type: uc
+    class: normative
+    title: Run CE Tact with Virtual Counterparties (agents, nodes, 3-level position)
+    path: docs/02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/use-case.md
+    feature: F-05A
+    status: active
+    systemSequence: sequences/SEQ-UC-F05A-06-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F05A-UC-F05A-06-services.md
+    ucDir: docs/02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing
+  - id: UC-F06-01
+    type: uc
+    class: normative
+    title: Показать позиции / PnL / маржу
+    path: docs/02-system/use-cases/UC-F06-01-show-positions/use-case.md
+    feature: F-06
+    status: active
+    systemSequence: sequences/SEQ-UC-F06-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F06-UC-F06-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F06-01-show-positions
+  - id: UC-F07-01
+    type: uc
+    class: normative
+    title: Pre-trade risk check
+    path: docs/02-system/use-cases/UC-F07-01-pretrade-risk-check/use-case.md
+    feature: F-07
+    status: active
+    systemSequence: sequences/SEQ-UC-F07-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F07-UC-F07-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F07-01-pretrade-risk-check
+  - id: UC-F08-01
+    type: uc
+    class: normative
+    title: Принудительная ликвидация позиции
+    path: docs/02-system/use-cases/UC-F08-01-liquidate-position/use-case.md
+    feature: F-08
+    status: active
+    systemSequence: sequences/SEQ-UC-F08-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F08-UC-F08-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F08-01-liquidate-position
+  - id: UC-F09-01
+    type: uc
+    class: normative
+    title: Создать combo / multi-leg order
+    path: docs/02-system/use-cases/UC-F09-01-create-combo-order/use-case.md
+    feature: F-09
+    status: active
+    systemSequence: sequences/SEQ-UC-F09-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F09-UC-F09-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F09-01-create-combo-order
+  - id: UC-F09-02
+    type: uc
+    class: normative
+    title: Grouped matching внутри batch cycle
+    path: docs/02-system/use-cases/UC-F09-02-grouped-matching/use-case.md
+    feature: F-09
+    status: active
+    systemSequence: sequences/SEQ-UC-F09-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F09-UC-F09-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F09-02-grouped-matching
+  - id: UC-F09-03
+    type: uc
+    class: normative
+    title: External leg execution / compensating
+    path: docs/02-system/use-cases/UC-F09-03-external-leg-execution/use-case.md
+    feature: F-09
+    status: active
+    systemSequence: sequences/SEQ-UC-F09-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F09-UC-F09-03-services.md
+    ucDir: docs/02-system/use-cases/UC-F09-03-external-leg-execution
+  - id: UC-F10-01
+    type: uc
+    class: normative
+    title: Опубликовать MM-кривую ликвидности
+    path: docs/02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md
+    feature: F-10
+    status: active
+    systemSequence: sequences/SEQ-UC-F10-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F10-UC-F10-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F10-01-publish-mm-curve
+  - id: UC-F11-01
+    type: uc
+    class: normative
+    title: Подключить новую площадку (operator onboarding)
+    path: docs/02-system/use-cases/UC-F11-01-onboard-venue/use-case.md
+    feature: F-11
+    status: active
+    systemSequence: sequences/SEQ-UC-F11-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F11-01-onboard-venue
+  - id: UC-F11-02
+    type: uc
+    class: normative
+    title: Опубликовать VenueSnapshot (raw → normalized)
+    path: docs/02-system/use-cases/UC-F11-02-publish-snapshot/use-case.md
+    feature: F-11
+    status: active
+    systemSequence: sequences/SEQ-UC-F11-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F11-02-publish-snapshot-services.md
+    ucDir: docs/02-system/use-cases/UC-F11-02-publish-snapshot
+  - id: UC-F11-03
+    type: uc
+    class: normative
+    title: Построить VenueLiquidityCurve (LOB → FOB)
+    path: docs/02-system/use-cases/UC-F11-03-build-liquidity-curve/use-case.md
+    feature: F-11
+    status: active
+    systemSequence: sequences/SEQ-UC-F11-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F11-03-build-curve-services.md
+    ucDir: docs/02-system/use-cases/UC-F11-03-build-liquidity-curve
+  - id: UC-F11-04
+    type: uc
+    class: normative
+    title: Деградация площадки (stale / circuit breaker)
+    path: docs/02-system/use-cases/UC-F11-04-venue-health-degradation/use-case.md
+    feature: F-11
+    status: active
+    systemSequence: sequences/SEQ-UC-F11-04-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F11-04-health-routing-services.md
+    ucDir: docs/02-system/use-cases/UC-F11-04-venue-health-degradation
+  - id: UC-F11-05
+    type: uc
+    class: normative
+    title: Исполнить hedge child-ордер на площадке (F-11 adapter view)
+    path: docs/02-system/use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md
+    feature: F-11
+    status: active
+    systemSequence: sequences/SEQ-UC-F11-05-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F11-05-execute-on-venue-services.md
+    ucDir: docs/02-system/use-cases/UC-F11-05-execute-hedge-on-venue
+  - id: UC-F11-06
+    type: uc
+    class: normative
+    title: Принять external market data (legacy)
+    path: docs/02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md
+    feature: F-11
+    status: deprecated
+    systemSequence: sequences/SEQ-UC-F11-06-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy
+  - id: UC-F12-01
+    type: uc
+    class: normative
+    title: Auto Hedge After Batch (Happy Path)
+    path: docs/02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md
+    feature: F-12
+    status: active
+    systemSequence: sequences/SEQ-UC-F12-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F12-01-auto-hedge-services.md
+    ucDir: docs/02-system/use-cases/UC-F12-01-auto-hedge-after-batch
+  - id: UC-F12-02
+    type: uc
+    class: normative
+    title: Manual Operator Hedge
+    path: docs/02-system/use-cases/UC-F12-02-manual-operator-hedge/use-case.md
+    feature: F-12
+    status: active
+    systemSequence: sequences/SEQ-UC-F12-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F12-02-rejection-fallback-services.md
+    ucDir: docs/02-system/use-cases/UC-F12-02-manual-operator-hedge
+  - id: UC-F12-03
+    type: uc
+    class: normative
+    title: Partial Fill + Retry
+    path: docs/02-system/use-cases/UC-F12-03-partial-fill-retry/use-case.md
+    feature: F-12
+    status: active
+    systemSequence: sequences/SEQ-UC-F12-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F12-03-error-scenarios-services.md
+    ucDir: docs/02-system/use-cases/UC-F12-03-partial-fill-retry
+  - id: UC-F12-04
+    type: uc
+    class: normative
+    title: Rejection + Fallback
+    path: docs/02-system/use-cases/UC-F12-04-rejection-fallback/use-case.md
+    feature: F-12
+    status: active
+    systemSequence: sequences/SEQ-UC-F12-04-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F12-04-rejection-fallback
+  - id: UC-F12-05
+    type: uc
+    class: normative
+    title: Timeout / Underfilled / Reconciliation
+    path: docs/02-system/use-cases/UC-F12-05-timeout-underfilled-reconciliation/use-case.md
+    feature: F-12
+    status: active
+    systemSequence: sequences/SEQ-UC-F12-05-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F12-05-timeout-underfilled-reconciliation
+  - id: UC-F13-01
+    type: uc
+    class: normative
+    title: Получить post-trade отчёт
+    path: docs/02-system/use-cases/UC-F13-01-generate-posttrade-report/use-case.md
+    feature: F-13
+    status: active
+    systemSequence: sequences/SEQ-UC-F13-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F13-UC-F13-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F13-01-generate-posttrade-report
+  - id: UC-F14-01
+    type: uc
+    class: normative
+    title: Депозит средств
+    path: docs/02-system/use-cases/UC-F14-01-deposit-funds/use-case.md
+    feature: F-14
+    status: active
+    systemSequence: sequences/SEQ-UC-F14-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F14-UC-F14-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F14-01-deposit-funds
+  - id: UC-F15-01
+    type: uc
+    class: normative
+    title: Создать replay-сессию
+    path: docs/02-system/use-cases/UC-F15-01-create-replay-session/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F15-01-create-replay-session
+  - id: UC-F15-02
+    type: uc
+    class: normative
+    title: Отменить replay-сессию
+    path: docs/02-system/use-cases/UC-F15-02-cancel-replay-session/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F15-02-replay-cycle-services.md
+    ucDir: docs/02-system/use-cases/UC-F15-02-cancel-replay-session
+  - id: UC-F15-03
+    type: uc
+    class: normative
+    title: A/B сравнение двух replay-сессий
+    path: docs/02-system/use-cases/UC-F15-03-ab-compare-sessions/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F15-03-cancel-services.md
+    ucDir: docs/02-system/use-cases/UC-F15-03-ab-compare-sessions
+  - id: UC-F15-04
+    type: uc
+    class: normative
+    title: Audit-mode replay одного batch
+    path: docs/02-system/use-cases/UC-F15-04-audit-mode-replay/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-04-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F15-04-audit-mode-services.md
+    ucDir: docs/02-system/use-cases/UC-F15-04-audit-mode-replay
+  - id: UC-F15-05
+    type: uc
+    class: normative
+    title: Повторно запустить failed / cancelled сессию
+    path: docs/02-system/use-cases/UC-F15-05-retry-failed-session/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-05-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F15-05-retry-failed-session
+  - id: UC-F15-06
+    type: uc
+    class: normative
+    title: Проверка детерминизма replay
+    path: docs/02-system/use-cases/UC-F15-06-replay-determinism-check/use-case.md
+    feature: F-15
+    status: active
+    systemSequence: sequences/SEQ-UC-F15-06-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F15-06-replay-determinism-check
+  - id: UC-F15-07
+    type: uc
+    class: normative
+    title: Replay исторического batch (legacy, historical/superseded)
+    path: docs/02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md
+    feature: F-15
+    status: superseded
+    systemSequence: sequences/SEQ-UC-F15-07-system.md
+    serviceSequence: null
+    ucDir: docs/02-system/use-cases/UC-F15-07-replay-historical-batch-legacy
+  - id: UC-F16-01
+    type: uc
+    class: normative
+    title: Активировать kill-switch
+    path: docs/02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md
+    feature: F-16
+    status: active
+    systemSequence: sequences/SEQ-UC-F16-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F16-UC-F16-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F16-01-trigger-kill-switch
+  - id: UC-F17-01
+    type: uc
+    class: normative
+    title: Сгенерировать alert и нотифицировать on-call
+    path: docs/02-system/use-cases/UC-F17-01-fire-alert/use-case.md
+    feature: F-17
+    status: active
+    systemSequence: sequences/SEQ-UC-F17-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F17-UC-F17-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F17-01-fire-alert
+  - id: UC-F18-01
+    type: uc
+    class: normative
+    title: Сформировать капитал CE (seed + PnL/fees)
+    path: docs/02-system/use-cases/UC-F18-01-form-ce-capital/use-case.md
+    feature: F-18
+    status: active
+    systemSequence: sequences/SEQ-UC-F18-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F18-UC-F18-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F18-01-form-ce-capital
+  - id: UC-F18-02
+    type: uc
+    class: normative
+    title: Вывести чистую позицию CE из Δпозиции клиринга
+    path: docs/02-system/use-cases/UC-F18-02-derive-ce-position/use-case.md
+    feature: F-18
+    status: active
+    systemSequence: sequences/SEQ-UC-F18-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F18-UC-F18-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F18-02-derive-ce-position
+  - id: UC-F18-03
+    type: uc
+    class: normative
+    title: Хеджировать чистую позицию сверх порога
+    path: docs/02-system/use-cases/UC-F18-03-hedge-net-position/use-case.md
+    feature: F-18
+    status: active
+    systemSequence: sequences/SEQ-UC-F18-03-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F18-UC-F18-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F18-03-hedge-net-position
+  - id: UC-F18-04
+    type: uc
+    class: normative
+    title: Такт клиринга виртуальных контрагентов и хедж по полосе ±q (v2)
+    path: docs/02-system/use-cases/UC-F18-04-ce-v2-agent-band-hedge/use-case.md
+    feature: F-18
+    status: active
+    systemSequence: sequences/SEQ-UC-F18-04-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F18-UC-F18-04-services.md
+    ucDir: docs/02-system/use-cases/UC-F18-04-ce-v2-agent-band-hedge
+  - id: UC-F20-01
+    type: uc
+    class: normative
+    title: SIM_ONLY execution (симулированное исполнение child-ордера)
+    path: docs/02-system/use-cases/UC-F20-01-sim-only-execution/use-case.md
+    feature: F-20
+    status: active
+    systemSequence: sequences/SEQ-UC-F20-01-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F20-UC-F20-01-services.md
+    ucDir: docs/02-system/use-cases/UC-F20-01-sim-only-execution
+  - id: UC-F20-02
+    type: uc
+    class: normative
+    title: SHADOW compare (параллельное SIM vs LIVE)
+    path: docs/02-system/use-cases/UC-F20-02-shadow-compare/use-case.md
+    feature: F-20
+    status: active
+    systemSequence: sequences/SEQ-UC-F20-02-system.md
+    serviceSequence: ../../../05-components/sequences/SEQ-F20-UC-F20-02-services.md
+    ucDir: docs/02-system/use-cases/UC-F20-02-shadow-compare
+  calc:
+  - id: CALC-F11-BOOK-VWAP
+    type: calc
+    class: normative
+    title: Кумулятивный VWAP по уровням стакана биржи
+    path: docs/04-domain/calculations/CALC-BOOK-VWAP.md
+    filenameId: CALC-BOOK-VWAP
+    feature: F-11
+    status: implemented
+    level: L3
+    code:
+    - frontend/api/book_vwap.js#cumulativeBookVwap
+    - frontend/api/server.js#fetchVenueCurveImpl (buildSide)
+    - frontend/api/server.js#handleVenues (GET /api/venues/orderbook)
+    tests:
+    - frontend/api/book_vwap.test.js
+  - id: CALC-CE-ANCHOR
+    type: calc
+    class: normative
+    title: Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017)
+    path: docs/04-domain/calculations/CALC-CE-ANCHOR.md
+    filenameId: CALC-CE-ANCHOR
+    feature: F-18
+    status: partial
+    level: L3
+    code:
+    - cpp/matching/src/app/matching_loop.cpp (anchor_eff = anchor − clamp(γ·c_j),
+      inventory-skew; НЕ реализует A/B/w из теоремы 1 — см. §7)
+    - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked (трёхзонный
+      порог Z̄lim/Z̄mkt; НЕ реализует Q_i=ω_i c_i/A — см. §7)
+    - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
+    tests: []
+  - id: CALC-F18-CE-ARBITRAGEUR-BASIS
+    type: calc
+    class: normative
+    title: Арбитражёр CE — заработок по сделкам, базис и открытая позиция (панель
+      «Живые позиции»)
+    path: docs/04-domain/calculations/CALC-CE-ARBITRAGEUR-BASIS.md
+    filenameId: CALC-CE-ARBITRAGEUR-BASIS
+    feature: F-18
+    status: implemented
+    level: L3
+    code:
+    - frontend/api/trade_stats_math.js#arbPositionParts
+    - frontend/api/server.js#buildAgentRows (поля basis_mtm_usdt и open_position_usdt
+      у арбитражёра)
+    tests:
+    - frontend/api/trade_stats_math.test.js
+    - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
+  - id: CALC-F18-CE-CLEARING-DIAG
+    type: calc
+    class: normative
+    title: Диагностика решения CE-клиринга — отклонение ребра, полка, запас и порог
+      типового цикла (панель «Решение клиринга» на вкладке «Граф»)
+    path: docs/04-domain/calculations/CALC-CE-CLEARING-DIAG.md
+    filenameId: CALC-CE-CLEARING-DIAG
+    feature: F-18
+    status: implemented
+    level: L3
+    code:
+    - cpp/matching/src/domain/ce_clearing_snapshot.hpp#BuildCeClearingSnapshotJson
+    - cpp/matching/src/app/matching_loop.cpp#on_ce_clearing_input (сохранение снимка),
+      MatchingLoop::last_ce_clearing_snapshot_json
+    - cpp/matching/src/main.cpp (GET /ce/clearing/last)
+    - cpp/market_data/src/domain/agent_builder.hpp#BuildQuoteAgent (dz_age / dz_spread
+      / dz_commission)
+    - cpp/market_data/src/app/market_data_uc.cpp#BuildAndPublishCeClearingInput (dropped)
+    - frontend/api/ce_clearing_view.js#buildClearingView
+    - frontend/api/server.js (GET /api/vector-clearing/ce-clearing)
+    tests:
+    - cpp/matching/tests/domain/ce_clearing_snapshot_test.cpp
+    - cpp/market_data/tests/agent_builder_test.cpp
+    - frontend/api/ce_clearing_view.test.js
+    - frontend/web/src/pages/CeGraph/__tests__/CeClearingPanel.smoke.test.js
+  - id: CALC-CE-CLEARING-SURPLUS
+    type: calc
+    class: normative
+    title: Выгода участника в клиринге CE (теоретический излишек S = w²/2α)
+    path: docs/04-domain/calculations/CALC-CE-CLEARING-SURPLUS.md
+    filenameId: CALC-CE-CLEARING-SURPLUS
+    feature: F-18
+    status: implemented
+    level: fish
+    code:
+    - frontend/api/ce_surplus_accum.js
+    - frontend/api/server.js#samplePnlHistoryOnce
+    tests:
+    - frontend/api/ce_surplus_accum.test.js
+    - tools/arb-pnl-decomposition/demo/demo_check.js
+  - id: CALC-F18-CE-GRAPH
+    type: calc
+    class: normative
+    title: Граф CE — якоря, наклоны, ЭДС ветвей, позиции агентов у узлов и позиции
+      на биржах от хеджа (вкладка «Граф»)
+    path: docs/04-domain/calculations/CALC-CE-GRAPH.md
+    filenameId: CALC-CE-GRAPH
+    feature: F-18
+    status: implemented
+    level: L3
+    code:
+    - frontend/api/ce_graph_build.js#buildCeGraph
+    - frontend/api/server.js#handleVectorClearing (GET /api/vector-clearing/ce-graph)
+    - frontend/api/server.js#fetchHedgePositionRows (хедж-заполнения для nodes[].hedgePos)
+    tests:
+    - frontend/api/ce_graph_build.test.js
+    - frontend/web/src/pages/CeGraph/__tests__/CeGraphLive.smoke.test.js
+  - id: CALC-CE-LINK-TRANSFER
+    type: calc
+    class: normative
+    title: Физический перевод связки CE между биржами (порог, сумма, штуки, остаток
+      паритета)
+    path: docs/04-domain/calculations/CALC-CE-LINK-TRANSFER.md
+    filenameId: CALC-CE-LINK-TRANSFER
+    feature: F-18
+    status: implemented
+    level: fish
+    code:
+    - cpp/ledger/src/app/ledger_uc.cpp#TransferThresholdK
+    - cpp/ledger/src/app/ledger_uc.cpp#TransferAmountK
+    - cpp/ledger/src/app/ledger_uc.cpp#TransferUnits
+    - cpp/ledger/src/app/ledger_uc.cpp#maybe_queue_link_transfer_locked
+    - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
+    tests:
+    - cpp/ledger/tests/ce_link_transfer_test.cpp
+  - id: CALC-CE-SKEW-BAND-CALIBRATION
+    type: calc
+    class: normative
+    title: Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка
+      переводчика
+    path: docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md
+    filenameId: CALC-CE-SKEW-BAND-CALIBRATION
+    feature: F-18
+    status: calibrated
+    level: L3
+    code:
+    - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked (порог z_lim/z_mkt)
+    - cpp/matching/src/app/matching_loop.cpp (anchor_eff = anchor − clamp(γ_s·n),
+      сдвиг)
+    - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig (все ручки из f05a_clearing_config)
+    tests: []
+  - id: CALC-CE-SYSTEM-PNL
+    type: calc
+    class: normative
+    title: P&L системы CE (MTM реальных остатков) и инварианты
+    path: docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md
+    filenameId: CALC-CE-SYSTEM-PNL
+    feature: F-18
+    status: partial
+    level: fish
+    code: []
+    tests: []
+  - id: CALC-CE-TRANSLATOR-DEPTH
+    type: calc
+    class: normative
+    title: Итоговая глубина переводчика CE — вес по возрасту, множитель исполнения
+      и капитальный предел
+    path: docs/04-domain/calculations/CALC-CE-TRANSLATOR-DEPTH.md
+    filenameId: CALC-CE-TRANSLATOR-DEPTH
+    feature: F-18
+    status: implemented
+    level: fish
+    code:
+    - cpp/market_data/src/domain/depth_trust_scale.hpp#AgeTrustWeight
+    - cpp/market_data/src/domain/depth_trust_scale.hpp#CapitalDepthCap
+    - cpp/market_data/src/domain/depth_trust_scale.hpp#ParseCapitalByKey
+    - cpp/market_data/src/domain/depth_trust_scale.hpp#ResolveCapitalW
+    - cpp/market_data/src/domain/fill_depth_scale.hpp#ResolveFillDepthScale
+    - cpp/market_data/src/domain/agent_builder.hpp#BuildQuoteAgent
+    - cpp/market_data/src/app/market_data_uc.cpp (сборка котировок агентов, второй
+      проход)
+    tests:
+    - cpp/market_data/tests/depth_trust_scale_test.cpp
+    - cpp/market_data/tests/fill_depth_scale_test.cpp
+    - cpp/market_data/tests/agent_builder_test.cpp
+    - cpp/market_data/tests/ce_input_guard_test.cpp
+  - id: CALC-CE-TRANSLATOR-PNL
+    type: calc
+    class: normative
+    title: Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM
+      остатка)
+    path: docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md
+    filenameId: CALC-CE-TRANSLATOR-PNL
+    feature: F-18
+    status: proposed
+    level: L3
+    code:
+    - frontend/api/trade_stats_math.js#tradedBasketUsdt (сейчас только агрегат R+U;
+      раздельные R/U — цель ADR-072)
+    - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price
+      — child_orders с 2026-10-22; прежде venue_fill_diagnostics)
+    - frontend/api/server.js#buildAgentRows (pnl_usdt)
+    tests: []
+  - id: CALC-F05A-DEPTH-WINDOW
+    type: calc
+    class: normative
+    title: Окно глубины стакана для кривой ликвидности — объём сделки $V_{cal}$ и
+      число уровней $n$
+    path: docs/04-domain/calculations/CALC-F05A-DEPTH-WINDOW.md
+    filenameId: CALC-F05A-DEPTH-WINDOW
+    feature: F-05A
+    status: implemented
+    level: L3
+    code:
+    - cpp/venues/src/domain/depth_window.hpp#ComputeDepthWindow
+    - cpp/venues/src/app/depth_window_controller.cpp#Apply
+    - cpp/venues/src/app/venues_loop.cpp (poll_adapter: лимит запроса и обрезка снимка)
+    - cpp/market_data/src/domain/agent_builder.hpp#FitM5Side
+    tests:
+    - cpp/venues/tests/depth_window_test.cpp
+    - cpp/venues/tests/depth_window_controller_test.cpp
+    - cpp/market_data/tests/agent_builder_test.cpp
+  - id: CALC-F05A-SLOPE-ONDEMAND
+    type: calc
+    class: normative
+    title: Кривые ликвидности M1–M4 по глубокому стакану по запросу (панель «Торговля»)
+    path: docs/04-domain/calculations/CALC-F05A-SLOPE-ONDEMAND.md
+    filenameId: CALC-F05A-SLOPE-ONDEMAND
+    feature: F-05A
+    status: implemented
+    level: L3
+    code:
+    - cpp/venues/src/app/liquidity_curve_producer.cpp#ComputeSlopeMethods
+    - cpp/venues/src/main.cpp (GET /api/v1/venues/{venue}/slope-curves)
+    - frontend/api/server.js#handleVenues (GET /api/venues/slope-curves, GET /api/venues/slope-curves-all)
+    - frontend/api/slope_aggregate.js#aggregateLines
+    tests:
+    - cpp/venues/tests/liquidity_curve_producer_test.cpp#TestComputeSlopeMethodsOnDemand
+    - cpp/venues/tests/liquidity_curve_producer_test.cpp#TestSlopeMethodsGroundExample
+    - frontend/api/slope_aggregate.test.js
+  - id: CALC-F12-HEDGE-PNL
+    type: calc
+    class: normative
+    title: Hedge PnL (результат внешнего хеджа)
+    path: docs/04-domain/calculations/CALC-F12-HEDGE-PNL.md
+    filenameId: CALC-F12-HEDGE-PNL
+    feature: F-12
+    status: drift
+    level: L3
+    code:
+    - cpp/ledger/src/app/ledger_uc.cpp#calculate_hedge_pnl
+    - cpp/ledger/src/app/ledger_uc.cpp#RecordHedgeExecution
+    - cpp/market_data/src/app/hedge_pnl_aggregator.cpp#HedgePnLAggregator (агрегат
+      для ClickHouse/дашборда, отдельный путь)
+    - frontend/api/server.js#fetchAgentTradeStats (BFF, 4-й путь — per-agent агрегат
+      по venue_fill_diagnostics, scope ce|band|%; p_int≡limit_price, см. §7.2)
+    - frontend/api/trade_stats_math.js#combineTradeStats/pnlQuoteToUsdt (чистая знаковая
+      математика 4-го пути)
+    tests:
+    - cpp/ledger/tests/ledger_hedge_pnl_test.cpp
+    - frontend/web/src/api/__tests__/hedgeFlowService.pnl.test.js
+    - frontend/api/trade_stats_math.test.js (знаки base/quote/pnl + конверсия USDT,
+      4-й путь)
+  - id: CALC-F18-VENUE-LIQUIDITY-STATS
+    type: calc
+    class: normative
+    title: Ликвидность внешней биржи — оборот ленты ν и коэффициент исполнения f
+    path: docs/04-domain/calculations/CALC-VENUE-LIQUIDITY-STATS.md
+    filenameId: CALC-VENUE-LIQUIDITY-STATS
+    feature: F-18
+    status: implemented
+    level: L3
+    code:
+    - cpp/venues/src/domain/liquidity_stats.hpp#TapeRateEstimator
+    - cpp/venues/src/domain/liquidity_stats.hpp#FillCoefficient
+    - cpp/venues/src/infra/cex_ws_rest_adapter.cpp#parse_rest_trades_locked (вход
+      ν)
+    - cpp/venues/src/infra/cex_ws_rest_adapter.cpp#ApplyRealTradeFillLocked (вход
+      f)
+    - frontend/api/venue_liquidity_view.js#buildLiquidityStatsView
+    - cpp/ledger/src/app/ledger_uc.cpp#TapeCapK,
+    - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked (применение
+      бюджета при эмиссии хеджа)
+    - cpp/market_data/src/domain/fill_depth_scale.hpp#FillDepthScale (шаг 1: множитель
+        глубины)
+    - cpp/market_data/src/app/market_data_uc.cpp#BuildAndPublishCeClearingInput (применение
+      после фильтра тонких)
+    tests:
+    - cpp/venues/tests/liquidity_stats_test.cpp
+    - cpp/venues/tests/cex_ws_rest_adapter_test.cpp#TestLiquidityStatsTapeAndFill
+    - cpp/market_data/tests/fill_depth_scale_test.cpp
+    - cpp/ledger/tests/ce_order_cap_test.cpp
+    - frontend/api/venue_liquidity_view.test.js
+    - frontend/web/src/pages/ExternalVenues/__tests__/VenueLiquidityPanel.test.js
+  adr:
+  - id: ADR-001
+    type: adr
+    class: normative
+    title: ADR-001-event-driven-microservices
+    path: docs/03-architecture/adr/ADR-001-event-driven-microservices.md
+    status: accepted
+  - id: ADR-002
+    type: adr
+    class: normative
+    title: ADR-002-protobuf-grpc-contracts
+    path: docs/03-architecture/adr/ADR-002-protobuf-grpc-contracts.md
+    status: accepted
+  - id: ADR-003
+    type: adr
+    class: normative
+    title: ADR-003-kafka-redpanda-broker
+    path: docs/03-architecture/adr/ADR-003-kafka-redpanda-broker.md
+    status: accepted
+  - id: ADR-004
+    type: adr
+    class: normative
+    title: ADR-004-postgres-clickhouse-data-platform
+    path: docs/03-architecture/adr/ADR-004-postgres-clickhouse-data-platform.md
+    status: accepted
+  - id: ADR-005
+    type: adr
+    class: normative
+    title: ADR-005-fixed-point-decimal-money
+    path: docs/03-architecture/adr/ADR-005-fixed-point-decimal-money.md
+    status: accepted
+  - id: ADR-006
+    type: adr
+    class: normative
+    title: ADR-006-docs-as-code-repository-structure
+    path: docs/03-architecture/adr/ADR-006-docs-as-code-repository-structure.md
+    status: accepted
+  - id: ADR-007
+    type: adr
+    class: normative
+    title: ADR-007-feature-traceability-gate
+    path: docs/03-architecture/adr/ADR-007-feature-traceability-gate.md
+    status: accepted
+  - id: ADR-008
+    type: adr
+    class: normative
+    title: ADR-008-code-doc-drift-policy
+    path: docs/03-architecture/adr/ADR-008-code-doc-drift-policy.md
+    status: accepted
+  - id: ADR-009
+    type: adr
+    class: normative
+    title: ADR-009-shadow-mode-isolation-strategy
+    path: docs/03-architecture/adr/ADR-009-shadow-mode-isolation-strategy.md
+    status: accepted
+  - id: ADR-010
+    type: adr
+    class: normative
+    title: ADR-010-agentlog-replay-agentlog-unification
+    path: docs/03-architecture/adr/ADR-010-agentlog-replay-agentlog-unification.md
+    status: proposed
+  - id: ADR-011
+    type: adr
+    class: normative
+    title: ADR-011-replay-agentlogs-ddl-placement
+    path: docs/03-architecture/adr/ADR-011-replay-agentlogs-ddl-placement.md
+    status: accepted
+  - id: ADR-012
+    type: adr
+    class: normative
+    title: ADR-012-venue-execution-adapter-decomposition
+    path: docs/03-architecture/adr/ADR-012-venue-execution-adapter-decomposition.md
+    status: accepted
+  - id: ADR-013
+    type: adr
+    class: normative
+    title: ADR-013-execution-planning-placement
+    path: docs/03-architecture/adr/ADR-013-execution-planning-placement.md
+    status: accepted
+  - id: ADR-014
+    type: adr
+    class: normative
+    title: ADR-014-venues-binary-vs-components
+    path: docs/03-architecture/adr/ADR-014-venues-binary-vs-components.md
+    status: accepted
+  - id: ADR-015
+    type: adr
+    class: normative
+    title: ADR-015-sim-execution-topic-isolation
+    path: docs/03-architecture/adr/ADR-015-sim-execution-topic-isolation.md
+    status: accepted
+  - id: ADR-016
+    type: adr
+    class: normative
+    title: ADR-016-ledger-sim-book-storage
+    path: docs/03-architecture/adr/ADR-016-ledger-sim-book-storage.md
+    status: accepted
+  - id: ADR-017
+    type: adr
+    class: normative
+    title: ADR-017-venue-simulator-vs-legacy-adapter
+    path: docs/03-architecture/adr/ADR-017-venue-simulator-vs-legacy-adapter.md
+    status: accepted
+  - id: ADR-018
+    type: adr
+    class: normative
+    title: ADR-018-design-traceability-chain
+    path: docs/03-architecture/adr/ADR-018-design-traceability-chain.md
+    status: accepted
+  - id: ADR-019
+    type: adr
+    class: normative
+    title: ADR-019-c4-documentation-standard
+    path: docs/03-architecture/adr/ADR-019-c4-documentation-standard.md
+    status: accepted
+  - id: ADR-020
+    type: adr
+    class: normative
+    title: ADR-020-event-ordering-idempotency
+    path: docs/03-architecture/adr/ADR-020-event-ordering-idempotency.md
+    status: accepted
+  - id: ADR-021
+    type: adr
+    class: normative
+    title: ADR-021-floworder-lifecycle
+    path: docs/03-architecture/adr/ADR-021-floworder-lifecycle.md
+    status: accepted
+  - id: ADR-022
+    type: adr
+    class: normative
+    title: ADR-022-batch-clearing-solver-replay
+    path: docs/03-architecture/adr/ADR-022-batch-clearing-solver-replay.md
+    status: accepted
+  - id: ADR-023
+    type: adr
+    class: normative
+    title: ADR-023-lob-to-fob-curve
+    path: docs/03-architecture/adr/ADR-023-lob-to-fob-curve.md
+    status: accepted
+  - id: ADR-024
+    type: adr
+    class: normative
+    title: ADR-024-latency-aware-venue-curve
+    path: docs/03-architecture/adr/ADR-024-latency-aware-venue-curve.md
+    status: proposed
+  - id: ADR-025
+    type: adr
+    class: normative
+    title: ADR-025-risk-manager-boundaries
+    path: docs/03-architecture/adr/ADR-025-risk-manager-boundaries.md
+    status: accepted
+  - id: ADR-026
+    type: adr
+    class: normative
+    title: ADR-026-ledger-accounting-pnl
+    path: docs/03-architecture/adr/ADR-026-ledger-accounting-pnl.md
+    status: accepted
+  - id: ADR-027
+    type: adr
+    class: normative
+    title: ADR-027-execution-routing-algorithm
+    path: docs/03-architecture/adr/ADR-027-execution-routing-algorithm.md
+    status: accepted
+  - id: ADR-028
+    type: adr
+    class: normative
+    title: ADR-028-backtest-replay-parity
+    path: docs/03-architecture/adr/ADR-028-backtest-replay-parity.md
+    status: accepted
+  - id: ADR-029
+    type: adr
+    class: normative
+    title: ADR-029-llm-assisted-development-governance
+    path: docs/03-architecture/adr/ADR-029-llm-assisted-development-governance.md
+    status: accepted
+  - id: ADR-030
+    type: adr
+    class: normative
+    title: ADR-030-legacy-mvp-migration-policy
+    path: docs/03-architecture/adr/ADR-030-legacy-mvp-migration-policy.md
+    status: accepted
+  - id: ADR-031
+    type: adr
+    class: normative
+    title: ADR-031-multileg-execution-modes-atomicity
+    path: docs/03-architecture/adr/ADR-031-multileg-execution-modes-atomicity.md
+    status: accepted
+  - id: ADR-032
+    type: adr
+    class: normative
+    title: ADR-032-parent-child-order-model
+    path: docs/03-architecture/adr/ADR-032-parent-child-order-model.md
+    status: accepted
+  - id: ADR-033
+    type: adr
+    class: normative
+    title: ADR-033-execution-groups-topic
+    path: docs/03-architecture/adr/ADR-033-execution-groups-topic.md
+    status: accepted
+  - id: ADR-034
+    type: adr
+    class: normative
+    title: ADR-034-grouped-constraint-solver
+    path: docs/03-architecture/adr/ADR-034-grouped-constraint-solver.md
+    status: accepted
+  - id: ADR-035
+    type: adr
+    class: normative
+    title: ADR-035-fob-solver-mathematical-foundation
+    path: docs/03-architecture/adr/ADR-035-fob-solver-mathematical-foundation.md
+    status: null
+  - id: ADR-036
+    type: adr
+    class: normative
+    title: ADR-036-atomic-one-branch-oco
+    path: docs/03-architecture/adr/ADR-036-atomic-one-branch-oco.md
+    status: accepted
+  - id: ADR-037
+    type: adr
+    class: normative
+    title: ADR-037-external-leg-execution-compensation
+    path: docs/03-architecture/adr/ADR-037-external-leg-execution-compensation.md
+    status: accepted
+  - id: ADR-038
+    type: adr
+    class: normative
+    title: ADR-038-oco-bracket-runtime
+    path: docs/03-architecture/adr/ADR-038-oco-bracket-runtime.md
+    status: accepted
+  - id: ADR-039
+    type: adr
+    class: normative
+    title: ADR-039-compensation-resolution
+    path: docs/03-architecture/adr/ADR-039-compensation-resolution.md
+    status: accepted
+  - id: ADR-040
+    type: adr
+    class: normative
+    title: ADR-040-compensation-resolution-cross-service
+    path: docs/03-architecture/adr/ADR-040-compensation-resolution-cross-service.md
+    status: accepted
+  - id: ADR-041
+    type: adr
+    class: normative
+    title: ADR-041-auto-policy-compensation-resolution
+    path: docs/03-architecture/adr/ADR-041-auto-policy-compensation-resolution.md
+    status: accepted
+  - id: ADR-042
+    type: adr
+    class: normative
+    title: Единый read-слой батчей (single-leg + combo) через ClickHouse view
+    path: docs/03-architecture/adr/ADR-042-unified-batch-read-layer.md
+    status: accepted
+  - id: ADR-043
+    type: adr
+    class: normative
+    title: Combo external-нога → HedgeFlow (на ногу) + ChildOrder (на chunk) — интеграция
+      F-09↔F-12
+    path: docs/03-architecture/adr/ADR-043-combo-external-hedgeflow-childorder.md
+    status: accepted
+  - id: ADR-044
+    type: adr
+    class: normative
+    title: Модель балансов ledger — единый PG-источник vs dual in-memory + PG
+    path: docs/03-architecture/adr/ADR-044-ledger-balance-source-of-truth.md
+    status: proposed
+  - id: ADR-045
+    type: adr
+    class: normative
+    title: Модель соединений с PostgreSQL — per-call connection vs in-app pool
+    path: docs/03-architecture/adr/ADR-045-pg-connection-pooling.md
+    status: proposed
+  - id: ADR-046
+    type: adr
+    class: normative
+    title: Топик positions.update для push-обновлений позиций (F6-5)
+    path: docs/03-architecture/adr/ADR-046-positions-update-topic.md
+    status: proposed
+  - id: ADR-047
+    type: adr
+    class: normative
+    title: Surplus / EXCHANGE_PNL policy для vector clearing (F-05A)
+    path: docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
+    status: accepted
+  - id: ADR-048
+    type: adr
+    class: normative
+    title: QP solver backend (OSQP) для vector clearing F-05A — активация и расширение
+      ADR-034
+    path: docs/03-architecture/adr/ADR-048-qp-solver-backend.md
+    status: accepted
+  - id: ADR-049
+    type: adr
+    class: normative
+    title: F-05A vector clearing execution → F-12 hedge channel (converged-only, feature-flagged)
+    path: docs/03-architecture/adr/ADR-049-f05a-vector-clearing-execution-hedge.md
+    status: accepted
+  - id: ADR-050
+    type: adr
+    class: normative
+    title: F-05A batch-window aggregation — один клиринг над многими venue и парами
+      (общий asset-basis)
+    path: docs/03-architecture/adr/ADR-050-f05a-batch-window-aggregation.md
+    status: accepted
+  - id: ADR-051
+    type: adr
+    class: normative
+    title: F-05A — ликвидность венью как ОДИН линейный сегмент на сторону (наклон
+      из кривой)
+    path: docs/03-architecture/adr/ADR-051-f05a-linear-venue-segment.md
+    status: accepted
+  - id: ADR-052
+    type: adr
+    class: normative
+    title: F-05A — двусторонний знаковый сегмент венью (academic-формулировка клиринга)
+    path: docs/03-architecture/adr/ADR-052-f05a-two-sided-signed-segment.md
+    status: accepted
+  - id: ADR-053
+    type: adr
+    class: normative
+    title: F-05A — safe-translator модель ликвидности (VWAP-глубина + θ-haircut),
+      клиринг в log-ценах
+    path: docs/03-architecture/adr/ADR-053-f05a-safe-translator-liquidity-model.md
+    status: accepted
+  - id: ADR-054
+    type: adr
+    class: normative
+    title: ADR-054-ce-capital-net-position-hedging
+    path: docs/03-architecture/adr/ADR-054-ce-capital-net-position-hedging.md
+    status: null
+  - id: ADR-055
+    type: adr
+    class: normative
+    title: CE — виртуальные контрагенты как агенты (переводчик + связка-арбитражёр,
+      единая кривая с мёртвой зоной)
+    path: docs/03-architecture/adr/ADR-055-ce-virtual-counterparties-agents.md
+    status: accepted
+  - id: ADR-056
+    type: adr
+    class: normative
+    title: CE — граф узлов «валюта@площадка» и снятие Wx=0 (баланс по узлам площадок
+      + свободные узлы книги)
+    path: docs/03-architecture/adr/ADR-056-ce-node-graph-clearing.md
+    status: accepted
+  - id: ADR-057
+    type: adr
+    class: normative
+    title: CE — трёхуровневая позиция (агент → узел → актив) и Z_a = Σqty + in_transit
+      + committed − target
+    path: docs/03-architecture/adr/ADR-057-ce-three-level-position.md
+    status: superseded
+  - id: ADR-058
+    type: adr
+    class: normative
+    title: CE — committed/in-flight состояние агентов вместо cooldown-таймера хеджа
+    path: docs/03-architecture/adr/ADR-058-ce-committed-inflight-state.md
+    status: accepted
+  - id: ADR-059
+    type: adr
+    class: normative
+    title: CE — clearing_trace как единый аудит-артефакт такта (агенты/узлы/инварианты/PnL/заявки)
+    path: docs/03-architecture/adr/ADR-059-ce-clearing-trace-audit.md
+    status: accepted
+  - id: ADR-060
+    type: adr
+    class: normative
+    title: Симуляция исполнения на venue по ленте реальных публичных сделок
+    path: docs/03-architecture/adr/ADR-060-venue-sim-fill-vs-real-trades.md
+    status: accepted
+  - id: ADR-061
+    type: adr
+    class: normative
+    title: 'CE v2: позиция агента с нуля, полоса ±q, счёт дома, тип участника AGENT'
+    path: docs/03-architecture/adr/ADR-061-ce-v2-agent-position-band-hedge.md
+    status: accepted
+  - id: ADR-062
+    type: adr
+    class: normative
+    title: CE — консолидация движков клиринга (Newton ce_agent_clearing vs OSQP vector_qp_solver)
+    path: docs/03-architecture/adr/ADR-062-ce-clearing-engine-consolidation.md
+    status: accepted
+  - id: ADR-063
+    type: adr
+    class: normative
+    title: CE — тип участника AGENT (третий party_type рядом с CLIENT и HOUSE)
+    path: docs/03-architecture/adr/ADR-063-party-type-agent.md
+    status: accepted
+  - id: ADR-064
+    type: adr
+    class: normative
+    title: 'CE — прямые кросс-пары: переводчик обобщается с актив/номинал на любую
+      пару base/quote'
+    path: docs/03-architecture/adr/ADR-064-ce-cross-pair-translators.md
+    status: accepted
+  - id: ADR-065
+    type: adr
+    class: normative
+    title: ADR-065-ce-commission-placement-and-arbitrageur-hedge
+    path: docs/03-architecture/adr/ADR-065-ce-commission-placement-and-arbitrageur-hedge.md
+    status: null
+  - id: ADR-066
+    type: adr
+    class: normative
+    title: ADR-066-ce-band-threshold-gamma-definition
+    path: docs/03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md
+    status: null
+  - id: ADR-067
+    type: adr
+    class: normative
+    title: ADR-067-ce-maker-resting-limit-hedge
+    path: docs/03-architecture/adr/ADR-067-ce-maker-resting-limit-hedge.md
+    status: null
+  - id: ADR-068
+    type: adr
+    class: normative
+    title: ADR-068-ce-house-realized-profit-recognition
+    path: docs/03-architecture/adr/ADR-068-ce-house-realized-profit-recognition.md
+    status: null
+  - id: ADR-069
+    type: adr
+    class: normative
+    title: CE-арбитражёр — две реальные ноги позиции и хеджа (по заявке на каждую
+      биржу)
+    path: docs/03-architecture/adr/ADR-069-ce-arbitrageur-two-leg-position-hedge.md
+    status: accepted
+  - id: ADR-070
+    type: adr
+    class: normative
+    title: Быстрая полоса стакана venues — свежий сырой стакан для панели «Торговля»
+    path: docs/03-architecture/adr/ADR-070-venues-fast-depth-lane-for-raw-book-display.md
+    status: proposed
+  - id: ADR-071
+    type: adr
+    class: normative
+    title: Inventory-skew для ног CE-арбитражёра — самоограничение позиции сдвигом
+      якоря
+    path: docs/03-architecture/adr/ADR-071-ce-arbitrageur-inventory-skew.md
+    status: accepted
+  - id: ADR-072
+    type: adr
+    class: normative
+    title: Прибыль переводчика — клэмп сдвига цены границей прибыли, resting-заявки
+      симулятора, realized/unrealized P&L
+    path: docs/03-architecture/adr/ADR-072-ce-translator-profit-hedge-price-skew-resting.md
+    status: accepted
+  - id: ADR-073
+    type: adr
+    class: normative
+    title: CE-арбитражёр без рыночного хеджа — позиция как дисбаланс остатков
+    path: docs/03-architecture/adr/ADR-073-ce-arbitrageur-no-market-hedge.md
+    status: accepted
+  - id: ADR-074
+    type: adr
+    class: normative
+    title: Честный симулятор исполнения — forward-only филл по биржевому времени
+    path: docs/03-architecture/adr/ADR-074-honest-execution-simulator.md
+    status: proposed
+  - id: ADR-075
+    type: adr
+    class: normative
+    title: Синхронные рыночные данные — биржевое время снимка и age-aware якорь
+    path: docs/03-architecture/adr/ADR-075-synchronous-market-data-anchors.md
+    status: proposed
+  - id: ADR-076
+    type: adr
+    class: normative
+    title: Топология графа переводов CE — полная сетка бирж против звезды вокруг дома
+    path: docs/03-architecture/adr/ADR-076-ce-transfer-graph-topology.md
+    status: proposed
+  - id: ADR-077
+    type: adr
+    class: normative
+    title: Окно глубины стакана для кривой ликвидности — по объёму сделки, а не по
+      числу уровней
+    path: docs/03-architecture/adr/ADR-077-liquidity-depth-window-by-volume.md
+    status: proposed
+  - id: ADR-078
+    type: adr
+    class: normative
+    title: Опрос внешних бирж — фиксированный период на пару, лестница действий при
+      сбое, расчёт отвязан от запросов
+    path: docs/03-architecture/adr/ADR-078-exchange-polling-scheduler.md
+    status: accepted
+  - id: ADR-079
+    type: adr
+    class: normative
+    title: Диагностика решения CE-клиринга — снимок последнего такта из matching,
+      показ на вкладке «Граф» с объяснением «почему потока нет»
+    path: docs/03-architecture/adr/ADR-079-ce-clearing-decision-diagnostics.md
+    status: proposed
+  - id: ADR-080
+    type: adr
+    class: normative
+    title: Внутренний клиринг CE без барьеров — выход на внешнюю биржу у переводчиков
+      и арбитражёров по порогу позиции
+    path: docs/03-architecture/adr/ADR-080-ce-internal-clearing-without-barriers.md
+    status: accepted
+  - id: ADR-081
+    type: adr
+    class: normative
+    title: Ширина полосы хеджа CE — ручная установка и автоматический режим по волатильности
+    path: docs/03-architecture/adr/ADR-081-ce-band-width-manual-and-volatility-modes.md
+    status: proposed
+  - id: ADR-082
+    type: adr
+    class: normative
+    title: Измерение ликвидности внешних бирж и её обратная связь в глубину агента,
+      размер заявки и порог хеджа CE
+    path: docs/03-architecture/adr/ADR-082-venue-liquidity-measurement-and-feedback.md
+    status: proposed
+  - id: ADR-083
+    type: adr
+    class: normative
+    title: Связка-арбитражёр CE — остаток паритета принадлежит связке, рыночный хедж
+      её ног отключён, целевое внешнее действие — физический перевод
+    path: docs/03-architecture/adr/ADR-083-ce-link-parity-residual-and-no-market-hedge.md
+    status: accepted
+  - id: ADR-084
+    type: adr
+    class: normative
+    title: Физический перевод связки CE между биржами — смоделированный перевод в
+      ledger, который сбрасывает накопленный перекос
+    path: docs/03-architecture/adr/ADR-084-ce-link-physical-transfer.md
+    status: accepted
+  - id: ADR-085
+    type: adr
+    class: normative
+    title: Уценка устаревших котировок и капитальный предел глубины переводчика CE
+      — за флагами
+    path: docs/03-architecture/adr/ADR-085-ce-translator-depth-trust-and-capital-cap.md
+    status: accepted
+  - id: ADR-086
+    type: adr
+    class: normative
+    title: Двухосевая маршрутизация реплик, V-петля «спецификация — проверка» и отмена
+      единого сэндвича ingress → агент → ingress
+    path: docs/03-architecture/adr/ADR-086-two-axis-reply-routing.md
+    status: accepted
+  table:
+  - id: postgresql:flow_orders
+    type: table
+    class: normative
+    title: flow_orders
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: flow_orders
+  - id: postgresql:flow_order_legs
+    type: table
+    class: normative
+    title: flow_order_legs
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: flow_order_legs
+  - id: postgresql:solver_config
+    type: table
+    class: normative
+    title: solver_config
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: solver_config
+  - id: postgresql:hedgeflows
+    type: table
+    class: normative
+    title: hedgeflows
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: hedgeflows
+  - id: postgresql:child_orders
+    type: table
+    class: normative
+    title: child_orders
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: child_orders
+  - id: postgresql:ce_agent_pnl_history
+    type: table
+    class: normative
+    title: ce_agent_pnl_history
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_agent_pnl_history
+  - id: postgresql:ce_system_pnl_baseline
+    type: table
+    class: normative
+    title: ce_system_pnl_baseline
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_system_pnl_baseline
+  - id: postgresql:ce_system_pnl_history
+    type: table
+    class: normative
+    title: ce_system_pnl_history
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_system_pnl_history
+  - id: postgresql:venue_fill_diagnostics
+    type: table
+    class: normative
+    title: venue_fill_diagnostics
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: venue_fill_diagnostics
+  - id: postgresql:venue_liquidity_stats
+    type: table
+    class: normative
+    title: venue_liquidity_stats
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: venue_liquidity_stats
+  - id: postgresql:execution_reports_raw
+    type: table
+    class: normative
+    title: execution_reports_raw
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: execution_reports_raw
+  - id: postgresql:sim_sessions
+    type: table
+    class: normative
+    title: sim_sessions
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: sim_sessions
+  - id: postgresql:sim_positions
+    type: table
+    class: normative
+    title: sim_positions
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: sim_positions
+  - id: postgresql:sim_hedge_pnl
+    type: table
+    class: normative
+    title: sim_hedge_pnl
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: sim_hedge_pnl
+  - id: postgresql:marketdata_config
+    type: table
+    class: normative
+    title: marketdata_config
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: marketdata_config
+  - id: postgresql:replay_solver_configs
+    type: table
+    class: normative
+    title: replay_solver_configs
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: replay_solver_configs
+  - id: postgresql:replay_risk_limits
+    type: table
+    class: normative
+    title: replay_risk_limits
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: replay_risk_limits
+  - id: postgresql:replay_fee_models
+    type: table
+    class: normative
+    title: replay_fee_models
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: replay_fee_models
+  - id: postgresql:replay_reward_configs
+    type: table
+    class: normative
+    title: replay_reward_configs
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: replay_reward_configs
+  - id: postgresql:batch_orders
+    type: table
+    class: normative
+    title: batch_orders
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: batch_orders
+  - id: postgresql:combo_orders
+    type: table
+    class: normative
+    title: combo_orders
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: combo_orders
+  - id: postgresql:combo_order_legs
+    type: table
+    class: normative
+    title: combo_order_legs
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: combo_order_legs
+  - id: postgresql:combo_constraints
+    type: table
+    class: normative
+    title: combo_constraints
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: combo_constraints
+  - id: postgresql:conditional_links
+    type: table
+    class: normative
+    title: conditional_links
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: conditional_links
+  - id: postgresql:combo_compensations
+    type: table
+    class: normative
+    title: combo_compensations
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: combo_compensations
+  - id: postgresql:execution_groups
+    type: table
+    class: normative
+    title: execution_groups
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: execution_groups
+  - id: postgresql:group_state_transitions
+    type: table
+    class: normative
+    title: group_state_transitions
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: group_state_transitions
+  - id: postgresql:asset_basis
+    type: table
+    class: normative
+    title: asset_basis
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: asset_basis
+  - id: postgresql:vector_flow_segments
+    type: table
+    class: normative
+    title: vector_flow_segments
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: vector_flow_segments
+  - id: postgresql:vectorization_runs
+    type: table
+    class: normative
+    title: vectorization_runs
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: vectorization_runs
+  - id: postgresql:venue_order_levels
+    type: table
+    class: normative
+    title: venue_order_levels
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: venue_order_levels
+  - id: postgresql:accounts
+    type: table
+    class: normative
+    title: accounts
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: accounts
+  - id: postgresql:positions
+    type: table
+    class: normative
+    title: positions
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: positions
+  - id: postgresql:risk_limits
+    type: table
+    class: normative
+    title: risk_limits
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: risk_limits
+  - id: postgresql:risk_snapshots
+    type: table
+    class: normative
+    title: risk_snapshots
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: risk_snapshots
+  - id: postgresql:f05a_clearing_config
+    type: table
+    class: normative
+    title: f05a_clearing_config
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: f05a_clearing_config
+  - id: postgresql:operator_audit_log
+    type: table
+    class: normative
+    title: operator_audit_log
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: operator_audit_log
+  - id: postgresql:f05a_clearing_config_history
+    type: table
+    class: normative
+    title: f05a_clearing_config_history
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: f05a_clearing_config_history
+  - id: postgresql:ce_agent_position
+    type: table
+    class: normative
+    title: ce_agent_position
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_agent_position
+  - id: postgresql:ce_asset_volatility
+    type: table
+    class: normative
+    title: ce_asset_volatility
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_asset_volatility
+  - id: postgresql:ce_asset_liquidity
+    type: table
+    class: normative
+    title: ce_asset_liquidity
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_asset_liquidity
+  - id: clickhouse:batchresults
+    type: table
+    class: normative
+    title: batchresults
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: batchresults
+  - id: clickhouse:fills
+    type: table
+    class: normative
+    title: fills
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: fills
+  - id: clickhouse:execution_reports
+    type: table
+    class: normative
+    title: execution_reports
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: execution_reports
+  - id: clickhouse:grouped_execution_events
+    type: table
+    class: normative
+    title: grouped_execution_events
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: grouped_execution_events
+  - id: clickhouse:grouped_leg_fills
+    type: table
+    class: normative
+    title: grouped_leg_fills
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: grouped_leg_fills
+  - id: clickhouse:grouped_quality_metrics
+    type: table
+    class: normative
+    title: grouped_quality_metrics
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: grouped_quality_metrics
+  - id: clickhouse:grouped_ratio_deviation
+    type: table
+    class: normative
+    title: grouped_ratio_deviation
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: grouped_ratio_deviation
+  - id: clickhouse:grouped_replay_results
+    type: table
+    class: normative
+    title: grouped_replay_results
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: grouped_replay_results
+  - id: clickhouse:sim_execution_reports
+    type: table
+    class: normative
+    title: sim_execution_reports
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: sim_execution_reports
+  - id: clickhouse:sim_divergence_log
+    type: table
+    class: normative
+    title: sim_divergence_log
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: sim_divergence_log
+  - id: clickhouse:marketdata_snapshots
+    type: table
+    class: normative
+    title: marketdata_snapshots
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: marketdata_snapshots
+  - id: clickhouse:effective_spreads
+    type: table
+    class: normative
+    title: effective_spreads
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: effective_spreads
+  - id: clickhouse:combo_groups_pg
+    type: table
+    class: normative
+    title: combo_groups_pg
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: combo_groups_pg
+  - id: clickhouse:vector_clearing_results
+    type: table
+    class: normative
+    title: vector_clearing_results
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: vector_clearing_results
+  - id: clickhouse:surplus_events
+    type: table
+    class: normative
+    title: surplus_events
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: surplus_events
+  - id: clickhouse:vector_flow_segments_history
+    type: table
+    class: normative
+    title: vector_flow_segments_history
+    path: infra/clickhouse/init.sql
+    store: clickhouse
+    tableName: vector_flow_segments_history
+edges:
+- from: FR-AUTH-001
+  to: F-01
+  type: requirement->feature
+  resolved: true
+- from: FR-AUTH-002
+  to: F-01
+  type: requirement->feature
+  resolved: true
+- from: FR-ORDER-001
+  to: F-02
+  type: requirement->feature
+  resolved: true
+- from: FR-ORDER-002
+  to: F-02
+  type: requirement->feature
+  resolved: true
+- from: FR-ORDER-004
+  to: F-02
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-001
+  to: F-02
+  type: requirement->feature
+  resolved: true
+- from: FR-ORDER-003
+  to: F-03
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-001
+  to: F-03
+  type: requirement->feature
+  resolved: true
+- from: FR-CLEAR-001
+  to: F-04
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-002
+  to: F-04
+  type: requirement->feature
+  resolved: true
+- from: FR-MD-001
+  to: F-05
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-001
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-002
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-003
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-004
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-005
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-006
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-007
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-008
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-009
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-010
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-F05A-011
+  to: F-05A
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-001
+  to: F-06
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-002
+  to: F-06
+  type: requirement->feature
+  resolved: true
+- from: FR-RISK-001
+  to: F-07
+  type: requirement->feature
+  resolved: true
+- from: FR-RISK-002
+  to: F-08
+  type: requirement->feature
+  resolved: true
+- from: FR-ORDER-001
+  to: F-09
+  type: requirement->feature
+  resolved: true
+- from: FR-MM-001
+  to: F-10
+  type: requirement->feature
+  resolved: true
+- from: FR-MM-002
+  to: F-10
+  type: requirement->feature
+  resolved: true
+- from: FR-MD-002
+  to: F-11
+  type: requirement->feature
+  resolved: true
+- from: FR-HEDGE-001
+  to: F-12
+  type: requirement->feature
+  resolved: true
+- from: FR-HEDGE-002
+  to: F-12
+  type: requirement->feature
+  resolved: true
+- from: FR-REPORT-001
+  to: F-13
+  type: requirement->feature
+  resolved: true
+- from: FR-REPORT-002
+  to: F-13
+  type: requirement->feature
+  resolved: true
+- from: FR-LEDGER-003
+  to: F-14
+  type: requirement->feature
+  resolved: true
+- from: FR-CLEAR-002
+  to: F-15
+  type: requirement->feature
+  resolved: true
+- from: FR-RISK-003
+  to: F-16
+  type: requirement->feature
+  resolved: true
+- from: FR-OPS-001
+  to: F-16
+  type: requirement->feature
+  resolved: true
+- from: FR-OPS-002
+  to: F-16
+  type: requirement->feature
+  resolved: true
+- from: FR-REPORT-002
+  to: F-17
+  type: requirement->feature
+  resolved: true
+- from: FR-OPS-001
+  to: F-17
+  type: requirement->feature
+  resolved: true
+- from: F-01
+  to: UC-F01-01
+  type: feature->uc
+  resolved: true
+- from: F-02
+  to: UC-F02-01
+  type: feature->uc
+  resolved: true
+- from: F-03
+  to: UC-F03-01
+  type: feature->uc
+  resolved: true
+- from: F-04
+  to: UC-F04-01
+  type: feature->uc
+  resolved: true
+- from: F-05
+  to: UC-F05-01
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-01
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-02
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-03
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-04
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-05
+  type: feature->uc
+  resolved: true
+- from: F-05A
+  to: UC-F05A-06
+  type: feature->uc
+  resolved: true
+- from: F-06
+  to: UC-F06-01
+  type: feature->uc
+  resolved: true
+- from: F-07
+  to: UC-F07-01
+  type: feature->uc
+  resolved: true
+- from: F-08
+  to: UC-F08-01
+  type: feature->uc
+  resolved: true
+- from: F-09
+  to: UC-F09-01
+  type: feature->uc
+  resolved: true
+- from: F-09
+  to: UC-F09-02
+  type: feature->uc
+  resolved: true
+- from: F-09
+  to: UC-F09-03
+  type: feature->uc
+  resolved: true
+- from: F-10
+  to: UC-F10-01
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-01
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-02
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-03
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-04
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-05
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: UC-F11-06
+  type: feature->uc
+  resolved: true
+- from: F-12
+  to: UC-F12-01
+  type: feature->uc
+  resolved: true
+- from: F-12
+  to: UC-F12-02
+  type: feature->uc
+  resolved: true
+- from: F-12
+  to: UC-F12-03
+  type: feature->uc
+  resolved: true
+- from: F-12
+  to: UC-F12-04
+  type: feature->uc
+  resolved: true
+- from: F-12
+  to: UC-F12-05
+  type: feature->uc
+  resolved: true
+- from: F-13
+  to: UC-F13-01
+  type: feature->uc
+  resolved: true
+- from: F-14
+  to: UC-F14-01
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-01
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-02
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-03
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-04
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-05
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-06
+  type: feature->uc
+  resolved: true
+- from: F-15
+  to: UC-F15-07
+  type: feature->uc
+  resolved: true
+- from: F-16
+  to: UC-F16-01
+  type: feature->uc
+  resolved: true
+- from: F-17
+  to: UC-F17-01
+  type: feature->uc
+  resolved: true
+- from: F-18
+  to: UC-F18-01
+  type: feature->uc
+  resolved: true
+- from: F-18
+  to: UC-F18-02
+  type: feature->uc
+  resolved: true
+- from: F-18
+  to: UC-F18-03
+  type: feature->uc
+  resolved: true
+- from: F-18
+  to: UC-F18-04
+  type: feature->uc
+  resolved: true
+- from: F-20
+  to: UC-F20-01
+  type: feature->uc
+  resolved: true
+- from: F-20
+  to: UC-F20-02
+  type: feature->uc
+  resolved: true
+- from: F-11
+  to: CALC-F11-BOOK-VWAP
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-ANCHOR
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-F18-CE-ARBITRAGEUR-BASIS
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-F18-CE-CLEARING-DIAG
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-CLEARING-SURPLUS
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-F18-CE-GRAPH
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-LINK-TRANSFER
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-SKEW-BAND-CALIBRATION
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-SYSTEM-PNL
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-TRANSLATOR-DEPTH
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-TRANSLATOR-PNL
+  type: feature->calc
+  resolved: true
+- from: F-05A
+  to: CALC-F05A-DEPTH-WINDOW
+  type: feature->calc
+  resolved: true
+- from: F-05A
+  to: CALC-F05A-SLOPE-ONDEMAND
+  type: feature->calc
+  resolved: true
+- from: F-12
+  to: CALC-F12-HEDGE-PNL
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-F18-VENUE-LIQUIDITY-STATS
+  type: feature->calc
+  resolved: true

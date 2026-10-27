@@ -65,6 +65,30 @@
   продуктовое решение, не инженерное; зафиксировано как
   `OQ-F18v2-25`/`OQ-F20-01`, не решено здесь.
 
+- **Первый прогон `tools/consistency/check.py` (Этап 2, ADR-086/IN-019,
+  2026-10-27) нашёл 17 пред­существующих находок** (не внесены этим
+  прогоном, инструмент только обнаружил):
+  - `C-04` (4): `UC-F12-04`, `UC-F12-05`, `UC-F15-05`, `UC-F15-06` —
+    `status: active`, но нет `service-sequence` в frontmatter и нет файла
+    L1-диаграммы вообще (`.claude/rules/sequences.md` требует её для
+    активного UC).
+  - `C-05` (2): `CALC-F05A-DEPTH-WINDOW.md` и `CALC-F18-VENUE-LIQUIDITY-STATS.md`
+    (файл `CALC-VENUE-LIQUIDITY-STATS.md`) — элемент списка `code:` в
+    frontmatter содержит неэкранированное `:` внутри комментария в скобках,
+    YAML парсит его как вложенный маппинг, а не строку (сломанная шапка).
+  - `C-08` (6): таблицы `execution_reports_raw`, `sim_hedge_pnl`,
+    `replay_fee_models`, `replay_reward_configs`, `combo_compensations`,
+    `f05a_clearing_config_history` существуют в `infra/postgres/init.sql`,
+    но не упомянуты ни в одном файле `docs/07-data/`.
+  - `C-15` (5): `id` в шапке CALC-карточки ≠ имени файла — `CALC-BOOK-VWAP.md`
+    (id `CALC-F11-BOOK-VWAP`), `CALC-CE-ARBITRAGEUR-BASIS.md` (id
+    `CALC-F18-CE-ARBITRAGEUR-BASIS`), `CALC-CE-CLEARING-DIAG.md` (id
+    `CALC-F18-CE-CLEARING-DIAG`), `CALC-CE-GRAPH.md` (id `CALC-F18-CE-GRAPH`),
+    `CALC-VENUE-LIQUIDITY-STATS.md` (id `CALC-F18-VENUE-LIQUIDITY-STATS`).
+  Не исправлено этим шагом (построение инструмента ≠ исправление того, что
+  он нашёл) — повторный `python3 tools/consistency/check.py` воспроизводит
+  полный список в любой момент, см. `tools/consistency/README.md`.
+
 При любой задаче явно указывай, является ли изменение:
 
 - `docs-only`;

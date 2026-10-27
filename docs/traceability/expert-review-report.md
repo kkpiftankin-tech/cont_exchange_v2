@@ -12,7 +12,7 @@
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **5**
 - ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **4**
+- Инженерных долгов в known-gaps.md: **5**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -109,3 +109,4 @@
 - `matching_loop.cpp` poison-message backstop без метрики и без теста
 - `feature.yaml.status` и `specs/domain/feature-component-map.yaml[F-XX].status` используют разные схемы после Этап 1 (ADR-086/IN-019 §4.4, 2026-10-27).
 - `F-18.relatedAdrs` переименован из `parentRequirements`
+- Первый прогон `tools/consistency/check.py` (Этап 2, ADR-086/IN-019, 2026-10-27) нашёл 17 пред­существующих находок
