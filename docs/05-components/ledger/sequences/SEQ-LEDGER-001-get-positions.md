@@ -75,7 +75,7 @@ sequenceDiagram
 - **Ошибка чтения PostgreSQL** → typed `Error{code, message}`, частичный ответ
   не отдаётся.
 
-## Decimal / precision notes (CLAUDE.md §9)
+## Decimal / precision notes ([.claude/rules/data.md](../../../../.claude/rules/data.md))
 
 - Все денежные величины — `Decimal` (fixed-point), `double` запрещён.
 - `ComputeUnrealized` явно фиксирует scale результата и не смешивает base/quote

@@ -463,7 +463,7 @@ INSERT INTO replay_fee_models (id, version, body_json) VALUES (
 -- Creation order respects FK dependencies:
 --   batch_orders → combo_orders → combo_order_legs / combo_constraints /
 --   conditional_links → execution_groups → group_state_transitions.
--- All monetary / qty / price fields: NUMERIC(38,18) per CLAUDE.md §9.
+-- All monetary / qty / price fields: NUMERIC(38,18) per .claude/rules/data.md.
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
@@ -831,7 +831,7 @@ CREATE INDEX IF NOT EXISTS idx_venue_order_levels_batch
 --   accounts, positions  -> ledger  (single writer; risk + gateway read).
 --   risk_limits          -> risk    (writer; matching + gateway read).
 --   risk_snapshots       -> risk    (writer; ledger + gateway + observability read).
--- All monetary / qty / price fields: NUMERIC(38,18) per CLAUDE.md §9 and the
+-- All monetary / qty / price fields: NUMERIC(38,18) per .claude/rules/data.md and the
 --   precision already used by flow_orders / hedgeflows in this file.
 -- NOTE: user_id is TEXT (no FK to `users`) — there is no `users` table in this
 --   init.sql (matching the rest of the schema: flow_orders.user_id is TEXT too).
@@ -1208,7 +1208,7 @@ CREATE TRIGGER f05a_clearing_config_versioning_trg
 --
 -- position (c_j) меняется по факту клиринга такта (c ← c + f) — накопление
 -- идемпотентно по last_batch_id (UPSERT-guard в PostgresAgentPositionRepository
--- / ledger_uc.cpp ApplyPositionDelta, CLAUDE.md §17 "применять fill дважды"
+-- / ledger_uc.cpp ApplyPositionDelta, cpp/ledger/CLAUDE.md "применять fill дважды"
 -- запрещено). in_flight зарезервировано для Э3 (полоса ±q, T-F18-304) —
 -- до включения CE_AGENT_BAND всегда 0.
 -- ---------------------------------------------------------------------------

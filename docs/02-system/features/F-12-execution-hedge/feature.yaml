@@ -1,9 +1,14 @@
 feature:
   id: F-12
   name: Execution Hedge
-  status: doc-complete-impl-partial
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: complete, code: partial, runtime: dev}  # было: doc-complete-impl-partial
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-HEDGE-001  # формирование намерения
+  - FR-HEDGE-002  # размещение и учёт
 
 description: >
   Автоматическое хеджирование нетто-позиций провайдера на внешних площадках
@@ -908,10 +913,10 @@ knownIssues:
 
       Runtime confirmation (IN-007, 2026-05-22): cpp/venues публикует в
       топик `execution.venue` (поле `topic` в JSON-логе "Produced
-      execution report"). CLAUDE.md §7.3 всё ещё перечисляет только
+      execution report"). .claude/rules/contracts.md всё ещё перечисляет только
       `execution.reports`. Требуется либо обновить CLAUDE.md, либо
       ADR-015 «execution.venue заменяет execution.reports».
-    location: infra/kafka/create_topics.sh#L60-L61, CLAUDE.md §7.3
+    location: infra/kafka/create_topics.sh#L60-L61, .claude/rules/contracts.md
     target_pr: PR-C (см. IN-007.meta.md)
   - id: ledger-not-consuming-execution-venue-events
     severity: critical

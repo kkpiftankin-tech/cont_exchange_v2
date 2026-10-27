@@ -72,7 +72,7 @@ RULES = [
     ]),
     (r"^docs/04-domain/(business-rules|entities|domain-overview)\.md$", [
         "Domain doc edited -> if a formula/invariant/field name changed, check for drift against "
-        "docs/04-domain/calculations/CALC-* cards and contracts/proto/ (source of truth for field names, CLAUDE.md §3.1).",
+        "docs/04-domain/calculations/CALC-* cards and contracts/proto/ (source of truth for field names, CLAUDE.md §1).",
     ]),
     (r"^docs/02-system/features/[^/]+/open-questions\.md$", [
         "open-questions.md edited -> use the OQ-FXX-NN / status / addressee format "

@@ -2,7 +2,7 @@
 // grpc_ledger_service.cpp — gRPC transport layer для LedgerService.
 //
 // Тонкий wrapper над LedgerUseCases (app/ledger_uc.cpp). Бизнес-логика
-// (idempotency, FSM, balance invariants — CLAUDE.md §17) живёт в UC.
+// (idempotency, FSM, balance invariants — cpp/ledger/CLAUDE.md) живёт в UC.
 //
 // Группы методов:
 //   * User balances:    GetBalances / ReserveFunds / ReleaseFunds

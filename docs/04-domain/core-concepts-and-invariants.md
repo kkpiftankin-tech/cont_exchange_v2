@@ -30,7 +30,7 @@ owner: core-team
 
 `FlowOrder` — центральная бизнес-сущность MVP. Технические имена полей —
 proto-контракт `contracts/proto/fob/orders/v1/orders.proto` (источник истины
-по приоритету CLAUDE.md §3.1): `order_id`, `client_order_id`, `user_id`,
+по приоритету [CLAUDE.md §1](../../CLAUDE.md)): `order_id`, `client_order_id`, `user_id`,
 `account_id`, `instrument`, `side`, `total_qty`, `remaining_qty`, `price_low`,
 `price_high`, `max_speed`, `status`, `tif`, `tags`.
 

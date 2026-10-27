@@ -103,7 +103,7 @@ Kafka engine table читает `execution.venue`, MV агрегирует в Me
   publishes every ExecutionReport to BOTH `execution.venue` (canonical
   per IN-005) and `execution.reports` (legacy, for backwards
   compatibility with consumers that haven't migrated yet). The legacy
-  topic will be retired after migration completes; see CLAUDE.md §7.3.
+  topic will be retired after migration completes; see [.claude/rules/contracts.md](../../../.claude/rules/contracts.md).
 - **`hedge_flow_id` must be propagated by venues**: PR-F12-5 added
   the line `rep.set_hedge_flow_id(intent.hedge_flow_id())` after
   `execute_on_venue_.Run(...)` in `cpp/venues/src/app/venues_loop.cpp`.

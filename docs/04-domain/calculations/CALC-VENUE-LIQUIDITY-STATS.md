@@ -3,7 +3,7 @@ id: CALC-F18-VENUE-LIQUIDITY-STATS
 title: Ликвидность внешней биржи — оборот ленты ν и коэффициент исполнения f
 level: L3
 feature: F-18
-status: implemented (шаг 1, множитель глубины, и шаг 2, бюджет ленты на заявки; оба выключены флагами CE_DEPTH_FILL_COEF и CE_ORDER_CAP_TAPE)
+status: implemented # шаг 1 (множитель глубины) и шаг 2 (бюджет ленты на заявки) — оба выключены флагами CE_DEPTH_FILL_COEF и CE_ORDER_CAP_TAPE
 code:
   - cpp/venues/src/domain/liquidity_stats.hpp#TapeRateEstimator
   - cpp/venues/src/domain/liquidity_stats.hpp#FillCoefficient

@@ -34,6 +34,7 @@ solution-architect) записывались в open-questions.md/known-gaps.md 
 собирает в одно место для владельца/эксперта.
 """
 import argparse
+import os
 import pathlib
 import re
 import sys
@@ -43,6 +44,7 @@ FEATURES_DIR = ROOT / "docs" / "02-system" / "features"
 CALC_DIR = ROOT / "docs" / "04-domain" / "calculations"
 ADR_DIR = ROOT / "docs" / "03-architecture" / "adr"
 KNOWN_GAPS = ROOT / "docs" / "00-methodology" / "known-gaps.md"
+OUT_DIR = ROOT / "docs" / "traceability"
 
 OQ_HEADING = re.compile(r"^###\s+(OQ-[A-Za-z0-9_-]+)\s*(?:—|-)?\s*(.*)$", re.MULTILINE)
 STATUS_FIELD = re.compile(r"\*\*Статус:?\*\*\s*`?([A-Za-zА-Яа-яёЁ]+)`?", re.IGNORECASE)
@@ -162,6 +164,14 @@ def scan_known_gaps_debts():
     return [re.sub(r"\s+", " ", t).strip() for t in titles]
 
 
+def relurl(path) -> str:
+    """Путь, сохранённый как ROOT-relative, -> ссылка, корректная из OUT_DIR
+    (docs/traceability/, где живёт сам отчёт) — иначе markdown-ссылка вида
+    `docs/02-system/...` резолвится как `docs/traceability/docs/02-system/...`
+    и ломается (link-audit.py, 2026-10-27)."""
+    return pathlib.Path(os.path.relpath(ROOT / path, OUT_DIR)).as_posix()
+
+
 def render(structured, unstructured, calc, adrs, debts) -> str:
     blocking = [o for o in structured if o["status"] == "blocking"]
     open_ = [o for o in structured if o["status"] == "open"]
@@ -189,7 +199,7 @@ def render(structured, unstructured, calc, adrs, debts) -> str:
         lines.append("")
         for o in blocking:
             lines.append(f"- **{o['id']}** ({o['feature']}) — {o['title']} · адресат: "
-                          f"{o['addressee']} · [{o['path']}]({o['path']})")
+                          f"{o['addressee']} · [{o['path']}]({relurl(o['path'])})")
         lines.append("")
 
     if open_:
@@ -203,7 +213,7 @@ def render(structured, unstructured, calc, adrs, debts) -> str:
             lines.append("")
             for o in by_addr[addr]:
                 lines.append(f"- **{o['id']}** ({o['feature']}) — {o['title']} · "
-                              f"[{o['path']}]({o['path']})")
+                              f"[{o['path']}]({relurl(o['path'])})")
             lines.append("")
 
     if unstructured:
@@ -213,7 +223,7 @@ def render(structured, unstructured, calc, adrs, debts) -> str:
                       "\"Open Questions Template\"; мигрировать по касанию фичи, не разом.")
         lines.append("")
         for fid, path, n in unstructured:
-            lines.append(f"- **{fid}** — {n} вопрос(ов) без структуры · [{path}]({path})")
+            lines.append(f"- **{fid}** — {n} вопрос(ов) без структуры · [{path}]({relurl(path)})")
         lines.append("")
 
     if calc:
@@ -221,14 +231,14 @@ def render(structured, unstructured, calc, adrs, debts) -> str:
         lines.append("")
         for c in calc:
             lines.append(f"- **{c['id']}** ({c['feature']}, `{c['status']}`) — {c['title']} · "
-                          f"[{c['path']}]({c['path']})")
+                          f"[{c['path']}]({relurl(c['path'])})")
         lines.append("")
 
     if adrs:
         lines.append("## ADR в статусе `proposed` (ждут решения владельца)")
         lines.append("")
         for a in adrs:
-            lines.append(f"- **{a['id']}** ({a['feature']}) — {a['title']} · [{a['path']}]({a['path']})")
+            lines.append(f"- **{a['id']}** ({a['feature']}) — {a['title']} · [{a['path']}]({relurl(a['path'])})")
         lines.append("")
 
     if debts:

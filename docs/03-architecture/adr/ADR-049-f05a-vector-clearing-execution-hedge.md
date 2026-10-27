@@ -88,7 +88,7 @@ ledger никогда не применяет несбалансированну
 
 ## Трассировка
 
-- Feature: [F-05A](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Surplus/QP: [ADR-047](ADR-047-surplus-exchange-pnl-policy.md), [ADR-048](ADR-048-qp-solver-backend.md)
 - Контракты: `contracts/proto/fob/execution/v1/execution.proto` (`ExecutionIntent`), топик `execution.intents`
 - Код (при реализации): `cpp/matching/src/app/matching_loop.cpp` (`on_vectorized_liquidity`, flag-гейт), `cpp/matching/src/app/vector_clearing_hedge_builder.*` (segments+x → `ExecutionIntent[]`), `cpp/matching/src/infra/kafka/execution_intents_producer.*`

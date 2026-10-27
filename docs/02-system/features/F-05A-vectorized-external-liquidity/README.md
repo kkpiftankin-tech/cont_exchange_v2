@@ -1,22 +1,28 @@
 <!-- level: kite -->
 # F-05A — Vectorized External Liquidity for F-09 Batch/Combo Clearing
 
-> **Статус:** `planned` · **Тип:** addendum к [F-05 Live Market Data](README.md) · **Потребитель:** [F-09](../F-09-batch-combo-orders/) `multileg_vector_solver`
-> **Спецификация:** [`F-05A-feature.yaml`](F-05A-feature.yaml) · **План:** [implementation-plan](../../../implementation-plan/F-05A-vectorized-external-liquidity.tasks.md)
+> **Статус:** `planned` (кроме UC-06 CE-агенты — см. known-gaps) · **Тип:** addendum к [F-05 Live Market Data](../F-05-live-market-data/README.md) · **Потребитель:** [F-09](../F-09-batch-combo-orders/) `multileg_vector_solver`
+> **Спецификация:** [`feature.yaml`](feature.yaml) · **План:** [implementation-plan](../../../implementation-plan/F-05A-vectorized-external-liquidity.tasks.md)
 > **Источник:** IN-014 — [archive](../../../../incoming-docs/2026-07-07-F-05A-vectorized-external-liquidity-v1.md), [meta](../../../../incoming-docs/IN-014.meta.md), [fragment-map](../../../../incoming-docs/IN-014.fragment-map.md)
+>
+> **Перенесено в собственный каталог 2026-10-27** (ADR-086/IN-019 §8 Этап 1
+> п.5): было `docs/02-system/features/F-05-live-market-data/F-05A-feature.yaml`
+> и `addendum-F05A-vectorized-external-liquidity.md`; теперь отдельный
+> каталог `F-05A-vectorized-external-liquidity/` с `parent: F-05` в
+> `feature.yaml`. Контент не менялся, только расположение файлов.
 
 ## 🧭 Navigation
 
 | Уровень | Артефакт |
 | --- | --- |
-| ☁️ L0 | эта страница + `F-05A-feature.yaml` + L0 system sequences (TODO) |
+| ☁️ L0 | эта страница + `feature.yaml` + L0 system sequences (TODO) |
 | 🌊 L1 | Use Cases `UC-F05A-01..05` (TODO) + L1 service sequences (TODO) |
 | 🐟 L2 | component-internal sequences (TODO) |
 | 💻 src | `cpp/market_data`, `cpp/matching`, `cpp/ledger` (при реализации) |
 
 ## Назначение
 
-F-05A расширяет [F-05](README.md): помимо live ticker/snapshot, `market_data`
+F-05A расширяет [F-05](../F-05-live-market-data/README.md): помимо live ticker/snapshot, `market_data`
 преобразует **реальные внешние стаканы бирж** (CEX/DEX/AMM) в математически
 пригодную форму для F-09 `multileg_vector_solver`.
 
@@ -49,7 +55,7 @@ side/price). Matching multi-asset ликвидности (напр. цикл `BT
 - **Flow segment:** `(w_i, p_i^L=0, p_i^H=d_i^{HL}, q_i, Q_i^{max})`, `D = diag(dHL/q)`.
 - **Residual:** `r = Wx`, `residualNorm = ‖r‖`; converged ⇔ `‖r‖ < tolerance`.
 
-Полная модель — в [`F-05A-feature.yaml`](F-05A-feature.yaml) и IN-014 §3/§13/§16.
+Полная модель — в [`feature.yaml`](feature.yaml) и IN-014 §3/§13/§16.
 
 ## Use Cases
 
@@ -80,23 +86,28 @@ side/price). Matching multi-asset ликвидности (напр. цикл `BT
 
 ## Архитектурные решения (ADR)
 
-- [ADR-047](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — surplus / EXCHANGE_PNL policy (`proposed`, blocker).
-- [ADR-048](../../../03-architecture/adr/ADR-048-qp-solver-backend.md) — QP solver backend OSQP (`proposed`, blocker; активирует [ADR-034](../../../03-architecture/adr/ADR-034-grouped-constraint-solver.md)).
+- [ADR-047](../../../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md) — surplus / EXCHANGE_PNL policy (`accepted` 2026-08-26; реализация money-path разблокирована).
+- [ADR-048](../../../03-architecture/adr/ADR-048-qp-solver-backend.md) — QP solver backend OSQP (`accepted` 2026-08-25; активирует [ADR-034](../../../03-architecture/adr/ADR-034-grouped-constraint-solver.md)).
 
 ## Known Gaps
 
+> Исправлено 2026-10-27 (Этап 1 перенос): ADR-047/048 приняты (`accepted`),
+> этот раздел ранее отставал от `feature.yaml.architectureDecisions`
+> (показывал `proposed`/blocker) — сама реализация векторизации/QP-solver
+> всё равно не начата (`codePaths: []`), это не изменилось.
+
 | ID | Severity | Description |
 | --- | --- | --- |
-| GAP-F05A-001 | blocker | ADR-047 surplus policy — proposed (решение владельца). |
-| GAP-F05A-002 | blocker | ADR-048 QP backend — proposed; QP-решателя в matching пока нет. |
+| GAP-F05A-001 | major | ADR-047 surplus policy принята (accepted); реализация (T-F05A-304/305) не начата. |
+| GAP-F05A-002 | major | ADR-048 QP backend принят (accepted); QP-решателя в matching пока нет (только bisection). |
 | GAP-F05A-003 | major | Dimensional units validation (KI-F05A-003). |
 | GAP-F05A-004 | major | Stale external levels policy (KI-F05A-004). |
 | GAP-F05A-005 | major | Vector/grouped replay в backtest (совм. с AC-F09-010, CN-IN014-05). |
 
 ## Трассировка
 
-- Feature spec: [`F-05A-feature.yaml`](F-05A-feature.yaml)
+- Feature spec: [`feature.yaml`](feature.yaml)
 - Implementation plan: [F-05A-*.tasks.md](../../../implementation-plan/F-05A-vectorized-external-liquidity.tasks.md)
-- Base feature: [F-05 Live Market Data](README.md) · Consumer: [F-09](../F-09-batch-combo-orders/)
+- Base feature: [F-05 Live Market Data](../F-05-live-market-data/README.md) · Consumer: [F-09](../F-09-batch-combo-orders/)
 - Reused: [F-11 External Venues](../F-11-external-venues-lob-to-fob/) · [F-15 Backtest/Replay](../F-15-backtest-replay/)
 - Source: IN-014 (см. header)

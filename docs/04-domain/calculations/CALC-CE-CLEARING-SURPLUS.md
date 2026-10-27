@@ -3,7 +3,7 @@ id: CALC-CE-CLEARING-SURPLUS
 title: Выгода участника в клиринге CE (теоретический излишек S = w²/2α)
 level: fish
 feature: F-18
-status: implemented (BFF, 2026-10-22)
+status: implemented # BFF, 2026-10-22
 code:
   - frontend/api/ce_surplus_accum.js
   - frontend/api/server.js#samplePnlHistoryOnce

@@ -27,7 +27,7 @@
 //   DeleteVenueConfig / ForceReconnect) — operator API для гибкой настройки
 //   venues без рестарта сервиса.
 //
-// Архитектурный паттерн (CLAUDE.md §10):
+// Архитектурный паттерн (.claude/rules/cpp.md):
 //   transport/  — gRPC venues service + Kafka producers/consumers
 //   app/        — этот файл (VenuesLoop) — orchestration
 //   domain/     — VenueSubscription, VenueRawSnapshot, depth_curve_builder

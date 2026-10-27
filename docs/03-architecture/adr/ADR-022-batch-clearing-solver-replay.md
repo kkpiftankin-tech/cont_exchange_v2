@@ -16,7 +16,7 @@ related:
 
 ## Контекст
 
-`matching` сейчас — batch-clearing **симулятор** (CLAUDE.md §15, §26), но он
+`matching` сейчас — batch-clearing **симулятор** ([cpp/matching/CLAUDE.md](../../../cpp/matching/CLAUDE.md), [known-gaps.md](../../00-methodology/known-gaps.md)), но он
 уже эмитит `BatchResult` (`contracts/proto/fob/matching/v1/batch.proto`) с
 диагностикой (`residual_norm`, `solve_time_ms`, `num_active_orders`,
 `config_version`), и F-15 требует детерминированного replay. Контракт и
@@ -59,4 +59,4 @@ related:
 
 ## Обратимость
 
-Контракт `BatchResult` — низкая обратимость (нужен ADR на breaking change, CLAUDE.md §15). Выбор алгоритма solver — обратим, пока соблюдён контракт и replay parity.
+Контракт `BatchResult` — низкая обратимость (нужен ADR на breaking change, [cpp/matching/CLAUDE.md](../../../cpp/matching/CLAUDE.md)). Выбор алгоритма solver — обратим, пока соблюдён контракт и replay parity.

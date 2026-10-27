@@ -8,7 +8,7 @@
 //   OnExecutionReport, OnSyntheticOrder, CurveChecks, HealthChecks).
 //
 //   Решения risk выражаются enum RiskDecision: ACCEPT, REJECT, RESIZE, HALT.
-//   См. CLAUDE.md §16 — принципы risk policy.
+//   См. cpp/risk/CLAUDE.md — принципы risk policy.
 //
 // Concurrency model:
 //   * Один mutex mu_ защищает: global_halt_, instrument_halt_,
@@ -420,7 +420,7 @@ bool RiskUseCases::buildRiskSnapshot(
   }
 
   if (!persisted) {
-    // Hard failure для этого user (CLAUDE.md §16 audit-критично): не
+    // Hard failure для этого user (cpp/risk/CLAUDE.md audit-критично): не
     // публикуем alert без персистентного снапшота.
     return false;
   }
@@ -762,7 +762,7 @@ void RiskUseCases::OnSyntheticOrder(
   auto new_exposure = cex::common::Decimal::add(exposure, cost);
 
   // |new_exposure| через explicit cast к double — допустимо для metrics,
-  // не для money math (см. CLAUDE.md §9 — здесь это проверка лимита, не settlement).
+  // не для money math (см. .claude/rules/data.md — здесь это проверка лимита, не settlement).
   if (std::abs(static_cast<double>(new_exposure)) <= max_exposure) {
     exposures_[venue] = new_exposure;
     return;

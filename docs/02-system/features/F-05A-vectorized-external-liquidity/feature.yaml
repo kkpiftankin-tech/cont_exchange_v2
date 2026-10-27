@@ -1,7 +1,13 @@
 feature:
   id: F-05A
   name: Vectorized External Liquidity for F-09 Batch/Combo Clearing
-  status: planned
+  parent: F-05  # addendum к F-05 Live Market Data, перенесён в свой каталог Этап 1 (ADR-086/IN-019)
+  lifecycle: planned  # planned | active | deprecated
+  status: {docs: complete, code: none, runtime: none}  # было: planned.
+  # ПРИМЕЧАНИЕ: codePaths=[] (ниже) верно для векторизации/QP-solver/UC-01..05.
+  # Но UC-F05A-06 (CE виртуальные контрагенты, ADR-055..059) реализован и
+  # живёт на dev как часть F-18 — границы F-05A/F-18 не согласованы в docs
+  # (см. docs/00-methodology/known-gaps.md). Не разрешаю это здесь.
   owner: core-team
   level: kite
 
@@ -29,6 +35,19 @@ decomposedInto:
   - UC-F05A-04  # Validate Algorithm on Real Exchange Order Books
   - UC-F05A-05  # Replay Vector Clearing Scenario
   - UC-F05A-06  # Run CE Tact with Virtual Counterparties (agents, nodes, 3-level position) — ADR-055..059
+
+parentRequirements:  # FR-F05A-* — docs/02-system/functional-requirements.md#fr-f05a-vectorized-external-liquidity-f-09-clearing (Этап 1 п.6, ADR-086/IN-019)
+  - FR-F05A-001  # получать внешние order levels
+  - FR-F05A-002  # нормализовать level (P_eff)
+  - FR-F05A-003  # построить AssetBasis
+  - FR-F05A-004  # построить w_i
+  - FR-F05A-005  # построить flow-сегмент
+  - FR-F05A-006  # собрать solver input (W, pH, dHL, q, D, source_map)
+  - FR-F05A-007  # решить QP (Wx=0)
+  - FR-F05A-008  # проверить residual
+  - FR-F05A-009  # сформировать исполнения (source-trace)
+  - FR-F05A-010  # представить как F-09 ExecutionGroup
+  - FR-F05A-011  # публиковать batch.outputs/fills/execution.groups/marketdata.snapshots
 
 relatedFeatures:
   - F-04   # общий batch cycle, BatchResult, FillEvent

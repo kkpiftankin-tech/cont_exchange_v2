@@ -21,7 +21,7 @@
 ## Key / Retention
 
 - Key: `agent_id` (v2) — все дельты одного агента идут в одну партицию, сохраняя порядок накопления `c ← c + f`. (v1 использовал ключ уровня house/asset.)
-- Delivery: at-least-once + **идемпотентный consumer** — `ledger` дедуплицирует по `(agent_id, batch_id)` через guard `last_batch_id IS DISTINCT FROM ...` (CLAUDE.md §13, §17).
+- Delivery: at-least-once + **идемпотентный consumer** — `ledger` дедуплицирует по `(agent_id, batch_id)` через guard `last_batch_id IS DISTINCT FROM ...` ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md), [cpp/ledger/CLAUDE.md](../../../cpp/ledger/CLAUDE.md)).
 - Retention: аудит-класс (не market-data); согласовать со значением в `create_topics.sh`.
 
 ## Эволюция payload: `AssetDelta` → `AgentDelta`
@@ -66,7 +66,7 @@ message CeAgentPositionDeltaBatch {
 }
 ```
 
-**Почему это breaking (семантически), даже при additive wire-формате.** Меняется экономический смысл: house **перестаёт** копить позицию по активу вообще (v2: прибыль падает на «счёт дома» — невязку, позиция — только у агента). Consumer, интерпретирующий данные по-старому (`Z_a` через house-дельту), получит неверный результат, даже если Kafka-схема формально совместима. Прямое попадание в CLAUDE.md §3.3 (модель денежных расчётов / clearing algorithm) → **ADR-061 обязателен**.
+**Почему это breaking (семантически), даже при additive wire-формате.** Меняется экономический смысл: house **перестаёт** копить позицию по активу вообще (v2: прибыль падает на «счёт дома» — невязку, позиция — только у агента). Consumer, интерпретирующий данные по-старому (`Z_a` через house-дельту), получит неверный результат, даже если Kafka-схема формально совместима. Прямое попадание в [CLAUDE.md §1](../../../CLAUDE.md) (модель денежных расчётов / clearing algorithm) → **ADR-061 обязателен**.
 
 **Миграция.** Топик internal-only, единственный consumer — `ledger`. Переключить producer (`matching`) и consumer (`ledger`) на новый payload синхронно в одном релизе (без dual-publish периода). Старые `AssetDelta` / `CePositionDeltaBatch` — не переиспользовать номера полей, пометить deprecated, вывести из proto отдельной чисткой (sunset-план в ADR-061).
 
@@ -87,7 +87,7 @@ message CeAgentPositionDeltaBatch {
 
 ## Decimal / EventMeta
 
-- `delta`, `price_used`, `delta_value`, `base_price`, `fair_price` — `fob.common.v1.Decimal` (деньги/объём/цена, CLAUDE.md §9).
+- `delta`, `price_used`, `delta_value`, `base_price`, `fair_price` — `fob.common.v1.Decimal` (деньги/объём/цена, [.claude/rules/data.md](../../../.claude/rules/data.md)).
 - `CeAgentPositionDeltaBatch.meta` — `EventMeta` присутствует (обязателен для публикуемого в Kafka сообщения; несёт `correlation_id`, `partition_key`).
 
 ## Used In

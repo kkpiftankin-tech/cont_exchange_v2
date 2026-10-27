@@ -4,7 +4,7 @@
 
 - Source: **IN-0XX** — `CE_algorithm_spec.md`, `CE_virtual_counterparties.md` (⧗ регистрация ingest-docs
   ожидает пере-отправки файлов: хук авто-архивации не сохранил вложения в `incoming-docs/`).
-- Feature: [F-05A Vectorized External Liquidity](../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A Vectorized External Liquidity](../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use case: [UC-F05A-06 Run CE Tact with Virtual Counterparties](../02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/use-case.md)
   ([L0](../02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/sequences/SEQ-UC-F05A-06-system.md),
   [L1](../05-components/sequences/SEQ-F05A-UC-F05A-06-services.md))

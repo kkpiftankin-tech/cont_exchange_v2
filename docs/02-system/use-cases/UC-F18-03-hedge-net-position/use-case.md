@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F18-03
+title: Хеджировать чистую позицию сверх порога
 level: sea
+feature: F-18
+system-sequence: sequences/SEQ-UC-F18-03-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F18-UC-F18-02-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F18-03. Хеджировать чистую позицию сверх порога
 

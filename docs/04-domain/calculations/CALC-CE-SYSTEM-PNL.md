@@ -1,7 +1,7 @@
 ---
 id: CALC-CE-SYSTEM-PNL
 title: P&L системы CE (MTM реальных остатков) и инварианты
-status: partially implemented (торговый результат и переоценка запасов — BFF, 2026-10-22; инварианты §4 — логи ledger)
+status: partial # торговый результат и переоценка запасов — BFF, 2026-10-22; инварианты §4 — логи ledger
 level: fish
 feature: F-18
 related_adr: [ADR-061, ADR-069, ADR-073]

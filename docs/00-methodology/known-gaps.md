@@ -42,6 +42,29 @@
   2026-10-27): добавить `metrics_.ObserveError("ce_clearing_input_rejected")` в
   catch-блок и `EXPECT_THROW(..., std::out_of_range)` в `ce_graph_assembler_test.cpp`.
 
+- **`feature.yaml.status` и `specs/domain/feature-component-map.yaml[F-XX].status`
+  используют разные схемы после Этап 1 (ADR-086/IN-019 §4.4, 2026-10-27).**
+  `feature.yaml` перешёл на `lifecycle: planned|active|deprecated` +
+  `status: {docs, code, runtime}`; `feature-component-map.yaml` остался на
+  старой плоской строке (`in-progress-mvp`, `docs-complete-code-gated`, ...).
+  `tools/feature-yaml-checker/check.py` больше не падает ERROR на этом
+  расхождении (понижено до WARN — две разные схемы нельзя сравнивать строкой
+  в строку), но сама рассинхронизация не устранена. Решение по полной миграции
+  `feature-component-map.yaml` на новую схему (или по её выводу из
+  эксплуатации как дубликата — сам файл дублирует feature.yaml, что отдельная
+  давняя проблема) не принято; не делать молча в рамках точечных правок.
+
+- **`F-18.relatedAdrs` переименован из `parentRequirements`** (Этап 1 п.6,
+  ADR-086/IN-019, 2026-10-27) — это поле ошибочно хранило ADR, а не
+  `FR-*` бизнес-требования (конвенция `relatedAdrs`/`architectureDecisions`
+  уже использовалась в F-06/F-09/F-05A). F-18 и F-20 при этой правке
+  остались с `parentRequirements: []` — у обеих фич вообще нет `FR-*` в
+  `docs/02-system/functional-requirements.md` (в отличие от остальных 17
+  фич + F-05A, где перенос был механическим по явной строке
+  `Acceptance: F-XX`). Нужно ли писать retroactive `FR-CE-*`/`FR-SIM-*` —
+  продуктовое решение, не инженерное; зафиксировано как
+  `OQ-F18v2-25`/`OQ-F20-01`, не решено здесь.
+
 При любой задаче явно указывай, является ли изменение:
 
 - `docs-only`;
@@ -52,4 +75,5 @@
 - `migration from legacy_mvp`.
 
 Это высокоуровневый список; конкретный статус по фиче — `feature.yaml`
-(`status: planned|stub|implemented`), не здесь.
+(`lifecycle: planned|active|deprecated` + `status: {docs, code, runtime}`,
+Этап 1 ADR-086/IN-019), не здесь.

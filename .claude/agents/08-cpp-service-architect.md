@@ -16,7 +16,7 @@ color: green
 
 # Жёсткие правила
 
-- Каждый сервис придерживается layering из [CLAUDE.md §10.1](CLAUDE.md):
+- Каждый сервис придерживается layering из [.claude/rules/cpp.md](../rules/cpp.md):
   - `src/transport/` — HTTP/gRPC handlers, Kafka consumer wrappers
   - `src/app/` — use cases (orchestration)
   - `src/domain/` — entities, value objects, invariants (pure logic)

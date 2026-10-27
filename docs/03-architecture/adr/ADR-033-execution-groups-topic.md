@@ -28,8 +28,8 @@ F-04 публикует результат клиринга в `batch.outputs` (
 `ExecutionGroup` с согласованным вектором исполнений и набором `LegFill`,
 плюс commit rule «LegFill фиксируется не раньше или одновременно с
 ExecutionGroup» (IN-011 §11.4, §20). Запихивать grouped-результат в
-`batch.outputs` без схемы и ключа партиционирования нельзя (CLAUDE.md §13,
-Conflict CN-IN011-03). Изменение схемы топика требует ADR (CLAUDE.md §3.3).
+`batch.outputs` без схемы и ключа партиционирования нельзя ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md),
+Conflict CN-IN011-03). Изменение схемы топика требует ADR ([CLAUDE.md §1](../../../CLAUDE.md)).
 
 ## Решение
 
@@ -84,4 +84,4 @@ envelope — `ExecutionGroup` в `execution.groups`.
 
 Низкая. Имя топика, ключ и схема — часть контракта; ретайр/переименование
 требует нового ADR и миграции consumers (как `execution.venue` vs
-`execution.reports`, CLAUDE.md §7.3).
+`execution.reports`, [.claude/rules/contracts.md](../../../.claude/rules/contracts.md)).

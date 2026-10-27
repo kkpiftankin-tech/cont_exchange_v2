@@ -274,7 +274,7 @@ const ReverseConfirmModal = ({ item, isSubmitting, onClose, onConfirm }) => {
             placeholder="operator-name / employee ID"
             onChange={(e) => setOperatorId(e.target.value)}
           />
-          <small>Записывается в audit log (ADR-039 §4, CLAUDE.md §22). Минимум 3 символа.</small>
+          <small>Записывается в audit log (ADR-039 §4, CLAUDE.md §1). Минимум 3 символа.</small>
         </label>
         <div className="comp-modal-actions">
           <button type="button" className="comp-modal-confirm" disabled={!valid || isSubmitting}

@@ -1,19 +1,26 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F15-07
+title: Replay исторического batch (legacy, historical/superseded)
 level: sea
+feature: F-15
+system-sequence: sequences/SEQ-UC-F15-07-system.md
+status: superseded  # draft | active | superseded | deprecated
 ---
--->
 
-# UC-F15-01. (Historical / Superseded) — Replay исторического batch
+# UC-F15-07 (legacy). (Historical / Superseded) — Replay исторического batch
+
+> **Перенумеровано 2026-10-27** ([ADR-086](../../../03-architecture/adr/ADR-086-two-axis-reply-routing.md)
+> Этап 1, IN-019 §8 Этап 1 п.2): этот use case раньше ошибочно делил номер
+> `UC-F15-01` с [UC-F15-01. Create Replay Session](../UC-F15-01-create-replay-session/use-case.md).
+> Контент не менялся, только номер (01 → 07) и путь (`git mv`).
 
 ## 🧭 Navigation (IN-013)
 
 | Уровень | Где |
 | --- | --- |
 | ⬆️ Parent feature L0 ☁️ | [F-15-backtest-replay](../../features/F-15-backtest-replay/) |
-| ☁️ L0 system sequence | [SEQ-UC-F15-01-system](sequences/SEQ-UC-F15-01-system.md) — system как чёрный ящик |
-| 🌊 L1 service sequence | [SEQ-F15-UC-F15-01-services](../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md) — взаимодействие сервисов |
+| ☁️ L0 system sequence | [SEQ-UC-F15-07-system](sequences/SEQ-UC-F15-07-system.md) — system как чёрный ящик (historical) |
+| 🌊 L1 service sequence | N/A — исторический артефакт; актуальная — у [UC-F15-01 Create Replay Session](../UC-F15-01-create-replay-session/use-case.md) |
 | 🐟 L2 component sequences | см. component overviews (ссылки в parent feature) |
 | 💻 Source code | [`cpp/`](../../../../cpp/) |
 
@@ -35,5 +42,6 @@ level: sea
 
 ## Note
 
-Старая `sequences/SEQ-UC-F15-01-system.md` оставлена как historical artifact;
-актуальные system-sequence — в каждом из 6 новых UC.
+Старая `sequences/SEQ-UC-F15-07-system.md` (до 2026-10-27 — `SEQ-UC-F15-01-system.md`)
+оставлена как historical artifact; актуальные system-sequence — в каждом из
+6 новых UC.

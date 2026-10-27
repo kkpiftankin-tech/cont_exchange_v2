@@ -1,19 +1,18 @@
-<!--
 ---
 id: UC-F05A-02
 title: "Run Vector Clearing with F-09 Solver"
 level: sea
-parent-feature: F-05A
+feature: F-05A
 system-sequence: "sequences/SEQ-UC-F05A-02-system.md"
 service-sequence: "../../../05-components/sequences/SEQ-F05A-UC-F05A-02-services.md"
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F05A-02. Run Vector Clearing with F-09 Solver
 
 ## Feature
 
-- [F-05A. Vectorized External Liquidity](../../features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- [F-05A. Vectorized External Liquidity](../../features/F-05A-vectorized-external-liquidity/README.md)
 
 ## Primary Actor
 

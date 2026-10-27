@@ -23,7 +23,7 @@ related:
 
 - **`legacy_mvp/` — read-only reference**, кроме явных migration-задач.
 - **Не источник истины**: при конфликте с `docs/` или `contracts/proto/`
-  приоритет у docs/contracts (CLAUDE.md §3.1).
+  приоритет у docs/contracts ([CLAUDE.md §1](../../../CLAUDE.md)).
 - **Никаких новых production-фич** в `legacy_mvp/`.
 - **Mapping** legacy-сервис → целевой C++ компонент оформляется в
   migration-доке перед переносом.

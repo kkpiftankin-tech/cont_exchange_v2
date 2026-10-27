@@ -87,7 +87,7 @@ infra/         DB repositories, external clients, Kafka wrappers, gRPC clients
 - Не хардкодить адреса сервисов, брокеров, тайминги, лимиты, secrets.
 - Использовать env vars через `cex::common::Env`.
 - Dev defaults допустимы, если явно безопасны и подходят для docker-compose.
-- Prod-секреты никогда не хранить в git (правило в CLAUDE.md §3;
+- Prod-секреты никогда не хранить в git (правило в [CLAUDE.md §1](../../CLAUDE.md);
   `permissions.deny` в `.claude/settings.json` блокирует чтение `infra/.env`
   и `secrets/**` инструментом Read).
 

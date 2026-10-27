@@ -10,7 +10,7 @@ paths: ["contracts/**", "infra/kafka/**", "docs/06-api/**"]
 через `contracts/CMakeLists.txt` в C++ library `contracts_proto`.
 
 Не меняй generated files вручную (`.pb.cc`, `.pb.h`, `.grpc.pb.cc`,
-`.grpc.pb.h`, CLAUDE.md §12.4). Меняй `.proto`, затем пересобирай проект.
+`.grpc.pb.h`, [.claude/rules/cpp.md](cpp.md)). Меняй `.proto`, затем пересобирай проект.
 Если generated files появляются в build directory, не добавлять их как
 source-of-truth.
 
@@ -85,7 +85,7 @@ breaking running ledger instances.
 5. обнови тесты;
 6. убедись, что старые consumers не ломаются без миграционного плана.
 
-Для breaking changes нужен ADR (CLAUDE.md §3.3).
+Для breaking changes нужен ADR ([CLAUDE.md §1](../../CLAUDE.md)).
 
 ## Event-first (для Kafka-flow)
 

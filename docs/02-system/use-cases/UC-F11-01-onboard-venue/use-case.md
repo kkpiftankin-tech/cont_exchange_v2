@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F11-01
+title: Подключить новую площадку (operator onboarding)
 level: sea
+feature: F-11
+system-sequence: sequences/SEQ-UC-F11-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F11-01. Подключить новую площадку (operator onboarding)
 

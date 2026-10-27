@@ -17,7 +17,7 @@ related:
 
 # Data: CE Agent Position (позиция виртуального контрагента, v2)
 
-> **Status:** ✅ реализовано (Э2-шаг-2, 2026-09-16, T-F18-202/203/204 + T-F18-205 party_type=AGENT). `ce_agent_position` — в `infra/postgres/init.sql` (ровно эта схема, без CHECK неотрицательности). `ledger` накапливает `c ← c + f` per `(agent_id, asset, venue)` в write-through кэше (`LedgerUseCases::agent_positions_`, `ApplyPositionDelta`) + опционально в PG (`PostgresAgentPositionRepository`, `ledger_uc.hpp/.cpp`, `infra/postgres_repositories.{hpp,cpp}`), с идемпотентностью по `last_batch_id`. Читается через `LedgerService/GetAgentPositions` ([ledger-agent-positions.md](../06-api/grpc/ledger-agent-positions.md)). `party_type = AGENT` в `ReserveFunds` — no-op (ADR-063, [ledger-reserve-funds.md](../06-api/grpc/ledger-reserve-funds.md)). Активация — data-driven по непустому `agent_id` в `AssetDelta` (не отдельным env-флагом на стороне ledger; флаг `CE_AGENT_POS` включается на стороне matching, T-F18-201). `in_flight` (Э3, полоса `±q`) и `ce_transfer` (Э5) — ещё не реализованы, поле/таблица зарезервированы. Деньги/объёмы — `NUMERIC(38,18)` (PG), mirror `fob.common.v1.Decimal` (CLAUDE.md §9).
+> **Status:** ✅ реализовано (Э2-шаг-2, 2026-09-16, T-F18-202/203/204 + T-F18-205 party_type=AGENT). `ce_agent_position` — в `infra/postgres/init.sql` (ровно эта схема, без CHECK неотрицательности). `ledger` накапливает `c ← c + f` per `(agent_id, asset, venue)` в write-through кэше (`LedgerUseCases::agent_positions_`, `ApplyPositionDelta`) + опционально в PG (`PostgresAgentPositionRepository`, `ledger_uc.hpp/.cpp`, `infra/postgres_repositories.{hpp,cpp}`), с идемпотентностью по `last_batch_id`. Читается через `LedgerService/GetAgentPositions` ([ledger-agent-positions.md](../06-api/grpc/ledger-agent-positions.md)). `party_type = AGENT` в `ReserveFunds` — no-op (ADR-063, [ledger-reserve-funds.md](../06-api/grpc/ledger-reserve-funds.md)). Активация — data-driven по непустому `agent_id` в `AssetDelta` (не отдельным env-флагом на стороне ledger; флаг `CE_AGENT_POS` включается на стороне matching, T-F18-201). `in_flight` (Э3, полоса `±q`) и `ce_transfer` (Э5) — ещё не реализованы, поле/таблица зарезервированы. Деньги/объёмы — `NUMERIC(38,18)` (PG), mirror `fob.common.v1.Decimal` ([.claude/rules/data.md](../../.claude/rules/data.md)).
 
 ## Назначение
 
@@ -58,7 +58,7 @@ PK `(agent_id, asset, venue)` — трёхсоставной; прецедент
 
 ### Upsert-семантика с guard по `last_batch_id` (идемпотентность per batch)
 
-За один такт на агента приходит ОДНА дельта = `f_j` (A6, каждый такт) за вычетом эмитированного (A7, только при выходе за `±q`). `ledger` применяет её одним upsert. Kafka `ce.position.delta` — at-least-once, поэтому дельта может прийти повторно; guard по `last_batch_id` защищает от двойного применения (CLAUDE.md §17 — «применять fill дважды» запрещено):
+За один такт на агента приходит ОДНА дельта = `f_j` (A6, каждый такт) за вычетом эмитированного (A7, только при выходе за `±q`). `ledger` применяет её одним upsert. Kafka `ce.position.delta` — at-least-once, поэтому дельта может прийти повторно; guard по `last_batch_id` защищает от двойного применения ([cpp/ledger/CLAUDE.md](../../cpp/ledger/CLAUDE.md) — «применять fill дважды» запрещено):
 
 ```sql
 INSERT INTO ce_agent_position
@@ -75,7 +75,7 @@ ON CONFLICT (agent_id, asset, venue) DO UPDATE
 
 ### Денежная граница
 
-`σ, α, c, π` в клиринговом ядре — `double` (диагностика). `c_j` пересекает границу `double → Decimal` **ровно в момент записи** в эту таблицу (A6/A7) — единственная точка, где позиция становится persist-истиной. Маппинг обязан идти через `fob.common.v1.Decimal` с явным `scale`, без прямого `double → NUMERIC` каста без округления (CLAUDE.md §9).
+`σ, α, c, π` в клиринговом ядре — `double` (диагностика). `c_j` пересекает границу `double → Decimal` **ровно в момент записи** в эту таблицу (A6/A7) — единственная точка, где позиция становится persist-истиной. Маппинг обязан идти через `fob.common.v1.Decimal` с явным `scale`, без прямого `double → NUMERIC` каста без округления ([.claude/rules/data.md](../../.claude/rules/data.md)).
 
 ## `ce_transfer` (state machine перевоза)
 
@@ -116,7 +116,7 @@ Writer: `venues` (симулятор перевоза, F-20). `matching` тол�
 | резерв | есть (`reserved_balance`) | колонка есть, содержательно не используется | **нет концепта резерва** |
 | ключ | `(user_id, asset)` | `(user_id, asset)` (magic string) | `(agent_id, asset, venue)` |
 
-Впихнуть AGENT в `accounts` нельзя: пришлось бы снять `CHECK (free_balance >= 0)` для всей таблицы (тихо ослабляет инвариант неотрицательности клиентских балансов — недопустимо, CLAUDE.md §8.2) или добавлять nullable-колонки под чужой ключ.
+Впихнуть AGENT в `accounts` нельзя: пришлось бы снять `CHECK (free_balance >= 0)` для всей таблицы (тихо ослабляет инвариант неотрицательности клиентских балансов — недопустимо, [docs/04-domain/core-concepts-and-invariants.md](../04-domain/core-concepts-and-invariants.md)) или добавлять nullable-колонки под чужой ключ.
 
 - **CLIENT / HOUSE** остаются в `accounts` — различаются через `party_type` как **generated column** (не меняет инварианты, не требует переписи CHECK, безопасно для `ALTER` на живой таблице, Postgres 12+):
 

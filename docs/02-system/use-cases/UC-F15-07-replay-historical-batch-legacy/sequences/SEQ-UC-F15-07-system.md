@@ -1,15 +1,15 @@
 <!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: SEQ-UC-F15-01-system
+id: SEQ-UC-F15-07-system
 level: kite
 ---
 -->
 
-# SEQ-UC-F15-01-system. Replay: system view
+# SEQ-UC-F15-07-system. Replay (legacy, formerly UC-F15-01): system view
 
 ## Type
 
-System Context Sequence
+System Context Sequence (historical artifact — see use-case.md superseded note)
 
 ## Feature
 
@@ -17,7 +17,7 @@ System Context Sequence
 
 ## Use Case
 
-- [UC-F15-01](../use-case.md)
+- [UC-F15-07 (legacy)](../use-case.md)
 
 ## Participants
 
@@ -38,4 +38,6 @@ sequenceDiagram
 
 ## Related Service Sequence
 
-- [SEQ-F15-UC-F15-01-services](../../../../05-components/sequences/SEQ-F15-UC-F15-01-services.md)
+N/A — исторический артефакт, собственной service-sequence не имел. Актуальная
+service-sequence (`SEQ-F15-UC-F15-01-services.md`) принадлежит
+[UC-F15-01 Create Replay Session](../../UC-F15-01-create-replay-session/use-case.md).

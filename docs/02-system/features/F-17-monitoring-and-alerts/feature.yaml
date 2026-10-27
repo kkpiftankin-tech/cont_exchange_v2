@@ -1,9 +1,14 @@
 feature:
   id: F-17
   name: Monitoring & Alerting (Observability)
-  status: partially-implemented-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: partially-implemented-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-REPORT-002  # регуляторная выгрузка
+  - FR-OPS-001  # мониторинг
 
 description: >
   Непрерывный сбор метрик производительности (solve time, fill rate, IS,

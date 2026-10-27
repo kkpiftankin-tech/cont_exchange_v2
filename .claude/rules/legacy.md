@@ -14,5 +14,5 @@ paths: ["legacy_mvp/**"]
   паттерны;
 - при переносе кода оформлять как отдельный refactoring/migration task;
 - не считать legacy architecture источником истины, если она конфликтует с
-  `docs/` или `contracts/proto/` (приоритет источников — CLAUDE.md §3.1,
+  `docs/` или `contracts/proto/` (приоритет источников — [CLAUDE.md §1](../../CLAUDE.md),
   `legacy_mvp/` стоит там последним).

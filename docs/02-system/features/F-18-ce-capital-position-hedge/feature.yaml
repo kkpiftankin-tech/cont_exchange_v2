@@ -1,7 +1,8 @@
 feature:
   id: F-18
   name: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge"
-  status: draft            # draft | in-progress | shipped | deprecated
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: complete, code: partial, runtime: dev}  # было: draft (устарело — feature-component-map.yaml уже указывал docs-complete-code-gated; код существует за флагами, ADR-061+)
   owner: core-team
   level: kite              # IN-013: Feature всегда kite ☁️
 
@@ -15,7 +16,7 @@ decomposedInto:
   - UC-F18-03            # [SUPERSEDED v1] hedge net position beyond θ_a — заменён per-agent полосой ±q_j
   - UC-F18-04            # [v2] хедж по полосе ±q: такт клиринга агентов + эмиссия сверх полосы
 
-parentRequirements:
+relatedAdrs:  # переименовано из parentRequirements Этап 1 п.6 (ADR-086/IN-019) — это ADR, не FR-* бизнес-требования; см. ниже
   - ADR-061             # [accepted 2026-09-15] смена модели позиции CE: с нуля, знаковая, без target, house-невязка, полоса ±q, party_type AGENT (supersede ADR-057)
   - ADR-055             # revised — убрать STOCK-агентов (плечи запаса)
   - ADR-056             # revised — убрать book-узел/склад; добавить house-столбец
@@ -23,6 +24,10 @@ parentRequirements:
   - ADR-081             # [proposed 2026-10-19] ширина полосы хеджа: ручной режим и автоматический по волатильности
   - ADR-082             # [proposed 2026-10-20] измерение ликвидности бирж (оборот ленты ν, коэффициент исполнения f) и обратная связь в глубину агента, размер заявки и порог хеджа; шаги 0–2 реализованы (флаги выключены), 3–4 нет; карточка CALC-VENUE-LIQUIDITY-STATS
   - ADR-079             # [proposed 2026-10-16] диагностика решения клиринга: снимок последнего такта в matching → BFF → панель «Решение клиринга» на вкладке «Граф»; карточка CALC-CE-CLEARING-DIAG
+
+parentRequirements: []  # FR-* бизнес-требование для F-18 в docs/02-system/functional-requirements.md ОТСУТСТВУЕТ
+  # (CE виртуальные контрагенты не описаны на уровне FR-*, только через ADR выше) —
+  # открытый вопрос, не решаю здесь сам (Этап 1 п.6, ADR-086/IN-019; см. known-gaps.md)
 
 description: >
   Биржа CE (Continuous Exchange) выступает дилером через двух виртуальных контрагентов:
@@ -163,7 +168,7 @@ knownIssues:
     description: >
       v2 содержательно ПРОТИВОРЕЧИТ v1 (UC-F18-01..03, ADR-054/057): модель
       «капитал → target → net-хедж» заменяется на «знаковая позиция агента с нуля,
-      без target, house-невязка, полоса ±q». Per CLAUDE.md §0a (Conflict rule):
+      без target, house-невязка, полоса ±q». Per .claude/rules/docs-as-code.md (Conflict rule):
       требуется ADR-061 (supersede ADR-057; ревизии ADR-055/056/058) и Conflict Notes
       в UC-F18-01..03 ДО кода. UC-F18-01..03 помечены superseded, не удалены.
     location: docs/03-architecture/adr/ (ADR-061 planned), UC-F18-01..03

@@ -10,7 +10,7 @@ operator-driven политика — [ADR-039](../../03-architecture/adr/ADR-039
 
 ## Purpose
 
-matching — единственный владелец таблицы `combo_compensations` (CLAUDE.md §14/§17):
+matching — единственный владелец таблицы `combo_compensations` ([.claude/rules/data.md](../../../.claude/rules/data.md)/§17):
 в MVP-5 он записывает `pending`-компенсации при провале внешней combo-ноги (ADR-037).
 Для MVP-6 operator-driven resolution endpoint живёт в **order_flow** (он владеет
 созданием reversing-FlowOrder, §10.3), поэтому matching экспонирует read+resolve
@@ -52,7 +52,7 @@ service CompensationService {
 
 ## Money / invariants
 
-- `internal_filled_qty` — `fob.common.v1.Decimal` (никаких double, CLAUDE.md §9). Это
+- `internal_filled_qty` — `fob.common.v1.Decimal` (никаких double, [.claude/rules/data.md](../../../.claude/rules/data.md)). Это
   лишь снимок; объём для `reverse_internal` пересчитывается из
   `combo_order_legs.filled_cum` на момент resolution (ADR-039 §3, ADR-040 §3).
 - `action ∈ {reverse_internal, retry_external, accept}` — валидируется сервером;

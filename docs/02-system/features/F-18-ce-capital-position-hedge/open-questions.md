@@ -313,3 +313,24 @@
 - **Статус:** `open`.
 - **Адресат:** владелец + trading-domain-specialist.
 - **Источник:** [EXP-2026-10-15-data-validity](../../../../docs/experiments/EXP-2026-10-15-data-validity.md).
+
+### OQ-F18v2-25 — у F-18 нет FR-* бизнес-требования уровня functional-requirements.md
+
+- **Вопрос.** При нормализации `feature.yaml.parentRequirements` (Этап 1
+  п.6, ADR-086/IN-019, 2026-10-27) обнаружено: у 17 из 19 фич (F-01..F-17)
+  и у F-05A каждый `FR-*` в `docs/02-system/functional-requirements.md`
+  явно называет свою фичу (`Acceptance: F-XX`) — перенос в
+  `feature.yaml.parentRequirements` был чисто механическим. У F-18 такого
+  `FR-*` нет вообще: CE виртуальные контрагенты/band hedge выросли из ADR
+  (ADR-055..059/061/079/081/082/083/084/085) и ревью-сводки, а не из
+  исходного документа бизнес-требований 2026 Q2/Q3. Нужно решение: писать
+  retroactive `FR-CE-*` сейчас (кто формулирует требование постфактум —
+  задача не инженерная), или сознательно оставить F-18 без этого уровня
+  трассировки (ADR/UC уже покрывают её достаточно)? Тот же вопрос у F-20
+  (см. его `open-questions.md`).
+- **Влияет на:** `feature.yaml.parentRequirements` (сейчас `[]`),
+  полноту traceability-цепочки Business Requirement → Feature.
+- **Статус:** `open`.
+- **Адресат:** владелец (решение продуктовое — писать ли FR-* постфактум).
+- **Источник:** Этап 1 п.6 (ADR-086/IN-019); см. также
+  `docs/00-methodology/known-gaps.md`.

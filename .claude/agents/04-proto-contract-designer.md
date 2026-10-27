@@ -36,7 +36,7 @@ color: yellow
 - `specs/contracts/proto-map.yaml`
 - `docs/06-api/grpc/`, `docs/06-api/rest/`, `docs/06-api/messaging/`
 - `infra/kafka/create_topics.sh`
-- [CLAUDE.md §7](CLAUDE.md) — контракты и топики
+- [.claude/rules/contracts.md](../rules/contracts.md) — контракты и топики
 
 # Выходы
 

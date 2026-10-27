@@ -62,7 +62,7 @@ message ApplyNodeTransferRequest {
 
 ## Used In Features
 
-- [F-05A. Vectorized External Liquidity](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- [F-05A. Vectorized External Liquidity](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 
 ## Used In Use Cases
 

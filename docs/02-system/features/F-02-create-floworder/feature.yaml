@@ -1,9 +1,16 @@
 feature:
   id: F-02
   name: Create FlowOrder
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-ORDER-001  # поддержка типов заявок
+  - FR-ORDER-002  # параметры заявки
+  - FR-ORDER-004  # exchange-provider
+  - FR-LEDGER-001  # балансы и резервы
 
 description: >
   Клиент создаёт FlowOrder через HTTP API gateway или напрямую через gRPC.

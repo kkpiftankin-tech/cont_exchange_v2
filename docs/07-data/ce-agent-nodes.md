@@ -135,7 +135,7 @@ BFF уже селектит 9 колонок ([`server.js:6576`](../../frontend/
 
 ## Used In
 
-- Feature: [F-05A](../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use case: [UC-F05A-06](../02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/use-case.md)
 - Sequence: [SEQ-F05A-UC-F05A-06-services](../05-components/sequences/SEQ-F05A-UC-F05A-06-services.md)
 - Tasks: [F-05A-CE-agents.tasks.md](../implementation-plan/F-05A-CE-agents.tasks.md) (T-CEA-001/002/202/401)
@@ -147,7 +147,7 @@ BFF уже селектит 9 колонок ([`server.js:6576`](../../frontend/
 (A0–A8). Она **пересматривает** модель, зафиксированную в этом файле (ADR-055…059). Ниже —
 что именно superseded; каноническая v2-схема позиции — в
 [`ce-agent-position.md`](ce-agent-position.md), решение — под ADR-061 (TODO, supersedes
-ADR-057/058). Старые описания НЕ удаляются (правило истории ADR, CLAUDE.md §3.3) — помечаются.
+ADR-057/058). Старые описания НЕ удаляются (правило истории ADR, [CLAUDE.md §1](../../CLAUDE.md)) — помечаются.
 
 - **CN-A. `target` / STOCK-агенты (плечи запаса) / `__book__`-узел — SUPERSEDED.**
   В v2 нет ни цели `target` (казначейство), ни агентов-плеч запаса, ни book-узла. Узлы — только

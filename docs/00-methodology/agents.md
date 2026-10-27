@@ -1,46 +1,58 @@
 # Специализированные агенты проекта (SDLC subagents)
 
-Проект использует набор **специализированных субагентов** Claude Code, каждый из которых
-покрывает свой этап docs-as-code конвейера
-(Business Requirement → Feature → Use Case → Sequences → Contracts → Data → Components →
-Tests → Code → Review). Агенты вызываются через инструмент **Agent** (`subagent_type`);
-координацию between ними ведёт `sdlc-coordinator`.
+Проект использует набор **специализированных субагентов** Claude Code.
+Агенты вызываются через инструмент **Agent** (`subagent_type`); какого агента
+вызывать и когда — решает `.claude/rules/agent-routing.md` (классы S/M/L/XL +
+триггеры эскалации), не фиксированный порядок этапов.
 
-> **Где заданы.** Агенты предоставляются на уровне сессии/SDK (frontmatter
-> `.claude/agents/*.md` или `agents` в SDK), а не хранятся как файлы в этом репозитории.
-> Этот документ — **канонический реестр-описание** для команды. Доступность конкретного
-> агента может отличаться от сессии к сессии; актуальный список — в системном сообщении
-> «Available agent types».
+> **Где заданы.** Агенты — файлы `.claude/agents/*.md` в этом репозитории
+> (frontmatter `name`/`description`/`tools`/`model`/`maxTurns` + тело —
+> системный промпт). Это не внешняя SDK-конфигурация — правка файла меняет
+> поведение агента в следующем вызове. Актуальный список для текущей сессии
+> — системное сообщение «Available agent types».
 
-## Карта: этап SDLC → агент
+## Карта: уровень спецификации (ось Р) → агент
 
-| Этап (docs-as-code) | Агент | Артефакты на выходе |
-|---|---|---|
-| 1. Бизнес-требования | `business-analyst` | business requirements, goals, users, feature candidates |
-| 2. Системный анализ | `system-analyst` | feature.yaml, use cases, L0/L1 sequence diagrams, FR/NFR, acceptance criteria |
-| 3. Архитектура | `solution-architect` | C4 (C1/C2), границы сервисов, ADR, integration/deployment views |
-| 3a. Домен | `trading-domain-specialist` | FOB/CSLO matching, risk/ledger/hedge/venue правила, инварианты, формулы, тест-сценарии |
-| 4. Контракты | `proto-contract-designer` | protobuf (gRPC + Kafka envelopes), `docs/06-api/`, регистрация топиков, backward-compat |
-| 5. Данные | `data-schema-designer` | PostgreSQL OLTP + ClickHouse OLAP схемы, миграции, data-flow |
-| 6. Внутренняя архитектура сервиса | `cpp-service-architect` | слои C++ (transport/app/domain/infra), gRPC-хендлеры, порты, Kafka-обвязка |
-| 7. Frontend | `frontend-architect` | страницы/компоненты, customer vs ops chrome, API-usage, состояния, UI acceptance |
-| 8. Инфраструктура | `devops-engineer` | Docker Compose, Dockerfile, env, Kafka topic init, health checks, CI, deploy |
-| 9. План реализации | `implementation-planner` | задачи `PR-FXX-NNN` / `T-FXX-NNN`, привязанные к файлам/тестам/AC |
-| 10. Тесты | `test-architect` | unit/integration/E2E/contract/replay/SLA тест-планы |
-| 11. Реализация | `code-implementer` | реализация **одной** задачи `T-FXX-NNN` с тестами (в worktree-изоляции) |
-| 12. Ревью (качество) | `code-reviewer` | ревью корректности/слоёв/traceability/money-инвариантов/тестов (read-only) |
-| 12a. Ревью (безопасность) | `security-reviewer` | auth/authz/secrets/replay/audit/KYC/operator-safety (read-only) |
-| Ингест документации | `docs-ingestion-engineer` | регистрация IN-NNN → segment → classify → map → normalize (навык `ingest-docs`) |
-| Координация | `sdlc-coordinator` | решает, какой специалист что производит для фичи F-XX |
+Из [IN-019](../../incoming-docs/IN-019.meta.md) §3.2 (принято как целевая
+модель, [ADR-086](../03-architecture/adr/ADR-086-two-axis-reply-routing.md)).
+**Это целевая раскладка, не действующий порядок вызова** — ревизия
+`description`/тела всех 16 агентов под эту таблицу (явный `Use when`
+уровень Р, `Returns` до 30 строк) запланирована на Этап 6 плана IN-019 и
+ещё не произведена; сегодня агенты вызываются по триггерам
+`.claude/rules/agent-routing.md`, не по номеру Р. Номер агента — его имя,
+не позиция на оси: `06` работает на Р4, `07` — на Р8.
+
+| Р | Уровень (левая ветвь — спецификация) | Агент-специалист | Проверка на правой ветви |
+|---|---|---|---|
+| Р1 | Бизнес-требование | `business-analyst` | приёмка владельцем на экране (Р15) |
+| Р2 | Возможность, AC, сценарий | `system-analyst` | приёмочные тесты по AC |
+| Р3 | Архитектура | `solution-architect` | архитектурные проверки (границы, зависимости) |
+| Р4 | Домен | `trading-domain-specialist` | исполняемые примеры CALC, инвариант-тесты |
+| Р5 | Взаимодействие сервисов | `system-analyst`, `cpp-service-architect` | интеграционные и e2e-тесты |
+| Р6 | Контракты и DTO | `proto-contract-designer` | `buf breaking`, валидация ответов BFF, контрактные тесты |
+| Р7 | Данные | `data-schema-designer` | миграция на копии dev-тома, сверка инвентаря таблиц |
+| Р8 | Экран (спецификация) | `frontend-architect` | UI-тесты, соответствие `data-ui-id` карте |
+| Р9 | Устройство сервиса | `cpp-service-architect` | проверки слоёв (`domain` не зависит от `infra`) |
+| Р10 | Тест-план | `test-architect` | — (проект правой ветви) |
+| Р11 | Задачи | `implementation-planner` | — |
+| Р12 | Код и unit-тесты | главная сессия, `code-implementer`, `devops-engineer` | unit-тесты |
+| Р13 | Ревью | `code-reviewer`, `security-reviewer` | вердикт ревью |
+| Р14 | Сборка и стенд | `devops-engineer` (навык `rebuild-service`) | зелёный CI, сервис жив на dev |
+| Р15 | Экран (наблюдение) | главная сессия + владелец | значение на экране = пример CALC/AC, подтверждение владельца |
+
+`docs-ingestion-engineer` — не уровень Р, а отдельная роль: только приём и
+регистрация входящих документов (`incoming-docs/*.md` → `IN-NNN`), навык
+[`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md).
+`sdlc-coordinator` — навигатор анализа, см. ниже.
 
 ## Описание агентов
 
-### Проектные (SDLC)
+### Проектные
 
 - **business-analyst** — старт фичи: сырые заметки/`IN-NNN` → структурированные бизнес-требования, цели, целевые пользователи, кандидаты-фичи. Не пишет код/тех-спеки. Tools: Read, Grep, Glob.
 - **system-analyst** — после бизнес-требований: детальные `feature.yaml`, use cases, system-level (L0) и service-level (L1) sequence-диаграммы (Mermaid), FR/NFR, acceptance criteria. Tools: Read, Grep, Glob.
 - **solution-architect** — C4-архитектура, границы сервисов, ADR, integration map, deployment views из утверждённых фич/use-case. Не пишет код/proto. Tools: Read, Grep, Glob.
-- **trading-domain-specialist** — доменное ядро: FOB/CSLO matching, risk-политики, ledger-инварианты, hedge-триггеры, venue-правила (F-04/F-06/F-07/F-08/F-09/F-11/F-12). Производит спеки, инварианты, математику, тест-сценарии — не код. Tools: Read, Grep, Glob.
+- **trading-domain-specialist** — доменное ядро: FOB/CSLO matching, risk-политики, ledger-инварианты, hedge-триггеры, venue-правила (F-04/F-06/F-07/F-08/F-09/F-11/F-12). Производит спеки, инварианты, математику, тест-сценарии — не код. Если находка требует решения эксперта/владельца, а не инженерного — формулирует кандидата в `OQ-*` для записи главной сессией (`.claude/rules/agent-routing.md` §3). Tools: Read, Grep, Glob.
 - **proto-contract-designer** — protobuf-сообщения (gRPC-сервисы + Kafka-envelope) в `contracts/proto/fob/`, распространение в `docs/06-api/`, регистрация топиков в `create_topics.sh`, backward-compat до реализации. Tools: Read, Grep, Glob.
 - **data-schema-designer** — PostgreSQL OLTP (`infra/postgres/init.sql`) + ClickHouse OLAP схемы, миграции, data-flow (`flow_orders`, `fills`, `batchresults`, `execution_reports`, …). Tools: Read, Grep, Glob.
 - **cpp-service-architect** — внутренняя архитектура C++ сервисов (transport/app/domain/infra), структура gRPC-хендлеров, интерфейсы-репозитории, Kafka producer/consumer wiring для `gateway`/`order_flow`/`matching`/`risk`/`ledger`/`market_data`/`venues`/`observability`. Не пишет код. Tools: Read, Grep, Glob.
@@ -48,10 +60,10 @@ Tests → Code → Review). Агенты вызываются через инс�
 - **devops-engineer** — Docker Compose (`infra/docker-compose.dev.yml`, `Testing/*-override.yml`), Dockerfile, env (`infra/env/.env-example`), Kafka topic init, health checks, build/CI, deploy. **Может** править infra-файлы. Tools: Read, Grep, Glob, Edit, Write, Bash.
 - **implementation-planner** — после того как есть feature.yaml + use cases + sequences + proto + data + frontend + backend + test plans: создаёт мелкие задачи `PR-FXX-NNN`, привязанные к файлам/тестам/AC. Не пишет код. Tools: Read, Grep, Glob.
 - **code-implementer** — реализует **одну** узко-скоупленную задачу `T-FXX-NNN` из `docs/implementation-plan/` с тестами, следуя docs/proto/схемам. Работает в **worktree-изоляции**. Tools: Read, Grep, Glob, Edit, Write, Bash.
-- **code-reviewer** — после изменений кода (diff/`PR-FXX-NNN`): корректность, слои, traceability к docs, тесты, безопасность, money-инварианты (Decimal vs double), Kafka/proto backward-compat, правила проекта. Предпочтительно read-only (не Edit/Write). Tools: Read, Grep, Glob, Bash.
+- **code-reviewer** — после изменений кода (diff/`PR-FXX-NNN`), обязательно для денежного контура и класса L: корректность, слои, traceability к docs, тесты, безопасность, money-инварианты (Decimal vs double), Kafka/proto backward-compat, правила проекта. Находка, не требующая немедленного блока, но заслуживающая трекинга — в `known-gaps.md` или `OQ-*`, не только в ответе. Предпочтительно read-only (не Edit/Write). Tools: Read, Grep, Glob, Bash.
 - **security-reviewer** — auth/authz, secret handling, replay-safety, полнота audit trail, money-инварианты, dangerous tools, KYC/AML, operator-control safety. Read-only. Tools: Read, Grep, Glob, Bash.
-- **docs-ingestion-engineer** — обрабатывает `incoming-docs/YYYY-MM-DD-*.md`: регистрация `IN-NNN` → segment → classify → map → normalize → insert → link → traceability (навык [`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md)). Tools: Read, Grep, Glob, Edit, Write.
-- **sdlc-coordinator** — координирует полный SDLC фичи F-XX: решает, какой специалист производит business-анализ, system-анализ, архитектуру, proto, данные, frontend, backend, тесты, план, код, ревью. Сам не пишет код/docs. Tools: Read, Grep, Glob.
+- **docs-ingestion-engineer** — обрабатывает `incoming-docs/YYYY-MM-DD-*.md`: регистрация `IN-NNN` → segment → classify → map → normalize → insert → link → traceability (навык [`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md)). Только входящие документы — не writer-of-record для обычных правок `docs/`. Tools: Read, Grep, Glob, Edit, Write.
+- **sdlc-coordinator** — навигатор анализа для класса **XL** (новая фича) или по прямой просьбе владельца: читает цепочку от якоря, возвращает таблицу «чего не хватает / какой специалист дальше». Не вызывается автоматически для реплик меньшего класса. Сам не пишет код/docs и не вызывает других агентов (нет инструмента `Agent`). Tools: Read, Grep, Glob.
 
 ### Служебные (встроенные)
 
@@ -66,14 +78,15 @@ Tests → Code → Review). Агенты вызываются через инс�
 Agent(subagent_type="system-analyst", description="...", prompt="...")
 ```
 
-- Для последовательности этапов одной фичи — начинать с `sdlc-coordinator` (он распределит), либо вызывать специалистов по порядку карты выше.
-- Правила: **docs перед кодом** (§0a CLAUDE.md) — сначала `business-analyst`/`system-analyst`/`solution-architect`/`proto-contract-designer`/`data-schema-designer`/`test-architect`/`implementation-planner`, и только затем `code-implementer`.
+- Класс и триггеры — по [`.claude/rules/agent-routing.md`](../../.claude/rules/agent-routing.md), не по фиксированному порядку этапов: класс S — без агентов; M — 1–2 профильных по триггерам; L — профильные по затронутым уровням + `code-reviewer`; XL — `sdlc-coordinator` + полный проход.
 - `code-implementer` запускать **только** когда существует задача `T-FXX-NNN`.
-- Ревью (`code-reviewer`, `security-reviewer`) — после изменений кода, до merge.
+- Ревью (`code-reviewer`, `security-reviewer`) — обязательно при денежном триггере (§2 `agent-routing.md`), иначе — после изменений кода, до merge.
 
 ## Связанные документы
 
-- Docs-as-code workflow и traceability chain — [CLAUDE.md §0a](../../CLAUDE.md).
-- Ингест входящих документов — [document-ingestion.md](document-ingestion.md), навык [`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md).
+- Маршрутизация и триггеры — [`.claude/rules/agent-routing.md`](../../.claude/rules/agent-routing.md).
+- Двухосевая модель (ось Ф, ось Р, V-петля) — [IN-019](../../incoming-docs/IN-019.meta.md), [ADR-086](../03-architecture/adr/ADR-086-two-axis-reply-routing.md).
+- Docs-as-code workflow и traceability chain — [`.claude/rules/docs-as-code.md`](../../.claude/rules/docs-as-code.md).
+- Ингест входящих документов — [ingest-and-agents-integration.md](ingest-and-agents-integration.md) (historical) + навык [`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md).
 - Шаблоны артефактов — [artifact-templates.md](artifact-templates.md).
 - Карта репозитория — [repository-map.md](repository-map.md).

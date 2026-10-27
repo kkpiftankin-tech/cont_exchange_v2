@@ -7,7 +7,7 @@ source:
   - IN-014 §7.4 / §11.1 (F-10 DATA_MODEL)
 related:
   - docs/07-data/vector-clearing-results.md
-  - docs/02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md
+  - docs/02-system/features/F-05A-vectorized-external-liquidity/README.md
   - contracts/proto/fob/marketdata/v1/vector_liquidity.proto
 ---
 
@@ -64,7 +64,7 @@ Index: `idx_vector_flow_segments_batch (batch_id)`.
 
 ## Used In
 
-- Feature: [F-05A](../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use cases: [UC-F05A-01 Vectorize](../02-system/use-cases/UC-F05A-01-vectorize-external-orderbook/use-case.md)
 - Sequence: [SEQ-F05A-UC-F05A-01-services](../05-components/sequences/SEQ-F05A-UC-F05A-01-services.md)
 - Proto: `contracts/proto/fob/marketdata/v1/vector_liquidity.proto`

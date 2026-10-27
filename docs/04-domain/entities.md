@@ -62,10 +62,10 @@ Persistence: [`flow_orders`](../07-data/oltp-schema.md#таблица-flow_order
 > **Conflict Note (2026-09-28).** Это бизнес-форма из раннего ingest'а
 > (IN-001), а не поля контракта. Технический `FlowOrder` в
 > `contracts/proto/fob/orders/v1/orders.proto` (источник истины по
-> приоритету CLAUDE.md §3.1: контракты выше docs/) использует другие имена:
+> приоритету [CLAUDE.md §1](../../CLAUDE.md): контракты выше docs/) использует другие имена:
 > `order_id`, `client_order_id`, `user_id`, `account_id`, `instrument`,
 > `side`, `total_qty`, `remaining_qty`, `price_low`, `price_high`,
-> `max_speed`, `status`, `created_at` — совпадает с CLAUDE.md §8.2. Поля
+> `max_speed`, `status`, `created_at` — совпадает с [docs/04-domain/core-concepts-and-invariants.md](core-concepts-and-invariants.md). Поля
 > `provider_type`, `portfolio_weights`, `time_in_force`, `window_start`,
 > `window_end` из бизнес-формы в текущем proto отсутствуют (не реализованы
 > или замещены другим механизмом — не проверено в рамках этой правки). При

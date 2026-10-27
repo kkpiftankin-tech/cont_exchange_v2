@@ -68,7 +68,7 @@ paths: ["**/tests/**", "Testing/**", "docs/10-testing/**", "docs/09-testing/**",
 `stub` (в `feature.yaml` и/или в карточке `CALC-*`, если у неё уже есть
 величина с этим статусом).
 
-## Минимальные тестовые сценарии для solver (CLAUDE.md §15)
+## Минимальные тестовые сценарии для solver ([cpp/matching/CLAUDE.md](../../cpp/matching/CLAUDE.md))
 
 - один buyer и один seller с пересекающимися диапазонами;
 - непересекающиеся диапазоны;

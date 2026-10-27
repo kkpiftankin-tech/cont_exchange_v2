@@ -1,9 +1,14 @@
 feature:
   id: F-03
   name: FlowOrder Lifecycle (Amend / Cancel)
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-ORDER-003  # управление заявкой (amend/cancel)
+  - FR-LEDGER-001  # балансы и резервы
 
 description: >
   Изменение параметров активного FlowOrder и его отмена.

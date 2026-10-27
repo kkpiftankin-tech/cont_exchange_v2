@@ -82,6 +82,6 @@ C++↔Python до 1e-9 на одних входах (базовый набор �
 
 ## Used In
 
-- Feature: [F-05A](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use case: [UC-F05A-06](../../02-system/use-cases/UC-F05A-06-ce-agent-tact-clearing/use-case.md)
 - Tasks: [F-05A-CE-agents.tasks.md](../../implementation-plan/F-05A-CE-agents.tasks.md) (T-CEA-501/502)

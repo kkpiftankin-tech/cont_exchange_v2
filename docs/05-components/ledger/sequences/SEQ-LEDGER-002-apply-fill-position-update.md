@@ -103,17 +103,17 @@ sequenceDiagram
   `avg_entry_price = fill_price`.
 
 Инвариант: `realized_pnl` начисляется только на фактически закрытом объёме;
-двойное применение одного `fill_id` исключено `IdempotencyGuard` (CLAUDE.md §17).
+двойное применение одного `fill_id` исключено `IdempotencyGuard` ([cpp/ledger/CLAUDE.md](../../../../cpp/ledger/CLAUDE.md)).
 
 ## Idempotency & ordering
 
-- Ключ идемпотентности — `(batch_id, order_id, fill_id)` (CLAUDE.md §13).
+- Ключ идемпотентности — `(batch_id, order_id, fill_id)` ([.claude/rules/contracts.md](../../../../.claude/rules/contracts.md)).
 - Offset коммитится только после успешного `COMMIT` (at-least-once + idempotent
   consumer).
 - Вся обработка одного fill — в одной PostgreSQL-транзакции; частичный апдейт
   `accounts` без `positions` невозможен.
 
-## Decimal / precision notes (CLAUDE.md §9)
+## Decimal / precision notes ([.claude/rules/data.md](../../../../.claude/rules/data.md))
 
 - `realized` / `unrealized` / `avg_entry_price` — `Decimal`, scale зафиксирован.
 - Учитывается known issue `scale-inflation` (`Decimal::mul` удваивает scale):

@@ -18,7 +18,7 @@ color: purple
 
 - Не писать имплементацию.
 - Не создавать internals сервиса до того как заданы service boundaries.
-- Каждый сервис имеет одну зону ответственности (см. [CLAUDE.md §6](CLAUDE.md)).
+- Каждый сервис имеет одну зону ответственности (см. [.claude/rules/cpp.md](../rules/cpp.md)).
 - Каждое межсервисное взаимодействие имеет proto/event-контракт.
 - Каждый крупный архитектурный выбор → ADR в `docs/03-architecture/adr/ADR-NNN-*.md` с context/decision/alternatives/consequences/reversibility.
 - Service groups строго: user-facing (gateway), order-lifecycle (order_flow), matching (matching), risk (risk), ledger (ledger), market data (market_data), venues (venues), observability (observability).

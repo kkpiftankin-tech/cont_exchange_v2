@@ -184,11 +184,11 @@ related:
 | IT-CE-V2-01 | `ce.clearing.input → ce.position.delta` | Kafka, producer `matching` (`CePositionDeltaBatch`→`AgentDelta`) | consumer `ledger` получает `AgentDelta{agent_id,asset,venue,delta}`; поле `target` **отсутствует** (breaking) | Э2 |
 | IT-CE-V2-02 | `ce.position.delta → ledger → GetAgentPositions` | gRPC `LedgerService.GetAgentPositions` (новый) | `ce_agent_position(agent_id,asset,venue)` = накопленная знаковая позиция; реплей той же дельты идемпотентен (guard по `batch_id`) | Э2 |
 | IT-CE-V2-03 | Эмиссия по полосе → `execution.intents` | Kafka, producer `risk` | `|c|>q` → ровно один `ExecutionIntent` на `(|c|−q)`; `|c|≤q` → сообщений нет | Э3 |
-| IT-CE-V2-04 | `execution.intents → venues → execution.venue` | Kafka round-trip | intent исполняется (полн./частично), `ExecutionReport` в `execution.venue` (+ legacy `execution.reports`, dual-publish CLAUDE.md §7.3) | Э3/Э4 |
+| IT-CE-V2-04 | `execution.intents → venues → execution.venue` | Kafka round-trip | intent исполняется (полн./частично), `ExecutionReport` в `execution.venue` (+ legacy `execution.reports`, dual-publish [.claude/rules/contracts.md](../../../.claude/rules/contracts.md)) | Э3/Э4 |
 | IT-CE-V2-05 | `execution.venue → ledger`: возврат остатка | Kafka consumer в `ledger` | частичное исполнение → остаток в `ce_agent_position` по ПЛАНОВОЙ цене; полное → позиция не двоится (уменьшена на A7) | Э4 |
 | IT-CE-V2-06 | Таймаут `in_flight` без `ExecutionReport` | внутренний таймер `ledger` | по TTL весь объём → `c_j`; повторной отправки нет (защита от двойной эмиссии) | Э4 |
 | IT-CE-V2-07 | Перевозка арбитражёра | Kafka `ce.transfers` (новый) | `{asset,src,dst,qty,eta,tariff}` публикуется; по `eta≤t` приход на узел; `in_transit` учтён в `владение_a` | Э5 |
-| IT-CE-V2-08 | Backward-compat `AgentDelta` vs `AssetDelta` | proto | старый consumer отключён по флагу либо совместимый fallback; тест **фиксирует факт несовместимости**, форсируя миграционный план (CLAUDE.md §11.3) | Э2 |
+| IT-CE-V2-08 | Backward-compat `AgentDelta` vs `AssetDelta` | proto | старый consumer отключён по флагу либо совместимый fallback; тест **фиксирует факт несовместимости**, форсируя миграционный план ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md)) | Э2 |
 
 ---
 

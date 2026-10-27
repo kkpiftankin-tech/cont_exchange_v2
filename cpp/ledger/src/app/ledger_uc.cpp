@@ -18,7 +18,7 @@
 //   * venue_balances_  — наши balances на внешних venues (F-12 hedge).
 //   * hedge_pnl_records_ — журнал hedge fills для DoD-6 reporting.
 //
-// Идempotency и контракты (CLAUDE.md §17 — Ledger rules):
+// Идempotency и контракты (cpp/ledger/CLAUDE.md — Ledger rules):
 //   * Reservation идempotent по reservation_id (повторный Reserve — no-op).
 //   * Batch fills идempotent по batch_id через IsBatchProcessed.
 //   * Execution reports идempotent по composite key (intent_id + venue_order_id +
@@ -253,14 +253,14 @@ std::chrono::system_clock::time_point timestamp_to_time_point(
 //
 // Known issue `scale-inflation`: Decimal::mul складывает scale операндов
 // (price[scale=2] * qty[scale=8] → scale=10). Без нормализации scale денежных
-// величин неконтролируемо растёт после серии mul, что нарушает CLAUDE.md §9.
+// величин неконтролируемо растёт после серии mul, что нарушает .claude/rules/data.md.
 // rescale() приводит Decimal к каноническому per-currency scale: округляет вниз
 // по scale (half-up через Decimal::div на 1) или дополняет нулями вверх,
 // сохраняя точное значение в пределах target_scale.
 // ----------------------------------------------------------------------------
 constexpr int32_t kPriceScale = 2;    // quote/USDT price precision (cents)
 constexpr int32_t kPnlScale = 2;      // realised/unrealised PnL — quote currency
-constexpr int32_t kQtyScale = 8;      // crypto base quantity (8 знаков, CLAUDE.md §9)
+constexpr int32_t kQtyScale = 8;      // crypto base quantity (8 знаков, .claude/rules/data.md)
 
 /// Приводит Decimal к ровно target_scale знакам (half-up при усечении вниз).
 /// Реализация через Decimal::div(value, 1, target_scale) — div уже округляет
@@ -574,7 +574,7 @@ LedgerUseCases::Position& LedgerUseCases::ensure_position_locked(
 // unified signed-position transition. SELL is modelled as a negative qty delta
 // (fill_dir = -1) so reduce / close / flip-through-zero and short positions all
 // share one Decimal-only code path. Pure Decimal arithmetic (no double) —
-// CLAUDE.md §9. Kept for ABI compatibility with the header / existing callers.
+// .claude/rules/data.md. Kept for ABI compatibility with the header / existing callers.
 // ============================================================================
 void LedgerUseCases::calculate_and_record_pnl(
     const std::string& user,
@@ -665,7 +665,7 @@ void LedgerUseCases::ApplyExecutionGroup(const fob::matching::v1::ExecutionGroup
 //       закрываем всю текущую ногу (realised на закрытом объёме),
 //       открываем остаток в противоположную сторону по avg_entry = fill_price.
 //
-// Вся арифметика — Decimal (CLAUDE.md §9). Результаты нормализуются к
+// Вся арифметика — Decimal (.claude/rules/data.md). Результаты нормализуются к
 // каноническому scale (T-F06-023, known issue scale-inflation).
 // ============================================================================
 void LedgerUseCases::apply_signed_fill(Position& pos,
@@ -2969,7 +2969,7 @@ std::unordered_map<std::string, LedgerUseCases::Position> LedgerUseCases::GetPos
 // For each non-flat position recompute unrealized_pnl on the supplied mark
 // price (long: (mark-entry)*qty; short: (entry-mark)*qty). side="flat" or
 // qty==0 → unrealized_pnl=0, no mark lookup. Missing mark → keep last
-// persisted unrealized_pnl (no silent zeroing). Decimal-only (CLAUDE.md §9),
+// persisted unrealized_pnl (no silent zeroing). Decimal-only (.claude/rules/data.md),
 // PnL normalized to the quote scale.
 // ============================================================================
 fob::ledger::v1::GetPositionsResponse LedgerUseCases::GetPositionsView(

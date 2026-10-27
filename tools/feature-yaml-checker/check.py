@@ -125,10 +125,24 @@ def check_feature(
     fdata = load_yaml(feature_yaml_path)
     feature_block = fdata.get("feature") or {}
     f_status = feature_block.get("status")
+    f_lifecycle = feature_block.get("lifecycle")
     map_status = map_entry.get("status")
 
     # ----- Check 2: status sync ----------------------------------------------
-    if f_status and map_status and f_status != map_status:
+    if isinstance(f_status, dict):
+        # Этап 1 (ADR-086/IN-019 §4.4): feature.yaml.status перешёл на форму
+        # {docs, code, runtime} + отдельный lifecycle. feature-component-map.yaml
+        # пока хранит старую плоскую строку — прямое сравнение двух разных
+        # схем даёт только ложные ERROR, поэтому здесь WARN, а не ERROR; сама
+        # схемная рассинхронизация — известный разрыв (known-gaps.md).
+        if map_status:
+            warns.append(
+                f"{fid}: feature.yaml использует новую схему lifecycle/status "
+                f"(lifecycle={f_lifecycle!r}, status={f_status!r}); "
+                f"feature-component-map.status={map_status!r} — старая схема, "
+                f"сравнение пропущено (см. docs/00-methodology/known-gaps.md)"
+            )
+    elif f_status and map_status and f_status != map_status:
         errors.append(
             f"{fid}: status mismatch — feature.yaml={f_status!r}, "
             f"feature-component-map={map_status!r}"

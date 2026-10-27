@@ -1,7 +1,8 @@
 feature:
   id: F-XX
   name: Short Feature Name
-  status: draft           # draft | in-progress | shipped | deprecated
+  lifecycle: planned       # planned | active | deprecated
+  status: {docs: partial, code: none, runtime: none}  # docs/code/runtime: none | partial | complete/done | dev/prod
   owner: core-team
   level: kite             # IN-013: kite | sea | fish — для Feature всегда kite ☁️
 

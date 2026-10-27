@@ -128,7 +128,7 @@ ALTER TABLE execution_reports
 --   fills (extended)        → grouped_leg_fills
 --   computed / MV           → grouped_quality_metrics
 --   backtest.execution.groups → grouped_replay_results
--- Monetary / qty fields: Decimal128(18) per CLAUDE.md §9.
+-- Monetary / qty fields: Decimal128(18) per .claude/rules/data.md.
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------

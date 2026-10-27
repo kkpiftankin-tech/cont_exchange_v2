@@ -132,7 +132,7 @@ per-asset (агрегат по площадкам); per-venue — расшире
 1. **PG-таблица `ce_asset_volatility` + poll (выбрано).** market_data пишет (throttled), ledger поллит
    с TTL-кэшем. Плюсы: минимум кода, гейт staleness через `updated_at`, gauge-семантика (нужно только
    последнее σ, не история/replay), тот же механизм, что ledger уже применяет к `f05a_clearing_config`.
-2. **Kafka `marketdata.volatility` (отклонено сейчас).** Правильно по event-first (CLAUDE.md §11.4),
+2. **Kafka `marketdata.volatility` (отклонено сейчас).** Правильно по event-first ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md)),
    но ledger пришлось бы держать ещё один consumer + in-memory кэш σ ради gauge-значения, которое не
    нуждается в replay/партиционировании. Оверинжиниринг для порогового коэффициента.
 3. **gRPC-метод на `MarketDataService` (отклонено сейчас).** Синхронный вызов из горячего пути ledger

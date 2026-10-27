@@ -3,7 +3,7 @@ id: CALC-CE-TRANSLATOR-DEPTH
 title: Итоговая глубина переводчика CE — вес по возрасту, множитель исполнения и капитальный предел
 level: fish
 feature: F-18
-status: implemented (за флагами, по умолчанию выключено; 2026-10-26)
+status: implemented # за флагами, по умолчанию выключено; 2026-10-26
 code:
   - cpp/market_data/src/domain/depth_trust_scale.hpp#AgeTrustWeight
   - cpp/market_data/src/domain/depth_trust_scale.hpp#CapitalDepthCap

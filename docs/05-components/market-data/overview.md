@@ -44,7 +44,7 @@ In-memory кэш последних тикеров по парам (venue, symbo
 
 ## Participates In Use Cases
 
-- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md)
+- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-06](../../02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md)
 
 ## Participates In Sequence Diagrams
 

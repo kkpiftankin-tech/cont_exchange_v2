@@ -47,7 +47,7 @@
 - **F-18** переехала с v1 (UC-F18-01..03 «CE Capital, Net Position») на v2
   (UC-F18-04 «Virtual Counterparties — Translator/Arbitrageur Agents, Signed
   Agent Position & Band Hedge ±q»). v1 UC помечены superseded, но НЕ удалены
-  (CLAUDE.md §0a Conflict rule); модель заменяется под ADR-061 (planned,
+  ([.claude/rules/docs-as-code.md](../../.claude/rules/docs-as-code.md) Conflict rule); модель заменяется под ADR-061 (planned,
   supersede ADR-054/057). Сводка — [`F-18-v2-agents-review-summary.md`](../implementation-plan/F-18-v2-agents-review-summary.md).
 
 ## Связанные матрицы

@@ -56,7 +56,7 @@ $$
 | q | исполненный объём хеджа | base | `HedgeExecution.executed_qty`, параметр `qty` |
 | s | знак стороны исполнения на venue | — | `HedgeExecution.side` |
 
-Тип везде `cex::common::Decimal` (CLAUDE.md §9) — `double` в этом пути не участвует.
+Тип везде `cex::common::Decimal` ([.claude/rules/data.md](../../../.claude/rules/data.md)) — `double` в этом пути не участвует.
 
 ## 3. Числовой пример (из `ledger_hedge_pnl_test.cpp::test_hedge_pnl_sell_profit`)
 
@@ -186,7 +186,7 @@ st.last_price` (мид клиринга на момент пробоя поло�
    `RecordHedgeExecution` реализованы и покрыты тестами. Исправлено при
    заведении этой карточки.
 4. **`double` в `hedge_pnl_aggregator.cpp`.** Формально это ClickHouse-агрегат
-   (аналитика/история), для которого CLAUDE.md §9 разрешает `double`
+   (аналитика/история), для которого [.claude/rules/data.md](../../../.claude/rules/data.md) разрешает `double`
    ("временных research/simulation calculations, если результат не попадает
    в ledger") — но здесь результат попадает в операторский дашборд PnL, а не
    только в research. Не переквалифицировано как нарушение без решения

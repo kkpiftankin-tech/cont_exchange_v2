@@ -1,8 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case level: sea feature: F-18 supersedes: [UC-F18-01, UC-F18-02, UC-F18-03] parentRequirements: [ADR-061]
+id: UC-F18-04
+title: Такт клиринга виртуальных контрагентов и хедж по полосе ±q (v2)
+level: sea
+feature: F-18
+system-sequence: sequences/SEQ-UC-F18-04-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F18-UC-F18-04-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F18-04. Такт клиринга виртуальных контрагентов и хедж по полосе ±q (v2)
 
@@ -21,7 +25,7 @@ id: use-case level: sea feature: F-18 supersedes: [UC-F18-01, UC-F18-02, UC-F18-
 
 ## Supersedes (v1)
 
-Этот UC v2 заменяет модель v1. Per CLAUDE.md §0a (Conflict rule) — не «молчаливая» замена:
+Этот UC v2 заменяет модель v1. Per [.claude/rules/docs-as-code.md](../../../../.claude/rules/docs-as-code.md) (Conflict rule) — не «молчаливая» замена:
 
 - [UC-F18-01](../UC-F18-01-form-ce-capital/use-case.md) — form CE capital (seed + PnL) → house-невязка.
 - [UC-F18-02](../UC-F18-02-derive-ce-position/use-case.md) — net position (проекция x) → per-agent signed `c_j`.

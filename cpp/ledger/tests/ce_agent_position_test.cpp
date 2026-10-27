@@ -128,7 +128,7 @@ bool test_negative_position_is_legitimate() {
 }
 
 bool test_idempotent_batch_replay() {
-  // ADR-061 §7 / CLAUDE.md §17: at-least-once Kafka может повторно доставить
+  // ADR-061 §7 / cpp/ledger/CLAUDE.md: at-least-once Kafka может повторно доставить
   // тот же batch_id — повторная дельта НЕ должна задвоить позицию.
   LedgerUseCases uc(LedgerUseCases::InitOptions{.seed_demo_state = false});
   const auto delta = MakeAgentDelta("T_BTC", "translator", "BTC", "Binance", 700, 2);

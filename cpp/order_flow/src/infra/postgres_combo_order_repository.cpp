@@ -3,7 +3,7 @@
 //
 // Все enum→строка мапперы совпадают с CHECK-ограничениями DDL
 // (infra/postgres/init.sql, блок F-09). Деньги — NUMERIC через
-// cex::common::Decimal::to_string() (CLAUDE.md §9, никаких double).
+// cex::common::Decimal::to_string() (.claude/rules/data.md, никаких double).
 //
 // NOTE (идемпотентность): combo_orders.atomicity_policy / atomicity_scope /
 // fallback_policy — NOT NULL в DDL. Для orchestration_only, где domain не

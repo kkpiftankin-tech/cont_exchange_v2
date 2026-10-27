@@ -3,7 +3,7 @@ id: CALC-CE-LINK-TRANSFER
 title: Физический перевод связки CE между биржами (порог, сумма, штуки, остаток паритета)
 level: fish
 feature: F-18
-status: implemented (ledger, dev; 2026-10-22)
+status: implemented # ledger, dev; 2026-10-22
 code:
   - cpp/ledger/src/app/ledger_uc.cpp#TransferThresholdK
   - cpp/ledger/src/app/ledger_uc.cpp#TransferAmountK

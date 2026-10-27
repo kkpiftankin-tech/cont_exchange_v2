@@ -310,7 +310,7 @@ features:
     docsPath: docs/02-system/features/F-18-ce-capital-position-hedge
     # v2 (UC-F18-04) заменяет v1 (UC-F18-01..03, ADR-054/057 superseded). Модель:
     # знаковая позиция агента с нуля, без target, house-невязка, полоса ±q, party_type AGENT.
-    # Код НЕ открыт — no-code-before-docs (CLAUDE.md §0a): гейт на accepted ADR-061.
+    # Код НЕ открыт — no-code-before-docs (.claude/rules/docs-as-code.md): гейт на accepted ADR-061.
     # Сводка 12 агентов: docs/implementation-plan/F-18-v2-agents-review-summary.md (§13 гейт владельца).
     status: docs-complete-code-gated   # docs ✅ (feature/UC/SEQ/AC-F18v2-01..18); код planned под ADR-061
     primaryComponents:

@@ -886,7 +886,7 @@ async function handleQuote(req, res, pathname, query) {
   return true;
 }
 
-// Decimal proto → каноническая строка. БЕЗ float (CLAUDE.md §9).
+// Decimal proto → каноническая строка. БЕЗ float (.claude/rules/data.md).
 function decimalToString(d) {
   if (!d || d.units === undefined || d.units === null) return '0';
   const units = String(d.units);
@@ -906,7 +906,7 @@ function decimalToString(d) {
 // combo_order_legs + execution_groups + combo_compensations). gateway combo не
 // проксирует, поэтому весь combo-flow для фронта живёт здесь.
 
-// Десятичная строка/число → proto Decimal {units, scale} БЕЗ float (CLAUDE.md §9).
+// Десятичная строка/число → proto Decimal {units, scale} БЕЗ float (.claude/rules/data.md).
 function numToDecimal(v) {
   let s = String(v == null ? '' : v).trim();
   if (s === '') return { units: 0, scale: 0 };

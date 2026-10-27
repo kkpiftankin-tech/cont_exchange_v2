@@ -13,7 +13,7 @@
 
 ## 🏗 Class structure (внутреннее устройство, L2 🐟)
 
-Высокоуровневая структура сервиса (соответствует слоям из CLAUDE.md §10):
+Высокоуровневая структура сервиса (соответствует слоям из [.claude/rules/cpp.md](../../../.claude/rules/cpp.md)):
 
 ```mermaid
 classDiagram
@@ -159,7 +159,7 @@ classDiagram
 
 ## Participates In Use Cases
 
-- [UC-F02-01](../../02-system/use-cases/UC-F02-01-create-flow-order/use-case.md), [UC-F03-01](../../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md), [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F09-01](../../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md), [UC-F10-01](../../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md)
+- [UC-F02-01](../../02-system/use-cases/UC-F02-01-create-flow-order/use-case.md), [UC-F03-01](../../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md), [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F09-01](../../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md), [UC-F10-01](../../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md), [UC-F11-06](../../02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F15-07](../../02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md)
 
 ## Participates In Sequence Diagrams
 

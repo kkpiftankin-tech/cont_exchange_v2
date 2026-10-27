@@ -65,7 +65,7 @@ reports и observability queries.
 5. Добавить integration tests.
 6. Обновить backup/retention docs.
 
-## Финансовая точность (напоминание — полное правило в CLAUDE.md §3)
+## Финансовая точность (напоминание — полное правило в [CLAUDE.md §1](../../CLAUDE.md))
 
 Запрещено использовать `double`/`float` для денежных величин в domain-логике,
 ledger, risk, matching settlement или persistence — только

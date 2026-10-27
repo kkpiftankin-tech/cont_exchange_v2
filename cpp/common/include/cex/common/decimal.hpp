@@ -5,7 +5,7 @@
 // Назначение и физический смысл:
 //   Decimal представляет точное десятичное число формата value = units * 10^(-scale).
 //   Это единственный допустимый тип для денежных величин в доменной логике,
-//   ledger, risk, matching settlement и persistence — см. CLAUDE.md §9
+//   ledger, risk, matching settlement и persistence — см. .claude/rules/data.md
 //   ("Запрещено использовать double/float для денежных величин").
 //
 //   Пример: Decimal{units=12345, scale=2} = 123.45
@@ -118,7 +118,7 @@ struct Decimal {
   // double(units * 10^(-scale))
   /// Cast к double. Помечен explicit — нельзя случайно "забыть" и передать
   /// Decimal туда, где ждут double (например, в floating-point метрику).
-  /// Используется ТОЛЬКО для diagnostics/metrics/research (см. CLAUDE.md §9).
+  /// Используется ТОЛЬКО для diagnostics/metrics/research (см. .claude/rules/data.md).
   /// Никогда не должен попадать в ledger settlement или persistence.
   explicit operator double() const;
 };

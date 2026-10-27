@@ -9,7 +9,7 @@ Ledger — источник истины по balances/positions.
 - смешивать user balance и exchange hedge balance;
 - обновлять balances без audit trail;
 - делать settlement на основе floating-point money (только
-  `cex::common::Decimal` — см. `.claude/rules/data.md` и CLAUDE.md §3).
+  `cex::common::Decimal` — см. `.claude/rules/data.md` и [CLAUDE.md §1](../../CLAUDE.md)).
 
 Для ledger flows всегда фиксируй:
 

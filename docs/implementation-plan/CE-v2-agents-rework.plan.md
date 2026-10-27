@@ -69,7 +69,7 @@ book-узла.
 4. **Тип участника**: агенты — **третий тип `AGENT`** (дилерский инвентарь), рядом с
    CLIENT/HOUSE, а не подтип клиента (см. §6).
 
-## 3. Docs-as-code: что создать ДО кода (no-code-before-docs, CLAUDE.md §0a)
+## 3. Docs-as-code: что создать ДО кода (no-code-before-docs, [.claude/rules/docs-as-code.md](../../.claude/rules/docs-as-code.md))
 
 - **ADR-061** — смена модели позиции CE (supersede ADR-057): позиция агента с нуля, знаковая,
   без target; house-невязка; `Z_a=владение−владение(0)`; полоса ±q; тип участника AGENT.

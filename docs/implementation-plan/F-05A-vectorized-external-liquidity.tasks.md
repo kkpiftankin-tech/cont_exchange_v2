@@ -46,7 +46,7 @@
 ### Phase 0 — Docs & ADR (ingress-close IN-014, no code)
 
 #### T-F05A-001. Feature docs + YAML
-- `docs/02-system/features/F-05-live-market-data/F-05A-feature.yaml` + `addendum-F05A-vectorized-external-liquidity.md` (skill `create-feature`). Source: IN-014 §1,§19. Owner: system-analyst.
+- `docs/02-system/features/F-05A-vectorized-external-liquidity/feature.yaml` + `addendum-F05A-vectorized-external-liquidity.md` (skill `create-feature`). Source: IN-014 §1,§19. Owner: system-analyst.
 
 #### T-F05A-002. Use cases + sequences
 - `UC-F05A-01..05` (`docs/02-system/use-cases/UC-F05A-*/use-case.md`) + L0 `SEQ-UC-F05A-*-system.md` + L1 `docs/05-components/sequences/SEQ-F05A-UC-F05A-*-services.md` (mermaid из IN-014 §15). Owner: system-analyst.

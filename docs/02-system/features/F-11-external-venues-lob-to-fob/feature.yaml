@@ -1,7 +1,8 @@
 feature:
   id: F-11
   name: External Venues / LOB to FOB
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
 
@@ -14,6 +15,9 @@ theoreticalFoundation:
   sections: ["§5.1", "§5.2", "§A"]
   adr: ADR-035
   primitives: [StandardAgent, LinearFeeAgent, IndependentAgent2D, PortfolioAgent]
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-MD-002  # внешние данные (CEX/DEX/AMM → FOB)
 
 description: >
   Подключение внешних торговых площадок (CEX/DEX/AMM), нормализация их

@@ -17,13 +17,13 @@ related:
 
 ## Финансовая точность
 
-Все суммы денег, объёмов, цен — `fob.common.v1.Decimal` (см. [common.proto](../../contracts/proto/fob/common/v1/common.proto)). `double` допустим только для диагностики (residualNorm, solveTimeMs) и метрик. См. [CLAUDE.md §9](../../CLAUDE.md).
+Все суммы денег, объёмов, цен — `fob.common.v1.Decimal` (см. [common.proto](../../contracts/proto/fob/common/v1/common.proto)). `double` допустим только для диагностики (residualNorm, solveTimeMs) и метрик. См. [.claude/rules/data.md](../../.claude/rules/data.md).
 
 ---
 
 ## F-04 Batch Clearing
 
-См. [features/F-04-batch-clearing/](../02-system/features/F-04-batch-clearing/) и [matching-fob-core/overview.md](../05-components/matching-fob-core/overview.md). Формулы VWAP и инвариант диапазона цен описаны в [CLAUDE.md §8.5 и §8.4](../../CLAUDE.md).
+См. [features/F-04-batch-clearing/](../02-system/features/F-04-batch-clearing/) и [matching-fob-core/overview.md](../05-components/matching-fob-core/overview.md). Формулы VWAP и инвариант диапазона цен описаны в [core-concepts-and-invariants.md](core-concepts-and-invariants.md).
 
 ---
 

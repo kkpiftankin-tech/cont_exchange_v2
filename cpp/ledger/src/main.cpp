@@ -8,7 +8,7 @@
 //   - Запускает Kafka consumers (batch.outputs / execution.intents /
 //     execution.venue / execution.reports).
 //
-// CLAUDE.md §17: ledger — источник истины по balances/positions.
+// cpp/ledger/CLAUDE.md: ledger — источник истины по balances/positions.
 // ============================================================================
 #include <grpcpp/grpcpp.h>
 
@@ -36,7 +36,7 @@ int main() {
   const std::string brokers =
       cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
 
-  // Empty DSN → in-memory mode (CLAUDE.md §14: targeted state in PG для prod).
+  // Empty DSN → in-memory mode (.claude/rules/data.md: targeted state in PG для prod).
   const std::string pg_dsn =
       cex::common::Env::get_string("LEDGER_POSTGRES_DSN", "");
 

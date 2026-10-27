@@ -91,7 +91,7 @@ struct CeOrders {
 // "A_*") перевозит актив между площадками. Δc_j = f_j (A6: c←c+f) — СЫРОЙ поток
 // клиринга (тыс. USDT), БЕЗ конвертации в количество (в отличие от
 // ProjectPositionQuantity выше — там money-path по узлам для house-holdings).
-// domain не знает о protobuf (CLAUDE.md §10.2): CeAgentKind — доменный enum,
+// domain не знает о protobuf (.claude/rules/cpp.md): CeAgentKind — доменный enum,
 // app-слой (matching_loop) мапит его в fob::treasury::v1::AgentKind.
 // ---------------------------------------------------------------------------
 enum class CeAgentKind { kUnspecified = 0, kTranslator = 1, kArbitrageur = 2 };

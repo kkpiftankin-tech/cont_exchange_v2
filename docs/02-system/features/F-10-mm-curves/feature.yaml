@@ -1,7 +1,8 @@
 feature:
   id: F-10
   name: Market-Maker Liquidity Curves
-  status: not-implemented
+  lifecycle: planned  # planned | active | deprecated
+  status: {docs: partial, code: none, runtime: none}  # было: not-implemented
   owner: core-team
   level: kite
 
@@ -14,6 +15,10 @@ theoreticalFoundation:
   sections: ["§5.2.8", "§6.2.3"]
   adr: ADR-035
   primitives: [PortfolioAgent, MultiAssetReplication]
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-MM-001  # публикация и обновление кривых
+  - FR-MM-002  # контроль инвентори
 
 description: >
   Маркет-мейкер публикует двухсторонние CSLO-кривые (цена-скорость) с

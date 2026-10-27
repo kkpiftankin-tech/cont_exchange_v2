@@ -3,7 +3,7 @@ id: CALC-<F-XX>-<NAME>
 title: <название величины>
 level: L3
 feature: F-XX
-status: implemented # implemented | planned | drift
+status: implemented # implemented | partial | planned | drift | proposed | calibrated
 code: # якоря реализации: файл + функция/метод
   - cpp/<service>/src/<layer>/<file>.cpp#<function>
 tests:

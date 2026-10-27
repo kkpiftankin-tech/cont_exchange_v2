@@ -29,7 +29,7 @@ class PositionsUpdatePublisherPort {
 // ---------------------------------------------------------------------------
 // F-06 (T-F06-020) — read/write models for the F-06 `positions` / `accounts`
 // tables (DISTINCT from the legacy per-currency `ledger_positions`).
-// All monetary fields are Decimal (CLAUDE.md §9). side: "long"|"short"|"flat".
+// All monetary fields are Decimal (.claude/rules/data.md). side: "long"|"short"|"flat".
 // ---------------------------------------------------------------------------
 struct AccountRow {
   std::string user_id;

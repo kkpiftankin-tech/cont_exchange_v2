@@ -2,7 +2,7 @@
 // grpc_risk_service.cpp — gRPC transport layer для RiskService.
 //
 // Тонкий wrapper: каждый handler делегирует в RiskUseCases (app/risk_uc.cpp),
-// никакой бизнес-логики здесь нет (CLAUDE.md §10 layering).
+// никакой бизнес-логики здесь нет (.claude/rules/cpp.md layering).
 //
 // Методы:
 //   CheckNewOrder    (F-07 PreTradeCheck)  — pre-trade gate для FlowOrder.

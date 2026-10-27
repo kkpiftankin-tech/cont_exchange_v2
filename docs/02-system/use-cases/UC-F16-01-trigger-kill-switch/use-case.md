@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F16-01
+title: Активировать kill-switch
 level: sea
+feature: F-16
+system-sequence: sequences/SEQ-UC-F16-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F16-UC-F16-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F16-01. Активировать kill-switch
 

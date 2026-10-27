@@ -1,9 +1,13 @@
 feature:
   id: F-20
   name: Live Venue Simulator
-  status: draft           # documentation only; no implementation yet
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: complete, code: partial, runtime: dev}  # было: draft (устарело — codePaths помечали все файлы как planned, но venue_simulator.*, sim_session_manager.* и др. уже существуют с тестами)
   owner: core-team
   level: kite
+
+parentRequirements: []  # FR-* бизнес-требование для F-20 в docs/02-system/functional-requirements.md ОТСУТСТВУЕТ —
+  # открытый вопрос, не решаю здесь сам (Этап 1 п.6, ADR-086/IN-019; см. known-gaps.md)
 
 description: >
   Гибридный режим работы системы: приём живых LOB-снапшотов от внешних
@@ -61,22 +65,23 @@ storageDependencies:
     - sim_divergence_log     # CREATED PR-F20-4: per-clientOrderId delta LIVE vs SIM в SHADOW режиме
 
 codePaths:
-  # Все пути ниже — planned (NEW). На момент создания этого feature.yaml
-  # ни один файл не существует. См. implementation-plan/F-20-live-venue-simulator.tasks.md.
-  - cpp/venues/src/app/venue_simulator.cpp                 # planned
-  - cpp/venues/src/app/venue_simulator.hpp                 # planned
-  - cpp/venues/src/app/venue_sim_router.cpp                # planned
-  - cpp/venues/src/app/venue_sim_router.hpp                # planned
-  - cpp/venues/src/app/sim_session_manager.cpp             # planned
-  - cpp/venues/src/app/sim_session_manager.hpp             # planned
-  - cpp/venues/src/app/divergence_service.cpp              # planned
-  - cpp/venues/src/app/divergence_service.hpp              # planned
-  - cpp/venues/src/domain/models/latency_model.hpp         # planned
-  - cpp/venues/src/domain/models/impact_model.hpp          # planned
-  - cpp/venues/src/domain/models/fee_model.hpp             # planned
-  - cpp/venues/src/domain/models/rejection_model.hpp       # planned
-  - cpp/venues/src/infra/postgres_sim_session_repository.cpp # planned
-  - cpp/venues/src/infra/sim_config_consumer.cpp           # planned (Kafka sim.config consumer)
+  # Исправлено Этап 1 п.3 (2026-10-27, ADR-086/IN-019): на момент создания
+  # этого feature.yaml все пути были помечены planned; с тех пор движок
+  # симулятора реализован и покрыт тестами (venue_simulator_test.cpp,
+  # sim_session_pg_codec_test.cpp). divergence_service (SHADOW compare
+  # delta) остаётся не реализован.
+  - cpp/venues/src/app/venue_simulator.cpp                 # implemented
+  - cpp/venues/src/app/venue_simulator.hpp                 # implemented
+  - cpp/venues/src/app/venue_sim_router.cpp                # implemented
+  - cpp/venues/src/app/venue_sim_router.hpp                # implemented
+  - cpp/venues/src/app/sim_session_manager.cpp             # implemented
+  - cpp/venues/src/app/sim_session_manager.hpp             # implemented
+  - cpp/venues/src/app/divergence_service.cpp              # planned — ещё не создан (SHADOW-delta не считается)
+  - cpp/venues/src/app/divergence_service.hpp              # planned — ещё не создан
+  - cpp/venues/src/app/venue_simulator.{cpp,hpp}           # latency/impact/fee/rejection модели — реализованы инлайн здесь, не как отдельные domain/models/*.hpp (план не совпал с фактом)
+  - cpp/venues/src/infra/postgres_sim_session_repository.cpp # implemented
+  - cpp/venues/src/app/sim_config_applier.cpp              # implemented — Kafka sim.config consumer реализован под этим именем, не sim_config_consumer.cpp
+  - cpp/venues/src/app/sim_config_applier.hpp              # implemented
 
 kafkaTopics:
   produces:
@@ -136,7 +141,7 @@ definitionOfDone:
       FeeModel (maker/taker/min/gas), RejectionModel (stale/no-liq/
       random/rate-limit/price-constraint), LatencyModel (FIXED/UNIFORM/
       LOGNORMAL sampling + timeout→SIM_TIMEOUT). Детерминирован по
-      rng_seed. Математика в double (CLAUDE.md §9 — симуляция, sim-book
+      rng_seed. Математика в double (.claude/rules/data.md — симуляция, sim-book
       non-authoritative).
 
       Остаётся (Phase 4 wiring, НЕ в этом ядре): Kafka venue.snapshots

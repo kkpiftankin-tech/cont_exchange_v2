@@ -1,19 +1,18 @@
-<!--
 ---
 id: UC-F05A-06
 title: "Run CE Tact with Virtual Counterparties (agents, nodes, 3-level position)"
 level: sea
-parent-feature: F-05A
+feature: F-05A
 system-sequence: "sequences/SEQ-UC-F05A-06-system.md"
 service-sequence: "../../../05-components/sequences/SEQ-F05A-UC-F05A-06-services.md"
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F05A-06. Run CE Tact with Virtual Counterparties
 
 ## Feature
 
-- [F-05A. Vectorized External Liquidity](../../features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- [F-05A. Vectorized External Liquidity](../../features/F-05A-vectorized-external-liquidity/README.md)
 
 ## Primary Actor
 

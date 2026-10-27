@@ -6,7 +6,7 @@ owner: matching-team
 feature: F-05A
 related:
   - contracts/proto/fob/marketdata/v1/vector_liquidity.proto
-  - docs/02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md
+  - docs/02-system/features/F-05A-vectorized-external-liquidity/README.md
   - docs/implementation-plan/F-05A-vectorized-external-liquidity.tasks.md
 ---
 

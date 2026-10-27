@@ -10,7 +10,7 @@ syntax = "proto3";
 // equity. Хедж эмиттится по net-позиции (CeNetHedgeIntent), а не per-segment
 // (ADR-049).
 //
-// Money — только fob.common.v1.Decimal (CLAUDE.md §9). double запрещён.
+// Money — только fob.common.v1.Decimal (.claude/rules/data.md). double запрещён.
 //
 // Все «отображаемые» поля (ADR-054 §8) присутствуют в снапшотах, чтобы UI
 // /ce-capital-live визуально сверял учётное тождество Equity = Σ h·mark.

@@ -31,7 +31,7 @@ native multi-leg support.
 Источник IN-011 (F-09 v2 corrected) явно требует **различать** два режима и
 **не** маскировать оркестрацию независимых ног под атомарное исполнение
 (Conflict CN-IN011-01, CN-IN011-04). Молча выбрать одну версию нельзя
-(CLAUDE.md §0a Conflict rule).
+([.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md) Conflict rule).
 
 ## Решение
 

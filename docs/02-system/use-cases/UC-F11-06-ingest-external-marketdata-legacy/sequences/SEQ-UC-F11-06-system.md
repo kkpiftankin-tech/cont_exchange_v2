@@ -1,15 +1,15 @@
 <!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: SEQ-UC-F11-01-system
+id: SEQ-UC-F11-06-system
 level: kite
 ---
 -->
 
-# SEQ-UC-F11-01-system. External Market Data: system view
+# SEQ-UC-F11-06-system. External Market Data (legacy, formerly UC-F11-01): system view
 
 ## Type
 
-System Context Sequence
+System Context Sequence (historical artifact — see use-case.md DEPRECATED note)
 
 ## Feature
 
@@ -17,7 +17,7 @@ System Context Sequence
 
 ## Use Case
 
-- [UC-F11-01](../use-case.md)
+- [UC-F11-06 (legacy)](../use-case.md)
 
 ## Participants
 
@@ -40,4 +40,6 @@ sequenceDiagram
 
 ## Related Service Sequence
 
-- [SEQ-F11-UC-F11-01-services](../../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md)
+N/A — исторический артефакт, собственной service-sequence не имел. Актуальная
+service-sequence (`SEQ-F11-UC-F11-01-services.md`) принадлежит
+[UC-F11-01 Onboard venue](../../UC-F11-01-onboard-venue/use-case.md).

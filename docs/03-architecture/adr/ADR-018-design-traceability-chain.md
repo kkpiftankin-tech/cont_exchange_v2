@@ -18,7 +18,7 @@ related:
 [ADR-006](ADR-006-docs-as-code-repository-structure.md) фиксирует docs-as-code
 структуру, [ADR-007](ADR-007-feature-traceability-gate.md) — traceability gate
 на уровне feature → code. Но сама **сквозная проектная цепочка** от
-бизнес-требования до кода не зафиксирована как нормативная, хотя CLAUDE.md §0a
+бизнес-требования до кода не зафиксирована как нормативная, хотя [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md)
 её уже описывает и проект ей следует.
 
 ## Решение

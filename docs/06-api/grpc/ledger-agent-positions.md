@@ -69,7 +69,7 @@ message GetAgentPositionsResponse {
 
 Примечания к контракту (актуализировано по факту реализации):
 
-- `position` — `fob.common.v1.Decimal` (деньги/объём, CLAUDE.md §9), **без** ограничения знака (позиция агента знаковая — A6, проверено тестом на отрицательную позицию).
+- `position` — `fob.common.v1.Decimal` (деньги/объём, [.claude/rules/data.md](../../../.claude/rules/data.md)), **без** ограничения знака (позиция агента знаковая — A6, проверено тестом на отрицательную позицию).
 - `agent_kind` — **строка** ("translator" | "arbitrageur" | ""), НЕ общий `enum AgentKind` из черновика: совпадает с PG-хранением (`ce_agent_position.agent_kind TEXT CHECK (... IN ('translator','arbitrageur'))`, [ce-agent-position.md](../../07-data/ce-agent-position.md)) и не создаёт зависимость `ledger.proto → treasury.proto` (где живёт `AgentKind`) ради одного поля.
 - `in_flight` — часть позиции, отправленная наружу band-хеджем и ещё не исполненная (Э3, T-F18-304). При `CE_AGENT_BAND=0` всегда `0`; при `=1` растёт на эмиссии (`RememberExecutionIntent` для `hedge_flow_id` вида `ce|band|<agent_id>|<asset>|<venue>`) и убывает по исполнению/терминалу (`apply_agent_band_report_locked`, Э4).
 - `reference_price` — цена узла `P_node` (USDT/актив) последней дельты клиринга (`AgentDelta.price_used`). Нужна `risk.EmitAgentBandHedges` для перевода избытка полосы (в стоимости) в количество актива хедж-заявки. `0` у арбитражёров и до первой дельты (такие агенты хедж не эмитят). Не персистится — восстанавливается первой же дельтой после рестарта.

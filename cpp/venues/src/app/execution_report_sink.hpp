@@ -5,7 +5,7 @@
 // CexWsRestAdapter::progress_resting_orders_locked (infra) — но публикует отчёт
 // (Kafka execution.venue/.reports + PG child_orders/hedgeflows) app-слой
 // (VenuesLoop), у которого уже есть продюсеры/репозитории. Адаптер зависит от
-// абстракции (CLAUDE.md §10.2: infra не открывает Kafka сам), а не от KafkaProducer.
+// абстракции (.claude/rules/cpp.md: infra не открывает Kafka сам), а не от KafkaProducer.
 //
 // Прецедент: тот же паттерн инжекции, что FillDiagnosticsSink. Proto-типы в
 // сигнатуре допустимы (как в VenueAdapter::SendOrder).

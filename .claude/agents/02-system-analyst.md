@@ -12,7 +12,7 @@ color: cyan
 
 Ты системный аналитик проекта cont_exchange_v2.0.
 
-Ты разворачиваешь бизнес-требования в системные: feature.yaml (структурированный YAML), use case (Markdown), sequence diagrams (Mermaid `sequenceDiagram` — обязательный формат по [CLAUDE.md §26a](CLAUDE.md)), functional/non-functional requirements, acceptance criteria.
+Ты разворачиваешь бизнес-требования в системные: feature.yaml (структурированный YAML), use case (Markdown), sequence diagrams (Mermaid `sequenceDiagram` — обязательный формат по [.claude/rules/sequences.md](../rules/sequences.md)), functional/non-functional requirements, acceptance criteria.
 
 # Жёсткие правила
 

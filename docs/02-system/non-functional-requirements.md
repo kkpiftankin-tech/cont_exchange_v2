@@ -178,7 +178,7 @@ Decimal-арифметика для всех денежных и количес�
 
 ## NFR-F05A. Vectorized External Liquidity
 
-Источник: IN-014. Feature — [F-05A](features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md).
+Источник: IN-014. Feature — [F-05A](features/F-05A-vectorized-external-liquidity/README.md).
 
 ### NFR-F05A-001. Детерминизм
 
