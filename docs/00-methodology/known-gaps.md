@@ -150,6 +150,66 @@
     выше), посчитать нельзя не только за неделю, но и в любой момент без
     отдельной работы по генерации этого поля.
 
+- **Этап 7 (ADR-086/IN-019, 2026-10-27): «Гейты» сужен владельцем — без
+  `level_gate.py`.** Сделано: CI-гейт `.github/workflows/consistency-gate.yml`
+  (feature-yaml-checker, in013-checker, link-audit.py, consistency/check.py,
+  свежесть `specs/registry/registry.yaml`), спроектирован и написан
+  `devops-engineer` по обязательному триггеру `agent-routing.md` §2;
+  `scripts/hooks/post_edit_hint.py` расширен (`capability_hints()`) —
+  правка файла из `feature.yaml.capabilities[].codePaths` или
+  `ui-map.yaml` component теперь называет CAP/UC/CALC/UI в
+  `additionalContext` (не блокирует); попутно исправлен устаревший
+  placeholder `capability: CAP-F18-NN` в `docs/frontend/ui-map.yaml` у
+  `UI-VC-BAND-MODE`→`CAP-F18-BAND-WIDTH` и `UI-VC-SYSTEM-PNL`→
+  `CAP-F18-SYSTEM-PNL` (комментарий был написан до Этапа 4, когда
+  `capabilities[]` ещё не существовало — стал фактически неверным, не
+  просто неполным). `UI-VC-POS-BASIS` остался с placeholder'ом по сути
+  (ни одна из 3 заведённых capabilities[] F-18 не ссылается на него в
+  своём `ui[]` — реальный пробел каталога возможностей, не баг разметки).
+  НЕ сделано этим шагом (решение владельца 2026-10-27, не инженерная
+  недоработка):
+  - **`.claude/hooks/level_gate.py`** (блокирующий Stop-хук: правка
+    `codePaths`/`ui-map` без CR или трейлера `Change: S|spike` → блок) —
+    отложен целиком. За всю историю репозитория нет ни одного CR-файла и
+    ни одного `Change:`-трейлера в коммите; включение хука сейчас
+    останавливало бы любую будущую правку кода/docs, затрагивающую
+    `codePaths`, с первого же коммита после включения.
+  - **`buf breaking`** — `buf` не установлен ни на dev-хосте, ни в CI;
+    отдельная задача.
+  - **«Раннер примеров CALC»** — инструмента нет вообще, нужно строить с
+    нуля (парсинг численного примера из CALC-карточки + исполнение против
+    кода/формулы); не входит в «уже готово».
+  - **Рекомендация брифа п.4** (короткие ветки по CR от `main`/от ветки
+    F-18, не один PR №48 на всю ветку) — передана владельцу как
+    рекомендация, не реализация; пока вся ветка F-18 идёт одним PR, новый
+    CI-гейт видит только суммарный дифф этого PR, не дифф отдельного CR.
+
+- **Этап 7: пред-существующий долг на `main`, из-за которого п.1–3
+  `consistency-gate.yml` НЕ строго блокирующие (только `continue-on-error`,
+  как и п.4)** — найдено `devops-engineer`, перепроверено независимо
+  (git worktree на `main`, Python 3.12 — под CI-версией 3.11 находок у
+  `in013-checker` больше, чем при первой оценке агента на локальном
+  сломанном python3.9):
+  - `feature-yaml-checker`: 3 ERROR — `F-05` два `codePaths` отсутствуют
+    на диске (`cpp/market_data/src/infra/kafka_fills_consumer.cpp`,
+    `clickhouse_marketdata_storage.cpp`), `F-09` status mismatch
+    (`feature.yaml='implemented'` vs `feature-component-map='not-implemented'`).
+  - `in013-checker`: H1/H6 нарушения (`;`/`:` в тексте сообщений Mermaid)
+    минимум в 9 файлах `docs/02-system/.../sequences/` и
+    `docs/05-components/.../sequences/`, включая `SEQ-LEDGER-001`,
+    `SEQ-LEDGER-002`, `SEQ-RISK-001`, `SEQ-F05A-UC-F05A-02/04-services`,
+    `SEQ-F20-UC-F20-01/02`.
+  - `link-audit.py`: 28 broken links (часть — вероятные плейсхолдеры вида
+    `[text](url)` в примерах README, тул их не отличает от настоящих
+    битых ссылок).
+  Ничего из этого не внесено Этапом 7 — все три найдены уже существующими
+  на `main` до этого коммита. Закрывать вне мандата `devops-engineer`
+  (правки `docs/02-system/`, `docs/05-components/`, markdown-ссылок — не
+  его разрешённые пути); решение владельца 2026-10-27: не чинить сейчас,
+  держать `continue-on-error` до отдельного захода. Снимать
+  `continue-on-error` по каждому чекеру отдельно после закрытия его
+  конкретного долга, не всем скопом разом.
+
 При любой задаче явно указывай, является ли изменение:
 
 - `docs-only`;

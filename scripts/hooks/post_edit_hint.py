@@ -20,6 +20,11 @@ import os
 import re
 import sys
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 DEV = "ssh nik@ubuntu-dev"
 INFRA = "cd /home/nik/cont_exchange_v2/infra"
 
@@ -106,6 +111,53 @@ RULES = [
 ]
 
 
+def capability_hints(rel: str, root: str) -> list[str]:
+    """IN-019/ADR-086 Этап 7 п.2: если правка затрагивает codePaths из
+    feature.yaml.capabilities[] или ui-map.component — назвать возможность,
+    UC, CALC и UI-элементы, а не только service-level подсказки из RULES.
+    Покрытие частичное (пилот): только там, где capabilities[]/ui-map уже
+    заведены (сейчас — F-18, 3 capability, экран /vector-clearing-live).
+    Любая ошибка -> пустой список (хук не блокирует)."""
+    if yaml is None:
+        return []
+    lines: list[str] = []
+    try:
+        reg_path = os.path.join(root, "specs", "registry", "registry.yaml")
+        with open(reg_path, "r", encoding="utf-8") as f:
+            reg = yaml.safe_load(f) or {}
+        seen_caps = set()
+        for feat in (reg.get("nodes") or {}).get("feature") or []:
+            for cap in feat.get("capabilities") or []:
+                cp_files = {cp.split("#", 1)[0] for cp in cap.get("codePaths") or []}
+                if rel in cp_files and cap["id"] not in seen_caps:
+                    seen_caps.add(cap["id"])
+                    lines.append(
+                        f"{rel} входит в {cap['id']} ({feat['id']}): "
+                        f"ucs={cap.get('ucs') or []}, calcs={cap.get('calcs') or []}, "
+                        f"ui={cap.get('ui') or []} — проверь, не устарела ли документация capability."
+                    )
+    except Exception:
+        pass
+    try:
+        ui_path = os.path.join(root, "docs", "frontend", "ui-map.yaml")
+        with open(ui_path, "r", encoding="utf-8") as f:
+            ui = yaml.safe_load(f) or {}
+        for screen in ui.get("screens") or []:
+            component_match = screen.get("component") == rel
+            matched_elements = [
+                el["id"] for el in (screen.get("elements") or [])
+                if component_match or (el.get("generated") or {}).get("component") == rel
+            ]
+            if matched_elements:
+                lines.append(
+                    f"{rel} — компонент экрана {screen['id']} ({screen.get('route')}): "
+                    f"элементы ui-map {matched_elements} — сверь calc/contract/field, если менял данные."
+                )
+    except Exception:
+        pass
+    return lines
+
+
 def main() -> int:
     try:
         data = json.load(sys.stdin)
@@ -125,6 +177,8 @@ def main() -> int:
         if m:
             groups = m.groupdict()
             hints.extend(line.format(**groups) if groups else line for line in lines)
+
+    hints.extend(capability_hints(rel, root))
 
     if not hints:
         return 0

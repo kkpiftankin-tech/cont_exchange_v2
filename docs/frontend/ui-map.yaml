@@ -3,8 +3,11 @@
 # Остальные поля — руками. Пилот 2026-10-27: только /vector-clearing-live
 # (решение владельца — 1 экран, не все 6 из приоритета брифа, за один заход).
 #
-# capability: CAP-F18-NN — placeholder как в примере IN-019 §4.1: capabilities[]
-# в feature.yaml ещё не существует (Этап 4), поэтому ссылка не на реальный ID.
+# capability: обновлено Этапом 7 на реальные id из feature.yaml.capabilities[]
+# (появились в Этапе 4, после того как был написан этот комментарий). У
+# UI-VC-POS-BASIS сохранён placeholder CAP-F18-NN — ни одна из 3 заведённых
+# capabilities[] F-18 не ссылается на этот элемент в своём ui[] (см.
+# docs/00-methodology/known-gaps.md, запись Этап 7).
 
 screens:
   - id: UI-VC
@@ -23,7 +26,7 @@ screens:
         openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1agent-positions/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
         contract: docs/06-api/grpc/ledger-agent-positions.md
         calc: CALC-F18-CE-ARBITRAGEUR-BASIS
-        capability: CAP-F18-NN  # placeholder — capabilities[] нет до Этапа 4
+        capability: CAP-F18-NN  # placeholder — ни одна capability F-18 не владеет этим элементом (Этап 7)
         refresh: poll 2s
         states: {empty: "—", stale: "баннер «ЦЕПОЧКА ОСТАНОВЛЕНА» (dataAgeMs > порога)"}
 
@@ -36,7 +39,7 @@ screens:
         openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1config"  # TODO Этап 3 п.3
         contract: docs/06-api/rest/vector-clearing-config.md
         calc: CALC-CE-SKEW-BAND-CALIBRATION
-        capability: CAP-F18-NN
+        capability: CAP-F18-BAND-WIDTH
         refresh: on load / on save
         states: {empty: null, stale: null}
 
@@ -50,6 +53,6 @@ screens:
         openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1system-pnl/get"  # TODO Этап 3 п.3
         contract: docs/06-api/rest/system-pnl.md
         calc: CALC-CE-SYSTEM-PNL
-        capability: CAP-F18-NN
+        capability: CAP-F18-SYSTEM-PNL
         refresh: poll 30s
         states: {empty: "«нет данных»", stale: null}
