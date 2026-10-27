@@ -74,6 +74,35 @@ RULES = [
         "Domain doc edited -> if a formula/invariant/field name changed, check for drift against "
         "docs/04-domain/calculations/CALC-* cards and contracts/proto/ (source of truth for field names, CLAUDE.md §3.1).",
     ]),
+    (r"^docs/02-system/features/[^/]+/open-questions\.md$", [
+        "open-questions.md edited -> use the OQ-FXX-NN / status / addressee format "
+        "(docs/00-methodology/artifact-templates.md 'Open Questions Template') for new entries. "
+        "Re-run: python3 tools/expert_review_report.py --write ; if any entry's source field "
+        "points at docs/experiments/EXP-*.md, also: python3 tools/experiments_index.py --write",
+    ]),
+    (r"^docs/00-methodology/known-gaps\.md$", [
+        "known-gaps.md edited -> re-run: python3 tools/expert_review_report.py --write",
+    ]),
+    (r"^docs/04-domain/calculations/CALC-.*\.md$", [
+        "If the frontmatter `status:` field changed -> re-run: python3 tools/expert_review_report.py --write",
+    ]),
+    (r"^docs/03-architecture/adr/ADR-.*\.md$", [
+        "If the frontmatter `status:` field changed (proposed/accepted/superseded) -> "
+        "re-run: python3 tools/expert_review_report.py --write",
+    ]),
+    (r"^docs/experiments/EXP-.*\.md$", [
+        "Language rule (docs/experiments/README.md): main body = algo-trading terms only "
+        "(P&L, position/risk, execution, volatility, spread, basis). No ENV flag names, ADR "
+        "numbers as the sole explanation, or internal model notation (flow-balance invariant, "
+        "internal weight params, 'node') outside the trailing engineer-detail block. "
+        "If this run hit a question needing the owner/trading expert -> log it as OQ-* too (skill experiment, step 5). "
+        "Then re-run: python3 tools/experiments_index.py --write (keeps docs/experiments/README.md's "
+        "table and expert-questions list in sync).",
+    ]),
+    (r"^Testing/ce_experiment_summary\.sh$", [
+        "Generator for docs/experiments/ -> keep the heredoc's main body in algo-trading language; "
+        "system names (flags, internal invariant names) only in the trailing engineer-detail block.",
+    ]),
 ]
 
 

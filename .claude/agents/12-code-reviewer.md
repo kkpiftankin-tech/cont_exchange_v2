@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Reviews a diff for correctness, money invariants (Decimal vs double), layering, contract compatibility, traceability. Use proactively after changes to money paths, contracts, matching/risk/ledger code, or more than three files (mandatory trigger in .claude/rules/agent-routing.md; a money-path Stop-hook enforces this at the end of the turn). Skip doc-only and cosmetic edits. Returns only defects that affect correctness or requirements, each with file:line and a fix (<=30 lines).
+description: Reviews a diff for correctness, money invariants (Decimal vs double), layering, contract compatibility, traceability. Use proactively after changes to money paths, contracts, matching/risk/ledger code, or more than three files (mandatory trigger in .claude/rules/agent-routing.md; a money-path Stop-hook enforces this at the end of the turn). Skip doc-only and cosmetic edits. Returns only defects that affect correctness or requirements, each with file:line and a fix (<=30 lines); if a finding is a tracked gap rather than a blocking defect, say so explicitly so the main session logs it in docs/00-methodology/known-gaps.md or an OQ-* entry instead of letting it stay only in this response.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 model: sonnet

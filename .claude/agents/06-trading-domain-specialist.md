@@ -1,6 +1,6 @@
 ---
 name: trading-domain-specialist
-description: Owns the mathematics of clearing, risk, ledger and hedge — formulas, invariants, matching rules (F-04, F-06/07/08, F-09, F-11/12). Use when a formula or invariant is changed or questioned, including a CALC-* card drift or a UI number that looks wrong for computational reasons. Not for layout, wiring, or infra. Returns a formula check with variable definitions, invariants, one numeric test case.
+description: Owns the mathematics of clearing, risk, ledger and hedge — formulas, invariants, matching rules (F-04, F-06/07/08, F-09, F-11/12). Use when a formula or invariant is changed or questioned, including a CALC-* card drift or a UI number that looks wrong for computational reasons. Not for layout, wiring, or infra. Returns a formula check with variable definitions, invariants, one numeric test case; read-only, so if a question needs the owner's/trading expert's call rather than engineering, state it explicitly as a candidate OQ-* entry for the main session to persist (.claude/rules/agent-routing.md §3).
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan

@@ -97,6 +97,8 @@ cd infra && docker compose -f docker-compose.dev.yml up --build
 python3 tools/traceability-checker/check.py
 python3 tools/proto-contract-auditor/check_proto_map.py
 python3 tools/agents_report.py --days 7        # калибровка маршрутизации агентов
+python3 tools/expert_review_report.py --write  # критичная функциональность + вопросы эксперту
+python3 tools/experiments_index.py --write     # docs/experiments/README.md: таблица + вопросы эксперту
 ```
 
 Dev gateway: `http://localhost:8088/healthz`, `POST /v1/flow-orders`. Полные
