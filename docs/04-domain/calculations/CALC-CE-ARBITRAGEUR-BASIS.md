@@ -14,8 +14,14 @@ ui:
   - route: /vector-clearing-live
     component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js#AgentPositionsTables
     field: agentRows[].realized_usdt / unrealized_usdt (заработок), basis_mtm_usdt (базис), open_position_usdt (открытая позиция)
-sources: [ADR-073, ADR-080, ADR-069, docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md, incoming-docs/2026-09-15-CE_algorithm_v2.md]
-updated_at: 2026-10-20
+examples:
+  - id: EX-1
+    target: frontend/api/trade_stats_math.js#arbPositionParts
+    args: [ETH, USDT, 1.7579, 2398.80, -1.7579, 2398.66]
+    expect: {open_position_usdt: 0, basis_usdt: 0.246106}
+    tolerance: 0.000001
+sources: [ADR-073, ADR-080, ADR-069, ADR-083, docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md, incoming-docs/2026-09-15-CE_algorithm_v2.md]
+updated_at: 2026-10-27
 ---
 
 # Арбитражёр: заработок по сделкам, базис, открытая позиция

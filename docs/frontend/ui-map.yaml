@@ -4,10 +4,9 @@
 # (решение владельца — 1 экран, не все 6 из приоритета брифа, за один заход).
 #
 # capability: обновлено Этапом 7 на реальные id из feature.yaml.capabilities[]
-# (появились в Этапе 4, после того как был написан этот комментарий). У
-# UI-VC-POS-BASIS сохранён placeholder CAP-F18-NN — ни одна из 3 заведённых
-# capabilities[] F-18 не ссылается на этот элемент в своём ui[] (см.
-# docs/00-methodology/known-gaps.md, запись Этап 7).
+# (появились в Этапе 4, после того как был написан этот комментарий).
+# UI-VC-POS-BASIS получил владеющую capability в Этапе 8 (CR-F18-001,
+# CAP-F18-ARBITRAGEUR-BASIS) — до этого был placeholder CAP-F18-NN.
 
 screens:
   - id: UI-VC
@@ -26,7 +25,7 @@ screens:
         openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1agent-positions/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
         contract: docs/06-api/grpc/ledger-agent-positions.md
         calc: CALC-F18-CE-ARBITRAGEUR-BASIS
-        capability: CAP-F18-NN  # placeholder — ни одна capability F-18 не владеет этим элементом (Этап 7)
+        capability: CAP-F18-ARBITRAGEUR-BASIS
         refresh: poll 2s
         states: {empty: "—", stale: "баннер «ЦЕПОЧКА ОСТАНОВЛЕНА» (dataAgeMs > порога)"}
 

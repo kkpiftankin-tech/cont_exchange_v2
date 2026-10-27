@@ -624,6 +624,34 @@ nodes:
       - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
       tests:
       - cpp/ledger/tests/ce_link_transfer_test.cpp
+    - id: CAP-F18-ARBITRAGEUR-BASIS
+      title: Базис и открытая позиция арбитражёра — панель «Живые позиции»
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      since: CR-F18-001
+      acceptanceCriteria:
+      - AC-F18v2-29
+      adrs:
+      - ADR-080
+      - ADR-073
+      - ADR-069
+      - ADR-083
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-F18-CE-ARBITRAGEUR-BASIS
+      contracts:
+      - docs/06-api/grpc/ledger-agent-positions.md
+      ui:
+      - UI-VC-POS-BASIS
+      codePaths:
+      - frontend/api/trade_stats_math.js#arbPositionParts
+      - frontend/api/server.js#buildAgentRows
+      tests:
+      - frontend/api/trade_stats_math.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
     acceptanceCriteriaIds:
     - AC-F18v2-01
     - AC-F18v2-02
@@ -654,6 +682,7 @@ nodes:
     - AC-F18v2-26
     - AC-F18v2-27
     - AC-F18v2-28
+    - AC-F18v2-29
   - id: F-20
     type: feature
     class: normative

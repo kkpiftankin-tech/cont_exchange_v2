@@ -24,9 +24,17 @@ F-18, и только 3 из 28 AC-F18v2-* сгруппированы (пило�
 traceability.yaml остаются источником для tools/feature-yaml-checker и
 tools/traceability-checker — решение "обернуть, не заменять" (не Этап 2).
 
+Этап 8 (2026-10-27): `--scope F-XX` фильтрует findings по feature id — для
+feature/uc/calc-центричных правил (C-01/02/03/04/05/06/14/15/17) через поле
+`feature` узла (или id самой feature-записи); C-08 (таблицы) и C-16
+(waivers) всегда глобальные (не привязаны к одной фиче); C-14/C-15 для
+ADR-узлов тоже глобальные (ADR не несёт поле feature). Дубликаты ID
+(C-02/C-15) детектируются по всем узлам (иначе не поймать дубль между
+фичами), но в отчёт попадают только записи, относящиеся к `scope`.
+
 Запуск:
   python3 tools/registry/build.py --write   # сначала обновить реестр
-  python3 tools/consistency/check.py [--rule C-01] [--format md|json]
+  python3 tools/consistency/check.py [--rule C-01] [--scope F-18] [--format md|json]
 
 Код выхода: 1 при ERROR без waiver, 0 иначе (WARN не валит exit code).
 """
@@ -99,12 +107,14 @@ def active_waiver(waivers: list[dict], rule: str, scope: str = "") -> dict | Non
     return None
 
 
-def rule_c01(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c01(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """у фичи непустой parentRequirements; ID существуют."""
     findings = []
     req_ids = {n["id"] for n in reg["nodes"]["requirement"]}
     for feat in reg["nodes"]["feature"]:
         fid = feat["id"]
+        if scope and fid != scope:
+            continue
         reqs = feat.get("parentRequirements") or []
         if not reqs:
             findings.append({
@@ -121,10 +131,12 @@ def rule_c01(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c04(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c04(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """у UC active есть системная и сервисная SEQ (файлы существуют)."""
     findings = []
     for uc in reg["nodes"]["uc"]:
+        if scope and uc.get("feature") != scope:
+            continue
         if uc.get("status") != "active":
             continue
         uc_dir = ROOT / uc["ucDir"]
@@ -145,11 +157,13 @@ def rule_c04(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c05(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c05(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """CALC: валидная шапка, статус из перечня, якоря code/tests существуют.
     НЕ проверяет "проходящий пример" — Этап 4."""
     findings = []
     for calc in reg["nodes"]["calc"]:
+        if scope and calc.get("feature") != scope:
+            continue
         cid = calc["id"]
         status = calc.get("status")
         if status not in CALC_STATUS_ENUM:
@@ -179,14 +193,17 @@ def rule_c05(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c08(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c08(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """инвентарь таблиц init.sql = таблицы в docs/07-data/.
 
     Как у kafka-topic проверки в feature-yaml-checker: таблица считается
     документированной, если есть ЛИБО выделенный файл с её именем, ЛИБО
     она упомянута в обратных кавычках `table_name` в любом docs/07-data/*.md
     (bundled-doc, напр. data-flow.md/data-overview.md/oltp-schema.md
-    описывают несколько таблиц в одном файле)."""
+    описывают несколько таблиц в одном файле).
+
+    `scope` игнорируется: таблицы в registry не привязаны к одной фиче
+    (table-узлы не несут поле `feature`) — правило всегда глобальное."""
     findings = []
     dedicated = set()
     bundled_text = ""
@@ -210,10 +227,15 @@ def rule_c08(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c14(reg: dict, waivers: list[dict]) -> list[dict]:
-    """статусы только из перечней."""
+def rule_c14(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
+    """статусы только из перечней.
+
+    ADR-узлы не несут поле `feature` (ADR часто не 1:1 с фичей) — цикл по
+    ADR всегда глобальный, `scope` на него не действует (документировано)."""
     findings = []
     for feat in reg["nodes"]["feature"]:
+        if scope and feat["id"] != scope:
+            continue
         lc = feat.get("lifecycle")
         if lc is not None and lc not in FEATURE_LIFECYCLE_ENUM:
             findings.append({
@@ -221,6 +243,8 @@ def rule_c14(reg: dict, waivers: list[dict]) -> list[dict]:
                 "message": f"{feat['id']}: lifecycle={lc!r} не из перечня {sorted(FEATURE_LIFECYCLE_ENUM)}",
             })
     for uc in reg["nodes"]["uc"]:
+        if scope and uc.get("feature") != scope:
+            continue
         st = uc.get("status")
         if st is not None and st not in UC_STATUS_ENUM:
             findings.append({
@@ -228,6 +252,8 @@ def rule_c14(reg: dict, waivers: list[dict]) -> list[dict]:
                 "message": f"{uc['id']}: status={st!r} не из перечня {sorted(UC_STATUS_ENUM)}",
             })
     for calc in reg["nodes"]["calc"]:
+        if scope and calc.get("feature") != scope:
+            continue
         st = calc.get("status")
         if st is not None and st not in CALC_STATUS_ENUM:
             findings.append({
@@ -244,9 +270,13 @@ def rule_c14(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c15(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c15(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """ID уникальны (UC, CALC — AC/CR/UI пока не отдельные узлы реестра);
-    ID в шапке = имени файла (CALC)."""
+    ID в шапке = имени файла (CALC).
+
+    Дублирование ID — всегда глобальная проверка (дубликат по природе
+    затрагивает ≥2 узла, сужать до одной фичи некорректно); `scope`
+    фильтрует только "id != filename" для CALC, где есть `feature`."""
     findings = []
     for node_type in ("uc", "calc", "feature", "adr"):
         seen: dict[str, str] = {}
@@ -259,6 +289,8 @@ def rule_c15(reg: dict, waivers: list[dict]) -> list[dict]:
                 })
             seen[nid] = n["path"]
     for calc in reg["nodes"]["calc"]:
+        if scope and calc.get("feature") != scope:
+            continue
         if calc["id"] != calc["filenameId"]:
             findings.append({
                 "rule": "C-15", "severity": "error", "node": calc["id"],
@@ -267,8 +299,10 @@ def rule_c15(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c16(reg: dict, waivers: list[dict]) -> list[dict]:
-    """нет просроченных исключений в specs/waivers.yaml."""
+def rule_c16(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
+    """нет просроченных исключений в specs/waivers.yaml.
+
+    `scope` игнорируется — waiver-реестр не привязан к одной фиче."""
     findings = []
     today = datetime.date.today()
     for w in waivers:
@@ -300,13 +334,17 @@ def rule_c16(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c02(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c02(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """у возможности есть AC с ID и хотя бы один UC; ID уникальны.
 
     Этап 4 п.1 (2026-10-27) — реализуемо только там, где у фичи заведён
     capabilities[] (сейчас только F-18, пилот 3 из 28 AC). У фич без
     capabilities[] правило не применяется (not-yet-applicable для них,
-    не error) — пилотная группировка, не ретроактивная проверка всех фич."""
+    не error) — пилотная группировка, не ретроактивная проверка всех фич.
+
+    Дубликат cap-id детектируется по ВСЕМ фичам (иначе не поймать дубль
+    между фичами), но в найденную запись попадает, только если ТЕКУЩАЯ
+    (вторая встреченная) capability принадлежит `scope`."""
     findings = []
     uc_ids = {n["id"] for n in reg["nodes"]["uc"]}
     seen_cap_ids: dict[str, str] = {}
@@ -314,15 +352,18 @@ def rule_c02(reg: dict, waivers: list[dict]) -> list[dict]:
         caps = feat.get("capabilities") or []
         if not caps:
             continue
+        in_scope = not scope or feat["id"] == scope
         valid_ac_ids = set(feat.get("acceptanceCriteriaIds") or [])
         for cap in caps:
             cid = cap.get("id", "?")
-            if cid in seen_cap_ids:
+            if cid in seen_cap_ids and in_scope:
                 findings.append({
                     "rule": "C-02", "severity": "error", "node": cid,
                     "message": f"{cid}: дублирующийся ID capability ({seen_cap_ids[cid]} и {feat['id']})",
                 })
             seen_cap_ids[cid] = feat["id"]
+            if not in_scope:
+                continue
             acs = cap.get("acceptanceCriteria") or []
             if not acs:
                 findings.append({
@@ -351,13 +392,15 @@ def rule_c02(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c03(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c03(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """ADR из capabilities[].adrs существуют и ссылаются обратно (WARN)."""
     findings = []
     adr_dir = ROOT / "docs" / "03-architecture" / "adr"
     adr_ids = {n["id"] for n in reg["nodes"]["adr"]}
     adr_text_cache: dict[str, str] = {}
     for feat in reg["nodes"]["feature"]:
+        if scope and feat["id"] != scope:
+            continue
         for cap in feat.get("capabilities") or []:
             cid = cap.get("id", "?")
             for adr_id in cap.get("adrs") or []:
@@ -383,10 +426,12 @@ def rule_c03(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c06(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c06(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """нет открытых TODO contract у возможностей с code: done."""
     findings = []
     for feat in reg["nodes"]["feature"]:
+        if scope and feat["id"] != scope:
+            continue
         for cap in feat.get("capabilities") or []:
             cid = cap.get("id", "?")
             status = cap.get("status") or {}
@@ -414,10 +459,12 @@ def rule_c06(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
-def rule_c17(reg: dict, waivers: list[dict]) -> list[dict]:
+def rule_c17(reg: dict, waivers: list[dict], scope: str | None = None) -> list[dict]:
     """у AC возможности с code: done есть тест (warn -> error после этапа 8)."""
     findings = []
     for feat in reg["nodes"]["feature"]:
+        if scope and feat["id"] != scope:
+            continue
         for cap in feat.get("capabilities") or []:
             cid = cap.get("id", "?")
             status = cap.get("status") or {}
@@ -466,7 +513,10 @@ def main() -> int:
     ap.add_argument("--rule", help="запустить только одно правило, например C-05")
     ap.add_argument("--format", choices=["md", "json"], default="md")
     ap.add_argument("--levels", help="(зарезервировано, не используется в сужённом Этапе 2)")
-    ap.add_argument("--scope", help="(зарезервировано, не используется в сужённом Этапе 2)")
+    ap.add_argument("--scope", help="фильтр по feature id (например F-18), Этап 8. "
+                    "C-08/C-16 всегда глобальные (table/waiver не привязаны к фиче); "
+                    "C-14/C-15 фильтруют feature/uc/calc, ADR-узлы в них — всегда глобальные "
+                    "(ADR не несёт поле feature). См. докстринги правил.")
     args = ap.parse_args()
 
     reg = load_registry()
@@ -480,9 +530,15 @@ def main() -> int:
         print(f"ERROR: unknown rule {args.rule}", file=sys.stderr)
         return 2
 
+    if args.scope:
+        feat_ids = {f["id"] for f in reg["nodes"]["feature"]}
+        if args.scope not in feat_ids:
+            print(f"ERROR: --scope {args.scope!r} не найден среди feature id в registry", file=sys.stderr)
+            return 2
+
     findings: list[dict] = []
     for rid, fn in rules_to_run.items():
-        findings.extend(fn(reg, waivers))
+        findings.extend(fn(reg, waivers, args.scope))
     findings = apply_waivers(findings, waivers)
 
     errors = [f for f in findings if f["severity"] == "error"]

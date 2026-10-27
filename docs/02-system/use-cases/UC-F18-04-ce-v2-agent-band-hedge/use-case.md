@@ -3,6 +3,7 @@ id: UC-F18-04
 title: Такт клиринга виртуальных контрагентов и хедж по полосе ±q (v2)
 level: sea
 feature: F-18
+capabilities: [CAP-F18-BAND-WIDTH, CAP-F18-SYSTEM-PNL, CAP-F18-LINK-TRANSFER, CAP-F18-ARBITRAGEUR-BASIS]
 system-sequence: sequences/SEQ-UC-F18-04-system.md
 service-sequence: ../../../05-components/sequences/SEQ-F18-UC-F18-04-services.md
 status: active  # draft | active | superseded | deprecated
