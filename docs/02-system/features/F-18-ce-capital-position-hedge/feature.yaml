@@ -29,6 +29,58 @@ parentRequirements: []  # FR-* бизнес-требование для F-18 в 
   # (CE виртуальные контрагенты не описаны на уровне FR-*, только через ADR выше) —
   # открытый вопрос, не решаю здесь сам (Этап 1 п.6, ADR-086/IN-019; см. known-gaps.md)
 
+# Этап 4 п.1 (ADR-086/IN-019 §4.4), пилот 2026-10-27 — решение владельца:
+# ТОЛЬКО 3 из 28 AC-F18v2-* сгруппированы в capabilities ниже (демонстрация
+# механизма). Остальные 25 — НЕ размечены: группировка в capabilities — это
+# продуктовое решение о границах возможностей, не механический перенос
+# (в отличие от Этапа 1 п.6 FR-* переноса); угадывать его на 25 ACs разом
+# не стал. acceptanceCriteria ниже остаются и в общем списке ниже
+# (не перемещены, не удалены) — capabilities дополняют, не заменяют.
+capabilities:
+  - id: CAP-F18-BAND-WIDTH
+    title: Ширина полосы хеджа — ручной и волатильностный режимы
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-21]
+    adrs: [ADR-081, ADR-066]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-SKEW-BAND-CALIBRATION]
+    contracts: [docs/06-api/rest/vector-clearing-config.md]
+    tables: [f05a_clearing_config, operator_audit_log]
+    ui: [UI-VC-BAND-MODE]
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
+    tests: []  # CALC-CE-SKEW-BAND-CALIBRATION.tests тоже [] — калибровка значений, не код-путь
+
+  - id: CAP-F18-SYSTEM-PNL
+    title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый + V переоценка)
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-26]
+    adrs: [ADR-083, ADR-084]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-SYSTEM-PNL]
+    contracts: [docs/06-api/rest/system-pnl.md]
+    ui: [UI-VC-SYSTEM-PNL]
+    codePaths: [frontend/api/system_pnl.js]
+    tests: [frontend/api/system_pnl.test.js]
+
+  - id: CAP-F18-LINK-TRANSFER
+    title: Физический перевод связки между биржами
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-27]
+    adrs: [ADR-084, ADR-083]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-LINK-TRANSFER]
+    contracts: [docs/06-api/grpc/ledger-apply-node-transfer.md]
+    ui: []  # нет отдельного UI-ID в пилоте ui-map.yaml (Этап 3) — только упомянут в тексте "Живые позиции"/"Система по остаткам"
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferThresholdK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferAmountK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferUnits
+      - cpp/ledger/src/app/ledger_uc.cpp#maybe_queue_link_transfer_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
+    tests: [cpp/ledger/tests/ce_link_transfer_test.cpp]
+
 description: >
   Биржа CE (Continuous Exchange) выступает дилером через двух виртуальных контрагентов:
   ПЕРЕВОДЧИКОВ (Q_BIN, Q_KRK — маркет-мейкер, меняет на ОДНОЙ площадке актив на деньги)

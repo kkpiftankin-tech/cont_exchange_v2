@@ -5,14 +5,19 @@
 
   - Реализованы правила, не требующие артефактов будущих этапов:
     C-01, C-04, C-05 (частично), C-08, C-14, C-15, C-16.
-  - Остальные (C-02, C-03, C-06, C-07, C-09, C-10, C-11, C-12, C-13, C-17)
-    требуют артефактов Этапов 3/4 (capabilities в feature.yaml, ui-map.yaml,
-    OpenAPI BFF, CR-карточки, исполняемые примеры CALC, verified-даты) —
-    возвращаются как status=not-yet-applicable с причиной, не удаляются
-    молча из отчёта.
+  - Остальные требовали артефактов Этапов 3/4 — возвращаются как
+    status=not-yet-applicable с причиной, не удаляются молча из отчёта.
   - C-05 реализован БЕЗ проверки "у implemented есть проходящий пример"
     (исполняемые примеры CALC — Этап 4, §4.5); остальная часть правила
     (шапка, статус из перечня, якоря code/tests существуют) — проверяется.
+
+Этап 4 п.1 (2026-10-27): C-02, C-03, C-06, C-17 реализованы — но реально
+проверяют только фичи с заведённым `capabilities[]`. Сейчас это ТОЛЬКО
+F-18, и только 3 из 28 AC-F18v2-* сгруппированы (пилот, не весь каталог
+возможностей) — у остальных 18 фич и у 25 оставшихся AC F-18 правила
+молча ничего не находят (пустой `capabilities[]` = нечего проверять, не
+ошибка). C-07/09/10/11/12/13 остаются not-yet-applicable (Этап 3 п.3/
+Этап 4 п.2/Этап 6-7 не начаты).
 
 Работает НАД specs/registry/registry.yaml (tools/registry/build.py), не
 читает docs напрямую. specs/domain/feature-component-map.yaml и
@@ -51,16 +56,12 @@ FEATURE_LIFECYCLE_ENUM = {"planned", "active", "deprecated"}
 ADR_STATUS_ENUM = {"proposed", "accepted", "superseded", "deprecated", "rejected"}
 
 NOT_YET_APPLICABLE = {
-    "C-02": "требует capabilities[] в feature.yaml — Этап 4 (IN-019 §4.4)",
-    "C-03": "требует capabilities[].adrs — Этап 4",
-    "C-06": "требует capabilities[].status.code — Этап 4",
-    "C-07": "требует docs/frontend/ui-map.yaml и OpenAPI BFF — Этап 3",
-    "C-09": "требует docs/frontend/ui-map.yaml — Этап 3",
-    "C-10": "требует docs/frontend/ui-map.yaml — Этап 3",
-    "C-11": "требует CR-трейлеров / capabilities[].codePaths — Этап 4",
+    "C-07": "требует OpenAPI BFF (contracts/openapi/fob/bff/v1/) — Этап 3 п.3, не начато",
+    "C-09": "требует OpenAPI BFF + capability.ui сверку по всем экранам — Этап 3 (пилот 1 экрана есть, не 6)",
+    "C-10": "требует OpenAPI BFF — Этап 3 п.3",
+    "C-11": "требует CR-трейлеров — Этап 4 п.2, не начато",
     "C-12": "требует verified-дат на поясняющих артефактах — Этап 6/7",
-    "C-13": "требует docs/changes/CR-*.md — Этап 4",
-    "C-17": "требует capabilities[].acceptanceCriteria + tests — Этап 4",
+    "C-13": "требует docs/changes/CR-*.md — Этап 4 п.2, не начато",
 }
 
 
@@ -299,14 +300,153 @@ def rule_c16(reg: dict, waivers: list[dict]) -> list[dict]:
     return findings
 
 
+def rule_c02(reg: dict, waivers: list[dict]) -> list[dict]:
+    """у возможности есть AC с ID и хотя бы один UC; ID уникальны.
+
+    Этап 4 п.1 (2026-10-27) — реализуемо только там, где у фичи заведён
+    capabilities[] (сейчас только F-18, пилот 3 из 28 AC). У фич без
+    capabilities[] правило не применяется (not-yet-applicable для них,
+    не error) — пилотная группировка, не ретроактивная проверка всех фич."""
+    findings = []
+    uc_ids = {n["id"] for n in reg["nodes"]["uc"]}
+    seen_cap_ids: dict[str, str] = {}
+    for feat in reg["nodes"]["feature"]:
+        caps = feat.get("capabilities") or []
+        if not caps:
+            continue
+        valid_ac_ids = set(feat.get("acceptanceCriteriaIds") or [])
+        for cap in caps:
+            cid = cap.get("id", "?")
+            if cid in seen_cap_ids:
+                findings.append({
+                    "rule": "C-02", "severity": "error", "node": cid,
+                    "message": f"{cid}: дублирующийся ID capability ({seen_cap_ids[cid]} и {feat['id']})",
+                })
+            seen_cap_ids[cid] = feat["id"]
+            acs = cap.get("acceptanceCriteria") or []
+            if not acs:
+                findings.append({
+                    "rule": "C-02", "severity": "error", "node": cid,
+                    "message": f"{cid}: acceptanceCriteria пуст",
+                })
+            for ac in acs:
+                if ac not in valid_ac_ids:
+                    findings.append({
+                        "rule": "C-02", "severity": "error", "node": cid,
+                        "message": f"{cid}: AC {ac} не найден в feature.yaml.acceptanceCriteria",
+                    })
+            ucs = cap.get("ucs") or []
+            if not ucs:
+                findings.append({
+                    "rule": "C-02", "severity": "error", "node": cid,
+                    "message": f"{cid}: нет ни одного UC",
+                })
+            for uc in ucs:
+                uc_bare = uc.split("#")[0]
+                if uc_bare not in uc_ids:
+                    findings.append({
+                        "rule": "C-02", "severity": "error", "node": cid,
+                        "message": f"{cid}: UC {uc} не найден в registry",
+                    })
+    return findings
+
+
+def rule_c03(reg: dict, waivers: list[dict]) -> list[dict]:
+    """ADR из capabilities[].adrs существуют и ссылаются обратно (WARN)."""
+    findings = []
+    adr_dir = ROOT / "docs" / "03-architecture" / "adr"
+    adr_ids = {n["id"] for n in reg["nodes"]["adr"]}
+    adr_text_cache: dict[str, str] = {}
+    for feat in reg["nodes"]["feature"]:
+        for cap in feat.get("capabilities") or []:
+            cid = cap.get("id", "?")
+            for adr_id in cap.get("adrs") or []:
+                if adr_id not in adr_ids:
+                    findings.append({
+                        "rule": "C-03", "severity": "warn", "node": cid,
+                        "message": f"{cid}: ADR {adr_id} из capabilities[].adrs не найден в registry",
+                    })
+                    continue
+                adr_node = next(n for n in reg["nodes"]["adr"] if n["id"] == adr_id)
+                adr_path = ROOT / adr_node["path"]
+                if adr_id not in adr_text_cache:
+                    try:
+                        adr_text_cache[adr_id] = adr_path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        adr_text_cache[adr_id] = ""
+                if cid not in adr_text_cache[adr_id]:
+                    findings.append({
+                        "rule": "C-03", "severity": "warn", "node": cid,
+                        "message": f"{cid}: {adr_id} не ссылается обратно на {cid} "
+                                   f"(нет текста {cid!r} в {adr_node['path']})",
+                    })
+    return findings
+
+
+def rule_c06(reg: dict, waivers: list[dict]) -> list[dict]:
+    """нет открытых TODO contract у возможностей с code: done."""
+    findings = []
+    for feat in reg["nodes"]["feature"]:
+        for cap in feat.get("capabilities") or []:
+            cid = cap.get("id", "?")
+            status = cap.get("status") or {}
+            if status.get("code") != "done":
+                continue
+            for contract in cap.get("contracts") or []:
+                file_part = contract.split("#")[0]
+                target = ROOT / file_part
+                if not target.exists():
+                    findings.append({
+                        "rule": "C-06", "severity": "error", "node": cid,
+                        "message": f"{cid}: контракт не существует на диске: {file_part}",
+                    })
+                    continue
+                try:
+                    text = target.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if "TODO contract" in text:
+                    findings.append({
+                        "rule": "C-06", "severity": "error", "node": cid,
+                        "message": f"{cid}: контракт {file_part} помечен TODO contract, "
+                                   f"но capability.status.code=done",
+                    })
+    return findings
+
+
+def rule_c17(reg: dict, waivers: list[dict]) -> list[dict]:
+    """у AC возможности с code: done есть тест (warn -> error после этапа 8)."""
+    findings = []
+    for feat in reg["nodes"]["feature"]:
+        for cap in feat.get("capabilities") or []:
+            cid = cap.get("id", "?")
+            status = cap.get("status") or {}
+            if status.get("code") != "done":
+                continue
+            if not cap.get("acceptanceCriteria"):
+                continue
+            tests = cap.get("tests") or []
+            if not tests:
+                findings.append({
+                    "rule": "C-17", "severity": "warn", "node": cid,
+                    "message": f"{cid}: code=done, acceptanceCriteria={cap['acceptanceCriteria']}, "
+                               f"но tests пуст",
+                })
+    return findings
+
+
 RULES = {
     "C-01": rule_c01,
+    "C-02": rule_c02,
+    "C-03": rule_c03,
     "C-04": rule_c04,
     "C-05": rule_c05,
+    "C-06": rule_c06,
     "C-08": rule_c08,
     "C-14": rule_c14,
     "C-15": rule_c15,
     "C-16": rule_c16,
+    "C-17": rule_c17,
 }
 
 

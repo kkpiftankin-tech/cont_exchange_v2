@@ -273,6 +273,8 @@ nodes:
     parentRequirements:
     - FR-AUTH-001
     - FR-AUTH-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-02
     type: feature
     class: normative
@@ -288,6 +290,8 @@ nodes:
     - FR-ORDER-002
     - FR-ORDER-004
     - FR-LEDGER-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-03
     type: feature
     class: normative
@@ -301,6 +305,8 @@ nodes:
     parentRequirements:
     - FR-ORDER-003
     - FR-LEDGER-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-04
     type: feature
     class: normative
@@ -314,6 +320,8 @@ nodes:
     parentRequirements:
     - FR-CLEAR-001
     - FR-LEDGER-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-05
     type: feature
     class: normative
@@ -326,6 +334,8 @@ nodes:
       runtime: dev
     parentRequirements:
     - FR-MD-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-05A
     type: feature
     class: normative
@@ -348,6 +358,8 @@ nodes:
     - FR-F05A-009
     - FR-F05A-010
     - FR-F05A-011
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-06
     type: feature
     class: normative
@@ -361,6 +373,8 @@ nodes:
     parentRequirements:
     - FR-LEDGER-001
     - FR-LEDGER-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-07
     type: feature
     class: normative
@@ -373,6 +387,8 @@ nodes:
       runtime: dev
     parentRequirements:
     - FR-RISK-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-08
     type: feature
     class: normative
@@ -385,6 +401,8 @@ nodes:
       runtime: none
     parentRequirements:
     - FR-RISK-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-09
     type: feature
     class: normative
@@ -397,6 +415,8 @@ nodes:
       runtime: dev
     parentRequirements:
     - FR-ORDER-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-10
     type: feature
     class: normative
@@ -410,6 +430,8 @@ nodes:
     parentRequirements:
     - FR-MM-001
     - FR-MM-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-11
     type: feature
     class: normative
@@ -422,6 +444,8 @@ nodes:
       runtime: dev
     parentRequirements:
     - FR-MD-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-12
     type: feature
     class: normative
@@ -435,6 +459,8 @@ nodes:
     parentRequirements:
     - FR-HEDGE-001
     - FR-HEDGE-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-13
     type: feature
     class: normative
@@ -448,6 +474,8 @@ nodes:
     parentRequirements:
     - FR-REPORT-001
     - FR-REPORT-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-14
     type: feature
     class: normative
@@ -460,6 +488,8 @@ nodes:
       runtime: none
     parentRequirements:
     - FR-LEDGER-003
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-15
     type: feature
     class: normative
@@ -472,6 +502,8 @@ nodes:
       runtime: dev
     parentRequirements:
     - FR-CLEAR-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-16
     type: feature
     class: normative
@@ -486,6 +518,8 @@ nodes:
     - FR-RISK-003
     - FR-OPS-001
     - FR-OPS-002
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-17
     type: feature
     class: normative
@@ -499,6 +533,8 @@ nodes:
     parentRequirements:
     - FR-REPORT-002
     - FR-OPS-001
+    capabilities: []
+    acceptanceCriteriaIds: []
   - id: F-18
     type: feature
     class: normative
@@ -511,6 +547,113 @@ nodes:
       code: partial
       runtime: dev
     parentRequirements: []
+    capabilities:
+    - id: CAP-F18-BAND-WIDTH
+      title: Ширина полосы хеджа — ручной и волатильностный режимы
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      acceptanceCriteria:
+      - AC-F18v2-21
+      adrs:
+      - ADR-081
+      - ADR-066
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-CE-SKEW-BAND-CALIBRATION
+      contracts:
+      - docs/06-api/rest/vector-clearing-config.md
+      tables:
+      - f05a_clearing_config
+      - operator_audit_log
+      ui:
+      - UI-VC-BAND-MODE
+      codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
+      tests: []
+    - id: CAP-F18-SYSTEM-PNL
+      title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый
+        + V переоценка)
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      acceptanceCriteria:
+      - AC-F18v2-26
+      adrs:
+      - ADR-083
+      - ADR-084
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-CE-SYSTEM-PNL
+      contracts:
+      - docs/06-api/rest/system-pnl.md
+      ui:
+      - UI-VC-SYSTEM-PNL
+      codePaths:
+      - frontend/api/system_pnl.js
+      tests:
+      - frontend/api/system_pnl.test.js
+    - id: CAP-F18-LINK-TRANSFER
+      title: Физический перевод связки между биржами
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      acceptanceCriteria:
+      - AC-F18v2-27
+      adrs:
+      - ADR-084
+      - ADR-083
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-CE-LINK-TRANSFER
+      contracts:
+      - docs/06-api/grpc/ledger-apply-node-transfer.md
+      ui: []
+      codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferThresholdK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferAmountK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferUnits
+      - cpp/ledger/src/app/ledger_uc.cpp#maybe_queue_link_transfer_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
+      tests:
+      - cpp/ledger/tests/ce_link_transfer_test.cpp
+    acceptanceCriteriaIds:
+    - AC-F18v2-01
+    - AC-F18v2-02
+    - AC-F18v2-03
+    - AC-F18v2-04
+    - AC-F18v2-05
+    - AC-F18v2-06
+    - AC-F18v2-07
+    - AC-F18v2-08
+    - AC-F18v2-09
+    - AC-F18v2-10
+    - AC-F18v2-11
+    - AC-F18v2-12
+    - AC-F18v2-13
+    - AC-F18v2-13a
+    - AC-F18v2-14
+    - AC-F18v2-15
+    - AC-F18v2-16
+    - AC-F18v2-17
+    - AC-F18v2-18
+    - AC-F18v2-19
+    - AC-F18v2-20
+    - AC-F18v2-21
+    - AC-F18v2-22
+    - AC-F18v2-23
+    - AC-F18v2-24
+    - AC-F18v2-25
+    - AC-F18v2-26
+    - AC-F18v2-27
+    - AC-F18v2-28
   - id: F-20
     type: feature
     class: normative
@@ -522,6 +665,8 @@ nodes:
       code: partial
       runtime: dev
     parentRequirements: []
+    capabilities: []
+    acceptanceCriteriaIds: []
   uc:
   - id: UC-F01-01
     type: uc

@@ -16,10 +16,15 @@
   adr          — docs/03-architecture/adr/ADR-*.md (frontmatter)
   table        — infra/postgres/init.sql + infra/clickhouse/init.sql (CREATE TABLE)
 
-НЕ покрывает (нет исходных артефактов на момент Этапа 2, см. known-gaps.md):
-  capability, ac (как отдельный узел), seq, contract, openapi-path,
-  ui-screen, ui-element, code, test, cr, exp, waiver — появятся по мере
-  того, как Этапы 3/4 создадут сами артефакты.
+Этап 4 п.1 (2026-10-27): `feature.capabilities` теперь попадает в реестр как
+вложенное поле узла `feature` (не отдельный тип узла `capability` — пилот
+только для F-18, 3 из 28 AC; не весь каталог возможностей).
+
+НЕ покрывает (нет исходных артефактов):
+  ac (как отдельный узел), seq, contract, openapi-path, ui-screen,
+  ui-element, code, test, cr, exp, waiver — появятся по мере того, как
+  Этапы 3/4 создадут сами артефакты (ui-screen/ui-element — пилот Этапа 3
+  в docs/frontend/ui-map.yaml, пока отдельно от этого реестра).
 
 Запуск:
   python3 tools/registry/build.py --write   # пишет specs/registry/registry.yaml
@@ -124,11 +129,22 @@ def scan_features() -> list[dict]:
         parent_reqs = data.get("parentRequirements")
         if not isinstance(parent_reqs, list):
             parent_reqs = []
+        capabilities = data.get("capabilities")
+        if not isinstance(capabilities, list):
+            capabilities = []
+        ac_raw = data.get("acceptanceCriteria") or []
+        ac_ids = []
+        for item in ac_raw:
+            m = re.match(r"^(AC-[A-Za-z0-9]+-\d+[a-z]?)", str(item))
+            if m:
+                ac_ids.append(m.group(1))
         nodes.append({
             "id": fid, "type": "feature", "class": "normative",
             "title": f.get("name", ""), "path": rel(fy),
             "lifecycle": f.get("lifecycle"), "status": f.get("status"),
             "parentRequirements": parent_reqs,
+            "capabilities": capabilities,
+            "acceptanceCriteriaIds": ac_ids,
         })
     return nodes
 
