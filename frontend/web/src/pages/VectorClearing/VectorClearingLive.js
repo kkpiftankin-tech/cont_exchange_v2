@@ -501,7 +501,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
       <span data-testid="arb-pnl">
         {trade || <span title="внешних сделок пока нет" style={{ opacity: 0.4 }}>—</span>}
         {hasPos && (
-          <span data-testid="arb-basis" style={{ display: 'block', fontSize: '0.8em', opacity: 0.85 }}
+          <span data-testid="arb-basis" data-ui-id="UI-VC-POS-BASIS" style={{ display: 'block', fontSize: '0.8em', opacity: 0.85 }}
             title="Позиция арбитражёра по ценам его бирж, USDT. Базис = разница цен между биржами на перевозимом объёме (результат разницы цен, не реализован). Открытая позиция = нетто-количество актива на двух ногах × цена: у зеркальной позиции 0, растёт, когда хедж одной ноги исполняется, а другой нет; это риск изменения цены, а не убыток.">
             базис {okNum(a.basis_mtm_usdt) ? <span style={{ color: pnlColor(a.basis_mtm_usdt) }}>{sgn(a.basis_mtm_usdt)}</span> : '—'}
             {' · '}открытая позиция {okNum(a.open_position_usdt) ? <span style={{ color: pnlColor(a.open_position_usdt) }}>{sgn(a.open_position_usdt)}</span> : '—'}
@@ -1608,7 +1608,7 @@ function VectorClearingLive() {
             <input type="number" min="0" max="1000" step="0.5" value={cfgMakerBps}
               onChange={(e) => setCfgMakerBps(e.target.value)} />
           </label>
-          <label className="vc-config-field" data-testid="band-mode" title="Как задаётся ширина полосы хеджа — граница |позиции агента|, за которой он отправляет заявку на внешнюю биржу. Вручную: вы задаёте границы напрямую. Авто по волатильности: ширина от комиссии, умноженная на коэффициент по волатильности актива (чем волатильнее, тем уже). От комиссии: ширина от комиссии без поправки на волатильность.">
+          <label className="vc-config-field" data-testid="band-mode" data-ui-id="UI-VC-BAND-MODE" title="Как задаётся ширина полосы хеджа — граница |позиции агента|, за которой он отправляет заявку на внешнюю биржу. Вручную: вы задаёте границы напрямую. Авто по волатильности: ширина от комиссии, умноженная на коэффициент по волатильности актива (чем волатильнее, тем уже). От комиссии: ширина от комиссии без поправки на волатильность.">
             ширина полосы хеджа
             <select value={cfgBandMode} onChange={(e) => setCfgBandMode(e.target.value)}>
               <option value="fee">от комиссии (плоская)</option>

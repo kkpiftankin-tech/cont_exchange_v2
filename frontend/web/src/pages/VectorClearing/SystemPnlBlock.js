@@ -47,7 +47,7 @@ export default function SystemPnlBlock({ pollMs = 30000 }) {
   );
 
   return (
-    <div style={box} data-testid="system-pnl">
+    <div style={box} data-testid="system-pnl" data-ui-id="UI-VC-SYSTEM-PNL">
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
         <b style={{ color: '#cdd9e4' }}>Система по остаткам</b>
         <span style={{ fontSize: 12, color: '#8a9aa8' }}>реальные остатки биржи по валютам, оценка по рыночным ценам, USDT, без комиссий</span>

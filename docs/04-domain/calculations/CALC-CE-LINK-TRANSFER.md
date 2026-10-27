@@ -13,7 +13,7 @@ code:
 tests:
   - cpp/ledger/tests/ce_link_transfer_test.cpp
 ui:
-  - /vector-clearing — «Живые позиции» (позиции ног связки, порог перевода в колонке порога); блок «Система по остаткам»
+  - /vector-clearing-live — «Живые позиции» (позиции ног связки, порог перевода в колонке порога); блок «Система по остаткам»
 sources:
   - docs/03-architecture/adr/ADR-084-ce-link-physical-transfer.md
   - docs/03-architecture/adr/ADR-083-ce-link-parity-residual-and-no-market-hedge.md

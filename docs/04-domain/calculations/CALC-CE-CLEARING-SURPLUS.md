@@ -11,7 +11,7 @@ tests:
   - frontend/api/ce_surplus_accum.test.js
   - tools/arb-pnl-decomposition/demo/demo_check.js
 ui:
-  - /vector-clearing — «Живые позиции», колонка «выгода по теории» и ряд S на графике агента
+  - /vector-clearing-live — «Живые позиции», колонка «выгода по теории» и ряд S на графике агента
 sources:
   - docs/03-architecture/adr/ADR-083-ce-link-parity-residual-and-no-market-hedge.md
   - docs/experiments/EXP-2026-10-22-ce-theory-conformity.md

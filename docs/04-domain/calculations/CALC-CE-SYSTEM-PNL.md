@@ -5,6 +5,8 @@ status: partial # торговый результат и переоценка з
 level: fish
 feature: F-18
 related_adr: [ADR-061, ADR-069, ADR-073]
+ui:
+  - /vector-clearing-live — «Система по остаткам»
 ---
 
 # CALC-CE-SYSTEM-PNL — P&L системы и инварианты

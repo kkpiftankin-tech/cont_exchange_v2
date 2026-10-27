@@ -10,7 +10,7 @@ code:
   - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig (все ручки из f05a_clearing_config)
 tests: [] # калибровка (значения), не код-путь; инварианты — ниже
 ui:
-  - /vector-clearing (realized R / U — целевая метрика Π)
+  - /vector-clearing-live (realized R / U — целевая метрика Π)
 sources:
   - incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md#5 (Теорема 1: a*=P−Aq, A=σ√(2γ/Λ))
   - incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md#8 (Предложение 2: Q_i=ω_i c_i/A)

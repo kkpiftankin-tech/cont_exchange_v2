@@ -9,7 +9,7 @@ code:
   - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked (трёхзонный порог Z̄lim/Z̄mkt; НЕ реализует Q_i=ω_i c_i/A — см. §7)
   - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
 tests: [] # прямого unit-теста эталонной формулы нет — это research/reference карточка, не код-путь
-ui: [] # величина не выведена на фронт напрямую; см. Z̄lim/Z̄mkt в /ce-agents (Γ-порог)
+ui: [] # величина не выведена на фронт напрямую; см. Z̄lim/Z̄mkt в /vector-clearing-live (Γ-порог)
 sources:
   - incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md#5 (Теорема 1)
   - incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md#8 (Предложение 2)

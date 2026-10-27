@@ -1,0 +1,55 @@
+# Карта экранов (IN-019 §4.1, Этап 3 ADR-086). Сгенерированные поля (`generated:`)
+# пишет tools/ui-map/scan.py — не редактировать руками, он их перезатрёт.
+# Остальные поля — руками. Пилот 2026-10-27: только /vector-clearing-live
+# (решение владельца — 1 экран, не все 6 из приоритета брифа, за один заход).
+#
+# capability: CAP-F18-NN — placeholder как в примере IN-019 §4.1: capabilities[]
+# в feature.yaml ещё не существует (Этап 4), поэтому ссылка не на реальный ID.
+
+screens:
+  - id: UI-VC
+    route: /vector-clearing-live  # как в frontend/web/src/App.js
+    title: Векторный клиринг (live)
+    component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js
+    features: [F-18, F-05A]
+    elements:
+      - id: UI-VC-POS-BASIS
+        generated: {component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js, line: 504}  # tools/ui-map/scan.py, api-эвристика не нашла (вызов в той же функции, но axios.get с API_BASE далеко от data-ui-id)
+        label: «Живые позиции» → арбитражёр → «базис»
+        kind: value
+        meaning: Разница цен бирж × перевозимый объём (результат разницы цен, не реализован)
+        unit: USDT
+        field: "agentRows[].basis_mtm_usdt"
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1agent-positions/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
+        contract: docs/06-api/grpc/ledger-agent-positions.md
+        calc: CALC-F18-CE-ARBITRAGEUR-BASIS
+        capability: CAP-F18-NN  # placeholder — capabilities[] нет до Этапа 4
+        refresh: poll 2s
+        states: {empty: "—", stale: "баннер «ЦЕПОЧКА ОСТАНОВЛЕНА» (dataAgeMs > порога)"}
+
+      - id: UI-VC-BAND-MODE
+        generated: {component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js, line: 1611}  # tools/ui-map/scan.py
+        label: Настройки CE → «ширина полосы хеджа»
+        kind: control
+        meaning: Режим определения ширины полосы хеджа (от комиссии / авто по волатильности / вручную)
+        field: cfgBandMode
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1config"  # TODO Этап 3 п.3
+        contract: docs/06-api/rest/vector-clearing-config.md
+        calc: CALC-CE-SKEW-BAND-CALIBRATION
+        capability: CAP-F18-NN
+        refresh: on load / on save
+        states: {empty: null, stale: null}
+
+      - id: UI-VC-SYSTEM-PNL
+        generated: {component: frontend/web/src/pages/VectorClearing/SystemPnlBlock.js, line: 50}  # tools/ui-map/scan.py: файл отличается от screen.component (SystemPnlBlock.js — подкомпонент VectorClearingLive.js)
+        label: Панель «Система по остаткам»
+        kind: banner
+        meaning: Прибыль системы по реальным остаткам биржи (T = торговый результат, V = переоценка запасов)
+        unit: USDT
+        field: "n/a — панель, не одно значение"
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1system-pnl/get"  # TODO Этап 3 п.3
+        contract: docs/06-api/rest/system-pnl.md
+        calc: CALC-CE-SYSTEM-PNL
+        capability: CAP-F18-NN
+        refresh: poll 30s
+        states: {empty: "«нет данных»", stale: null}

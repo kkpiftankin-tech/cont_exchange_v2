@@ -10,7 +10,7 @@ code:
   - frontend/api/server.js#buildAgentRows (pnl_usdt)
 tests: [] # цель — frontend/api/trade_stats_math.test.js (тождество C2) + ledger unit на кумулятивный R
 ui:
-  - /vector-clearing (разбор агента — строка заработка; цель: R и U раздельно)
+  - /vector-clearing-live (разбор агента — строка заработка; цель: R и U раздельно)
 sources:
   - docs/03-architecture/adr/ADR-072-ce-translator-profit-hedge-price-skew-resting.md#c-realized--unrealized-pl-переводчика
   - docs/04-domain/calculations/CALC-CE-ANCHOR.md
