@@ -8,15 +8,15 @@ jest.mock('axios', () => ({ __esModule: true, default: { get: jest.fn(), post: j
 const T0 = 1793200000000;
 const STEP = 900000;
 const pt = (i, o = {}) => ({
-  t: T0 + i * STEP, buy_qty: 0.4, sell_qty: 0, buy_price: 80030, sell_price: null,
+  t: T0 + i * STEP, buy_qty: 0.4, sell_qty: 0, buy_price: 80030, buy_price_fee: 80094, sell_price: null,
   cum_buy_qty: 0.4 * (i + 1), cum_sell_qty: 0.1 * i, cum_total_qty: 0.5 * i + 0.4, cum_net_qty: 0.3 * i + 0.4, ...o,
 });
 const pair = (name, base, quote, fills, n = 3, mk = pt) => ({
   pair: name, base, quote, fills,
-  totals: { buy_qty: 1.2, sell_qty: 0.3, total_qty: 1.5, net_qty: 0.9, buy_price: 80030, sell_price: 80100 },
+  totals: { buy_qty: 1.2, sell_qty: 0.3, total_qty: 1.5, net_qty: 0.9, buy_price: 80030, buy_price_fee: 80094, sell_price: 80100 },
   points: Array.from({ length: n }, (_, i) => mk(i)),
 });
-const dto = (pairs, over = {}) => ({ window_hours: 24, bucket_ms: STEP, first_ms: T0, pairs, has_data: pairs.length > 0, ...over });
+const dto = (pairs, over = {}) => ({ window_hours: 24, bucket_ms: STEP, first_ms: T0, fee: { maker_bps: 2, taker_bps: 10, source: 'config' }, pairs, has_data: pairs.length > 0, ...over });
 const PAIRS = [pair('BTC/USDT', 'BTC', 'USDT', 120), pair('ETH/BTC', 'ETH', 'BTC', 40, 3, (i) => pt(i, { buy_price: 0.051, sell_price: 0.0515, sell_qty: 1 })), pair('SOL/USDT', 'SOL', 'USDT', 10)];
 
 afterEach(() => { jest.clearAllMocks(); try { window.localStorage.clear(); } catch (e) { /* нет хранилища */ } });
@@ -167,4 +167,44 @@ test('смена окна: пока нет ответа, прежний граф
   expect(screen.getByTestId('pair-stale').textContent).toMatch(/168 ч/);
   await act(async () => { resolveSecond({ data: dto(PAIRS, { window_hours: 168 }) }); });
   expect(screen.queryByTestId('pair-stale')).toBeNull();
+});
+
+test('чекбокс «+ комиссия к цене покупки»: линия покупки берёт готовое поле buy_price_fee, итоги и подсказка показывают цену с комиссией, запроса нет', async () => {
+  // цена покупки меняется по времени, комиссия — фиксированная надбавка в готовом поле; есть и цена продажи, поэтому сдвиг линии покупки
+  // относительно линии продажи заметен (шкала цен общая для обеих линий)
+  const mk = (i) => pt(i, { buy_price: 80000 + i * 10, buy_price_fee: 80064 + i * 10, sell_price: 80100, sell_qty: 0.1 });
+  axios.get.mockResolvedValue({ data: dto([pair('BTC/USDT', 'BTC', 'USDT', 5, 3, mk)]) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.getByTestId('pair-fee').checked).toBe(false);
+  expect(screen.getByTestId('pair-fee-rates').textContent).toMatch(/maker 2 \/ taker 10 б\.п\./);
+  expect(screen.getByTestId('pair-totals-BTC/USDT').textContent).not.toMatch(/с комиссией/);
+  const before = screen.getByTestId('pair-line-buy_price-BTC/USDT').getAttribute('d');
+  expect(screen.getByTestId('pair-price-buy_price').parentElement.textContent).toMatch(/цена покупки$/);
+  fireEvent.click(screen.getByTestId('pair-fee'));
+  expect(screen.getByTestId('pair-fee').checked).toBe(true);
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.fee'))).toBe(true);
+  expect(screen.getByTestId('pair-price-buy_price').parentElement.textContent).toMatch(/цена покупки \+ комиссия/);
+  expect(screen.getByTestId('pair-totals-BTC/USDT').textContent).toMatch(/по 80\s?030 \(с комиссией 80\s?094\)/);
+  const after = screen.getByTestId('pair-line-buy_price-BTC/USDT').getAttribute('d');
+  expect(after).toMatch(/^M/);
+  expect(after).not.toBe(before);                  // линия покупки сдвинулась вверх к линии продажи: координаты взяты по полю с комиссией
+  const svg = screen.getByTestId('pair-svg-BTC/USDT');
+  svg.getBoundingClientRect = () => ({ left: 0, width: 780, top: 0, height: 250 });
+  fireEvent.mouseMove(svg, { clientX: 780 - 64 });
+  expect(screen.getByTestId('pair-hover-BTC/USDT').textContent).toMatch(/покупка 80\s?020 \(с комиссией 80\s?084\)/);
+  fireEvent.click(screen.getByTestId('pair-fee'));
+  expect(screen.getByTestId('pair-totals-BTC/USDT').textContent).not.toMatch(/с комиссией/);
+  expect(axios.get).toHaveBeenCalledTimes(1);
+});
+
+test('чекбокс комиссии восстанавливается из браузера; линия продажи остаётся; нет цены с комиссией — линии покупки нет, а не ноль', async () => {
+  window.localStorage.setItem('pnl.pairs.fee', JSON.stringify(true));
+  const mk = (i) => pt(i, { buy_price: 80000, buy_price_fee: null, sell_price: 80100, sell_qty: 0.1 });
+  axios.get.mockResolvedValue({ data: dto([pair('BTC/USDT', 'BTC', 'USDT', 5, 3, mk)]) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.getByTestId('pair-fee').checked).toBe(true);
+  expect(screen.queryByTestId('pair-line-buy_price-BTC/USDT')).toBeNull();          // покупки с комиссией нет ни в одной точке: линии нет
+  expect(screen.getByTestId('pair-line-sell_price-BTC/USDT').getAttribute('d')).toMatch(/^M/);
 });

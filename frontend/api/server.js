@@ -6,7 +6,7 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
-const { bucketMsForHours, buildPairTradesDto } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
+const { bucketMsForHours, buildPairTradesDto, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
@@ -7666,10 +7666,22 @@ const PAIR_TRADES_TIMEOUT_MS = 25000;   // зависший запрос не д
 const PAIR_TRADES_CACHE_MAX = 8;        // окон может быть до 168 разных, кэш хранит не больше нескольких последних
 const pairTradesCache = new Map();      // hours → { at, value }
 const pairTradesInflight = new Map();   // hours → Promise
+// Расчётные ставки комиссии хеджа, б.п.: maker — лимитные заявки (пассивные), taker — рыночные. Те же значения, что использует ledger для
+// оценки комиссии зоны (ce_maker_fee_bps / ce_taker_fee_bps из f05a_clearing_config, меняются на экране «Клиринг»; не заданы или не больше нуля —
+// значения по умолчанию ledger: env CE_BAND_REF_FEE_BPS / CE_BAND_MAKER_FEE_BPS, иначе 10 и 2). Реальная комиссия бирж в child_orders не записана.
+async function loadBandFeeBps(pool) {
+  let row = null;
+  try {
+    const r = await pool.query("SELECT ce_taker_fee_bps, ce_maker_fee_bps FROM f05a_clearing_config WHERE id=1");
+    row = r.rows[0] || null;
+  } catch (e) { /* нет таблицы или строки — значения по умолчанию */ }
+  return resolveFeeBps(row, { CE_BAND_MAKER_FEE_BPS: process.env.CE_BAND_MAKER_FEE_BPS, CE_BAND_REF_FEE_BPS: process.env.CE_BAND_REF_FEE_BPS });
+}
 async function loadPairTradesRows(hours) {
   const pool = getPgPool();
   if (!pool) throw new Error("postgres_unavailable");
   const bucketMs = bucketMsForHours(hours);
+  const fee = await loadBandFeeBps(pool);
   const r = await pool.query(
     `SELECT symbol,
             (floor(extract(epoch from created_at) * 1000 / $1::bigint)::bigint * $1::bigint)::bigint AS t,
@@ -7677,13 +7689,15 @@ async function loadPairTradesRows(hours) {
             SUM(CASE WHEN side = 'SELL' THEN filled_qty END)::float8 AS sell_qty,
             SUM(CASE WHEN side = 'BUY'  THEN filled_qty * avg_price END)::float8 AS buy_notional,
             SUM(CASE WHEN side = 'SELL' THEN filled_qty * avg_price END)::float8 AS sell_notional,
+            SUM(CASE WHEN side = 'BUY' THEN filled_qty * avg_price
+                       * (CASE WHEN order_type IN ('LIMIT', 'POST_ONLY') THEN $3::float8 ELSE $4::float8 END) / 10000.0 END)::float8 AS buy_fee,
             COUNT(*)::int AS fills
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0
             AND created_at > now() - make_interval(hours => $2::int)
       GROUP BY 1, 2
-      ORDER BY 1, 2`, [bucketMs, hours]);
-  return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs);
+      ORDER BY 1, 2`, [bucketMs, hours, fee.maker_bps, fee.taker_bps]);
+  return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs, fee);
 }
 function fetchPairTrades(hours) {
   const hit = pairTradesCache.get(hours);
@@ -8619,7 +8633,7 @@ async function handleVectorClearing(req, res, pathname, query) {
     // Конфиг для дисплея, согласованный с backend: skew (γ/клэмп) + трёхзонные пороги
     // band от комиссии (Кривые §6.4). Дефолты = env-дефолты ledger/matching.
     let gamma = 0.005, clamp = 8;
-    let cmktBps = 10, climBps = 2, kBand = 1.8;  // = CE_BAND_REF_FEE_BPS/MAKER_FEE_BPS/FEE_K
+    let cmktBps = DEFAULT_TAKER_BPS, climBps = DEFAULT_MAKER_BPS, kBand = 1.8;  // = CE_BAND_REF_FEE_BPS/MAKER_FEE_BPS/FEE_K
     let gammaCap = 1;  // capital-cap γ (поле gamma) — входит в Γ=γσ²τ динамического порога (ADR-066)
     const pool = getPgPool();
     if (pool) {

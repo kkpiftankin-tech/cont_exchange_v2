@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **24**
+- Открытых структурированных вопросов (`OQ-*`): **27**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **7**
 - ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **15**
+- Инженерных долгов в known-gaps.md: **16**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -32,6 +32,7 @@
 
 - **OQ-F18v2-17** (F-18) — переводчик тоже реагирует на фантомный сигнал, а не только арбитражёр · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-29** (F-18) — цена оценки связки и нумерарные связки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-36** (F-18) — заявки LIMIT с немедленным исполнением при выключенном резерве мейкер-заявок · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### trading-domain-specialist + matching (движок)
 
@@ -74,6 +75,8 @@
 - **OQ-F18v2-31** (F-18) — хедж ноги связки: закрывает ли он книгу или наращивает · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-32** (F-18) — R кросс-пар: фиксировать в USDT в момент сделки? · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-33** (F-18) — устаревание справедливой цены · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-34** (F-18) — комиссия на графике сделок: сторона, ставки по биржам, смысл taker-ставки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-35** (F-18) — комиссия на графике: текущие ставки или зафиксированные на момент заявки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 
@@ -88,7 +91,7 @@
 
 - **CALC-CE-AGENT-PNL** (F-18, `accepted`) — Заработок агента CE по биржам — R, U и R+U внутренней биржи, внешних бирж и итого · [docs/04-domain/calculations/CALC-CE-AGENT-PNL.md](../04-domain/calculations/CALC-CE-AGENT-PNL.md)
 - **CALC-CE-ANCHOR** (F-18, `partial`) — Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017) · [docs/04-domain/calculations/CALC-CE-ANCHOR.md](../04-domain/calculations/CALC-CE-ANCHOR.md)
-- **CALC-CE-PAIR-TRADES** (F-18, `accepted`) — Сделки на внешних биржах по паре — накопленный объём базовой валюты и цены покупки и продажи · [docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md](../04-domain/calculations/CALC-CE-PAIR-TRADES.md)
+- **CALC-CE-PAIR-TRADES** (F-18, `accepted`) — Сделки на внешних биржах по паре — накопленный объём базовой валюты, цены покупки и продажи и цена покупки с комиссией · [docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md](../04-domain/calculations/CALC-CE-PAIR-TRADES.md)
 - **CALC-CE-SKEW-BAND-CALIBRATION** (F-18, `calibrated`) — Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка переводчика · [docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md](../04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md)
 - **CALC-CE-SYSTEM-PNL** (F-18, `partial`) — P&L системы CE (MTM реальных остатков) и инварианты · [docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md](../04-domain/calculations/CALC-CE-SYSTEM-PNL.md)
 - **CALC-CE-TRANSLATOR-PNL** (F-18, `partial`) — Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM остатка) · [docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md](../04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md)
@@ -127,3 +130,4 @@
 - Учёт заработка агентов (ADR-087): известные ограничения
 - R и U едины, остальные цифры панели «Живые позиции» — нет
 - График «Заработок во времени» (CR-F18-005, 2026-10-28): известные ограничения.
+- Расчётная комиссия на графике сделок по парам (CR-F18-007, 2026-10-28): известные ограничения.

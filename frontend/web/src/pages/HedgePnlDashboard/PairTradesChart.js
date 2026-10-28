@@ -9,6 +9,7 @@ const W = 780, H = 250;
 const LS_PAIRS = 'pnl.pairs.selected';
 const LS_MODE = 'pnl.pairs.mode';
 const LS_PRICES = 'pnl.pairs.prices';
+const LS_FEE = 'pnl.pairs.fee';
 const C_GRID = '#1c2733';
 const C_TEXT = '#8a9aa8';
 
@@ -28,9 +29,12 @@ const fmtTime = (ms) => new Date(Number(ms)).toLocaleString('ru-RU', { hour12: f
 
 // График одной пары: две оси. Слева накопленный объём базовой валюты, справа цены покупки и продажи во второй валюте пары. Числа
 // готовы из BFF; здесь только линии, оси и подсказка под курсором.
-function PairChart({ pair, bucketMs, mode, prices, win }) {
+function PairChart({ pair, bucketMs, mode, prices, win, withFee }) {
   const [hoverT, setHoverT] = useState(null);
-  const model = buildPairChartModel(pair.points, W, H, mode, prices, bucketMs, win);
+  // Чекбокс «+ комиссия к цене покупки»: линия цены покупки строится по готовому полю buy_price_fee (цена + комиссия на единицу базовой валюты,
+  // посчитано в BFF); это выбор поля, не вычисление.
+  const modelPoints = withFee ? pair.points.map((p) => ({ ...p, buy_price: p.buy_price_fee })) : pair.points;
+  const model = buildPairChartModel(modelPoints, W, H, mode, prices, bucketMs, win);
   if (!model) return null;
   let hover = null;
   if (hoverT != null) {
@@ -51,7 +55,7 @@ function PairChart({ pair, bucketMs, mode, prices, win }) {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
         <b style={{ color: '#cdd9e4' }}>{id}</b>
         <span style={{ fontSize: 12, color: C_TEXT }} data-testid={`pair-totals-${id}`}>
-          за окно: куплено {fmtQty(tot.buy_qty)} {pair.base}{tot.buy_price != null ? ` по ${fmtAxis(tot.buy_price)}` : ''}
+          за окно: куплено {fmtQty(tot.buy_qty)} {pair.base}{tot.buy_price != null ? ` по ${fmtAxis(tot.buy_price)}` : ''}{withFee && tot.buy_price_fee != null ? ` (с комиссией ${fmtAxis(tot.buy_price_fee)})` : ''}
           {' · '}продано {fmtQty(tot.sell_qty)} {pair.base}{tot.sell_price != null ? ` по ${fmtAxis(tot.sell_price)}` : ''}
           {' · '}нетто {tot.net_qty > 0 ? '+' : ''}{fmtQty(tot.net_qty)} {pair.base}{pair.quote ? ` · цены в ${pair.quote}` : ''} · заявок {pair.fills}
         </span>
@@ -89,7 +93,7 @@ function PairChart({ pair, bucketMs, mode, prices, win }) {
       <div style={{ fontSize: 12, color: '#9fb2c2', minHeight: 18 }} data-testid={`pair-hover-${id}`}>
         {hover
           ? <>{fmtTime(hover.t)}: {modeDef.fields.map(([f, label]) => `${label} ${fmtQty(hover[f])} ${pair.base}`).join(' · ')}
-            {' · '}покупка {hover.buy_price != null ? `${fmtAxis(hover.buy_price)} (${fmtQty(hover.buy_qty)} ${pair.base})` : '—'}
+            {' · '}покупка {hover.buy_price != null ? `${fmtAxis(hover.buy_price)}${withFee && hover.buy_price_fee != null ? ` (с комиссией ${fmtAxis(hover.buy_price_fee)})` : ''} (${fmtQty(hover.buy_qty)} ${pair.base})` : '—'}
             {' · '}продажа {hover.sell_price != null ? `${fmtAxis(hover.sell_price)} (${fmtQty(hover.sell_qty)} ${pair.base})` : '—'}</>
           : <>наведите курсор на график, чтобы увидеть значения; точек: {pair.points.length}</>}
       </div>
@@ -104,6 +108,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
   const [mode, setMode] = useState(() => { const m = readLs(LS_MODE, 'total'); return VOLUME_MODES.some((x) => x.key === m) ? m : 'total'; });
   const [prices, setPrices] = useState(() => { const v = readLs(LS_PRICES, null); return { buy_price: !v || v.buy_price !== false, sell_price: !v || v.sell_price !== false }; });
   const [selected, setSelected] = useState(() => { const v = readLs(LS_PAIRS, null); return Array.isArray(v) ? v : null; });   // null — пользователь ещё не выбирал
+  const [withFee, setWithFee] = useState(() => readLs(LS_FEE, false) === true);   // накинуть расчётную комиссию на цену покупки
   const [state, setState] = useState({ loading: true, error: '', data: null });
 
   const reqSeq = useRef(0);   // ответ на более ранний запрос (другое окно) отбрасывается
@@ -139,6 +144,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
     writeLs(LS_PAIRS, merged);
   };
   const changeMode = (m) => { setMode(m); writeLs(LS_MODE, m); };
+  const toggleFee = () => setWithFee((cur) => { writeLs(LS_FEE, !cur); return !cur; });
   const togglePrice = (key) => setPrices((cur) => { const next = { ...cur, [key]: !cur[key] }; writeLs(LS_PRICES, next); return next; });
   const btn = (active) => ({
     padding: '2px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
@@ -146,6 +152,10 @@ export default function PairTradesChart({ pollMs = 30000 }) {
     background: active ? 'rgba(79,176,216,0.18)' : 'transparent', color: active ? '#dfe6ee' : '#9fb2c2',
   });
   const modeDef = VOLUME_MODES.find((x) => x.key === mode) || VOLUME_MODES[0];
+  const fee = data && data.fee ? data.fee : null;
+  const feeHint = fee && fee.maker_bps != null && fee.taker_bps != null
+    ? `Расчётная комиссия: ${fee.maker_bps} б.п. для лимитных заявок (maker) и ${fee.taker_bps} б.п. для рыночных (taker)${fee.source === 'config' ? ' — ставки экрана «Клиринг»' : fee.source === 'mixed' ? ' — одна ставка с экрана «Клиринг», другая по умолчанию' : ' — ставки по умолчанию'}; реальная комиссия бирж в сделках не записана`
+    : 'Расчётная комиссия по ставкам maker и taker';
   const win = data && Number.isFinite(Number(data.since_ms)) && Number.isFinite(Date.parse(data.generatedAt))
     ? { t0: Number(data.since_ms), t1: Date.parse(data.generatedAt) } : null;   // окно запроса: ось времени охватывает его целиком
   const stale = !!data && Number(data.window_hours) !== hours;                   // на экране ответ прежнего окна, новый ещё не пришёл
@@ -156,7 +166,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
         <h3>Сделки на внешних биржах по парам — объём и цены</h3>
         <span className="agent-pnl-sub">
           Слева накопленный объём базовой валюты, справа цены покупки и продажи во второй валюте пары. Факт исполнения хеджей агентов CE, все
-          внешние биржи вместе, без комиссий. Считает BFF; обновление каждые 30 сек.
+          внешние биржи вместе, без комиссий (кроме режима чекбокса «+ комиссия к цене покупки»). Считает BFF; обновление каждые 30 сек.
         </span>
       </div>
 
@@ -177,10 +187,15 @@ export default function PairTradesChart({ pollMs = 30000 }) {
           {PRICE_SERIES.map((s) => (
             <label key={s.key} style={{ cursor: 'pointer', color: prices[s.key] ? s.color : '#6a7a88', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <input type="checkbox" checked={!!prices[s.key]} onChange={() => togglePrice(s.key)} data-testid={`pair-price-${s.key}`} style={{ accentColor: s.color }} />
-              <b>{s.label}</b>
+              <b>{s.key === 'buy_price' && withFee ? 'цена покупки + комиссия' : s.label}</b>
             </label>
           ))}
         </span>
+        <label style={{ cursor: 'pointer', fontSize: 13, color: withFee ? '#dfe6ee' : '#9fb2c2', display: 'inline-flex', alignItems: 'center', gap: 5 }} title={feeHint}>
+          <input type="checkbox" checked={withFee} onChange={toggleFee} data-testid="pair-fee" />
+          <b>+ комиссия к цене покупки</b>
+          {fee && fee.maker_bps != null && <span style={{ fontSize: 11, color: '#6a7a88' }} data-testid="pair-fee-rates">(maker {fee.maker_bps} / taker {fee.taker_bps} б.п.)</span>}
+        </label>
       </div>
 
       {state.loading && !data && <div className="hedge-pnl-state">Загрузка сделок по парам…</div>}
@@ -205,7 +220,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
       {stale && <div style={{ fontSize: 12, color: '#e0b84a' }} data-testid="pair-stale">загрузка окна {hours} ч… (показан график прежнего окна)</div>}
       <div style={{ opacity: stale ? 0.45 : 1 }}>
         {pairs.filter((p) => chosen.includes(p.pair)).map((p) => (
-          <PairChart key={p.pair} pair={p} bucketMs={data.bucket_ms} mode={mode} prices={prices} win={win} />
+          <PairChart key={p.pair} pair={p} bucketMs={data.bucket_ms} mode={mode} prices={prices} win={win} withFee={withFee} />
         ))}
       </div>
 
@@ -213,7 +228,9 @@ export default function PairTradesChart({ pollMs = 30000 }) {
         <div style={{ fontSize: 12, color: '#8a9aa8', marginTop: 6 }}>
           Объём — сумма исполненного количества базовой валюты хедж-заявок с начала окна (общий: покупки и продажи вместе; нетто: покупки минус продажи).
           Цена — средневзвешенная по объёму цена исполнения за интервал (покупки и продажи отдельно, все биржи вместе) во второй валюте пары. Интервал
-          без сделок стороны не даёт точки цены, линия цены рвётся при долгом простое. Время заявки — момент её создания.
+          без сделок стороны не даёт точки цены, линия цены рвётся при долгом простое. Время заявки — момент её создания. «+ комиссия к цене покупки» добавляет к
+          цене покупки расчётную комиссию на единицу базовой валюты: стоимость каждой заявки × ставка (maker для лимитных, taker для рыночных), делённая на
+          купленный объём; реальная комиссия бирж в сделках не записана, цена продажи не меняется.
         </div>
       )}
     </section>
