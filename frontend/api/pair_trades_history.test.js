@@ -1,5 +1,5 @@
 // Self-contained node-тест: `node pair_trades_history.test.js` (у frontend/api нет jest).
-const { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require('./pair_trades_history');
+const { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, parseAgent, lruSet, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require('./pair_trades_history');
 
 let failed = 0;
 function check(name, cond) {
@@ -140,6 +140,23 @@ check('known_pairs: пустые и некорректные входы дают
   buildKnownPairs([], []).length === 0 && buildKnownPairs(undefined, null).length === 0 && buildKnownPairs([], [null, {}, { symbol: '' }]).length === 0);
 check('known_pairs: нет 7-суточных строк — остаются пары окна (запрос известных пар упал → график не ломается)',
   JSON.stringify(buildKnownPairs(winPairs, []).map((x) => x.pair)) === JSON.stringify(['BTC/USDT', 'ETH/USDT']) && buildKnownPairs(winPairs, [])[0].last_trade_ms === T0 + 60000);
+
+// parseAgent: фильтр графика по агенту (CR-F18-010)
+check('agent: пусто, не задано и null — все агенты (agent null, ok)',
+  JSON.stringify(parseAgent(undefined)) === JSON.stringify({ ok: true, agent: null }) && parseAgent('').agent === null && parseAgent(null).ok === true);
+check('agent: идентификаторы агентов CE проходят (T_BTC_binance, A_BTC_binanceokx, T_ETH_BTC_okx, T_BTC_uniswap_v3, A_USDT_okxuniswap_v3)',
+  ['T_BTC_binance', 'A_BTC_binanceokx', 'T_ETH_BTC_okx', 'T_BTC_uniswap_v3', 'A_USDT_okxuniswap_v3'].every((a) => { const r = parseAgent(a); return r.ok && r.agent === a; }));
+check('agent: разделитель hedge_flow_id «|», пробел, запятая (повтор параметра), кавычка, слэш и длиннее 64 знаков отклоняются',
+  ['a|b', 'a b', 'a,b', "a'b", 'a/b', 'x'.repeat(65), ['T_BTC_binance', 'T_ETH_okx']].every((a) => parseAgent(a).ok === false));
+
+// lruSet: обновлённый ключ становится самым свежим и не вытесняется первым
+check('lruSet: запись существующего ключа переносит его в конец, при переполнении уходят самые давние (а не самый горячий)', (() => {
+  const m = new Map();
+  lruSet(m, 'a', 1, 3); lruSet(m, 'b', 2, 3); lruSet(m, 'c', 3, 3);
+  lruSet(m, 'a', 10, 3);                    // «a» обновили — теперь самый свежий
+  lruSet(m, 'd', 4, 3);                     // вытесняется «b», а не «a»
+  return JSON.stringify([...m.keys()]) === JSON.stringify(['c', 'a', 'd']) && m.get('a') === 10 && m.size === 3;
+})());
 
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');

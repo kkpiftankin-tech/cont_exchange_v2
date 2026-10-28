@@ -21,6 +21,8 @@ function readLs(key, fallback) {
     return v === null || v === undefined ? fallback : v;
   } catch (e) { return fallback; }
 }
+// Сохранённый выбор пар: массив имён или null (пользователь ещё не выбирал).
+function readSel(key) { const v = readLs(key, null); return Array.isArray(v) ? v : null; }
 function writeLs(key, value) {
   try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* не критично */ }
 }
@@ -106,11 +108,14 @@ function PairChart({ pair, bucketMs, mode, prices, win, withFee, withSellFee }) 
 
 // Блок «Сделки на внешних биржах по парам» на вкладке «PnL» (CR-F18-006, CALC-CE-PAIR-TRADES). Пары выбираются чекбоксами; для каждой — график с двумя
 // осями. Всё посчитано в BFF (накопленные объёмы, средневзвешенные цены покупки и продажи по всем внешним биржам); браузер только рисует.
-export default function PairTradesChart({ pollMs = 30000 }) {
+export default function PairTradesChart({ selectedAgent = null, onClearAgent, pollMs = 30000 }) {
   const [hours, setHours] = useState(24);
   const [mode, setMode] = useState(() => { const m = readLs(LS_MODE, 'total'); return VOLUME_MODES.some((x) => x.key === m) ? m : 'total'; });
   const [prices, setPrices] = useState(() => { const v = readLs(LS_PRICES, null); return { buy_price: !v || v.buy_price !== false, sell_price: !v || v.sell_price !== false }; });
-  const [selected, setSelected] = useState(() => { const v = readLs(LS_PAIRS, null); return Array.isArray(v) ? v : null; });   // null — пользователь ещё не выбирал
+  // Выбор пар помним отдельно для «всех агентов» и для каждого агента (у агента известны не все пары): без выбора (null) отмечены все пары с данными.
+  const lsPairsKey = selectedAgent ? `${LS_PAIRS}.${selectedAgent}` : LS_PAIRS;
+  const [selMap, setSelMap] = useState({});
+  const selected = Object.prototype.hasOwnProperty.call(selMap, lsPairsKey) ? selMap[lsPairsKey] : readSel(lsPairsKey);
   const [withFee, setWithFee] = useState(() => readLs(LS_FEE, false) === true);   // накинуть расчётную комиссию на цену покупки
   const [withSellFee, setWithSellFee] = useState(() => readLs(LS_FEE_SELL, false) === true);   // вычесть расчётную комиссию из цены продажи
   const [state, setState] = useState({ loading: true, error: '', data: null });
@@ -119,15 +124,20 @@ export default function PairTradesChart({ pollMs = 30000 }) {
   const load = useCallback(async () => {
     const seq = ++reqSeq.current;
     try {
-      const r = await axios.get(`${API_BASE}/vector-clearing/pair-trades-history`, { params: { hours }, timeout: 15000 });
+      const r = await axios.get(`${API_BASE}/vector-clearing/pair-trades-history`, { params: selectedAgent ? { hours, agent: selectedAgent } : { hours }, timeout: 15000 });
       if (seq !== reqSeq.current) return;
+      if (selectedAgent && r.data && !Object.prototype.hasOwnProperty.call(r.data, 'agent')) {   // прежний BFF игнорирует agent и вернул бы сделки всех агентов
+        setState({ loading: false, error: 'сервер не поддерживает выбор агента — обновите frontend-api', data: null });
+        return;
+      }
       setState({ loading: false, error: '', data: r.data || null });
     } catch (e) {
       if (seq !== reqSeq.current) return;
       setState((s) => ({ loading: false, error: 'не удалось загрузить сделки по парам', data: s.data }));
     }
-  }, [hours]);
-  useEffect(() => { setState((s) => ({ loading: true, error: '', data: s.data })); load(); }, [hours, load]);
+  }, [hours, selectedAgent]);
+  // Смена окна оставляет прежний график (приглушён), смена агента — нет: чужие графики и пары под значком нового агента вводили бы в заблуждение.
+  useEffect(() => { setState((s) => ({ loading: true, error: '', data: s.data && (s.data.agent || null) === (selectedAgent || null) ? s.data : null })); load(); }, [hours, load]);
   useInterval(load, pollMs);
 
   const data = state.data;
@@ -146,8 +156,8 @@ export default function PairTradesChart({ pollMs = 30000 }) {
   const saveSelected = (names) => {
     // сохраняем отметки известных пар, в том числе пар без сделок в этом окне (в другом окне они получат график); неизвестные имена отбрасываются
     const next = known.filter((n) => names.includes(n));
-    setSelected(next);
-    writeLs(LS_PAIRS, next);
+    setSelMap((m) => ({ ...m, [lsPairsKey]: next }));
+    writeLs(lsPairsKey, next);
   };
   const togglePair = (name) => {
     const cur = new Set(chosen);
@@ -174,7 +184,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
     : 'Расчётная комиссия по ставкам maker и taker';
   const win = data && Number.isFinite(Number(data.since_ms)) && Number.isFinite(Date.parse(data.generatedAt))
     ? { t0: Number(data.since_ms), t1: Date.parse(data.generatedAt) } : null;   // окно запроса: ось времени охватывает его целиком
-  const stale = !!data && Number(data.window_hours) !== hours;                   // на экране ответ прежнего окна, новый ещё не пришёл
+  const stale = !!data && (Number(data.window_hours) !== hours || (data.agent || null) !== (selectedAgent || null));   // на экране ответ прежнего окна или агента, новый ещё не пришёл
 
   return (
     <section className="pair-trades" data-testid="pair-trades" data-ui-id="UI-PNL-PAIR-TRADES">
@@ -187,6 +197,16 @@ export default function PairTradesChart({ pollMs = 30000 }) {
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' }}>
+        <span style={{ fontSize: 13, color: '#9fb2c2', display: 'inline-flex', gap: 6, alignItems: 'center' }} data-testid="pair-agent">
+          {selectedAgent
+            ? (
+              <>
+                агент: <b style={{ color: '#4fb0d8' }} data-testid="pair-agent-name">{selectedAgent}</b>
+                {onClearAgent && <button type="button" style={btn(false)} onClick={onClearAgent} data-testid="pair-agent-clear">все агенты</button>}
+              </>
+            )
+            : <span style={{ color: '#6a7a88' }} data-testid="pair-agent-hint">все агенты · графики одного агента — клик по его строке в таблице «Заработок агентов» выше</span>}
+        </span>
         <span style={{ display: 'inline-flex', gap: 4 }} data-testid="pair-windows">
           {WINDOWS.map(([h, label]) => (
             <button key={h} type="button" style={btn(hours === h)} onClick={() => setHours(h)} aria-pressed={hours === h} data-testid={`pair-window-${h}`}>{label}</button>
@@ -221,7 +241,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
       {state.loading && !data && <div className="hedge-pnl-state">Загрузка сделок по парам…</div>}
       {state.error && <div className="hedge-pnl-state error" data-testid="pair-error">{state.error}</div>}
       {data && !data.has_data && (
-        <div className="hedge-pnl-state" data-testid="pair-empty">За выбранное окно внешних сделок по хеджам агентов CE нет{allPairs.length > 0 ? ' ни по одной паре (последние сделки — у пар ниже)' : ''}.</div>
+        <div className="hedge-pnl-state" data-testid="pair-empty">За выбранное окно внешних сделок по хеджам {selectedAgent ? `агента ${selectedAgent}` : 'агентов CE'} нет{allPairs.length > 0 ? ' ни по одной паре (последние сделки — у пар ниже)' : (selectedAgent ? ' (за последние 7 суток исполненных хеджей у этого агента не было)' : '')}.</div>
       )}
 
       {allPairs.length > 0 && (
@@ -247,7 +267,7 @@ export default function PairTradesChart({ pollMs = 30000 }) {
       )}
       {withData.length > 0 && chosen.length === 0 && <div style={{ fontSize: 13, color: '#e0b84a' }} data-testid="pair-none">Отметьте хотя бы одну пару, чтобы увидеть график.</div>}
 
-      {stale && <div style={{ fontSize: 12, color: '#e0b84a' }} data-testid="pair-stale">загрузка окна {hours} ч… (показан график прежнего окна)</div>}
+      {stale && <div style={{ fontSize: 12, color: '#e0b84a' }} data-testid="pair-stale">загрузка: окно {hours} ч{selectedAgent ? `, агент ${selectedAgent}` : ''}… (показан прежний график)</div>}
       <div style={{ opacity: stale ? 0.45 : 1 }}>
         {pairs.filter((p) => chosen.includes(p.pair)).map((p) => (
           <PairChart key={p.pair} pair={p} bucketMs={data.bucket_ms} mode={mode} prices={prices} win={win} withFee={withFee} withSellFee={withSellFee} />

@@ -312,3 +312,88 @@ test('в окне нет ни одной сделки: список пар ос�
   expect(screen.getByTestId('pair-check-ETH/BTC').disabled).toBe(true);
   expect(screen.queryByTestId('pair-none')).toBeNull();
 });
+
+// ---- фильтр по агенту (CR-F18-010): агент выбирается кликом по строке таблицы «Заработок агентов» на странице и приходит свойством ----
+test('агент не выбран: запрос без agent, подсказка как выбрать агента, значка агента нет', async () => {
+  axios.get.mockResolvedValue({ data: dto(PAIRS) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(axios.get.mock.calls[0][1].params).toEqual({ hours: 24 });
+  expect(screen.getByTestId('pair-agent-hint').textContent).toMatch(/Заработок агентов/);
+  expect(screen.queryByTestId('pair-agent-name')).toBeNull();
+});
+
+test('агент выбран: запрос с agent, значок с именем и кнопка «все агенты» вызывает сброс', async () => {
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]], { agent: 'T_BTC_binance' }) });
+  const onClear = jest.fn();
+  render(<PairTradesChart selectedAgent="T_BTC_binance" onClearAgent={onClear} pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(axios.get.mock.calls[0][1].params).toEqual({ hours: 24, agent: 'T_BTC_binance' });
+  expect(screen.getByTestId('pair-agent-name').textContent).toBe('T_BTC_binance');
+  expect(screen.queryByTestId('pair-agent-hint')).toBeNull();
+  expect(screen.queryByTestId('pair-stale')).toBeNull();               // ответ уже по этому агенту
+  fireEvent.click(screen.getByTestId('pair-agent-clear'));
+  expect(onClear).toHaveBeenCalledTimes(1);
+});
+
+test('смена агента: графики и пары прежнего агента убираются сразу (не показываются под значком нового), затем показан ответ по новому агенту', async () => {
+  let resolveSecond;
+  const second = new Promise((res) => { resolveSecond = res; });
+  axios.get.mockResolvedValueOnce({ data: dto(PAIRS) }).mockImplementationOnce(() => second);
+  const { rerender } = render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-ETH/BTC')).toBeTruthy());
+  rerender(<PairTradesChart selectedAgent="T_BTC_binance" onClearAgent={() => {}} pollMs={600000} />);
+  expect(screen.queryByTestId('pair-chart-ETH/BTC')).toBeNull();
+  expect(screen.queryByTestId('pair-check-ETH/BTC')).toBeNull();
+  expect(screen.getByText(/Загрузка сделок по парам/)).toBeTruthy();
+  expect(axios.get.mock.calls[1][1].params).toEqual({ hours: 24, agent: 'T_BTC_binance' });
+  await act(async () => { resolveSecond({ data: dto([PAIRS[0]], { agent: 'T_BTC_binance', known_pairs: [{ pair: 'BTC/USDT', base: 'BTC', quote: 'USDT', in_window: true, fills: 120, last_trade_ms: T0 }] }) }); });
+  expect(screen.queryByTestId('pair-stale')).toBeNull();
+  expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy();
+  expect(screen.queryByTestId('pair-chart-ETH/BTC')).toBeNull();       // у агента нет этой пары — её нет и в списке
+  expect(screen.queryByTestId('pair-check-ETH/BTC')).toBeNull();
+});
+
+test('прежний BFF не отдаёт поле agent: при выбранном агенте график не показывается, пояснение вместо чужих данных', async () => {
+  axios.get.mockResolvedValue({ data: dto(PAIRS) });                   // нет поля agent — сервер агента не понял
+  render(<PairTradesChart selectedAgent="T_BTC_binance" onClearAgent={() => {}} pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-error')).toBeTruthy());
+  expect(screen.getByTestId('pair-error').textContent).toMatch(/обновите frontend-api/);
+  expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
+});
+
+test('сохранённый выбор пар агента читается при открытии; общий выбор на него не влияет', async () => {
+  window.localStorage.setItem('pnl.pairs.selected.T_BTC_binance', JSON.stringify(['ETH/BTC']));
+  window.localStorage.setItem('pnl.pairs.selected', JSON.stringify(['BTC/USDT']));
+  const known = PAIRS.slice(0, 2).map((x) => ({ pair: x.pair, base: x.base, quote: x.quote, in_window: true, fills: x.fills, last_trade_ms: T0 }));
+  axios.get.mockResolvedValue({ data: dto(PAIRS.slice(0, 2), { agent: 'T_BTC_binance', known_pairs: known }) });
+  render(<PairTradesChart selectedAgent="T_BTC_binance" onClearAgent={() => {}} pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-ETH/BTC')).toBeTruthy());
+  expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
+  expect(screen.getByTestId('pair-check-ETH/BTC').checked).toBe(true);
+  expect(screen.getByTestId('pair-check-BTC/USDT').checked).toBe(false);
+});
+
+test('выбор пар у агента хранится отдельно от общего выбора: ключ с именем агента, общий не затронут', async () => {
+  window.localStorage.setItem('pnl.pairs.selected', JSON.stringify(['SOL/USDT']));
+  const known = PAIRS.slice(0, 2).map((p) => ({ pair: p.pair, base: p.base, quote: p.quote, in_window: true, fills: p.fills, last_trade_ms: T0 }));
+  axios.get.mockResolvedValue({ data: dto(PAIRS.slice(0, 2), { agent: 'T_BTC_binance', known_pairs: known }) });
+  render(<PairTradesChart selectedAgent="T_BTC_binance" onClearAgent={() => {}} pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  // сохранённый общий выбор (SOL/USDT) на агента не влияет: по умолчанию отмечены все пары агента с данными
+  expect(screen.getByTestId('pair-check-BTC/USDT').checked).toBe(true);
+  expect(screen.getByTestId('pair-check-ETH/BTC').checked).toBe(true);
+  fireEvent.click(screen.getByTestId('pair-check-ETH/BTC'));
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected.T_BTC_binance'))).toEqual(['BTC/USDT']);
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['SOL/USDT']);
+  expect(screen.queryByTestId('pair-chart-ETH/BTC')).toBeNull();
+});
+
+test('у агента нет хеджей: пояснение с именем агента и без пар в списке', async () => {
+  axios.get.mockResolvedValue({ data: dto([], { agent: 'A_USDT_okxuniswap_v3', known_pairs: [] }) });
+  render(<PairTradesChart selectedAgent="A_USDT_okxuniswap_v3" onClearAgent={() => {}} pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-empty')).toBeTruthy());
+  expect(screen.getByTestId('pair-empty').textContent).toMatch(/агента A_USDT_okxuniswap_v3/);
+  expect(screen.getByTestId('pair-empty').textContent).toMatch(/за последние 7 суток исполненных хеджей у этого агента не было/);
+  expect(screen.queryByTestId('pair-list')).toBeNull();
+});

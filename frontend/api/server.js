@@ -6,7 +6,7 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
-const { bucketMsForHours, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
+const { bucketMsForHours, buildPairTradesDto, buildKnownPairs, parseAgent, lruSet, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
@@ -7660,12 +7660,17 @@ async function fetchHedgePositionRows() {
 // (child_orders) по паре и интервалу окна. SQL отдаёт БЕЗЗНАКОВЫЕ суммы (количество и стоимость покупок и продаж, число заявок) по
 // (пара, интервал); средневзвешенные цены и накопленные объёмы считает buildPairTradesDto (чистая, покрыта pair_trades_history.test.js).
 // Время заявки — created_at (с ним согласована статистика сделок панели «Живые позиции»). Индекс idx_child_orders_created обслуживает окно;
-// запрос за 7 суток ~3 с, поэтому кэш 30 с на окно и один запрос на всех ожидающих.
+// запрос за 7 суток ~3 с, поэтому кэш 30 с на пару (окно, агент) и один запрос на всех ожидающих.
 const PAIR_TRADES_TTL_MS = 30000;
 const PAIR_TRADES_TIMEOUT_MS = 25000;   // зависший запрос не должен держать общий inflight вечно
-const PAIR_TRADES_CACHE_MAX = 8;        // окон может быть до 168 разных, кэш хранит не больше нескольких последних
-const pairTradesCache = new Map();      // hours → { at, value }
-const pairTradesInflight = new Map();   // hours → Promise
+const PAIR_TRADES_CACHE_MAX = 24;       // (окно × агент): окон до 168, агентов около 60 — кэш хранит не больше нескольких последних
+// Одновременных тяжёлых запросов (основной график и справочник пар вместе) для агентов: по агентам их множество, пул PostgreSQL BFF небольшой (max 5,
+// общий со всеми маршрутами), а Promise.race по таймауту запрос в БД не отменяет. Сверх предела запрос по агенту получает прежний (просроченный) ответ из кэша
+// или 503 pair_trades_busy; основной вид «все агенты» предел не режет (один ключ, запросы делятся).
+const PAIR_TRADES_INFLIGHT_MAX = 4;
+const PAIR_TRADES_DEGRADED_TTL_MS = 3000;   // ответ со справочником пар, который не удалось получить вовремя, живёт в кэше недолго
+const pairTradesCache = new Map();      // «окно|агент» → { at, ttl, value }
+const pairTradesInflight = new Map();   // «окно|агент» → Promise
 // Расчётные ставки комиссии хеджа, б.п.: maker — лимитные заявки (пассивные), taker — рыночные. Те же значения, что использует ledger для
 // оценки комиссии зоны (ce_maker_fee_bps / ce_taker_fee_bps из f05a_clearing_config, меняются на экране «Клиринг»; не заданы или не больше нуля —
 // значения по умолчанию ledger: env CE_BAND_REF_FEE_BPS / CE_BAND_MAKER_FEE_BPS, иначе 10 и 2). Реальная комиссия бирж в child_orders не записана.
@@ -7677,7 +7682,7 @@ async function loadBandFeeBps(pool) {
   } catch (e) { /* нет таблицы или строки — значения по умолчанию */ }
   return resolveFeeBps(row, { CE_BAND_MAKER_FEE_BPS: process.env.CE_BAND_MAKER_FEE_BPS, CE_BAND_REF_FEE_BPS: process.env.CE_BAND_REF_FEE_BPS });
 }
-async function loadPairTradesRows(hours) {
+async function loadPairTradesRows(hours, agent = null) {
   const pool = getPgPool();
   if (!pool) throw new Error("postgres_unavailable");
   const bucketMs = bucketMsForHours(hours);
@@ -7697,8 +7702,9 @@ async function loadPairTradesRows(hours) {
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0
             AND created_at > now() - make_interval(hours => $2::int)
+            AND ($5::text IS NULL OR split_part(hedge_flow_id, '|', 3) = $5::text)
       GROUP BY 1, 2
-      ORDER BY 1, 2`, [bucketMs, hours, fee.maker_bps, fee.taker_bps]);
+      ORDER BY 1, 2`, [bucketMs, hours, fee.maker_bps, fee.taker_bps, agent]);
   return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs, fee);
 }
 // Пары, по которым были исполненные band-хеджи за последние 7 суток (для чекбоксов: пара без сделок в окне остаётся в списке). Запрос идёт по
@@ -7709,43 +7715,59 @@ async function loadPairTradesRows(hours) {
 const KNOWN_PAIRS_TTL_MS = 600000;
 const KNOWN_PAIRS_WAIT_MS = 3000;
 const KNOWN_PAIRS_QUERY_TIMEOUT_MS = 25000;   // зависший запрос не должен держать общий inflight вечно
-let knownPairsCache = { at: 0, rows: [] };
-let knownPairsInflight = null;
-function refreshKnownPairs() {
-  if (knownPairsInflight) return knownPairsInflight;
+const knownPairsCache = new Map();      // агент ('' — все) → { at, rows }
+const knownPairsInflight = new Map();   // агент → Promise
+const heavyInflight = () => pairTradesInflight.size + knownPairsInflight.size;
+// Справочник пар агента: { rows, degraded }. degraded — получить свежий не удалось вовремя (ожидание 3 с, сбой или предел запросов), отдан прежний
+// список (в крайнем случае пустой): такой ответ графика кэшируется ненадолго, чтобы выбор неактивных пар не сузился надолго.
+function refreshKnownPairs(agent) {
+  const key = agent || '';
+  if (knownPairsInflight.has(key)) return knownPairsInflight.get(key);
+  const cached = () => (knownPairsCache.get(key) || { rows: [] }).rows;
   const pool = getPgPool();
-  if (!pool) return Promise.resolve(knownPairsCache.rows);
+  if (!pool || (agent && heavyInflight() >= PAIR_TRADES_INFLIGHT_MAX)) return Promise.resolve({ rows: cached(), degraded: true });
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("known_pairs_timeout")), KNOWN_PAIRS_QUERY_TIMEOUT_MS).unref());
   const query = pool.query(
     `SELECT symbol, (EXTRACT(EPOCH FROM MAX(created_at)) * 1000)::bigint AS last_trade_ms
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0 AND created_at > now() - interval '7 days'
-      GROUP BY symbol`);
-  knownPairsInflight = Promise.race([query, timeout])
-    .then((r) => { knownPairsCache = { at: Date.now(), rows: r.rows }; return r.rows; })
-    .catch(() => knownPairsCache.rows)
-    .finally(() => { knownPairsInflight = null; });
-  return knownPairsInflight;
+            AND ($1::text IS NULL OR split_part(hedge_flow_id, '|', 3) = $1::text)
+      GROUP BY symbol`, [agent || null]);
+  const promise = Promise.race([query, timeout])
+    .then((r) => { lruSet(knownPairsCache, key, { at: Date.now(), rows: r.rows }, PAIR_TRADES_CACHE_MAX); return { rows: r.rows, degraded: false }; })
+    .catch(() => ({ rows: cached(), degraded: true }))
+    .finally(() => knownPairsInflight.delete(key));
+  knownPairsInflight.set(key, promise);
+  return promise;
 }
-function loadKnownPairs() {
-  if (knownPairsCache.at && Date.now() - knownPairsCache.at < KNOWN_PAIRS_TTL_MS) return Promise.resolve(knownPairsCache.rows);
-  const wait = new Promise((resolve) => setTimeout(() => resolve(knownPairsCache.rows), KNOWN_PAIRS_WAIT_MS).unref());
-  return Promise.race([refreshKnownPairs(), wait]);
+function loadKnownPairs(agent = null) {
+  const hit = knownPairsCache.get(agent || '');
+  if (hit && Date.now() - hit.at < KNOWN_PAIRS_TTL_MS) return Promise.resolve({ rows: hit.rows, degraded: false });
+  const wait = new Promise((resolve) => setTimeout(() => resolve({ rows: hit ? hit.rows : [], degraded: true }), KNOWN_PAIRS_WAIT_MS).unref());
+  return Promise.race([refreshKnownPairs(agent), wait]);
 }
-function fetchPairTrades(hours) {
-  const hit = pairTradesCache.get(hours);
-  if (hit && Date.now() - hit.at < PAIR_TRADES_TTL_MS) return Promise.resolve(hit.value);
-  if (!pairTradesInflight.has(hours)) {
+// agent — идентификатор агента CE (null — все агенты); график и справочник пар считаются по его хеджам (сегмент hedge_flow_id «ce|band|<агент>|…»).
+function fetchPairTrades(hours, agent = null) {
+  const key = `${hours}|${agent || ''}`;
+  const hit = pairTradesCache.get(key);
+  if (hit && Date.now() - hit.at < hit.ttl) return Promise.resolve(hit.value);
+  if (!pairTradesInflight.has(key)) {
+    if (agent && heavyInflight() >= PAIR_TRADES_INFLIGHT_MAX) {
+      if (hit) return Promise.resolve(hit.value);   // занято: лучше прежний ответ того же агента, чем ошибка
+      return Promise.reject(new Error("pair_trades_busy"));
+    }
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("pair_trades_timeout")), PAIR_TRADES_TIMEOUT_MS).unref());
-    pairTradesInflight.set(hours, Promise.race([Promise.all([loadPairTradesRows(hours), loadKnownPairs()]).then(([dto, known]) => ({ ...dto, known_pairs: buildKnownPairs(dto.pairs, known) })), timeout])
-      .then((value) => {
-        pairTradesCache.set(hours, { at: Date.now(), value });
-        while (pairTradesCache.size > PAIR_TRADES_CACHE_MAX) pairTradesCache.delete(pairTradesCache.keys().next().value);   // самое старое окно
+    pairTradesInflight.set(key, Promise.race([
+      Promise.all([loadPairTradesRows(hours, agent), loadKnownPairs(agent)])
+        .then(([dto, known]) => ({ value: { ...dto, agent: agent || null, known_pairs: buildKnownPairs(dto.pairs, known.rows) }, degraded: known.degraded })),
+      timeout])
+      .then(({ value, degraded }) => {
+        lruSet(pairTradesCache, key, { at: Date.now(), ttl: degraded ? PAIR_TRADES_DEGRADED_TTL_MS : PAIR_TRADES_TTL_MS, value }, PAIR_TRADES_CACHE_MAX);
         return value;
       })
-      .finally(() => pairTradesInflight.delete(hours)));
+      .finally(() => pairTradesInflight.delete(key)));
   }
-  return pairTradesInflight.get(hours);
+  return pairTradesInflight.get(key);
 }
 
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
@@ -8526,11 +8548,14 @@ async function handleVectorClearing(req, res, pathname, query) {
     // График «Сделки на внешних биржах по парам» на вкладке «PnL»: накопленный объём базовой валюты и цены покупки и продажи (вторая
     // валюта пары) по состоявшимся хеджам агентов CE; всё посчитано здесь, браузер только рисует (CALC-CE-PAIR-TRADES).
     const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
+    const agentArg = parseAgent(query && query.agent);   // необязательный фильтр: хеджи одного агента (идентификатор как в таблице «Заработок агентов»)
+    if (!agentArg.ok) return writeJson(res, 400, { error: "bad_agent" });
     if (!getPgPool()) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
-      const dto = await fetchPairTrades(hours);
+      const dto = await fetchPairTrades(hours, agentArg.agent);
       return writeJson(res, 200, { ...dto, generatedAt: new Date().toISOString() });
     } catch (e) {
+      if (e && e.message === "pair_trades_busy") return writeJson(res, 503, { error: "pair_trades_busy" });
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
   }

@@ -155,7 +155,7 @@ const HedgePnlDashboardLive = () => {
 
         <AgentPnlTable selectedId={selectedAgent} onSelectAgent={setSelectedAgent} />
         <PnlHistoryChart selectedAgent={selectedAgent} onClearAgent={() => setSelectedAgent(null)} />
-        <PairTradesChart />
+        <PairTradesChart selectedAgent={selectedAgent} onClearAgent={() => setSelectedAgent(null)} />
 
         <section className="hedge-pnl-toolbar">
           <div className="hedge-pnl-field">

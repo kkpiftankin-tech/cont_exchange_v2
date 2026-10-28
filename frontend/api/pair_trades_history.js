@@ -136,4 +136,21 @@ function buildKnownPairs(windowPairs, knownRows) {
   return out.concat(rest);
 }
 
-module.exports = { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS };
+// Параметр agent маршрута: идентификатор агента CE (T_BTC_binance, A_BTC_binanceokx, T_ETH_BTC_okx) — латиница, цифры, «_», «.», «-», до 64 знаков.
+// Пусто — все агенты (agent: null); иной формат — ok: false (маршрут отвечает 400). Значение уходит в SQL только параметром, формат проверяется для кэша.
+const AGENT_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+function parseAgent(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, agent: null };
+  const s = String(raw);
+  return AGENT_RE.test(s) ? { ok: true, agent: s } : { ok: false, agent: null };
+}
+
+// Запись в кэш на Map с вытеснением давно не обновлявшихся: удаление перед записью переносит ключ в конец порядка вставки (Map.set по существующему
+// ключу порядок не меняет, и самый горячий ключ вытеснялся бы первым); сверх max удаляются самые старые.
+function lruSet(map, key, value, max) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value);
+}
+
+module.exports = { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, parseAgent, lruSet, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS };

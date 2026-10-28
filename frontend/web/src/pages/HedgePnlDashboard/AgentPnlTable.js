@@ -85,7 +85,7 @@ export default function AgentPnlTable({ pollMs = 5000, selectedId = null, onSele
     <section className="agent-pnl" data-testid="agent-pnl" data-ui-id="UI-PNL-AGENTS">
       <div className="agent-pnl-head">
         <h3>Заработок агентов — R / U / R+U</h3>
-        <span className="agent-pnl-sub">USDT, без комиссий. Числа считает ledger; обновление каждые 5 сек.{onSelectAgent ? ' Клик по строке — график агента ниже.' : ''}</span>
+        <span className="agent-pnl-sub">USDT, без комиссий. Числа считает ledger; обновление каждые 5 сек.{onSelectAgent ? ' Клик по строке — графики этого агента ниже (заработок во времени и сделки по парам).' : ''}</span>
       </div>
       <p className="agent-pnl-explain" data-testid="agent-pnl-explain">
         <b>Внутренняя биржа CE</b> — всё реализуется в такте клиринга, поэтому там только <b>R</b>: выгода агента относительно
