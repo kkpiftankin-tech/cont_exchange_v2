@@ -23,8 +23,8 @@ function pnlSamples(rows, tsMs, surplus) {
   };
   for (const a of Array.isArray(rows) ? rows : []) {
     if (!a || !a.agent_id) continue;
-    // как в панели: если R нет, а есть pnl_usdt (R+U), его используют вместо R
-    const r = finite(a.realized_usdt) ? Number(a.realized_usdt) : (finite(a.pnl_usdt) ? Number(a.pnl_usdt) : null);
+    // R и U приходят из ledger одной группой (ADR-087 п. 10): есть оба или нет обоих; подмены R суммой R+U нет
+    const r = finite(a.realized_usdt) ? Number(a.realized_usdt) : null;
     const u = finite(a.unrealized_usdt) ? Number(a.unrealized_usdt) : null;
     const sp = sPart(a.agent_id);
     if (r === null && u === null && sp.surplus_inc === null) continue;

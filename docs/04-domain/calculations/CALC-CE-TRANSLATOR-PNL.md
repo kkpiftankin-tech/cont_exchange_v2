@@ -3,12 +3,15 @@ id: CALC-CE-TRANSLATOR-PNL
 title: Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM остатка)
 level: L3
 feature: F-18
-status: proposed # формула определена в ADR-072 §C; код пока считает только агрегат R+U (tradedBasketUsdt)
+status: partial # R (vs fair) — ledger, ADR-072 §C; U и R+U внешней группы с 2026-10-28 считает ledger по ADR-087 п. 10 (CALC-CE-AGENT-PNL) — формула U ниже заменена
 code:
-  - frontend/api/trade_stats_math.js#tradedBasketUsdt (сейчас только агрегат R+U; раздельные R/U — цель ADR-072)
+  - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked (накопление realized_vs_fair и выход внутренней книги; ADR-087)
+  - cpp/ledger/src/app/agent_pnl_book.hpp#ApplyTranslatorHedgeFill (внешний U — только на несопоставленном объёме)
   - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price — child_orders с 2026-10-22; прежде venue_fill_diagnostics)
-  - frontend/api/server.js#buildAgentRows (pnl_usdt)
-tests: [] # цель — frontend/api/trade_stats_math.test.js (тождество C2) + ledger unit на кумулятивный R
+  - frontend/api/agent_pnl_dto.js#rowPnlFields (передача полей R/U в строку панели без арифметики)
+tests:
+  - cpp/ledger/tests/ce_agent_pnl_test.cpp
+  - cpp/ledger/tests/agent_pnl_book_test.cpp
 ui:
   - /vector-clearing-live (разбор агента — строка заработка; цель: R и U раздельно)
 sources:
@@ -44,7 +47,7 @@ SELL выше $F_0$ ⇒ $(p_f-F_0)>0$ (плюс); BUY ниже $F_0$ ⇒ $-(p_f-
 (ledger `st.fair_price`). Накопительно в quote, нарастает — не маскируется маркой.
 
 - **unrealized** $U$ = MTM открытого остатка: $U = (R{+}U) - R$, где $R{+}U$ —
-  корзина сделок по текущей марке (`tradedBasketUsdt`, прежняя метрика).
+  корзина сделок по текущей марке (прежняя метрика `tradedBasketUsdt`, удалена из BFF — см. «Заменено» в конце карточки).
 
 | Обозначение | Смысл | Единицы | Откуда |
 |---|---|---|---|
@@ -85,8 +88,7 @@ matching `AssetDelta.fair_price` (F_0) → ledger `st.fair_price`; на кажд
 подтверждённом хедж-филле `apply_agent_band_report_locked` копит
 `st.realized_vs_fair += s·(avg−F_0)·Δq` (Decimal, quote) → `GetAgentPositions.
 realized_vs_fair` → BFF `fetchAgentPositions`/`buildAgentRows` (quote→USDT) →
-`/vector-clearing` колонка «заработок R / U» (R — ledger vs-fair; U = (R+U)−R,
-`tradedBasketUsdt`).
+`/vector-clearing` колонка «заработок R / U» (R и U — ledger, внешняя группа `GetAgentPnl`, ADR-087 п. 10).
 
 ## 5а. Как R и U показаны на экране (2026-10-22)
 
@@ -94,10 +96,12 @@ realized_vs_fair` → BFF `fetchAgentPositions`/`buildAgentRows` (quote→USDT) 
 
 - **R — реализованный заработок.** Уже зафиксирован сделками и сам не меняется без новых сделок. У переводчика — накопленная по каждой сделке разница между ценой исполнения и справедливой ценой клиринга $F_0$ (продажа дороже $F_0$ — плюс, покупка дешевле — плюс). У арбитражёра — прибыль на закрытом объёме: $\min(B,S)\cdot(\bar p_S-\bar p_B)$.
 - **U — нереализованный результат.** Итог всех сделок агента по текущим ценам клиринга минус R: $U=(R{+}U)-R$. Меняется с рынком, пока позиция открыта.
-- Всё в USDT, без комиссий. Сброс статистики сделок обнуляет оба ряда.
+- Всё в USDT, без комиссий. Накопление идёт с отметки внедрения учёта или последнего сброса позиций (`ResetAgentPositions` в ledger); сброс статистики сделок обнуляет только количества сделок (`child_orders`), не R и U.
 - **График во времени.** По клику на агента BFF отдаёт ряд R, U и R + U, записанный раз в минуту (`docs/07-data/ce-agent-pnl-history.md`, `docs/06-api/rest/agent-pnl-history.md`). Значения те же, что в колонке, поэтому график не может разойтись с таблицей.
 
-> **Cross-reference (2026-10-28, ADR-087).** Заработок агента **по биржам** — внутренняя биржа CE, внешние биржи, итого — определён в карточке [CALC-CE-AGENT-PNL](CALC-CE-AGENT-PNL.md) и считается в ledger. Внешний R там совпадает с R этой карточки (`realized_vs_fair`, от отметки внедрения учёта). Внешний U там считается **только на несопоставленном с внутренней книгой объёме**, а не как корзина целиком (U этой карточки и панели «Живые позиции»): после закрытия внутренней позиции хеджем переоценка корзины по рынку фантомна и искажает итог. До перевода панели на единый источник эти два U различаются намеренно (OQ-F18v2-26).
+> **Заменено (2026-10-28, ADR-087 п. 10).** Расчёт R и U панели «Живые позиции» перенесён из BFF в ledger: формулы корзины сделок (`tradedBasketUsdt`) и перевода в USDT (`pnlQuoteToUsdt`) удалены из BFF. Определение U как «корзина целиком минус R» в §2 и §5 ниже больше не действует: внешний U — только на объёме без встречного остатка внутренней книги ([CALC-CE-AGENT-PNL](CALC-CE-AGENT-PNL.md)). Определение R (vs fair, §2) без изменений.
+
+> **Cross-reference (2026-10-28, ADR-087).** Заработок агента **по биржам** — внутренняя биржа CE, внешние биржи, итого — определён в карточке [CALC-CE-AGENT-PNL](CALC-CE-AGENT-PNL.md) и считается в ledger. Внешний R там совпадает с R этой карточки (`realized_vs_fair`, от отметки внедрения учёта). Внешний U там считается **только на несопоставленном с внутренней книгой объёме**, а не как корзина целиком: после закрытия внутренней позиции хеджем переоценка корзины по рынку фантомна и искажает итог. Панель «Живые позиции» читает те же числа (ADR-087 п. 10); открытый вопрос о правиле — OQ-F18v2-26.
 
 ## 6. Открытые вопросы / caveats
 

@@ -652,6 +652,45 @@ nodes:
       tests:
       - frontend/api/trade_stats_math.test.js
       - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
+    - id: CAP-F18-AGENT-PNL
+      title: Заработок агентов по биржам — R, U, R+U внутренней биржи, внешних бирж
+        и итого (вкладка «PnL»)
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      since: CR-F18-002
+      acceptanceCriteria:
+      - AC-F18v2-30
+      adrs:
+      - ADR-087
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-CE-AGENT-PNL
+      contracts:
+      - docs/06-api/grpc/ledger-agent-pnl.md
+      - docs/06-api/rest/agent-pnl.md
+      tables:
+      - ce_agent_pnl_book
+      - ce_agent_position
+      ui:
+      - UI-PNL-AGENTS
+      codePaths:
+      - cpp/ledger/src/app/agent_pnl_book.hpp
+      - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl
+      - cpp/ledger/src/app/ledger_uc.cpp#book_on_delta_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked
+      - frontend/api/agent_pnl_dto.js
+      - frontend/api/server.js#fetchAgentPnlDto
+      - frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js
+      - frontend/web/src/pages/VectorClearing/VectorClearingLive.js#AgentPositionsTables
+      tests:
+      - cpp/ledger/tests/agent_pnl_book_test.cpp
+      - cpp/ledger/tests/ce_agent_pnl_test.cpp
+      - frontend/api/agent_pnl_dto.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/AgentPnlTable.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
     acceptanceCriteriaIds:
     - AC-F18v2-01
     - AC-F18v2-02
@@ -683,6 +722,7 @@ nodes:
     - AC-F18v2-27
     - AC-F18v2-28
     - AC-F18v2-29
+    - AC-F18v2-30
   - id: F-20
     type: feature
     class: normative
@@ -1173,6 +1213,29 @@ nodes:
     - frontend/api/server.js#handleVenues (GET /api/venues/orderbook)
     tests:
     - frontend/api/book_vwap.test.js
+  - id: CALC-CE-AGENT-PNL
+    type: calc
+    class: normative
+    title: Заработок агента CE по биржам — R, U и R+U внутренней биржи, внешних бирж
+      и итого
+    path: docs/04-domain/calculations/CALC-CE-AGENT-PNL.md
+    filenameId: CALC-CE-AGENT-PNL
+    feature: F-18
+    status: proposed
+    level: L3
+    code:
+    - cpp/ledger/src/app/agent_pnl_book.hpp
+    - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl
+    - cpp/ledger/src/app/ledger_uc.cpp#ApplyPositionDelta
+    - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked
+    - frontend/api/agent_pnl_dto.js
+    - frontend/api/server.js#fetchAgentPnlDto
+    tests:
+    - cpp/ledger/tests/agent_pnl_book_test.cpp
+    - cpp/ledger/tests/ce_agent_pnl_test.cpp
+    - frontend/api/agent_pnl_dto.test.js
+    - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
+    - frontend/web/src/pages/HedgePnlDashboard/__tests__/AgentPnlTable.test.js
   - id: CALC-CE-ANCHOR
     type: calc
     class: normative
@@ -1340,15 +1403,20 @@ nodes:
     path: docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md
     filenameId: CALC-CE-TRANSLATOR-PNL
     feature: F-18
-    status: proposed
+    status: partial
     level: L3
     code:
-    - frontend/api/trade_stats_math.js#tradedBasketUsdt (сейчас только агрегат R+U;
-      раздельные R/U — цель ADR-072)
+    - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked (накопление
+      realized_vs_fair и выход внутренней книги; ADR-087)
+    - cpp/ledger/src/app/agent_pnl_book.hpp#ApplyTranslatorHedgeFill (внешний U —
+      только на несопоставленном объёме)
     - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price
       — child_orders с 2026-10-22; прежде venue_fill_diagnostics)
-    - frontend/api/server.js#buildAgentRows (pnl_usdt)
-    tests: []
+    - frontend/api/agent_pnl_dto.js#rowPnlFields (передача полей R/U в строку панели
+      без арифметики)
+    tests:
+    - cpp/ledger/tests/ce_agent_pnl_test.cpp
+    - cpp/ledger/tests/agent_pnl_book_test.cpp
   - id: CALC-F05A-DEPTH-WINDOW
     type: calc
     class: normative
@@ -1402,8 +1470,8 @@ nodes:
       для ClickHouse/дашборда, отдельный путь)
     - frontend/api/server.js#fetchAgentTradeStats (BFF, 4-й путь — per-agent агрегат
       по venue_fill_diagnostics, scope ce|band|%; p_int≡limit_price, см. §7.2)
-    - frontend/api/trade_stats_math.js#combineTradeStats/pnlQuoteToUsdt (чистая знаковая
-      математика 4-го пути)
+    - frontend/api/trade_stats_math.js#combineTradeStats (чистая знаковая математика
+      КОЛИЧЕСТВ 4-го пути; заработок с 2026-10-28 из ledger)
     tests:
     - cpp/ledger/tests/ledger_hedge_pnl_test.cpp
     - frontend/web/src/api/__tests__/hedgeFlowService.pnl.test.js
@@ -1978,6 +2046,13 @@ nodes:
       единого сэндвича ingress → агент → ingress
     path: docs/03-architecture/adr/ADR-086-two-axis-reply-routing.md
     status: accepted
+  - id: ADR-087
+    type: adr
+    class: normative
+    title: Заработок агентов CE по биржам — внутренняя книга агента (R и U по средней
+      себестоимости), внешний результат и итог, расчёт в ledger
+    path: docs/03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md
+    status: proposed
   table:
   - id: postgresql:flow_orders
     type: table
@@ -2252,6 +2327,13 @@ nodes:
     path: infra/postgres/init.sql
     store: postgresql
     tableName: ce_agent_position
+  - id: postgresql:ce_agent_pnl_book
+    type: table
+    class: normative
+    title: ce_agent_pnl_book
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_agent_pnl_book
   - id: postgresql:ce_asset_volatility
     type: table
     class: normative
@@ -2729,6 +2811,10 @@ edges:
   resolved: true
 - from: F-11
   to: CALC-F11-BOOK-VWAP
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-AGENT-PNL
   type: feature->calc
   resolved: true
 - from: F-18

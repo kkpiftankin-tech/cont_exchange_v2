@@ -53,15 +53,24 @@ test('под таблицей арбитражёров простыми слов
   expect(note.textContent).toMatch(/счёт дома/);
 });
 
-test('строка общего заработка: переводчики, арбитражёры и «Вместе» (R, U, итого), позиции арбитражёров отдельно', () => {
+// Итоги заработка считает ledger (GetAgentPnl) и приходят в пропе pnlTotals; панель их только показывает (ADR-087 п. 10).
+const grp = (r, u, total) => ({ has_data: true, r, u, r_plus_u: total === undefined ? r + u : total });
+const totals = (over = {}) => ({
+  translator: { external: grp(3.2, 1.1), internal: grp(0, 0), total: grp(3.2, 1.1) },
+  arbitrageur: { external: grp(10, -4), internal: grp(0, 0), total: grp(10, -4) },
+  all: { external: grp(13.2, -2.9), internal: grp(0, 0), total: grp(13.2, -2.9) },
+  ...over,
+});
+
+test('строка общего заработка: переводчики, арбитражёры и «Вместе» берутся из итогов ledger, позиции арбитражёров отдельно', () => {
   const rows = [translator,
     arbitrageur({ realized_usdt: 10, unrealized_usdt: -4, pnl_usdt: 6, trade_fills: 30, basis_mtm_usdt: 0.25, open_position_usdt: -8000 }),
     arbitrageur({ agent_id: 'A_BTC_krakenokx', basis_mtm_usdt: -0.5, open_position_usdt: -2000 })];
-  const { container } = render(<AgentPositionsTables agentRows={rows} title="t" />);
-  const totals = container.querySelector('[data-testid="trade-totals"]').textContent;
-  expect(totals).toMatch(/Общий заработок по состоявшимся сделкам/);
-  expect(totals).toMatch(/Переводчики \(1\): R \+3\.2000 \/ U \+1\.1000/);
-  expect(totals).toMatch(/Арбитражёры \(2\): R \+10\.0000 \/ U -4\.0000/);
+  const { container } = render(<AgentPositionsTables agentRows={rows} pnlTotals={totals()} title="t" />);
+  const t = container.querySelector('[data-testid="trade-totals"]').textContent;
+  expect(t).toMatch(/Общий заработок на внешних биржах \(из ledger/);
+  expect(t).toMatch(/Переводчики \(1\): R \+3\.2000 \/ U \+1\.1000/);
+  expect(t).toMatch(/Арбитражёры \(2\): R \+10\.0000 \/ U -4\.0000/);
   const all = container.querySelector('[data-testid="total-earnings"]').textContent;
   expect(all).toMatch(/Вместе: R \+13\.2000 \/ U -2\.9000 · итого R\+U \+10\.3000/);
   const pos = container.querySelector('[data-testid="arb-pos-total"]').textContent;
@@ -70,11 +79,52 @@ test('строка общего заработка: переводчики, ар
   expect(pos).toMatch(/открытая позиция -10000\.00/);
 });
 
-test('итого не смешивает позиции с заработком: большая открытая позиция не меняет «Вместе»', () => {
+test('панель не складывает: итоги показываются ровно как пришли из ledger, даже если они не равны сумме строк', () => {
+  // В строках R = 3.2 и 10, а ledger прислал другие итоги: если бы панель суммировала сама, увидели бы +13.2000.
+  const rows = [translator, arbitrageur({ realized_usdt: 10, unrealized_usdt: -4, pnl_usdt: 6 })];
+  const odd = totals({ all: { external: grp(777, 1, 999), internal: grp(0, 0), total: grp(0, 0) } });
+  const { container } = render(<AgentPositionsTables agentRows={rows} pnlTotals={odd} title="t" />);
+  const all = container.querySelector('[data-testid="total-earnings"]').textContent;
+  expect(all).toMatch(/Вместе: R \+777\.00 \/ U \+1\.0000 · итого R\+U \+999\.00/);
+  expect(all).not.toMatch(/13\.2000/);
+});
+
+test('итоги недоступны (ledger не ответил) — «нет данных от ledger», а не нули', () => {
+  const { container } = render(<AgentPositionsTables agentRows={[translator]} pnlTotals={null} title="t" />);
+  expect(container.querySelector('[data-testid="pnl-totals-missing"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="total-earnings"]')).toBeNull();
+});
+
+test('нет данных у вида агентов — прочерк в его итоге, остальные виды показаны', () => {
+  const noArb = totals({ arbitrageur: { external: { has_data: false, r: null, u: null, r_plus_u: null } } });
+  const { container } = render(<AgentPositionsTables agentRows={[translator, arbitrageur()]} pnlTotals={noArb} title="t" />);
+  const t = container.querySelector('[data-testid="trade-totals"]').textContent;
+  expect(t).toMatch(/Переводчики \(1\): R \+3\.2000/);
+  expect(t).toMatch(/Арбитражёры \(1\): R —/);
+});
+
+test('подпись итога: число агентов из ledger и сколько без данных (в сумму не входят)', () => {
+  const t = totals({
+    translator: { external: grp(3.2, 1.1), internal: grp(0, 0), total: grp(3.2, 1.1), agent_count: 17, incomplete_agents: 4 },
+    arbitrageur: { external: grp(0, 0), internal: grp(0, 0), total: grp(0, 0), agent_count: 30, incomplete_agents: 0 },
+  });
+  const { container } = render(<AgentPositionsTables agentRows={[translator, arbitrageur()]} pnlTotals={t} title="t" />);
+  const text = container.querySelector('[data-testid="trade-totals"]').textContent;
+  expect(text).toMatch(/Переводчики \(17, без данных: 4\): R \+3\.2000/);
+  expect(text).toMatch(/Арбитражёры \(30\): R/);
+});
+
+test('большая открытая позиция арбитражёра не меняет «Вместе» (позиция — не заработок)', () => {
   const a = arbitrageur({ realized_usdt: 1, unrealized_usdt: 0, pnl_usdt: 1, basis_mtm_usdt: 0, open_position_usdt: 0 });
   const b = arbitrageur({ realized_usdt: 1, unrealized_usdt: 0, pnl_usdt: 1, basis_mtm_usdt: 0, open_position_usdt: -14000 });
-  const t = (rows) => render(<AgentPositionsTables agentRows={rows} title="t" />).container.querySelector('[data-testid="total-earnings"]').textContent;
-  expect(t([a])).toBe(t([b]));
+  const tt = (rows) => render(<AgentPositionsTables agentRows={rows} pnlTotals={totals()} title="t" />).container.querySelector('[data-testid="total-earnings"]').textContent;
+  expect(tt([a])).toBe(tt([b]));
+});
+
+test('в строке агента R и U показываются без запасного пересчёта: нет R — пусто', () => {
+  const withFallbackBait = { ...translator, realized_usdt: null, unrealized_usdt: null, pnl_usdt: 4.3 };
+  const { container } = render(<AgentPositionsTables agentRows={[withFallbackBait]} pnlTotals={totals()} title="t" />);
+  expect(container.textContent).not.toMatch(/\+4\.3000/);
 });
 
 test('переводчик по-прежнему показывает realized / unrealized', () => {

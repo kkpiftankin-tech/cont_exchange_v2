@@ -9,7 +9,7 @@ code:
   - cpp/ledger/src/app/ledger_uc.cpp#RecordHedgeExecution
   - cpp/market_data/src/app/hedge_pnl_aggregator.cpp#HedgePnLAggregator (агрегат для ClickHouse/дашборда, отдельный путь)
   - frontend/api/server.js#fetchAgentTradeStats (BFF, 4-й путь — per-agent агрегат по venue_fill_diagnostics, scope ce|band|%; p_int≡limit_price, см. §7.2)
-  - frontend/api/trade_stats_math.js#combineTradeStats/pnlQuoteToUsdt (чистая знаковая математика 4-го пути)
+  - frontend/api/trade_stats_math.js#combineTradeStats (чистая знаковая математика КОЛИЧЕСТВ 4-го пути; заработок с 2026-10-28 из ledger)
 tests:
   - cpp/ledger/tests/ledger_hedge_pnl_test.cpp
   - frontend/web/src/api/__tests__/hedgeFlowService.pnl.test.js
@@ -111,6 +111,8 @@ sim-режиме `hedge_pnl`/`avg_price` в ClickHouse-пути остаются
 ## 7. Открытые вопросы и расхождения
 
 ### 7.2 Четвёртый путь: BFF `fetchAgentTradeStats` (панель «Живые позиции»)
+
+> **Заменено (2026-10-28, ADR-087 п. 10).** BFF больше не считает заработок: R, U и R+U панели приходят из ledger (`GetAgentPnl`, [CALC-CE-AGENT-PNL](CALC-CE-AGENT-PNL.md)). `fetchAgentTradeStats` и `combineTradeStats` остались для **количеств** (куплено/продано валюты, число исполнений), формулы заработка и пункт 5 ниже (корзина сделок, `tradedBasketUsdt`) удалены из кода. Текст ниже описывает прежнюю реализацию.
 
 Добавлен per-agent агрегат по СОСТОЯВШИМСЯ сделкам для панели «Живые позиции»
 (`/vector-clearing`): по каждому CE-агенту сумма кол-ва base/quote и заработка в USDT

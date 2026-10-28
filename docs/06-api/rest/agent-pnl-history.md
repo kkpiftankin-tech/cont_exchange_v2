@@ -76,7 +76,10 @@ related:
 | `hedge_symbol`, `hedge_side`, `hedge_venue`, `hedge_sent`, `hedge_filled`, `hedge_status`, `hedge_ms` | самая свежая заявка агента (как раньше); `hedge_symbol` в виде `BASE/QUOTE` (`BTC/USDT`), по нему панель выбирает строку валюты; `hedge_status`: `NEW`, `PARTIALLY_FILLED`, `FILLED`, `EXPIRED`, `REJECTED` (в БД `PENDING` ⇒ `NEW`, `CANCELLED` ⇒ `EXPIRED`) |
 | `hedge_by_venue` | новое: последняя заявка агента на каждой бирже `{ venue: { symbol, side, sent, filled, status, ms } }`; арбитражёр хеджирует обе ноги, и панель показывает заявку в строке ноги своей биржи |
 | `trade_by_venue` | новое: сделки агента по биржам `{ venue: { traded_base, traded_quote, trade_fills } }` (знаковые: покупка +, продажа −); на экране база и квота показаны в одном столбце «сделки» |
-| `traded_base`, `traded_quote`, `realized_usdt`, `unrealized_usdt`, `pnl_usdt`, `trade_fills` | итог по агенту, без изменений смысла |
+| `traded_base`, `traded_quote`, `trade_fills` | итог по агенту (количества по `child_orders` с момента сброса статистики), без изменений смысла |
+| `realized_usdt`, `unrealized_usdt`, `pnl_usdt` | **с 2026-10-28 (ADR-087 п. 10): внешняя группа R, U, R+U из ledger (`GetAgentPnl`)**, а не расчёт BFF по `child_orders`; `null`, если у агента нет цены оценки или ledger недоступен. Накапливаются с отметки внедрения учёта или последнего сброса позиций |
+| `pnl_internal`, `pnl_total`, `pnl_since_ms` | новое: внутренняя и итоговая группы того же агента (`{has_data, r, u, r_plus_u}`) и начало накопления, мс; те же числа, что на вкладке «PnL» |
+| `pnl_totals` (корень ответа) | новое: итоги заработка из ledger `{ translator, arbitrageur, all }`, каждый — `{internal, external, total, ...}`; панель их показывает, не складывает; `null`, если ledger недоступен |
 | `surplus_usdt`, `surplus_coverage` | новое (ADR-083): выгода участника в клиринге по теории, накопленная с момента сброса статистики (USDT), и доля учтённых тактов; нет данных — поля отсутствуют. Оценка относительно кривой агента, не деньги в кассе |
 
 Старые клиенты не ломаются: прежние поля сохранены, новые добавлены.

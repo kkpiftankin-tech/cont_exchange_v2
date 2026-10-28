@@ -12,7 +12,7 @@
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **6**
 - ADR в статусе `proposed` (ждут решения владельца): **14**
-- Инженерных долгов в known-gaps.md: **13**
+- Инженерных долгов в known-gaps.md: **14**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -89,7 +89,7 @@
 - **CALC-CE-ANCHOR** (F-18, `partial`) — Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017) · [docs/04-domain/calculations/CALC-CE-ANCHOR.md](../04-domain/calculations/CALC-CE-ANCHOR.md)
 - **CALC-CE-SKEW-BAND-CALIBRATION** (F-18, `calibrated`) — Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка переводчика · [docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md](../04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md)
 - **CALC-CE-SYSTEM-PNL** (F-18, `partial`) — P&L системы CE (MTM реальных остатков) и инварианты · [docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md](../04-domain/calculations/CALC-CE-SYSTEM-PNL.md)
-- **CALC-CE-TRANSLATOR-PNL** (F-18, `proposed`) — Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM остатка) · [docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md](../04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md)
+- **CALC-CE-TRANSLATOR-PNL** (F-18, `partial`) — Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM остатка) · [docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md](../04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md)
 - **CALC-F12-HEDGE-PNL** (F-12, `drift`) — Hedge PnL (результат внешнего хеджа) · [docs/04-domain/calculations/CALC-F12-HEDGE-PNL.md](../04-domain/calculations/CALC-F12-HEDGE-PNL.md)
 
 ## ADR в статусе `proposed` (ждут решения владельца)
@@ -124,3 +124,4 @@
 - Этап 8 (ADR-086/IN-019, 2026-10-27): «Пилот F-18» сужен владельцем до 1 полного примера CR
 - Этап 9 (ADR-086/IN-019, 2026-10-27): «Распространение и метрики» сужен владельцем до одной метрики
 - Учёт заработка агентов (ADR-087): известные ограничения
+- R и U едины, остальные цифры панели «Живые позиции» — нет

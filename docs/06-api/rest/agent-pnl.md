@@ -50,6 +50,9 @@ related:
     "agent_count": 1,
     "incomplete_agents": 0
   },
+  "by_kind": {
+    "translator": { "agent_kind": "translator", "internal": { "has_data": true, "r": 60.0, "u": 40.0, "r_plus_u": 100.0 }, "external": { "has_data": true, "r": 40.0, "u": -20.0, "r_plus_u": 20.0 }, "total": { "has_data": true, "r": 100.0, "u": 20.0, "r_plus_u": 120.0 }, "agent_count": 1, "incomplete_agents": 0 }
+  },
   "generatedAt": "2026-10-28T12:00:00.000Z"
 }
 ```
@@ -64,9 +67,14 @@ related:
 | `ext_fills` | число внешних хедж-исполнений с запуска ledger |
 | `since_ms` | начало накопления (миграция учёта или сброс позиций); `null` — не начато |
 | `totals` | строка «все агенты»: суммы по агентам, у которых в группе есть данные; `incomplete_agents` — сколько агентов неполные |
+| `by_kind` | те же суммы по видам агентов (`translator`, `arbitrageur`), ключ — вид; записи нет, если агентов этого вида нет |
 | `enabled` | `false` — ledger запущен с `CE_AGENT_PNL_ENABLED=0`: список пуст |
 
 Числа округляются только при отображении; BFF передаёт значения `Decimal` ledger как JSON number.
+
+## Другие потребители того же расчёта
+
+Панель «Живые позиции» (`GET /api/vector-clearing/agent-positions`) и семплер истории заработка получают R, U, R+U из этого же вызова ledger (`GetAgentPnl`), а не считают сами: колонка «заработок R / U» строки — внешняя группа агента, `pnl_totals` в корне ответа — `by_kind` и `totals`. Поля описаны в [agent-pnl-history](agent-pnl-history.md) §2 (ADR-087 п. 10).
 
 ## Ошибки
 

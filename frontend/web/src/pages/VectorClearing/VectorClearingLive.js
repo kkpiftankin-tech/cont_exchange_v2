@@ -423,7 +423,7 @@ const reasonBg = (r) => {
 // Две таблицы позиций агентов (переводчики base/quote + арбитражёры источник/приёмник).
 // Переиспользуется: статичный снимок батча (ClearingDetail) и живая панель (кнопка).
 // Money-path/маршрут/ноги считает BFF — здесь только рендер (frontend-no-domain-compute).
-export function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId }) {
+export function AgentPositionsTables({ agentRows, title, onSelectAgent, selectedId, pnlTotals }) {
   const rows = Array.isArray(agentRows) ? agentRows : [];
   const clickable = typeof onSelectAgent === 'function';
   // Не действующие агенты (нет позиции и не двигались) показываются приглушённо, но на своём месте; агент, пропавший из
@@ -475,15 +475,16 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   // ADR-072 §C: realized (R — закрытые round-trip, НАРАСТАЕТ = заработок) основным,
   // unrealized (U — MTM открытого остатка, болтается с маркой) приглушённым: «R / U».
   const pnlColor = (x) => Number(x) > 1e-9 ? '#5fd08a' : Number(x) < -1e-9 ? '#e06060' : '#9fb2c2';
-  // Заработок по состоявшимся сделкам (R / U) — и у переводчика, и у арбитражёра (арбитражёры выходят на внешнюю биржу, ADR-080).
+  // Заработок агента на внешних биржах (R / U): числа пришли готовыми из ledger (ADR-087 п. 10) — тот же расчёт и то же хранилище, что у
+  // вкладки «PnL». Здесь только отображение. Нет данных (нет цены оценки) — прочерк.
   const tradeCell = (a) => {
     const r = a.realized_usdt, u = a.unrealized_usdt;
     const rOk = r != null && Number.isFinite(Number(r));
     const uOk = u != null && Number.isFinite(Number(u));
-    if (!rOk && (a.pnl_usdt == null || !Number.isFinite(Number(a.pnl_usdt)))) return null;
+    if (!rOk) return null;
     return (
-      <span title={`R — реализованный (зафиксирован сделками) / U — нереализованный (остаток по текущим ценам) по ${a.trade_fills || 0} сделкам, USDT без комиссий. Клик по агенту — график во времени`}>
-        <span style={{ color: pnlColor(rOk ? r : a.pnl_usdt), fontWeight: 600 }}>{sgn(rOk ? r : a.pnl_usdt)}</span>
+      <span title="Внешние биржи, USDT, без комиссий; считает ledger. R — реализованный (зафиксирован сделками), U — нереализованный (остаток, которому не нашлось встречной позиции на внутренней бирже, по текущей цене оценки). Внутренняя биржа и итого — на вкладке «PnL». Клик по агенту — график во времени">
+        <span style={{ color: pnlColor(r), fontWeight: 600 }}>{sgn(r)}</span>
         {uOk && <span style={{ color: pnlColor(u), opacity: 0.6, fontSize: '0.85em' }}> / {sgn(u)}</span>}
       </span>
     );
@@ -594,16 +595,22 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const groupHead = (text) => (
     <tr className="vc-group-head"><td colSpan={10}>{text}</td></tr>
   );
-  // Итоги заработка по сделкам (USDT, без комиссий): переводчики, арбитражёры и вместе. R — realized (нарастает = заработок;
-  // fallback на pnl_usdt, если R нет), U — unrealized (MTM открытого остатка). Базис и открытая позиция арбитражёров в заработок
-  // не входят — они показаны отдельно.
-  const realizedOf = (a) => (okNum(a.realized_usdt) ? Number(a.realized_usdt) : (okNum(a.pnl_usdt) ? Number(a.pnl_usdt) : 0));
-  const sumR = (arr) => arr.reduce((acc, a) => acc + realizedOf(a), 0);
+  // Итоги заработка (внешние биржи, USDT, без комиссий): переводчики, арбитражёры и вместе. Их считает ledger (GetAgentPnl: итоги по видам и
+  // общий) — панель только показывает; складывать строки в браузере нельзя (ADR-087 п. 10). Базис и открытая позиция арбитражёров, как и
+  // выгода по теории, в заработок не входят — они показаны отдельно (и пока суммируются здесь: не R/U, см. known-gaps).
   const sumKey = (arr, key) => arr.reduce((acc, a) => acc + (okNum(a[key]) ? Number(a[key]) : 0), 0);
-  const haveStats = rows.some((a) => okNum(a.realized_usdt) || okNum(a.pnl_usdt) || okNum(a.basis_mtm_usdt) || okNum(a.open_position_usdt) || okNum(a.surplus_usdt));
-  const tR = sumR(tRows), tU = sumKey(tRows, 'unrealized_usdt');
-  const aR = sumR(aRows), aU = sumKey(aRows, 'unrealized_usdt');
-  const allR = tR + aR, allU = tU + aU;
+  const extOf = (kind) => {
+    const g = pnlTotals && pnlTotals[kind] && pnlTotals[kind].external;
+    return g && g.has_data ? g : null;
+  };
+  const tPnl = extOf('translator'), aPnl = extOf('arbitrageur'), allPnl = extOf('all');
+  // Подпись «(N)»: число агентов в итоге ledger и сколько из них без данных (нет цены оценки — в сумму они не входят); нет итога — число строк.
+  const kindCount = (kind, rowsLen) => {
+    const t = pnlTotals && pnlTotals[kind];
+    if (!t || t.agent_count == null) return rowsLen;
+    return t.incomplete_agents > 0 ? `${t.agent_count}, без данных: ${t.incomplete_agents}` : t.agent_count;
+  };
+  const haveStats = rows.length > 0;  // блок итогов есть всегда, когда есть агенты: нет итогов ledger — явное «нет данных», а не пустое место
   const arbBasis = sumKey(aRows, 'basis_mtm_usdt'), arbOpen = sumKey(aRows, 'open_position_usdt');
   const tSur = sumKey(tRows, 'surplus_usdt'), aSur = sumKey(aRows, 'surplus_usdt');
   const haveSurplus = rows.some((a) => okNum(a.surplus_usdt));
@@ -638,7 +645,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
         <th title="сколько исполнилось по результатам симуляции (накопленно, с дозаполнением резидентных лимитов). Та же строка, что у «отправлено»">исполнено</th>
         <th title="состоявшиеся сделки агента, количество валюты строки (знаковое: покупка +, продажа −); без комиссий. В строке базовой валюты — база, в строке котируемой — квота; у арбитражёра в каждой строке обе валюты его биржи">сделки</th>
         <th data-testid="ru-head"
-          title="Заработок в USDT, без комиссий. R — реализованный (уже зафиксирован сделками), U — нереализованный (оценка остатка по текущим ценам, меняется с рынком). R + U — итог. Подробно — в пояснении под таблицами.">
+          title="Заработок на внешних биржах, USDT, без комиссий; считает ledger. R — реализованный (уже зафиксирован сделками), U — нереализованный (остаток без встречной позиции на внутренней бирже, по текущей цене оценки). R + U — итог. Внутренняя биржа и итого по двум биржам — на вкладке «PnL». Подробно — в пояснении под таблицами.">
           заработок R / U ⓘ
           <div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>R реализ. · U нереализ.</div>
         </th>
@@ -673,19 +680,21 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
           </table>
         ) : <div className="vc-note vc-note-tight">нет арбитражёров</div>}
         <div className="vc-note vc-note-tight vc-ru-legend" data-testid="ru-explain">
-          <b>Что такое R и U в колонке «заработок».</b> Оба числа — USDT, считаются по состоявшимся сделкам агента, <b>без комиссий</b>.
+          <b>Что такое R и U в колонке «заработок».</b> Оба числа — USDT, <b>без комиссий</b>, это <b>внешние биржи</b>, и считает их <b>ledger</b>
+          (те же числа, что на вкладке «PnL»; там же внутренняя биржа CE и итого). Накапливаются с запуска учёта или последнего сброса позиций.
           <ul>
             <li>
               <b>R — реализованный заработок</b>: уже зафиксирован сделками, сам по себе не меняется, пока нет новых сделок.
               У переводчика это накопленная по каждой сделке разница между ценой исполнения и справедливой ценой клиринга: продажа дороже
-              справедливой цены — плюс, покупка дешевле — плюс. У арбитражёра — прибыль на закрытом объёме: меньшее из купленного и
-              проданного × (средняя цена продажи − средняя цена покупки).
+              справедливой цены — плюс, покупка дешевле — плюс. У связки внешние сделки редки (рыночный хедж её ног выключен): её результат —
+              на внутренней бирже, на вкладке «PnL».
             </li>
             <li>
-              <b>U — нереализованный результат</b>: оценка того, что ещё «висит» — итог всех сделок агента по <i>текущим</i> ценам клиринга
-              минус R. Меняется вместе с рынком, пока позиция открыта, и может уйти в минус или плюс, не став заработком.
+              <b>U — нереализованный результат</b>: оценка по текущей цене только того внешнего объёма, которому не нашлось встречной позиции на
+              внутренней бирже. Хедж закрывает внутреннюю позицию, поэтому у переводчика U здесь обычно близок к нулю, а открытый риск виден в
+              внутренней группе на вкладке «PnL».
             </li>
-            <li><b>R + U</b> — полный результат по текущим ценам. График по клику на агента показывает оба ряда во времени.</li>
+            <li><b>R + U</b> — сумма по внешним биржам. График по клику на агента показывает оба ряда во времени.</li>
           </ul>
           Базис и открытая позиция арбитражёров (под R / U) — это позиция, а не заработок.
           <br /><b>Выгода по теории (S)</b> — отдельная колонка во внутренней группе: сколько участник выигрывает в клиринге каждый такт, w²/(2α), накоплено с сброса статистики. Это оценка относительно его кривой, а не деньги в кассе;
@@ -705,12 +714,18 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
 
         {haveStats && (
           <div className="vc-trade-totals" data-testid="trade-totals">
-            <span className="vc-tt-title">Общий заработок по состоявшимся сделкам (USDT, без комиссий):</span>
-            <span>Переводчики ({tRows.length}): R {pnlNum(tR)} / U {pnlNum(tU)}</span>
-            <span>Арбитражёры ({aRows.length}): R {pnlNum(aR)} / U {pnlNum(aU)}</span>
-            <span className="vc-tt-all" data-testid="total-earnings" title="Сумма заработка по сделкам переводчиков и арбитражёров: R — реализованный, U — нереализованный (MTM открытого остатка). Базис и открытая позиция арбитражёров сюда не входят.">
-              Вместе: R {pnlNum(allR)} / U {pnlNum(allU)} · итого R+U {pnlNum(allR + allU)}
-            </span>
+            <span className="vc-tt-title">Общий заработок на внешних биржах (из ledger, USDT, без комиссий):</span>
+            {pnlTotals ? (
+              <>
+                <span>Переводчики ({kindCount('translator', tRows.length)}): R {tPnl ? pnlNum(tPnl.r) : dash} / U {tPnl ? pnlNum(tPnl.u) : dash}</span>
+                <span>Арбитражёры ({kindCount('arbitrageur', aRows.length)}): R {aPnl ? pnlNum(aPnl.r) : dash} / U {aPnl ? pnlNum(aPnl.u) : dash}</span>
+                <span className="vc-tt-all" data-testid="total-earnings" title="Сумма заработка на внешних биржах по всем агентам, посчитана в ledger: R — реализованный, U — нереализованный. Базис и открытая позиция арбитражёров сюда не входят. Внутренняя биржа и итого — на вкладке «PnL».">
+                  Вместе: R {allPnl ? pnlNum(allPnl.r) : dash} / U {allPnl ? pnlNum(allPnl.u) : dash} · итого R+U {allPnl ? pnlNum(allPnl.r_plus_u) : dash}
+                </span>
+              </>
+            ) : (
+              <span data-testid="pnl-totals-missing" title="Итоги считает ledger; он не ответил или учёт выключен.">нет данных от ledger</span>
+            )}
             {haveSurplus && (
               <span data-testid="surplus-totals" title="Выгода участников в клиринге по теории, накоплено с сброса статистики. Не деньги в кассе и не складывается с R и U.">
                 Выгода в клиринге (теория): переводчики <b style={{ color: '#b58cff' }}>{usd2(tSur)}</b> · арбитражёры <b style={{ color: '#b58cff' }}>{usd2(aSur)}</b>
@@ -1183,7 +1198,7 @@ function ClearingDetail({ d, onChartPauseChange }) {
           позиция и Δ такта разложены на ДВЕ НОГИ пары (переводчик: base−/quote+ при
           SELL, наоборот при BUY; арбитражёр: одна нога — перевозимый актив). Ноги
           считает BFF из c_j и цены пары (реальный DTO, без фейков; не в браузере). */}
-      <AgentPositionsTables agentRows={agentRows} title="4. Позиции агентов по парам валют (money-path)" />
+      <AgentPositionsTables agentRows={agentRows} pnlTotals={d.pnlTotals} title="4. Позиции агентов по парам валют (money-path)" />
     </div>
   );
 }
@@ -1200,6 +1215,7 @@ function VectorClearingLive() {
   const [stages, setStages] = useState(null);        // постадийная свежесть цепочки (/liveness)
   const [liveOpen, setLiveOpen] = useState(false);   // панель ЖИВЫХ позиций агентов (динамика)
   const [liveRows, setLiveRows] = useState(null);    // agentRows живого просмотра
+  const [livePnlTotals, setLivePnlTotals] = useState(null);  // итоги заработка из ledger (по видам и общий) — панель их только показывает
   const [liveAt, setLiveAt] = useState(null);        // время последнего обновления живой панели
   const [selAgent, setSelAgent] = useState(null);    // выбранный агент для drill-down
   const [agentDetail, setAgentDetail] = useState(null); // /agent-detail выбранного агента
@@ -1354,6 +1370,7 @@ function VectorClearingLive() {
       // Все агенты сразу (в том числе не действующие в этом такте) и без исчезновений между опросами: порядок строк задаёт
       // сортировка по биржам (agentRowsLayout), а не ход клиринга.
       setLiveRows((prev) => mergeStableRows(prev, all));
+      setLivePnlTotals((r.data && r.data.pnl_totals) || null);
       setLiveAt(new Date());
     } catch (e) { /* недоступно — панель покажет прошлое/пусто */ }
   }, []);
@@ -1698,7 +1715,7 @@ function VectorClearingLive() {
               : (
                 <>
                   <SystemPnlBlock />
-                  <AgentPositionsTables agentRows={liveRows}
+                  <AgentPositionsTables agentRows={liveRows} pnlTotals={livePnlTotals}
                     title="Позиции агентов — ЖИВОЙ просмотр (money-path) · клик по строке — разбор агента"
                     onSelectAgent={selectAgent} selectedId={selAgent} />
                 </>

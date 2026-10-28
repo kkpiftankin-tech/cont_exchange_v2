@@ -270,7 +270,7 @@ int main() {
     }
     setenv("CE_AGENT_PNL_ENABLED", "0", 1);
     const auto off = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
-    Check(!off.enabled() && off.agents_size() == 0, "R: выключатель ⇒ пустой список");
+    Check(!off.enabled() && off.agents_size() == 0 && off.by_kind_size() == 0, "R: выключатель ⇒ пустой список и пустые итоги по видам");
     unsetenv("CE_AGENT_PNL_ENABLED");
   }
 
@@ -437,6 +437,12 @@ int main() {
     const auto* a0 = Find(resp_a0, "T_BTC_binance");
     Check(a0 != nullptr && !a0->internal().has_data() && !a0->external().has_data() && !a0->total().has_data(),
           "F: книги не загружены ⇒ «нет данных», не нули");
+    // Итоги по видам при незагруженных книгах: агенты посчитаны, но все неполные, суммы без данных.
+    const auto resp0 = uc2.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    Check(resp0.by_kind_size() == 1 && resp0.by_kind(0).agent_kind() == "translator" &&
+              resp0.by_kind(0).agent_count() == resp0.by_kind(0).incomplete_agents() && !resp0.by_kind(0).total().has_data() &&
+              !resp0.totals().total().has_data(),
+          "F: by_kind при незагруженных книгах — все агенты неполные, итогов нет");
     uc2.ApplyPositionDelta("f1", 5000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 8.0, 80050.0, 80050.0)});
     Check(repo->books["T_BTC_binance"].qty.units == qty_saved.units && repo->books["T_BTC_binance"].qty.scale == qty_saved.scale &&
               Decimal::cmp(repo->books["T_BTC_binance"].realized, realized_saved) == 0,
@@ -451,6 +457,49 @@ int main() {
       Near(Num(a1->external().r()), 40.0, 1e-4, "F: накопленный R внешних сохранён");
     }
     unsetenv("CE_AGENT_PNL_RETRY_MS");
+  }
+
+  // --- 5h) агент неизвестного вида в расчёт заработка не входит ------------------------------------------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.ApplyPositionDelta("u1", 1000, {}, {MkDelta("X_UNKNOWN", "", "BTC", "binance", 5.0, 80000.0, 80000.0)});
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    Check(Find(resp, "X_UNKNOWN") == nullptr && resp.by_kind_size() == 0 && resp.totals().agent_count() == 0,
+          "U: агент неизвестного вида не попадает ни в список, ни в итоги");
+  }
+
+  // --- 5g) итоги по видам агентов (панель «Живые позиции» не суммирует в браузере) -------------------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    RunTranslatorScenario(uc);  // переводчик: R=100, U≈40
+    uc.ApplyPositionDelta("m1", 7000, {},
+                          {MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
+                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const fob::ledger::v1::KindPnlTotals* tr = nullptr;
+    const fob::ledger::v1::KindPnlTotals* ar = nullptr;
+    for (const auto& k : resp.by_kind()) {
+      if (k.agent_kind() == "translator") tr = &k;
+      if (k.agent_kind() == "arbitrageur") ar = &k;
+    }
+    Check(resp.by_kind_size() == 2 && tr != nullptr && ar != nullptr, "K: две записи by_kind — переводчики и арбитражёры");
+    if (tr != nullptr && ar != nullptr) {
+      Check(tr->agent_count() == 1 && ar->agent_count() == 1, "K: по одному агенту каждого вида");
+      Near(Num(tr->total().r()), 100.0, 1e-4, "K: R переводчиков");
+      Near(Num(ar->total().r()), 9.9900096, 1e-5, "K: R арбитражёров — базис круговой сделки");
+      Near(Num(tr->total().r_plus_u()) + Num(ar->total().r_plus_u()), Num(resp.totals().total().r_plus_u()), 1e-9,
+           "K: сумма по видам = строка «все агенты»");
+      Near(Num(tr->external().r()) + Num(ar->external().r()), Num(resp.totals().external().r()), 1e-9,
+           "K: внешний R: сумма по видам = общий");
+      Near(Num(tr->internal().u()) + Num(ar->internal().u()), Num(resp.totals().internal().u()), 1e-9,
+           "K: внутренний U: сумма по видам = общий");
+    }
+    // Запрос по одному агенту: итоги и записи по видам считаются по выбранным.
+    fob::ledger::v1::GetAgentPnlRequest one;
+    one.add_agent_ids("T_BTC_binance");
+    const auto only = uc.GetAgentPnl(one);
+    Check(only.agents_size() == 1 && only.by_kind_size() == 1 && only.by_kind(0).agent_kind() == "translator",
+          "K: фильтр по агенту — в by_kind только его вид");
   }
 
   if (g_fail != 0) {

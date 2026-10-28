@@ -1,5 +1,5 @@
 // Self-contained node-тест: `node agent_pnl_dto.test.js` (у frontend/api нет jest).
-const { buildAgentPnlDto, groupDto, decOrNull } = require('./agent_pnl_dto');
+const { buildAgentPnlDto, groupDto, decOrNull, rowPnlFields, pnlTotalsDto } = require('./agent_pnl_dto');
 
 let failed = 0;
 function check(name, cond) {
@@ -57,6 +57,34 @@ check('выключено: пустой список и enabled=false', off.enab
 check('нет ответа → безопасный пустой DTO', buildAgentPnlDto(null, 'x').agents.length === 0);
 check('неизвестный вид — в конец', buildAgentPnlDto({ agents: [{ agent_id: 'Z', agent_kind: '' }, { agent_id: 'A', agent_kind: 'translator' }] }, 'x')
   .agents.map((a) => a.agent_id).join() === 'A,Z');
+
+// --- итоги по видам агентов и поля строки панели (ADR-087 п. 10: панель и вкладка читают один расчёт ledger)
+const respK = {
+  ...resp,
+  by_kind: [
+    { agent_kind: 'translator', internal: grp(6000, 4000), external: grp(4000, 0), total: grp(10000, 4000), agent_count: 2, incomplete_agents: 1 },
+    { agent_kind: 'arbitrageur', internal: grp(999, 0), external: grp(0, 0), total: grp(999, 0), agent_count: 1, incomplete_agents: 0 },
+  ],
+};
+const dk = buildAgentPnlDto(respK, 'x');
+check('by_kind: записи по видам из ответа ledger', dk.by_kind.translator.agent_count === 2 && dk.by_kind.arbitrageur.total.r === 9.99);
+check('by_kind: нет в ответе — пустой объект', Object.keys(buildAgentPnlDto(resp, 'x').by_kind).length === 0);
+
+const tAgent = dk.agents.find((a) => a.agent_id === 'T_BTC_binance');
+const f = rowPnlFields(tAgent);
+check('строка панели: R/U/R+U — ВНЕШНЯЯ группа ledger без пересчёта', f.realized_usdt === 40 && f.unrealized_usdt === 0 && f.pnl_usdt === 40);
+check('строка панели: внутренняя и итоговая группы рядом', f.pnl_internal.r === 60 && f.pnl_total.r_plus_u === 140);
+check('строка панели: начало накопления', f.pnl_since_ms === 1792420000000);
+const nd = rowPnlFields(dk.agents.find((a) => a.agent_id === 'T_ETH_okx'));
+check('нет данных во внешней группе ⇒ null, не ноль', nd.realized_usdt === null && nd.unrealized_usdt === null && nd.pnl_usdt === null);
+const none = rowPnlFields(undefined);
+check('агента нет в ответе ledger ⇒ все поля null', none.realized_usdt === null && none.pnl_usdt === null && none.pnl_internal === null);
+
+const pt = pnlTotalsDto(dk);
+check('итоги панели: переводчики, арбитражёры, вместе — из ledger', pt.translator.external.r === 40 && pt.arbitrageur.internal.r === 9.99 && pt.all.total.r_plus_u === 149.99);
+check('ledger недоступен (dto = null) ⇒ итогов нет', pnlTotalsDto(null) === null);
+check('учёт выключен в ledger (enabled=false) ⇒ итогов нет, панель покажет «нет данных»', pnlTotalsDto(buildAgentPnlDto({ currency: 'USDT', enabled: false, agents: [], totals: {} }, 'x')) === null);
+check('вида нет в ответе ⇒ null', pnlTotalsDto(buildAgentPnlDto(resp, 'x')).translator === null);
 
 if (failed > 0) { console.error(`\n${failed} check(s) failed`); process.exit(1); }
 console.log('\nall agent_pnl_dto checks passed');

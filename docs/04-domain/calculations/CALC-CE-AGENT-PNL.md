@@ -9,16 +9,21 @@ code:
   - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl # сборка ответа по агентам
   - cpp/ledger/src/app/ledger_uc.cpp#ApplyPositionDelta # вход сделок внутренней биржи
   - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked # выход книги и внешние суммы по хедж-исполнению
-  - frontend/api/agent_pnl_dto.js # пересылка без арифметики
+  - frontend/api/agent_pnl_dto.js # пересылка без арифметики (buildAgentPnlDto, rowPnlFields, pnlTotalsDto)
+  - frontend/api/server.js#fetchAgentPnlDto # тот же вызов для вкладки, панели «Живые позиции» и семплера истории
 tests:
   - cpp/ledger/tests/agent_pnl_book_test.cpp
   - cpp/ledger/tests/ce_agent_pnl_test.cpp
   - frontend/api/agent_pnl_dto.test.js
+  - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
   - frontend/web/src/pages/HedgePnlDashboard/__tests__/AgentPnlTable.test.js
 ui:
   - route: /hedge-pnl-live
     component: frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js
     field: agents[].internal / external / total (r, u, r_plus_u)
+  - route: /vector-clearing-live
+    component: frontend/web/src/pages/VectorClearing/VectorClearingLive.js
+    field: agentRows[].realized_usdt / unrealized_usdt / pnl_usdt (внешняя группа), pnl_totals (итоги по видам и общий)
 sources:
   - docs/03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md
   - docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md
@@ -132,7 +137,7 @@ $$
 
 ## 5. Путь числа
 
-Matching: дельта агента (`AgentDelta`) → Kafka `ce.position.delta` → ledger `ApplyPositionDelta` (вход сделки в книгу) и `apply_agent_band_report_locked` (выход книги, внешние суммы по хедж-исполнению) → PostgreSQL (`ce_agent_pnl_book`, колонки `ce_agent_position`) → gRPC `GetAgentPnl` → BFF `GET /api/vector-clearing/agent-pnl` (пересылка без арифметики) → вкладка «PnL» (`/hedge-pnl-live`), таблица «Заработок агентов».
+Matching: дельта агента (`AgentDelta`) → Kafka `ce.position.delta` → ledger `ApplyPositionDelta` (вход сделки в книгу) и `apply_agent_band_report_locked` (выход книги, внешние суммы по хедж-исполнению) → PostgreSQL (`ce_agent_pnl_book`, колонки `ce_agent_position`) → gRPC `GetAgentPnl` → BFF (пересылка без арифметики): `GET /api/vector-clearing/agent-pnl` → вкладка «PnL» (`/hedge-pnl-live`), таблица «Заработок агентов»; `GET /api/vector-clearing/agent-positions` (поля строки `realized_usdt`/`unrealized_usdt`/`pnl_usdt` — внешняя группа, `pnl_internal`, `pnl_total`, `pnl_totals` — итоги по видам и общий) → колонка «заработок R / U» и строка итогов панели «Живые позиции»; тот же ответ берёт семплер истории `ce_agent_pnl_history` (график по клику на агента).
 
 ## 6. Проверка
 
@@ -146,7 +151,7 @@ Matching: дельта агента (`AgentDelta`) → Kafka `ce.position.delta`
 2. **Единая цена оценки (OQ-F18v2-27).** $F_0$ без сдвига; если её нет — последняя цена пары со сдвигом. Что показывать, если $F_0$ нет вовсе, решает владелец.
 3. **Связка (OQ-F18v2-28).** Внутренний R считается реализованным в момент замыкания круга внутри CE, хотя деньгами он станет только при физическом переводе (ADR-084); не двоится ли он с прибылью «счёта дома» (ADR-068, ADR-083 отдаёт остаток связке) — вопрос владельцу. С прибылью системы по остаткам (CALC-CE-SYSTEM-PNL) не складывать.
 4. **Цена оценки связки и нумерарные связки (OQ-F18v2-29).** Берётся среднее последних цен ног; для A_USDT книга не ведётся.
-5. **Источники R/U панели и вкладки.** Панель «Живые позиции» и ряд для графика читают внешние R/U из BFF (внешний U — корзина целиком); вкладка — из ledger (внешний U на несопоставленном объёме). Внешний R совпадает после общего сброса статистики; внешний U различается намеренно (ADR-087 п. 6, п. 10).
+5. **Один источник R/U (ADR-087 п. 10).** Панель «Живые позиции», ряд для графика и вкладка «PnL» читают одни числа из ledger; в BFF формул R и U нет. Ряд `ce_agent_pnl_history` до 2026-10-28 записан по прежней формуле (внешний U — корзина целиком), после — из ledger: на графике виден разрыв. Выгода $S$, базис и открытая позиция арбитражёров, количества сделок и разложение позиции на ноги считаются в BFF и в R/U не входят.
 6. **Частичные исполнения** учитываются приближённо (накопленная средняя цена заявки на прирост количества), как и в `realized_vs_fair` (замечание N1 карточки CALC-CE-TRANSLATOR-PNL).
 7. **Цена оценки** обновляется только дельтами агента: у агента без потока $m$ устаревает; в ответе есть возраст цены.
 8. **Кросс-пары** пересчитываются в USDT по курсу на момент выдачи.

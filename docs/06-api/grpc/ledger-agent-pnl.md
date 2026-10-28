@@ -28,7 +28,7 @@ rpc GetAgentPnl(GetAgentPnlRequest) returns (GetAgentPnlResponse);
 
 ## Caller
 
-- frontend-api / BFF (`GET /api/vector-clearing/agent-pnl`)
+- frontend-api / BFF: `GET /api/vector-clearing/agent-pnl` (вкладка «PnL»), а также `GET /api/vector-clearing/agent-positions` и сборка строк панели «Живые позиции» и ряда для графика (`loadLiveAgentRows`) — один источник R и U (ADR-087 п. 10)
 
 ## Callee
 
@@ -63,6 +63,14 @@ message AgentPnlTotals {
   uint32 agent_count = 4;            // сколько агентов в ответе
   uint32 incomplete_agents = 5;      // у скольких хотя бы в одной группе has_data = false
 }
+message KindPnlTotals {
+  string agent_kind = 1;             // "translator" | "arbitrageur"
+  PnlGroup internal = 2;             // суммы по агентам этого вида, у которых в группе есть данные
+  PnlGroup external = 3;
+  PnlGroup total = 4;
+  uint32 agent_count = 5;
+  uint32 incomplete_agents = 6;
+}
 message GetAgentPnlRequest {
   fob.common.v1.EventMeta meta = 1;
   repeated string agent_ids = 2;     // пусто = все агенты
@@ -73,6 +81,7 @@ message GetAgentPnlResponse {
   repeated AgentPnl agents = 3;
   AgentPnlTotals totals = 4;         // строка «все агенты»
   bool enabled = 5;                  // CE_AGENT_PNL_ENABLED
+  repeated KindPnlTotals by_kind = 6; // итоги по видам агентов (панель «Живые позиции»)
 }
 ```
 
@@ -80,6 +89,7 @@ message GetAgentPnlResponse {
 
 - **Единицы.** Все r, u, r_plus_u — USDT, `Decimal` (деньги — [.claude/rules/data.md](../../../.claude/rules/data.md)), масштаб до 8 знаков. Пересчёт из валюты котировки в USDT делает ledger (курс $\rho=P_b/p$ на момент выдачи).
 - **`has_data`.** Нулевое число и «нет данных» различаются. `internal.has_data=false` — у агента нет цены оценки (ни одной дельты с ценой с момента запуска) либо учёт приостановлен (книги не загружены из PostgreSQL при старте, см. ADR-087 п. 9). `external.has_data=true` с нулями — цена известна, внешних исполнений не было (у связки так и должно быть по ADR-083). `total.has_data` истинно только если истинно в обеих группах: частичных сумм нет.
+- **Итоги по видам `by_kind`.** Те же суммы, но отдельно для переводчиков и арбитражёров (по записи на вид, у которого есть агенты). Нужны панели «Живые позиции»: её строки «переводчики», «арбитражёры» и «вместе» берутся отсюда и из `totals`, браузер и BFF их не складывают.
 - **Итоги `totals`.** Суммы только по агентам, у которых в группе есть данные; `incomplete_agents` показывает неполноту. Итоги считаются по возвращённым агентам (при фильтре `agent_ids` — по выбранным).
 - **`enabled=false`.** Ledger запущен с `CE_AGENT_PNL_ENABLED=0`: список агентов пуст, `totals` нулевые, `has_data=false`.
 - **Идемпотентность.** RPC read-only, идемпотентен по конструкции — без `idempotency_key` (как `GetAgentPositions`). Данные берутся из памяти ledger под `mu_`; PostgreSQL на каждый вызов не читается. Сверка книги с позицией на чтении выполняется на копии и состояние не меняет.

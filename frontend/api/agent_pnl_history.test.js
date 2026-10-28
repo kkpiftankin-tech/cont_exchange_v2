@@ -10,16 +10,16 @@ function check(name, cond) {
 const rows = [
   { agent_id: 'T_BTC_binance', realized_usdt: 12.5, unrealized_usdt: -3.2, trade_fills: 40 },
   { agent_id: 'T_ETH_okx', realized_usdt: null, unrealized_usdt: null, pnl_usdt: null },          // нет данных → пропуск
-  { agent_id: 'T_SOL_kraken', pnl_usdt: 7, unrealized_usdt: null, trade_fills: 3 },               // R нет, есть R+U → вместо R
+  { agent_id: 'T_SOL_kraken', pnl_usdt: 7, unrealized_usdt: null, trade_fills: 3 },               // только R+U без R и U → не подменяет R, в выборку не идёт
   { agent_id: 'A_BTC_binancekraken', realized_usdt: 0, unrealized_usdt: 0, trade_fills: 0 },      // нули — это данные
   { agent_id: '', realized_usdt: 1 },                                                              // без id → пропуск
   null,
 ];
 const s = pnlSamples(rows, 1700000000000);
-check('в выборку идут агенты с данными: 3 из 6', s.length === 3);
+check('в выборку идут агенты с данными: 2 из 6', s.length === 2);
 check('R и U перенесены как есть', s[0].realized === 12.5 && s[0].unrealized === -3.2 && s[0].fills === 40);
-check('нет R, есть pnl_usdt → R = pnl_usdt (как в панели)', s[1].agent_id === 'T_SOL_kraken' && s[1].realized === 7 && s[1].unrealized === null);
-check('нули записываются (0 ≠ нет данных)', s[2].agent_id === 'A_BTC_binancekraken' && s[2].realized === 0 && s[2].unrealized === 0);
+check('нет R и U, есть только pnl_usdt → строки нет (R не подменяется суммой)', !s.some((x) => x.agent_id === 'T_SOL_kraken'));
+check('нули записываются (0 ≠ нет данных)', s[1].agent_id === 'A_BTC_binancekraken' && s[1].realized === 0 && s[1].unrealized === 0);
 check('метка времени выборки общая', s.every((x) => x.ts_ms === 1700000000000));
 check('не массив → пусто', pnlSamples(null, 1).length === 0);
 
@@ -59,7 +59,7 @@ const byId = Object.fromEntries(s2.map((x) => [x.agent_id, x]));
 check('выгода: агент с R/U получает и выгоду', byId.T_BTC_binance.realized === 2 && byId.T_BTC_binance.surplus_inc === 0.25 && byId.T_BTC_binance.surplus_tacts === 60 && byId.T_BTC_binance.surplus_expected === 62);
 check('выгода: связка без внешних сделок попадает в выборку с R/U = null', byId.A_BTC_binanceokx && byId.A_BTC_binanceokx.realized === null && byId.A_BTC_binanceokx.unrealized === null && byId.A_BTC_binanceokx.surplus_inc === 1.5);
 check('выгода: агент без данных и без выгоды пропущен, пустой id пропущен', !byId.T_ETH_okx && !('' in byId) && s2.length === 2);
-check('выгода: без накопителя поведение прежнее (3 аргумента необязательны)', pnlSamples(rows, 1700000000000).length === 3 && pnlSamples(rows, 1)[0].surplus_inc === null);
+check('выгода: без накопителя поведение прежнее (3 аргумента необязательны)', pnlSamples(rows, 1700000000000).length === 2 && pnlSamples(rows, 1)[0].surplus_inc === null);
 
 const dto2 = buildPnlHistoryDto('A_BTC_binanceokx', [
   { ts_ms: 2000, realized_usdt: null, unrealized_usdt: null, surplus_inc_usdt: 2, surplus_tacts: 50, surplus_tacts_expected: 60 },

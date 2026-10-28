@@ -1676,8 +1676,21 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
     by_agent[agent_id].push_back(&kv);
   }
 
-  PnlGroup tot_int, tot_ext, tot_all;
-  std::uint32_t agent_count = 0, incomplete = 0;
+  // Итоги: по всем агентам и по видам (панель «Живые позиции» показывает «переводчики», «арбитражёры», «вместе» — суммирует ledger,
+  // а не браузер). В итог входят только агенты, у которых в группе есть данные; incomplete показывает неполноту.
+  struct PnlAcc {
+    PnlGroup in, ex, all;
+    std::uint32_t count{0}, incomplete{0};
+  };
+  PnlAcc acc_all;
+  std::map<std::string, PnlAcc> acc_kind;
+  const auto accumulate = [](PnlAcc& a, const PnlGroup& in, const PnlGroup& ex, const PnlGroup& all) {
+    ++a.count;
+    if (!in.has_data || !ex.has_data) ++a.incomplete;
+    if (in.has_data) a.in = AddGroups(a.in, in);
+    if (ex.has_data) a.ex = AddGroups(a.ex, ex);
+    if (all.has_data) a.all = AddGroups(a.all, all);
+  };
   for (const auto& [agent_id, legs] : by_agent) {
     std::string kind;
     for (const auto* kv : legs)
@@ -1761,19 +1774,25 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
     a->set_ext_fills(fills);
     a->set_since_ms(bit == agent_books_.end() ? 0 : bit->second.since_ms);
 
-    ++agent_count;
-    if (!in.has_data || !ex.has_data) ++incomplete;
-    if (in.has_data) tot_int = AddGroups(tot_int, in);
-    if (ex.has_data) tot_ext = AddGroups(tot_ext, ex);
-    if (all.has_data) tot_all = AddGroups(tot_all, all);
+    accumulate(acc_all, in, ex, all);
+    accumulate(acc_kind[kind], in, ex, all);
   }
 
   auto* totals = resp.mutable_totals();
-  put_group(tot_int, totals->mutable_internal());
-  put_group(tot_ext, totals->mutable_external());
-  put_group(tot_all, totals->mutable_total());
-  totals->set_agent_count(agent_count);
-  totals->set_incomplete_agents(incomplete);
+  put_group(acc_all.in, totals->mutable_internal());
+  put_group(acc_all.ex, totals->mutable_external());
+  put_group(acc_all.all, totals->mutable_total());
+  totals->set_agent_count(acc_all.count);
+  totals->set_incomplete_agents(acc_all.incomplete);
+  for (const auto& [kind_name, a] : acc_kind) {
+    auto* k = resp.add_by_kind();
+    k->set_agent_kind(kind_name);
+    put_group(a.in, k->mutable_internal());
+    put_group(a.ex, k->mutable_external());
+    put_group(a.all, k->mutable_total());
+    k->set_agent_count(a.count);
+    k->set_incomplete_agents(a.incomplete);
+  }
   return resp;
 }
 

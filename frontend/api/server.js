@@ -4,11 +4,11 @@ const { Readable } = require("stream");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
-const { combineTradeStats, combineTradeStatsByVenue, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require("./trade_stats_math");
+const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
 const { pnlSamples, buildPnlHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента во времени
-const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");
-const { buildAgentPnlDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
+const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
+const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
 const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
@@ -6813,10 +6813,11 @@ async function fetchVectorClearingDetail(batchId, ts) {
   // причина (заменяет синтетические черновики; см. задачу 2026-09-17).
   const fillDiagnostics = await fetchVenueFillDiagnostics(clr.batch_id);
   const hedgeMap = await fetchAgentHedgeMap();  // заявки агента: отправлено/исполнено
-  const tradeStats = await fetchAgentTradeStats();  // статистика по состоявшимся сделкам
+  const tradeStats = await fetchAgentTradeStats();  // количества по состоявшимся сделкам
+  const agentPnl = await fetchAgentPnlDto();         // R/U/R+U агентов — из ledger (ADR-087 п. 10)
   // Money-path строки агентов: одна строка на агента, позиция/Δ разложены на ноги
   // пары (base−/quote+) + заявки (sent/filled) + статистика сделок (base/quote/PnL USDT).
-  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats);
+  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, undefined, agentPnl);
 
   return {
     batch_id: clr.batch_id,
@@ -6836,6 +6837,7 @@ async function fetchVectorClearingDetail(batchId, ts) {
     agentDeltas,
     agentPositions,
     agentRows,
+    pnlTotals: pnlTotalsDto(agentPnl),   // итоги заработка из ledger (по видам и общий): панель показывает, не складывает
     generatedAt: new Date().toISOString()
   };
 }
@@ -6935,18 +6937,19 @@ async function fetchVenueFillDiagnostics(batchId) {
 async function loadLiveAgentRows() {
   const rows = await fetchVectorClearingRows(1);
   const newest = rows && rows[0] ? rows[0].batch_id : "";
-  const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows, ceSnap, surplusTotals] = await Promise.all([
+  const [agentPositions, agentDeltas, hedgeMap, tradeStats, segRows, ceSnap, surplusTotals, agentPnl] = await Promise.all([
     fetchAgentPositions(),
     newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
     fetchAgentHedgeMap(),
     fetchAgentTradeStats(),
     fetchCeSegmentRows(600).catch(() => []),   // без цен по биржам базис арбитражёра остаётся «нет данных», панель работает
     fetchJsonWithTimeout(`${MATCHING_ADDR}/ce/clearing/last`, {}, 2000).catch(() => null),   // граф клиринга: полный список агентов
-    fetchAgentSurplusTotals().catch(() => new Map())   // накопленная выгода участников в клиринге (с момента сброса статистики)
+    fetchAgentSurplusTotals().catch(() => new Map()),   // накопленная выгода участников в клиринге (с момента сброса статистики)
+    fetchAgentPnlDto()   // R/U/R+U агентов — из ledger (ADR-087 п. 10): тот же расчёт и хранилище, что у вкладки «PnL»
   ]);
   // сегменты → {venue, pair, mid} (в запросе поле venue_id), как в маршруте графа
   const venuePriceOf = makePriceOf((segRows || []).map((r) => ({ venue: r.venue_id, pair: r.pair, mid: Number(r.mid) })));
-  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf);
+  const agentRows = buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf, agentPnl);
   // Агенты графа клиринга, у которых в ledger ещё нет строки позиции, показываем нулевыми строками: панель показывает ВСЕХ
   // агентов сразу, а не только тех, что уже двигались.
   agentRows.push(...placeholderAgentRows(ceSnap && ceSnap.edges, new Set(agentRows.map((r) => r.agent_id))));
@@ -6963,7 +6966,7 @@ async function loadLiveAgentRows() {
       r.surplus_coverage = rec ? rec.coverage : null;
     }
   }
-  return { agentRows, newest };
+  return { agentRows, newest, pnlTotals: pnlTotalsDto(agentPnl) };   // pnlTotals — итоги из ledger (по видам и общий) или null, если ledger недоступен
 }
 
 // ── История заработка агентов: семплер раз в PNL_HISTORY_SAMPLE_MS (деф. 60 с; 0 — выключен) пишет R и U каждого агента в PG
@@ -7225,8 +7228,10 @@ function startPnlHistorySampler() {
 // c·1000/цена_пары (единицы base). Одна нога +, другая − (в ОДНОЙ строке).
 // Арбитражёр перевозит ОДИН актив — у него одна нога (актив), пары нет.
 // Домен-математику держим в BFF (не в браузере, [frontend-no-domain-compute]).
-function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf) {
+function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venuePriceOf, agentPnl) {
   const hm = hedgeMap instanceof Map ? hedgeMap : new Map();
+  // agentPnl — результат buildAgentPnlDto (ledger GetAgentPnl) или null, если ledger недоступен: тогда R/U строк = null (нет данных), не ноль
+  const pnlByAgent = new Map(((agentPnl && agentPnl.agents) || []).map((x) => [x.agent_id, x]));
   const ts = tradeStats instanceof Map ? tradeStats : new Map();
   const keyOf = (p) => (p.agent_id || '') + '|' + (p.asset || '') + '|' + (p.venue || '');
   const delByKey = new Map((agentDeltas || []).map((d) => [keyOf(d), d]));
@@ -7343,33 +7348,18 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
       // Заявки агента (последняя band-хедж-заявка, venue_fill_diagnostics): сколько
       // отправлено на биржу (target_qty) и сколько исполнилось по симуляции (filled_qty).
       ...(hm.get(b.agent_id) || {}),
-      // F-18: статистика по состоявшимся сделкам (без комиссий). traded_base/quote —
-      // signed кол-во валют по fills. pnl_usdt — ЗАРАБОТОК = mark-to-market корзины
-      // сделок по ТЕКУЩИМ клиринговым ценам (правило владельца 2026-10-05,
-      // tradedBasketUsdt): net_base·P(base)_USDT + net_quote·P(quote)_USDT. Прежняя
-      // (avg−limit)-slippage метрика (pnlQuoteToUsdt/pnl_quote) была околонулевой по
-      // построению; оставлена как pnl_exec_slip для диагностики исполнения.
-      // ADR-072 §C: РЕАЛЬНЫЙ заработок переводчика на внешних сделках vs F_0 (ledger
-      // realized_vs_fair, quote→USDT) — честная метрика «отображаем что получается».
-      // Доступна даже без tradeStats-окна (накоплена в ledger). Арбитражёр: нет F_0 ⇒
-      // остаётся round-trip ниже.
-      realized_usdt: (b.realized_vs_fair != null && Number.isFinite(Number(b.realized_vs_fair)))
-        ? pnlQuoteToUsdt(b.realized_vs_fair, basePrice, price) : null,
+      // R, U, R+U агента (внешняя группа — колонка «Внешняя биржа»; внутренняя и итоговая — рядом) считает ledger (GetAgentPnl, ADR-087 п. 10)
+      // и приходят готовыми; BFF их НЕ считает — тот же расчёт и то же хранилище, что у вкладки «PnL». Нет записи/данных — null.
+      ...rowPnlFields(pnlByAgent.get(b.agent_id)),
+      // F-18: количества по состоявшимся сделкам (child_orders, окно с момента сброса статистики): сколько куплено/продано валюты и
+      // сколько исполнений. Это показ количеств, не заработок.
       ...((() => {
         const t = ts.get(b.agent_id);
         if (!t) return {};
-        // pnl_usdt = MTM корзины (R+U, прежняя метрика); realized берём из ledger
-        // (realized_vs_fair, выше), unrealized = R+U − realized.
-        const rpu = tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price);
-        const rfair = (b.realized_vs_fair != null && Number.isFinite(Number(b.realized_vs_fair)))
-          ? pnlQuoteToUsdt(b.realized_vs_fair, basePrice, price) : null;
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
           trade_by_venue: t.by_venue || {},   // сделки по биржам (панель показывает их в строке ноги)
-          pnl_usdt: rpu,                                                     // R+U (MTM корзины)
-          unrealized_usdt: (rpu != null && rfair != null) ? rpu - rfair : null, // U = R+U − R
-          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),   // диагностика: fill vs лимит
           trade_fills: t.trade_fills,
         };
       })()),
@@ -7414,8 +7404,7 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
     };
     const sL = legVals(srcPos, delSrc), dL = legVals(dstPos, delDst);
     const hasDelta = !!(delSrc || delDst);
-    // Марка MTM-заработка — цена dst-ноги (площадка выхода); fallback на src.
-    const basePrice = Number((dstPos || srcPos || {}).base_price) || 0;
+    // Цена пары для подписи строки — цена dst-ноги (площадка выхода); fallback на src. Заработок здесь НЕ считается — его даёт ledger.
     const price = Number((dstPos || srcPos || {}).reference_price) || 0;
     // Позиция арбитражёра по ценам бирж раскладывается на базис и открытую позицию (arbPositionParts). Если арбитражёр выходит
     // наружу (CE_ARB_MARKET_HEDGE=1, ADR-080), у него есть и заработок по сделкам (realized/unrealized ниже); тариф перевоза в
@@ -7444,21 +7433,15 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
         dleg_src: sL.delta, dleg_dst: dL.delta,    // дельта такта
       },
       ...(hm.get(agentId) || {}),  // отправлено/исполнено (последняя band-заявка агента)
+      // R, U, R+U связки считает ledger (GetAgentPnl): внутренняя книга (круговая сделка src→dst) и внешние исполнения; BFF не считает.
+      ...rowPnlFields(pnlByAgent.get(agentId)),
       ...((() => {
         const t = ts.get(agentId);
         if (!t) return {};
-        // ADR-072 §C: realized (R) отдельно от unrealized (U). Для арбитражёра R =
-        // кросс-спред закрытого объёма (net_base≈0, спред в avg_pS−avg_pB).
-        const rpu = tradedBasketUsdt(t.traded_base, t.traded_quote, basePrice, price);
-        const rlz = pnlQuoteToUsdt(t.realized_quote, basePrice, price);
         return {
           traded_base: t.traded_base,
           traded_quote: t.traded_quote,
           trade_by_venue: t.by_venue || {},   // база/квота отдельно на источнике и приёмнике
-          pnl_usdt: rpu,
-          realized_usdt: rlz,
-          unrealized_usdt: (rpu != null && rlz != null) ? rpu - rlz : null,
-          pnl_exec_slip: pnlQuoteToUsdt(t.pnl_quote, basePrice, price),
           trade_fills: t.trade_fills,
         };
       })()),
@@ -7484,6 +7467,20 @@ async function fetchCeSegmentRows(winS) {
     + " FROM " + CLICKHOUSE_DB + ".vector_flow_segments_history"
     + " WHERE event_time_ms > (toUnixTimestamp(now())-" + Number(winS) + ")*1000"
     + " ORDER BY event_time_ms DESC LIMIT 1 BY venue_id, pair FORMAT JSONEachRow");
+}
+
+// Заработок агентов из ledger (GetAgentPnl, ADR-087): единственный источник R, U и R+U для панели «Живые позиции», ряда для графика и
+// вкладки «PnL». Возвращает результат buildAgentPnlDto или null, если ledger недоступен — тогда строки панели получают null (нет данных),
+// а не нули и не прежний расчёт по child_orders.
+async function fetchAgentPnlDto() {
+  const led = initLedgerClient();
+  if (!led) return null;
+  try {
+    return buildAgentPnlDto(await grpcCall(led, "GetAgentPnl", {}));
+  } catch (e) {
+    console.error("[ledger] GetAgentPnl failed:", (e && e.message) || e);
+    return null;
+  }
 }
 
 async function fetchAgentPositions() {
@@ -7549,7 +7546,7 @@ async function loadAgentHedgeMap() {
 // резидентных лимитов ADR-067; до 2026-10-22 брали venue_fill_diagnostics, она видит только первый такт). SQL отдаёт БЕЗЗНАКОВЫЕ
 // per-side суммы по (агент, биржа) (однозначно); знаковую комбинацию (s=+1 SELL/−1 BUY, CALC-F12-HEDGE-PNL, p_int=limit price)
 // делает combineTradeStatsByVenue (чистая, покрыта trade_stats_math.test.js): итог по агенту + разбивка по биржам (ноги
-// арбитражёра). Перевод E_quote→USDT — в buildAgentRows. Кэш 10 с: запрос читает всю таблицу заявок (~1,4 с), данные меняются медленно.
+// арбитражёра). Заработок (R/U) отсюда не считается — его единственный источник ledger (ADR-087 п. 10). Кэш 10 с: запрос читает всю таблицу заявок (~1,4 с), данные меняются медленно.
 let tradeStatsCache = { at: 0, value: new Map() };
 let tradeStatsInflight = null;
 function fetchAgentTradeStats() {
@@ -7567,8 +7564,6 @@ async function loadAgentTradeStats() {
               SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
               SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
               SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional,
-              SUM(CASE WHEN side='BUY'  AND price IS NOT NULL THEN (avg_price-price)*filled_qty ELSE 0 END)::float8 AS buy_pnlbase,
-              SUM(CASE WHEN side='SELL' AND price IS NOT NULL THEN (avg_price-price)*filled_qty ELSE 0 END)::float8 AS sell_pnlbase,
               COUNT(*) AS fills
          FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0
@@ -7579,7 +7574,7 @@ async function loadAgentTradeStats() {
         GROUP BY 1, 2`);
     tradeStatsCache = { at: Date.now(), value: combineTradeStatsByVenue(r.rows) };
     return tradeStatsCache.value;
-  } catch (e) { return tradeStatsCache.value; }  // сбой PG — прошлая статистика, а не пустая: иначе U=null и график ложно падает до R
+  } catch (e) { return tradeStatsCache.value; }  // сбой PG — прошлая статистика, а не пустая: иначе количества сделок на панели пропадают
 }
 
 // Вкладка «Граф»: позиции на внешних биржах от хеджирования агентов (переводчики и арбитражёры).
@@ -8323,8 +8318,8 @@ async function handleVectorClearing(req, res, pathname, query) {
     }
   }
   if (pathname === "/api/vector-clearing/agent-positions") {
-    const { agentRows, newest } = await loadLiveAgentRows();
-    return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
+    const { agentRows, newest, pnlTotals } = await loadLiveAgentRows();
+    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, generatedAt: new Date().toISOString() });
   }
   // История заработка агента во времени (график по клику на агента): R, U и R+U, записанные семплером раз в минуту.
   // Прибыль системы по реальным остаткам: текущие значения (торговый результат, переоценка запасов, по валютам) и ряд за окно.
@@ -8486,11 +8481,12 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
     const rows = await fetchVectorClearingRows(1);
     const newest = rows && rows[0] ? rows[0].batch_id : "";
-    const [agentPositions, agentDeltas] = await Promise.all([
+    const [agentPositions, agentDeltas, agentPnl] = await Promise.all([
       fetchAgentPositions(),
-      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([])
+      newest ? fetchAgentPositionDeltas(newest) : Promise.resolve([]),
+      fetchAgentPnlDto()   // R/U агента — из ledger, как у панели и вкладки «PnL»
     ]);
-    const agent = buildAgentRows(agentPositions, agentDeltas).find((a) => a.agent_id === agentId) || null;
+    const agent = buildAgentRows(agentPositions, agentDeltas, undefined, undefined, undefined, agentPnl).find((a) => a.agent_id === agentId) || null;
     if (!agent) return writeJson(res, 404, { error: "agent_not_found" });
     // Конфиг для дисплея, согласованный с backend: skew (γ/клэмп) + трёхзонные пороги
     // band от комиссии (Кривые §6.4). Дефолты = env-дефолты ledger/matching.

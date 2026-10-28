@@ -245,6 +245,7 @@ protoContracts:
       - AgentPnl
       - PnlGroup
       - AgentPnlTotals
+      - KindPnlTotals
 
   execution:
     files:
