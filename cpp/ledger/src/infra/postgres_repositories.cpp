@@ -1,5 +1,6 @@
 #include "infra/postgres_repositories.hpp"
 
+#include <chrono>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -163,6 +164,42 @@ void ensure_agent_position_table(pqxx::work& tx) {
           "realized_vs_fair numeric(38,18) not null default 0");
 }
 
+// ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): таблица книги внутренней биржи агента и колонки внешних
+// сумм в ce_agent_position. Выполняется РОВНО один раз на процесс (EnsurePnlSchema), не на каждый вызов: ALTER берёт
+// ACCESS EXCLUSIVE и под mu_ ledger застопорил бы долгий SELECT по таблице. Колонки добавляет защитный DO-блок: страж —
+// отсутствие rvf_base (он добавляется в том же ALTER последним), поэтому UPDATE rvf_base = realized_vs_fair выполняется
+// один раз, на живой БД, и повторный запуск R_ext не обнуляет. lock_timeout: лучше упасть, чем заморозить ledger.
+constexpr const char* kPnlSchemaSql = R"sql(
+  create table if not exists ce_agent_pnl_book (
+    agent_id      text primary key,
+    agent_kind    text not null check (agent_kind in ('translator', 'arbitrageur')),
+    qty           numeric(38,18) not null default 0,
+    avg_price     numeric(38,18) not null default 0 check (avg_price >= 0),
+    realized      numeric(38,18) not null default 0,
+    last_batch_id text,
+    since_ms      bigint not null check (since_ms > 0),
+    updated_at    timestamptz not null default now(),
+    constraint ce_agent_pnl_book_flat_chk check (qty <> 0 or avg_price = 0)
+  ) with (fillfactor = 70);
+  do $$
+  begin
+    perform set_config('lock_timeout', '5s', true);
+    if not exists (select 1 from information_schema.columns
+                    where table_schema = current_schema()
+                      and table_name = 'ce_agent_position' and column_name = 'rvf_base') then
+      alter table ce_agent_position
+        add column if not exists ext_buy_base      numeric(38,18) not null default 0,
+        add column if not exists ext_sell_base     numeric(38,18) not null default 0,
+        add column if not exists ext_buy_notional  numeric(38,18) not null default 0,
+        add column if not exists ext_sell_notional numeric(38,18) not null default 0,
+        add column if not exists ext_fair_signed   numeric(38,18) not null default 0,
+        add column if not exists rvf_base          numeric(38,18) not null default 0;
+      update ce_agent_position set rvf_base = realized_vs_fair;
+    end if;
+  end
+  $$;
+)sql";
+
 // Parse a PostgreSQL NUMERIC text value (e.g. "1234.56000") into a Decimal.
 // Keeps every fractional digit as scale (canonicalization happens in the UC,
 // not here — the read path is authoritative about whatever PG stored).
@@ -193,6 +230,14 @@ Decimal parse_pg_numeric(const std::string& text) {
   }
   return Decimal{static_cast<int64_t>(units), scale};
 }
+
+// Строковый литерал для SQL. Вместо tx.quote(): шаблон quote<std::string> тянет pqxx::conversion_overrun(source_location),
+// которого нет в системной libpqxx (собрана без C++20) — ошибка линковки. esc() экранирует кавычки и обратные косые.
+std::string sql_lit(pqxx::work& tx, const std::string& v) { return "'" + tx.esc(v) + "'"; }
+
+// Decimal → текст для NUMERIC. Decimal::to_string берёт 10^scale в int64: при scale > 18 это переполнение. После mul/add масштаб малых
+// значений доходит до 19+ (в том числе после чтения NUMERIC(38,18) из PG, где scale = 18), поэтому длинный хвост сводим к 12 знакам.
+std::string pg_num(const Decimal& d) { return d.scale > 12 ? Decimal::div(d, Decimal{1, 0}, 12).to_string() : d.to_string(); }
 #endif
 
 }  // namespace
@@ -925,6 +970,7 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
   std::vector<app::AgentPositionRow> out;
 #ifdef CEX_LEDGER_HAS_LIBPQXX
   if (!pool_) return out;
+  const bool ext_cols = EnsurePnlSchema();  // ADR-087: без новых колонок читаем по-старому, а не теряем кэш ledger
   try {
     auto c = pool_->Acquire();
     pqxx::work tx(*c);
@@ -933,10 +979,12 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
     // of agent/asset/venue rows, not per-user data), so this avoids brittle
     // pqxx array-parameter binding for what is effectively an optional
     // WHERE IN (...) filter on three independent columns.
-    auto rows = tx.exec(
+    const std::string select_sql = std::string(
         "SELECT agent_id, asset, venue, agent_kind, position, in_flight, "
-        "COALESCE(realized_vs_fair, 0) AS realized_vs_fair, last_batch_id, "
-        "(extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms FROM ce_agent_position");
+        "COALESCE(realized_vs_fair, 0) AS realized_vs_fair, last_batch_id, ") +
+        (ext_cols ? "ext_buy_base, ext_sell_base, ext_buy_notional, ext_sell_notional, ext_fair_signed, rvf_base, " : "") +
+        "(extract(epoch from updated_at) * 1000)::bigint AS updated_at_ms FROM ce_agent_position";
+    auto rows = tx.exec(select_sql);
     tx.commit();
 
     const std::unordered_set<std::string> want_agents(agent_ids.begin(), agent_ids.end());
@@ -954,6 +1002,14 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
       r.position = parse_pg_numeric(row["position"].as<std::string>());
       r.in_flight = parse_pg_numeric(row["in_flight"].as<std::string>());
       r.realized_vs_fair = parse_pg_numeric(row["realized_vs_fair"].as<std::string>());
+      if (ext_cols) {
+        r.ext_buy_base = parse_pg_numeric(row["ext_buy_base"].as<std::string>());
+        r.ext_sell_base = parse_pg_numeric(row["ext_sell_base"].as<std::string>());
+        r.ext_buy_notional = parse_pg_numeric(row["ext_buy_notional"].as<std::string>());
+        r.ext_sell_notional = parse_pg_numeric(row["ext_sell_notional"].as<std::string>());
+        r.ext_fair_signed = parse_pg_numeric(row["ext_fair_signed"].as<std::string>());
+        r.rvf_base = parse_pg_numeric(row["rvf_base"].as<std::string>());
+      }
       r.last_batch_id = row["last_batch_id"].is_null() ? std::string() : row["last_batch_id"].as<std::string>();
       r.updated_at_ms = row["updated_at_ms"].as<int64_t>();
       out.push_back(std::move(r));
@@ -1005,6 +1061,179 @@ void PostgresAgentPositionRepository::ApplyHedge(
 #else
   (void)agent_id; (void)asset; (void)venue;
   (void)position_delta; (void)in_flight_delta; (void)updated_at_ms;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// ADR-087 (CALC-CE-AGENT-PNL): внешние суммы ноги, книга внутренней биржи агента.
+// ---------------------------------------------------------------------------
+bool PostgresAgentPositionRepository::EnsurePnlSchema() {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (schema_ready_.load()) return true;
+  if (!pool_) return false;
+  std::lock_guard<std::mutex> lk(schema_mu_);
+  if (schema_ready_.load()) return true;
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  const long long failed_at = schema_fail_ms_.load();
+  if (failed_at != 0 && now_ms - failed_at < 30000) return false;  // после неуспеха — не чаще раза в 30 с (вызов идёт под mu_ ledger)
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    tx.exec("SET LOCAL lock_timeout = '5s'");  // первым оператором: ALTER ниже берёт ACCESS EXCLUSIVE; лучше упасть, чем заморозить ledger
+    ensure_agent_position_table(tx);  // таблица обязана существовать до ALTER
+    tx.exec(kPnlSchemaSql);
+    tx.commit();
+    schema_ready_.store(true);
+    cex::common::log_json("INFO", "ADR-087 схема ce_agent_pnl_book / внешние суммы ce_agent_position готова");
+  } catch (const std::exception& e) {
+    schema_fail_ms_.store(now_ms);
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::EnsurePnlSchema failed (учёт PnL агентов приостановлен, повтор через 30 с)",
+                          {{"error", e.what()}});
+  }
+  return schema_ready_.load();
+#else
+  return false;
+#endif
+}
+
+void PostgresAgentPositionRepository::ApplyExternalFill(
+    const std::string& agent_id, const std::string& asset, const std::string& venue,
+    const cex::common::Decimal& in_flight_delta, const cex::common::Decimal& realized_delta,
+    const app::ExternalFillDelta& ext, int64_t updated_at_ms) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return;
+  if (!EnsurePnlSchema()) {  // нет новых колонок: прежний путь (in_flight и realized_vs_fair), внешние суммы не копятся
+    ApplyHedge(agent_id, asset, venue, cex::common::Decimal{0, 0}, in_flight_delta, updated_at_ms, realized_delta);
+    return;
+  }
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    ensure_agent_position_table(tx);
+    tx.exec_params(
+        R"sql(
+          UPDATE ce_agent_position SET
+            in_flight         = in_flight + ($4)::numeric,
+            realized_vs_fair  = COALESCE(realized_vs_fair, 0) + ($5)::numeric,
+            ext_buy_base      = ext_buy_base + ($6)::numeric,
+            ext_sell_base     = ext_sell_base + ($7)::numeric,
+            ext_buy_notional  = ext_buy_notional + ($8)::numeric,
+            ext_sell_notional = ext_sell_notional + ($9)::numeric,
+            ext_fair_signed   = ext_fair_signed + ($10)::numeric,
+            updated_at        = to_timestamp($11 / 1000.0)
+          WHERE agent_id = $1 AND asset = $2 AND venue = $3
+        )sql",
+        agent_id, asset, venue, pg_num(in_flight_delta), pg_num(realized_delta),
+        pg_num(ext.buy_base), pg_num(ext.sell_base), pg_num(ext.buy_notional),
+        pg_num(ext.sell_notional), pg_num(ext.fair_signed), updated_at_ms);
+    tx.commit();
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyExternalFill failed",
+                          {{"error", e.what()}, {"agent_id", agent_id}});
+  }
+#else
+  (void)agent_id; (void)asset; (void)venue; (void)in_flight_delta; (void)realized_delta; (void)ext; (void)updated_at_ms;
+#endif
+}
+
+// Абсолютное состояние книг одним пакетным запросом (на такт): повтор безвреден, сбой лечится следующим тактом.
+// Значения вставляются литералами через sql_lit (идентификаторы и десятичные строки), без массивов pqxx.
+void PostgresAgentPositionRepository::SaveBooks(const std::vector<app::AgentPnlBookRow>& books) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_ || books.empty() || !EnsurePnlSchema()) return;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    std::string sql =
+        "INSERT INTO ce_agent_pnl_book (agent_id, agent_kind, qty, avg_price, realized, last_batch_id, since_ms, updated_at) VALUES ";
+    bool first = true;
+    for (const auto& b : books) {
+      if (b.agent_kind != "translator" && b.agent_kind != "arbitrageur") continue;  // CHECK-нарушение валит весь пакет
+      if (b.since_ms <= 0) continue;
+      // Инвариант строки: при нулевом остатке средняя цена 0 (CHECK ce_agent_pnl_book_flat_chk).
+      const cex::common::Decimal avg = (b.qty.units == 0) ? cex::common::Decimal{0, 0} : b.avg_price;
+      if (!first) sql += ", ";
+      first = false;
+      sql += "(" + sql_lit(tx, b.agent_id) + ", " + sql_lit(tx, b.agent_kind) + ", " + sql_lit(tx, pg_num(b.qty)) + "::numeric, " +
+             sql_lit(tx, pg_num(avg)) + "::numeric, " + sql_lit(tx, pg_num(b.realized)) + "::numeric, " +
+             (b.last_batch_id.empty() ? std::string("NULL") : sql_lit(tx, b.last_batch_id)) + ", " +
+             std::to_string(static_cast<long long>(b.since_ms)) + ", now())";
+    }
+    if (first) return;  // нечего писать
+    sql +=
+        " ON CONFLICT (agent_id) DO UPDATE SET agent_kind = EXCLUDED.agent_kind, qty = EXCLUDED.qty, avg_price = EXCLUDED.avg_price,"
+        " realized = EXCLUDED.realized, last_batch_id = EXCLUDED.last_batch_id, since_ms = EXCLUDED.since_ms, updated_at = now()"
+        " WHERE (ce_agent_pnl_book.agent_kind, ce_agent_pnl_book.qty, ce_agent_pnl_book.avg_price, ce_agent_pnl_book.realized,"
+        " ce_agent_pnl_book.last_batch_id, ce_agent_pnl_book.since_ms)"
+        " IS DISTINCT FROM (EXCLUDED.agent_kind, EXCLUDED.qty, EXCLUDED.avg_price, EXCLUDED.realized, EXCLUDED.last_batch_id,"
+        " EXCLUDED.since_ms)";
+    tx.exec(sql);
+    tx.commit();
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::SaveBooks failed", {{"error", e.what()}});
+  }
+#else
+  (void)books;
+#endif
+}
+
+bool PostgresAgentPositionRepository::LoadBooks(std::vector<app::AgentPnlBookRow>& out) {
+  out.clear();
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_) return true;  // персистентности нет: книг нет, начинаем с памяти
+  if (!EnsurePnlSchema()) return false;  // схема не готова: «книг нет» утверждать нельзя — пересев перезаписал бы сохранённые
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    auto rows = tx.exec(
+        "SELECT agent_id, agent_kind, qty, avg_price, realized, last_batch_id, since_ms FROM ce_agent_pnl_book");
+    tx.commit();
+    for (const auto& row : rows) {
+      app::AgentPnlBookRow b;
+      b.agent_id = row["agent_id"].as<std::string>();
+      b.agent_kind = row["agent_kind"].as<std::string>();
+      b.qty = parse_pg_numeric(row["qty"].as<std::string>());
+      b.avg_price = parse_pg_numeric(row["avg_price"].as<std::string>());
+      b.realized = parse_pg_numeric(row["realized"].as<std::string>());
+      b.last_batch_id = row["last_batch_id"].is_null() ? std::string() : row["last_batch_id"].as<std::string>();
+      b.since_ms = row["since_ms"].as<int64_t>();
+      out.push_back(std::move(b));
+    }
+    return true;
+  } catch (const std::exception& e) {
+    out.clear();
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::LoadBooks failed", {{"error", e.what()}});
+    return false;
+  }
+#else
+  return true;
+#endif
+}
+
+// Сброс (пусто = все агенты): строки книги удаляются, внешние суммы и отметка realized_vs_fair обнуляются. rvf_base обязан
+// обнуляться вместе с realized_vs_fair, иначе R_ext = realized_vs_fair − rvf_base станет отрицательным.
+void PostgresAgentPositionRepository::ResetPnl(const std::vector<std::string>& agent_ids) {
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!pool_ || !EnsurePnlSchema()) return;
+  try {
+    auto c = pool_->Acquire();
+    pqxx::work tx(*c);
+    std::string where;
+    if (!agent_ids.empty()) {
+      where = " WHERE agent_id IN (";
+      for (std::size_t i = 0; i < agent_ids.size(); ++i) where += (i ? ", " : "") + sql_lit(tx, agent_ids[i]);
+      where += ")";
+    }
+    tx.exec("DELETE FROM ce_agent_pnl_book" + where);
+    tx.exec("UPDATE ce_agent_position SET ext_buy_base = 0, ext_sell_base = 0, ext_buy_notional = 0, ext_sell_notional = 0,"
+            " ext_fair_signed = 0, rvf_base = 0" + where);
+    tx.commit();
+  } catch (const std::exception& e) {
+    cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ResetPnl failed", {{"error", e.what()}});
+  }
+#else
+  (void)agent_ids;
 #endif
 }
 

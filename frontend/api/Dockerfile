@@ -24,6 +24,7 @@ COPY hedge_orders_view.js .
 COPY agent_pnl_history.js .
 COPY ce_surplus_accum.js .
 COPY system_pnl.js .
+COPY agent_pnl_dto.js .
 COPY data ./data
 
 EXPOSE 8090

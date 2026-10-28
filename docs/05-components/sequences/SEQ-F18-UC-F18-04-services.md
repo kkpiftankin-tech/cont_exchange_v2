@@ -97,6 +97,50 @@ sequenceDiagram
 | перевозы арбитражёра | PostgreSQL `ce_transfer(id, asset, src, dst, qty, eta, tariff, status)` | planned (Э5) |
 | трасса такта | ClickHouse `clearing_trace` (+`agent_id`, `c_j` до/после, house-невязка) | planned |
 
+## Заработок агентов по биржам (ADR-087)
+
+Путь числа для вкладки «PnL»: ledger ведёт книгу сделок агента на внутренней бирже и суммы внешних хедж-исполнений, а BFF только пересылает готовые R, U, R+U.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant MB as matching-fob-core
+    participant KP as Kafka ce.position.delta
+    participant L as ledger
+    participant PG as PostgreSQL
+    participant V as external-venues
+    participant KV as Kafka execution.venue
+    participant BFF as frontend-api (BFF)
+    participant UI as frontend-web (вкладка PnL)
+
+    MB->>KP: AgentDelta (delta, price_used, base_price, fair_price)
+    KP->>L: consume — сделка внутренней биржи входит в книгу агента
+    L->>PG: UPSERT ce_agent_pnl_book (пакетом на такт)
+    V->>KV: ExecutionReport (исполнение хеджа)
+    KV->>L: consume — выход книги по F_0 момента исполнения, внешние суммы
+    L->>PG: UPDATE ce_agent_position (ext_*, realized_vs_fair); UPSERT ce_agent_pnl_book
+    UI->>BFF: GET /api/vector-clearing/agent-pnl (опрос раз в 5 с)
+    BFF->>L: GetAgentPnl
+    L-->>BFF: R, U, R+U внутренней биржи, внешних бирж и итого (USDT)
+    BFF-->>UI: JSON без арифметики
+```
+
+### Contract binding (ADR-087)
+
+| # | Arrow | Transport | Contract |
+| --- | --- | --- | --- |
+| A1 | MB → KP → L | Kafka | `ce.position.delta` — `AgentDelta{agent_id, asset, venue, delta, price_used, base_price, fair_price}` — существующий контракт |
+| A2 | V → KV → L | Kafka | `execution.venue` — `fob.execution.v1.ExecutionReport` (`incr_filled_qty`, `average_price`) — существующий контракт |
+| A3 | UI → BFF | REST | `GET /api/vector-clearing/agent-pnl` — [agent-pnl](../../06-api/rest/agent-pnl.md) |
+| A4 | BFF → L | gRPC | `fob.ledger.v1.LedgerService.GetAgentPnl` — [ledger-agent-pnl](../../06-api/grpc/ledger-agent-pnl.md) |
+
+### Data binding (ADR-087)
+
+| Object | Store | Doc |
+| --- | --- | --- |
+| книга внутренней биржи агента | PostgreSQL `ce_agent_pnl_book` | [ce-agent-pnl-book](../../07-data/ce-agent-pnl-book.md) |
+| внешние суммы ноги, отметка `rvf_base` | PostgreSQL `ce_agent_position` (`ext_*`, `rvf_base`) | [ce-agent-position](../../07-data/ce-agent-position.md) |
+
 ## Related Components
 
 - [matching-fob-core](../matching-fob-core/overview.md), [ledger](../ledger/overview.md), [risk-manager](../risk-manager/overview.md), [external-venues](../external-venues/overview.md), [market-data](../market-data/overview.md)
@@ -104,6 +148,7 @@ sequenceDiagram
 ## Related ADR
 
 - ADR-061 (planned, supersede ADR-054/057; ревизии ADR-055/056/058).
+- ADR-087 — заработок агентов по биржам: книга внутренней биржи, внешние суммы, `GetAgentPnl`.
 
 ## Source Fragments
 

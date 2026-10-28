@@ -422,6 +422,46 @@ message GetAgentPositionDeltasResponse {
   repeated AgentPositionDelta deltas = 2;        // пусто = такт не менял позиции агентов
 }
 
+// ADR-087 (CALC-CE-AGENT-PNL): заработок агента CE в USDT — три группы (внутренняя биржа, внешние биржи, итого),
+// в каждой R (реализованный), U (нереализованный) и R+U. Всё посчитано в ledger; BFF и фронт арифметики не делают.
+message PnlGroup {
+  bool has_data = 1;                              // false ⇒ r, u, r_plus_u НЕ заданы (нет цены — это не ноль)
+  fob.common.v1.Decimal r = 2;                    // USDT
+  fob.common.v1.Decimal u = 3;                    // USDT
+  fob.common.v1.Decimal r_plus_u = 4;             // USDT, r + u
+}
+message AgentPnl {
+  string agent_id = 1;                            // "T_BTC_binance" | "A_BTC_binancekraken"
+  string agent_kind = 2;                          // "translator" | "arbitrageur" | ""
+  string asset = 3;                               // базовый актив
+  string quote = 4;                               // котируемая валюта пары ("USDT" у пар к USDT и у связки)
+  repeated string venues = 5;                     // площадки ног: переводчик одна, связка две
+  PnlGroup internal = 6;                          // внутренняя биржа CE
+  PnlGroup external = 7;                          // внешние биржи, все вместе
+  PnlGroup total = 8;                             // internal + external
+  int64 mark_age_ms = 9;                          // возраст цены оценки m; -1 ⇒ цена неизвестна
+  uint32 ext_fills = 10;                          // число внешних хедж-исполнений с запуска ledger
+  int64 since_ms = 11;                            // начало накопления, unix ms; 0 ⇒ не начато
+}
+message AgentPnlTotals {
+  PnlGroup internal = 1;                          // суммы по агентам, у которых в группе есть данные
+  PnlGroup external = 2;
+  PnlGroup total = 3;
+  uint32 agent_count = 4;                         // сколько агентов в ответе
+  uint32 incomplete_agents = 5;                   // у скольких хотя бы в одной группе has_data = false
+}
+message GetAgentPnlRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;                  // пусто = все агенты
+}
+message GetAgentPnlResponse {
+  fob.common.v1.EventMeta meta = 1;
+  string currency = 2;                            // "USDT"
+  repeated AgentPnl agents = 3;
+  AgentPnlTotals totals = 4;                      // строка «все агенты»
+  bool enabled = 5;                               // CE_AGENT_PNL_ENABLED
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -487,4 +527,8 @@ service LedgerService {
   // позиции агентов (c_j→0), in_flight и band-хеджи — чтобы наблюдать расхождение
   // позиций с нуля. РЕАЛЬНЫЙ сброс состояния владельца (ledger), не фронт-фикс.
   rpc ResetAgentPositions(ResetAgentPositionsRequest) returns (ResetAgentPositionsResponse);
+
+  // ADR-087 (вкладка «PnL»): заработок агентов CE — внутренняя биржа, внешние биржи, итого; R, U и R+U в USDT.
+  // Read-only, считается в ledger (книга внутренней биржи + внешние суммы хедж-исполнений).
+  rpc GetAgentPnl(GetAgentPnlRequest) returns (GetAgentPnlResponse);
 }

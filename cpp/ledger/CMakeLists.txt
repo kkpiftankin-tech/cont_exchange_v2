@@ -175,6 +175,36 @@ if (BUILD_TESTING)
   target_compile_options(ce_band_house_realized_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ce_band_house_realized_test COMMAND ce_band_house_realized_test)
 
+  # ADR-087 (CALC-CE-AGENT-PNL): заработок агентов через ledger целиком (дельты → хедж → GetAgentPnl, сброс, перезапуск
+  # через заглушку репозитория). Без PG и Kafka.
+  add_executable(ce_agent_pnl_test
+    tests/ce_agent_pnl_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_agent_pnl_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_agent_pnl_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_agent_pnl_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_agent_pnl_test COMMAND ce_agent_pnl_test)
+
+  # ADR-087 (CALC-CE-AGENT-PNL): чистая математика книги внутренней биржи и внешних сумм агента (Decimal, без ledger_uc/PG/Kafka).
+  add_executable(agent_pnl_book_test
+    tests/agent_pnl_book_test.cpp
+  )
+  target_include_directories(agent_pnl_book_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(agent_pnl_book_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(agent_pnl_book_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME agent_pnl_book_test COMMAND agent_pnl_book_test)
+
   # F-20 DoD-7 sim-book applier (pure; no PG, no Kafka).
   add_executable(ledger_sim_book_applier_test
     tests/sim_book_applier_test.cpp

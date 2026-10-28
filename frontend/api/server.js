@@ -7,7 +7,8 @@ const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, pnlQuoteToUsdt, tradedBasketUsdt, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
 const { pnlSamples, buildPnlHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента во времени
-const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
+const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");
+const { buildAgentPnlDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
@@ -8305,6 +8306,22 @@ async function handleVectorClearing(req, res, pathname, query) {
   // Живые позиции агентов (для кнопки динамического просмотра): ТЕКУЩИЕ позиции
   // всех переводчиков/арбитражёров + дельты самого свежего такта. Независимо от
   // выбранного статичного батча — этот эндпоинт всегда отдаёт «сейчас».
+  // ADR-087: заработок агентов CE по биржам (вкладка «PnL»): R, U, R+U внутренней биржи, внешних бирж и итого, USDT.
+  // Всё посчитано в ledger (GetAgentPnl); здесь только пересылка. Недоступность ledger — 502, а не пустой список: «нет данных»
+  // не должно выглядеть как «агентов нет» (в отличие от fetchAgentPositions, который при ошибке возвращает []).
+  if (pathname === "/api/vector-clearing/agent-pnl") {
+    if (req.method !== "GET") return writeJson(res, 405, { error: "method_not_allowed" });
+    const led = initLedgerClient();
+    if (!led) return writeJson(res, 502, { error: "ledger_unavailable", reason: "no_client" });
+    const ids = String((query && query.agent_ids) || "").split(",").map((x) => x.trim()).filter(Boolean);
+    try {
+      const resp = await grpcCall(led, "GetAgentPnl", { agent_ids: ids });
+      return writeJson(res, 200, buildAgentPnlDto(resp));
+    } catch (e) {
+      console.error("[ledger] GetAgentPnl failed:", (e && e.message) || e);
+      return writeJson(res, 502, { error: "ledger_unavailable", reason: (e && e.code === 12) ? "unimplemented" : String((e && e.message) || e) });
+    }
+  }
   if (pathname === "/api/vector-clearing/agent-positions") {
     const { agentRows, newest } = await loadLiveAgentRows();
     return writeJson(res, 200, { agentRows, batch_id: newest, generatedAt: new Date().toISOString() });
@@ -9626,6 +9643,7 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/detail"
         || pathname === "/api/vector-clearing/liveness"
         || pathname === "/api/vector-clearing/agent-positions"
+        || pathname === "/api/vector-clearing/agent-pnl"
         || pathname === "/api/vector-clearing/agent-pnl-history"
         || pathname === "/api/vector-clearing/system-pnl"
         || pathname === "/api/vector-clearing/agent-detail"

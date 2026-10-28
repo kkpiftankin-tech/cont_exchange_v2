@@ -226,6 +226,7 @@ protoContracts:
       - F-04
       - F-06
       - F-12
+      - F-18
     components:
       - ledger
       - order-flow
@@ -239,6 +240,11 @@ protoContracts:
       - ApplyBatchResultRequest
       - ApplyBatchResultResponse
       - ApplyExecutionReportRequest
+      - GetAgentPnlRequest
+      - GetAgentPnlResponse
+      - AgentPnl
+      - PnlGroup
+      - AgentPnlTotals
 
   execution:
     files:

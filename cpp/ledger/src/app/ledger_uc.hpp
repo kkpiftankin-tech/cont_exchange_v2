@@ -18,6 +18,7 @@
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/uuid.hpp"   // boot_id_ (ADR-084)
+#include "app/agent_pnl_book.hpp"   // ADR-087: книга внутренней биржи и внешние суммы агента
 #include "app/persistence_ports.hpp"
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
@@ -376,6 +377,10 @@ class LedgerUseCases {
   fob::ledger::v1::ResetAgentPositionsResponse ResetAgentPositions(
       const fob::ledger::v1::ResetAgentPositionsRequest& req);
 
+  // ADR-087 (CALC-CE-AGENT-PNL): заработок агентов — внутренняя биржа, внешние биржи, итого; R, U и R+U в USDT.
+  // Read-only: книги и суммы под mu_ только читаются, состояние не меняется.
+  fob::ledger::v1::GetAgentPnlResponse GetAgentPnl(const fob::ledger::v1::GetAgentPnlRequest& req);
+
   // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): ЧИСТАЯ математика закрытого
   // учёта — вынесена из состояния для юнит-тестируемости. mtm = Σ_ccy nop·mid
   // (валюты без мида пропускаются, см. skipped); wc_max/wc_nodes — узловой баланс
@@ -535,9 +540,34 @@ class LedgerUseCases {
     long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
     int band_fail_streak{0};         // заявок подряд, завершённых без единого исполнения (растит паузу, сбрасывается любым исполнением)
     cex::common::Decimal transfer_moved{0, 0};  // ADR-084: Σ сдвигов позиции переводом (приход +X, уход −X), тыс. USDT; монитор W·c: (W·c)_n + moved_n = 0
+    // ADR-087 (CALC-CE-AGENT-PNL): внешние суммы ноги (переводчик — несопоставленный с книгой объём, связка — все хедж-исполнения),
+    // отметка realized_vs_fair на момент внедрения учёта и число исполнений с запуска ledger.
+    ExternalSums ext;
+    cex::common::Decimal rvf_base{0, 0};
+    std::uint32_t ext_fills{0};
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // ADR-087: книга внутренней биржи — по одной на агента (у связки обе ноги в одной книге). Под mu_.
+  struct AgentBook {
+    InternalBook book;
+    std::string kind;            // "translator" | "arbitrageur"
+    std::string last_batch_id;   // последний учтённый такт (повторная доставка не удваивает книгу)
+    long long since_ms{0};       // начало накопления
+  };
+  std::map<std::string, AgentBook> agent_books_;
+  // Учёт заработка готов, когда книги загружены из репозитория (или репозитория нет). Пока нет — книги не обновляются и не пишутся
+  // (иначе пересев по текущей позиции перезаписал бы сохранённые), GetAgentPnl отдаёт «нет данных»; повторная загрузка раз в
+  // CE_AGENT_PNL_RETRY_MS (деф. 30 с). Под mu_.
+  bool pnl_ready_{true};
+  long long pnl_retry_ms_{0};
+  void retry_pnl_load_locked(long long ts_ms);
+  // Вход сделки внутренней биржи по дельте клиринга (ApplyPositionDelta); помечает книгу изменённой.
+  void book_on_delta_locked(const AgentDelta& ad, const AgentPositionState& st, const cex::common::Decimal& c_total_before,
+                            const std::string& batch_id, long long ts_ms, std::set<std::string>& seen_this_call,
+                            std::set<std::string>& dirty);
+  // Записать изменённые книги одним пакетом (если подключён репозиторий).
+  void save_dirty_books_locked(const std::set<std::string>& dirty);
   // ADR-082 (шаг 2): агенты, у которых потолок по ленте оставил остаток над порогом. Проверка пробоя вызывается только по дельтам
   // позиции агента, поэтому без перепроверки остаток мог бы зависнуть (агент без новых дельт). ApplyPositionDelta перепроверяет
   // этих агентов на каждом такте; запись снимается, когда остаток ушёл или позиция вернулась в полосу. Под mu_.

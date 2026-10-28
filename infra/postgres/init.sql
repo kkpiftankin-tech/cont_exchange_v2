@@ -1233,6 +1233,45 @@ CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
     ON ce_agent_position (agent_kind, updated_at DESC);
 
 -- ---------------------------------------------------------------------------
+-- ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): заработок агентов CE по биржам.
+-- Owner: ledger (writer и reader). ce_agent_pnl_book — книга внутренней биржи агента (одна строка на агента,
+-- абсолютное состояние, обновляется пакетом раз в такт); истории нет, строки удаляет сброс позиций.
+-- Колонки ext_* ce_agent_position — суммы внешних хедж-исполнений ноги (переводчик — несопоставленный с книгой
+-- объём, связка — все исполнения); rvf_base — значение realized_vs_fair на момент внедрения учёта.
+-- ledger при старте выполняет тот же блок сам (один раз на процесс); вручную на живой БД — до выкладки ledger.
+-- Страж — отсутствие rvf_base (он добавляется в том же ALTER последним), поэтому UPDATE выполняется ровно один раз.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_agent_pnl_book (
+    agent_id      TEXT PRIMARY KEY,
+    agent_kind    TEXT NOT NULL CHECK (agent_kind IN ('translator', 'arbitrageur')),
+    qty           NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- L: остаток, штуки базового актива (плюс — длинная позиция)
+    avg_price     NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (avg_price >= 0),  -- p̄: средняя цена входа, валюта котировки
+    realized      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R_int, валюта котировки, нарастает
+    last_batch_id TEXT,                                -- последний учтённый такт (повторная доставка не удваивает книгу)
+    since_ms      BIGINT NOT NULL CHECK (since_ms > 0),  -- начало накопления, unix ms
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ce_agent_pnl_book_flat_chk CHECK (qty <> 0 OR avg_price = 0)
+) WITH (fillfactor = 70);
+
+DO $$
+BEGIN
+    PERFORM set_config('lock_timeout', '5s', true);  -- ALTER берёт ACCESS EXCLUSIVE: лучше упасть, чем заморозить ledger
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = current_schema()
+                     AND table_name = 'ce_agent_position' AND column_name = 'rvf_base') THEN
+        ALTER TABLE ce_agent_position
+            ADD COLUMN IF NOT EXISTS ext_buy_base      NUMERIC(38, 18) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS ext_sell_base     NUMERIC(38, 18) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS ext_buy_notional  NUMERIC(38, 18) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS ext_sell_notional NUMERIC(38, 18) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS ext_fair_signed   NUMERIC(38, 18) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS rvf_base          NUMERIC(38, 18) NOT NULL DEFAULT 0;
+        UPDATE ce_agent_position SET rvf_base = realized_vs_fair;  -- живая БД: текущее значение; свежий том: таблица пуста
+    END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
 -- ce_asset_volatility: F-18 D1+#7 (ADR-066, T-F18-701) — оценка волатильности σ
 -- актива для ДИНАМИЧЕСКОГО порога band. По базовым докам Γ=ρ=γσ²τ (Кривые §6.1
 -- ρ≈γσ²τ, §6.4 Z̄=clim/Γ): порог хеджа масштабируется волатильностью площадки.

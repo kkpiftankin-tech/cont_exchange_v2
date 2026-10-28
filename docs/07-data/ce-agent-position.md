@@ -51,8 +51,15 @@ related:
 | `agent_kind` | `TEXT` | `CHECK (agent_kind IN ('translator','arbitrageur'))` |
 | `position` | `NUMERIC(38,18)` | `c_j`, **знаковая**, `DEFAULT 0`, **без** CHECK неотрицательности (A6: отрицательная позиция обязательна). Меняется по исполнению (A8) |
 | `in_flight` | `NUMERIC(38,18)` | committed: отправлено наружу, ещё не исполнено; **знаковое**, `DEFAULT 0`. Растёт при эмиссии (A7), убывает по исполнению/таймауту (A8). Защита от двойного хеджа |
+| `realized_vs_fair` | `NUMERIC(38,18)` | накопленный заработок на хедж-исполнениях относительно $F_0$ (валюта котировки), ADR-072 §C; `DEFAULT 0` |
+| `ext_buy_base`, `ext_sell_base` | `NUMERIC(38,18)` | ADR-087: куплено / продано штук базового актива по внешним хедж-исполнениям ноги (переводчик — только несопоставленный с книгой внутренней биржи объём, связка — все исполнения); `DEFAULT 0` |
+| `ext_buy_notional`, `ext_sell_notional` | `NUMERIC(38,18)` | ADR-087: стоимость покупок / выручка от продаж тех же исполнений, валюта котировки; `DEFAULT 0` |
+| `ext_fair_signed` | `NUMERIC(38,18)` | ADR-087, только переводчик: $\sum s\,m\,q$ по несопоставленным исполнениям ($s=+1$ продажа, $-1$ покупка, $m$ — $F_0$ на исполнении); нужна, чтобы оценить внешний U по единой цене оценки сегодня; `DEFAULT 0` |
+| `rvf_base` | `NUMERIC(38,18)` | ADR-087: значение `realized_vs_fair` на момент внедрения учёта; внешний R = `realized_vs_fair − rvf_base`; обнуляется вместе с `realized_vs_fair` при сбросе; `DEFAULT 0` |
 | `last_batch_id` | `TEXT` | последний такт, менявший позицию → `clearing_trace.batch_id` (CH); ключ идемпотентности применения дельты |
 | `updated_at` | `TIMESTAMPTZ` | `DEFAULT now()` |
+
+Колонки `ext_*` и `rvf_base` добавлены ADR-087 ([CALC-CE-AGENT-PNL](../04-domain/calculations/CALC-CE-AGENT-PNL.md)); писатель — ledger (`ApplyExternalFill`, одним UPDATE с `in_flight` и `realized_vs_fair` на каждом хедж-исполнении). Книга внутренней биржи агента лежит в отдельной таблице [ce-agent-pnl-book](ce-agent-pnl-book.md). Миграция колонок — защитный `DO`-блок, раздел «Миграция» ниже.
 
 PK `(agent_id, asset, venue)` — трёхсоставной; прецедент — `sim_positions` (ADR-016, `infra/postgres/init.sql`). Вспомогательный индекс `(agent_kind, updated_at DESC)` — для запросов «все переводчики вне полосы» и staleness-мониторинга.
 
@@ -151,6 +158,16 @@ Writer: `venues` (симулятор перевоза, F-20). `matching` тол�
 3. На живых dev/staging БД те же выражения выполняются **вручную** (`psql -f`), с явной пометкой в PR-описании и записью в `docs/07-data/migrations.md` (файла ещё нет — создаётся при реализации).
 
 **Предложение (не в этом PR): Flyway-lite runner.** Разбить `init.sql` на пронумерованные идемпотентные `infra/postgres/migrations/NNN_*.sql`, добавить `apply-migrations.sh` + bookkeeping-таблицу `schema_migrations(filename PK, applied_at)`, CI-гейт «прогнать дважды, второй прогон no-op». Это архитектурное решение по инфраструктуре персистентности → требует **отдельного ADR** и отдельного PR; F-18 v2 им не блокируется.
+
+### Миграция ADR-087 (колонки `ext_*`, `rvf_base`, таблица `ce_agent_pnl_book`)
+
+Идемпотентный блок лежит в `infra/postgres/init.sql` сразу после `ce_agent_position` и в `ledger` (`PostgresAgentPositionRepository::EnsurePnlSchema`, один раз на процесс). Страж блока — отсутствие колонки `rvf_base` (она добавляется в том же `ALTER` последней), поэтому `UPDATE ce_agent_position SET rvf_base = realized_vs_fair` выполняется ровно один раз и повторный прогон внешний R не обнуляет. На живой БД выполнять **до** выкладки ledger:
+
+```bash
+ssh nik@ubuntu-dev "docker exec -i infra-postgres-1 psql -U cex -d cex" < infra/postgres/init.sql
+```
+
+Проверка: `select count(*) from ce_agent_position where rvf_base <> realized_vs_fair` даёт 0 сразу после миграции; повторный прогон ничего не меняет. Откат: `ALTER TABLE ce_agent_position DROP COLUMN IF EXISTS ext_buy_base, ... rvf_base; DROP TABLE IF EXISTS ce_agent_pnl_book;` — достаточно и `CE_AGENT_PNL_ENABLED=0`. Порядок выкладки: сначала миграция, затем ledger, затем BFF.
 
 ## Used In
 

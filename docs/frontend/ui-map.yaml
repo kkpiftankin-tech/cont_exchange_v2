@@ -55,3 +55,23 @@ screens:
         capability: CAP-F18-SYSTEM-PNL
         refresh: poll 30s
         states: {empty: "«нет данных»", stale: null}
+
+  - id: UI-PNL
+    route: /hedge-pnl-live  # как в frontend/web/src/App.js; вкладка «PnL» в NavBar
+    title: Hedge PnL Dashboard (live) — вкладка «PnL»
+    component: frontend/web/src/pages/HedgePnlDashboard/HedgePnlDashboardLive.js
+    features: [F-18, F-12]
+    elements:
+      - id: UI-PNL-AGENTS
+        generated: {component: frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js, line: 81}  # tools/ui-map/scan.py (строку обновит --write)
+        label: Таблица «Заработок агентов — R / U / R+U»
+        kind: table
+        meaning: По каждому агенту R (реализованный) и U (нереализованный) внутренней биржи CE, внешних бирж и итого; строка «все агенты»
+        unit: USDT
+        field: "agents[].internal / external / total (r, u, r_plus_u); totals"
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1agent-pnl/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
+        contract: docs/06-api/rest/agent-pnl.md
+        calc: CALC-CE-AGENT-PNL
+        capability: CAP-F18-AGENT-PNL
+        refresh: poll 5s
+        states: {empty: "«Нет агентов с позицией»", stale: "«ledger недоступен» (502), прежние данные остаются"}

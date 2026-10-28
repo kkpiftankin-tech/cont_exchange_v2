@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **19**
+- Открытых структурированных вопросов (`OQ-*`): **23**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
-- Карточек вычислений не в статусе `implemented`: **5**
-- ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **12**
+- Карточек вычислений не в статусе `implemented`: **6**
+- ADR в статусе `proposed` (ждут решения владельца): **14**
+- Инженерных долгов в known-gaps.md: **13**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -31,6 +31,7 @@
 ### trading-domain-specialist
 
 - **OQ-F18v2-17** (F-18) — переводчик тоже реагирует на фантомный сигнал, а не только арбитражёр · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-29** (F-18) — цена оценки связки и нумерарные связки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### trading-domain-specialist + matching (движок)
 
@@ -69,6 +70,9 @@
 - **OQ-F18v2-22** (F-18) — физический перевод остаётся единственным путём вперёд для прибыльности арбитражёра · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-23** (F-18) — допустимая погрешность цены для порогов свежести данных · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-24** (F-18) — завышенная оценка волатильности из объединённого потока бирж · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-26** (F-18) — закрывает ли внешний хедж внутреннюю книгу агента · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-27** (F-18) — единая цена оценки для нереализованного результата · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-28** (F-18) — связка: внутренний результат «на бумаге» и счёт дома · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 
@@ -81,6 +85,7 @@
 
 ## Карточки вычислений не в статусе `implemented`
 
+- **CALC-CE-AGENT-PNL** (F-18, `proposed`) — Заработок агента CE по биржам — R, U и R+U внутренней биржи, внешних бирж и итого · [docs/04-domain/calculations/CALC-CE-AGENT-PNL.md](../04-domain/calculations/CALC-CE-AGENT-PNL.md)
 - **CALC-CE-ANCHOR** (F-18, `partial`) — Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017) · [docs/04-domain/calculations/CALC-CE-ANCHOR.md](../04-domain/calculations/CALC-CE-ANCHOR.md)
 - **CALC-CE-SKEW-BAND-CALIBRATION** (F-18, `calibrated`) — Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка переводчика · [docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md](../04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md)
 - **CALC-CE-SYSTEM-PNL** (F-18, `partial`) — P&L системы CE (MTM реальных остатков) и инварианты · [docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md](../04-domain/calculations/CALC-CE-SYSTEM-PNL.md)
@@ -102,6 +107,7 @@
 - **ADR-079** (F-18) — Диагностика решения CE-клиринга — снимок последнего такта из matching, показ на вкладке «Граф» с объяснением «почему потока нет» · [docs/03-architecture/adr/ADR-079-ce-clearing-decision-diagnostics.md](../03-architecture/adr/ADR-079-ce-clearing-decision-diagnostics.md)
 - **ADR-081** (F-18) — Ширина полосы хеджа CE — ручная установка и автоматический режим по волатильности · [docs/03-architecture/adr/ADR-081-ce-band-width-manual-and-volatility-modes.md](../03-architecture/adr/ADR-081-ce-band-width-manual-and-volatility-modes.md)
 - **ADR-082** (F-18) — Измерение ликвидности внешних бирж и её обратная связь в глубину агента, размер заявки и порог хеджа CE · [docs/03-architecture/adr/ADR-082-venue-liquidity-measurement-and-feedback.md](../03-architecture/adr/ADR-082-venue-liquidity-measurement-and-feedback.md)
+- **ADR-087** (F-18) — Заработок агентов CE по биржам — внутренняя книга агента (R и U по средней себестоимости), внешний результат и итог, расчёт в ledger · [docs/03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md](../03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md)
 
 ## Инженерные долги (docs/00-methodology/known-gaps.md)
 
@@ -117,3 +123,4 @@
 - Этап 7: пред-существующий долг на `main`, из-за которого п.1–3 `consistency-gate.yml` НЕ строго блокирующие (только `continue-on-error`, как и п.4)
 - Этап 8 (ADR-086/IN-019, 2026-10-27): «Пилот F-18» сужен владельцем до 1 полного примера CR
 - Этап 9 (ADR-086/IN-019, 2026-10-27): «Распространение и метрики» сужен владельцем до одной метрики
+- Учёт заработка агентов (ADR-087): известные ограничения

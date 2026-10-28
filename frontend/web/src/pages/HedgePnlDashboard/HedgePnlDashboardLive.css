@@ -291,3 +291,75 @@
 
 .hedge-pnl-table .pnl-pos { color: #4caf50; font-weight: 600; }
 .hedge-pnl-table .pnl-neg { color: #f44336; font-weight: 600; }
+
+/* ---- Заработок агентов: R / U / R+U по внутренней бирже, внешним биржам и итого (ADR-087) ---- */
+.agent-pnl {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+}
+
+.agent-pnl-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.agent-pnl-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.agent-pnl-sub {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+.agent-pnl-explain {
+  margin: 8px 0 12px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-pnl-scroll {
+  overflow-x: auto;
+}
+
+.agent-pnl-table th,
+.agent-pnl-table td {
+  white-space: nowrap;
+}
+
+.agent-pnl-table .agent-pnl-left {
+  text-align: left;
+}
+
+.agent-pnl-table th.agent-pnl-group {
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.agent-pnl-table .agent-pnl-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Разделитель между группами столбцов: первая колонка каждой группы. */
+.agent-pnl-table .agent-pnl-gstart {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.agent-pnl-table .agent-pnl-pos { color: #4caf50; font-weight: 600; }
+.agent-pnl-table .agent-pnl-neg { color: #f44336; font-weight: 600; }
+.agent-pnl-table .agent-pnl-zero { color: rgba(255, 255, 255, 0.55); }
+.agent-pnl-table .agent-pnl-na { color: rgba(255, 255, 255, 0.35); }
+
+.agent-pnl-table tfoot .agent-pnl-total td {
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  font-weight: 700;
+}

@@ -5,6 +5,7 @@ import axios from 'axios';
 import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
+import AgentPnlTable from './AgentPnlTable';
 import './HedgePnlDashboardLive.css';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
@@ -148,6 +149,8 @@ const HedgePnlDashboardLive = () => {
             </div>
           </div>
         </section>
+
+        <AgentPnlTable />
 
         <section className="hedge-pnl-toolbar">
           <div className="hedge-pnl-field">

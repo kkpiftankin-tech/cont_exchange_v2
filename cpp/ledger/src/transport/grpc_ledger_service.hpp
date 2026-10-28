@@ -93,6 +93,11 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
       const fob::ledger::v1::ResetAgentPositionsRequest* request,
       fob::ledger::v1::ResetAgentPositionsResponse* response) override;
 
+  // ADR-087: заработок агентов CE (внутренняя биржа, внешние биржи, итого) — R, U, R+U в USDT.
+  grpc::Status GetAgentPnl(grpc::ServerContext* context,
+                           const fob::ledger::v1::GetAgentPnlRequest* request,
+                           fob::ledger::v1::GetAgentPnlResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

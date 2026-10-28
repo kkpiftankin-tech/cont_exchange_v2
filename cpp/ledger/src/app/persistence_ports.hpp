@@ -180,8 +180,28 @@ struct AgentPositionRow {
   cex::common::Decimal position{0, 0};    // c_j, ЗНАКОВАЯ, накопленная клирингом
   cex::common::Decimal in_flight{0, 0};   // committed (Э3+), ЗНАКОВАЯ
   cex::common::Decimal realized_vs_fair{0, 0};  // ADR-072 §C: накопл. заработок vs fair (quote), персист
+  // ADR-087 (CALC-CE-AGENT-PNL): внешние суммы ноги и отметка realized_vs_fair на момент внедрения учёта.
+  cex::common::Decimal ext_buy_base{0, 0}, ext_sell_base{0, 0}, ext_buy_notional{0, 0}, ext_sell_notional{0, 0};
+  cex::common::Decimal ext_fair_signed{0, 0};
+  cex::common::Decimal rvf_base{0, 0};
   std::string last_batch_id;              // последний такт, менявший позицию
   int64_t updated_at_ms{0};
+};
+
+// ADR-087: прирост внешних сумм ноги на одном хедж-исполнении (аддитивно, как realized_delta).
+struct ExternalFillDelta {
+  cex::common::Decimal buy_base{0, 0}, sell_base{0, 0}, buy_notional{0, 0}, sell_notional{0, 0}, fair_signed{0, 0};
+};
+
+// ADR-087: книга внутренней биржи агента — абсолютное состояние (одна строка на агента, таблица ce_agent_pnl_book).
+struct AgentPnlBookRow {
+  std::string agent_id;
+  std::string agent_kind;   // "translator" | "arbitrageur"
+  cex::common::Decimal qty{0, 0};
+  cex::common::Decimal avg_price{0, 0};
+  cex::common::Decimal realized{0, 0};
+  std::string last_batch_id;
+  int64_t since_ms{0};
 };
 
 // Port for the `ce_agent_position` table (T-F18-204). Единственная мутация —
@@ -223,6 +243,20 @@ class AgentPositionRepositoryPort {
                           const cex::common::Decimal& /*in_flight_delta*/,
                           int64_t /*updated_at_ms*/,
                           const cex::common::Decimal& /*realized_delta*/ = cex::common::Decimal{0, 0}) {}
+
+  // ADR-087: хедж-исполнение одним UPDATE — in_flight, realized_vs_fair и внешние суммы ноги. По умолчанию делегирует в
+  // ApplyHedge: его сигнатуру не меняем, чтобы переопределения в тестовых заглушках продолжали работать.
+  virtual void ApplyExternalFill(const std::string& agent_id, const std::string& asset, const std::string& venue,
+                                 const cex::common::Decimal& in_flight_delta, const cex::common::Decimal& realized_delta,
+                                 const ExternalFillDelta& /*ext*/, int64_t updated_at_ms) {
+    ApplyHedge(agent_id, asset, venue, cex::common::Decimal{0, 0}, in_flight_delta, updated_at_ms, realized_delta);
+  }
+  // ADR-087: записать абсолютное состояние книг (один пакетный запрос на такт), загрузить при старте, сбросить (пусто = все агенты).
+  virtual void SaveBooks(const std::vector<AgentPnlBookRow>& /*books*/) {}
+  // false — не удалось прочитать (схема не готова, сбой PG): вызывающий НЕ должен считать, что книг нет, иначе пересев по текущей
+  // позиции перезапишет сохранённые книги. true и пустой список — книг действительно нет.
+  virtual bool LoadBooks(std::vector<AgentPnlBookRow>& out) { out.clear(); return true; }
+  virtual void ResetPnl(const std::vector<std::string>& /*agent_ids*/) {}
 };
 
 }  // namespace cex::ledger::app
