@@ -8,7 +8,7 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **23**
+- Открытых структурированных вопросов (`OQ-*`): **24**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **6**
 - ADR в статусе `proposed` (ждут решения владельца): **14**
@@ -73,6 +73,7 @@
 - **OQ-F18v2-26** (F-18) — закрывает ли внешний хедж внутреннюю книгу агента · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-27** (F-18) — единая цена оценки для нереализованного результата · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-28** (F-18) — связка: внутренний результат «на бумаге» и счёт дома · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-30** (F-18) — должна ли внутренняя группа быть нуль-суммарной по агентам при любых условиях · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 

@@ -158,6 +158,14 @@ fob::execution::v1::ExecutionIntent MkSellIntent(const std::string& agent, const
   return it;
 }
 
+// Та же заявка, но со стороной BUY (закрывает короткую внутреннюю позицию переводчика).
+fob::execution::v1::ExecutionIntent MkBuyIntent(const std::string& agent, const std::string& asset,
+                                                 const std::string& venue, double sent_kusd, double base_price) {
+  fob::execution::v1::ExecutionIntent it = MkSellIntent(agent, asset, venue, sent_kusd, base_price);
+  it.set_side(fob::common::v1::SIDE_BUY);
+  return it;
+}
+
 fob::execution::v1::ExecutionReport MkFill(const std::string& agent, const std::string& asset, const std::string& venue,
                                            double filled, double avg_price, const std::string& report_id) {
   fob::execution::v1::ExecutionReport r;
@@ -466,6 +474,63 @@ int main() {
     const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     Check(Find(resp, "X_UNKNOWN") == nullptr && resp.by_kind_size() == 0 && resp.totals().agent_count() == 0,
           "U: агент неизвестного вида не попадает ни в список, ни в итоги");
+  }
+
+  // --- 5i) закон сохранения внутренней биржи (вопрос владельца 2026-10-28: «суммарный R по всем агентам должен быть нулём»).
+  // Замкнутый цикл за один такт: переводчик T1 (binance) продаёт связке 0,125 BTC по 80 000, связка везёт на kraken и продаёт переводчику
+  // T2 по 80 080. Деньги и штуки сохраняются, поэтому при ОБЩЕЙ цене оценки Σ(R+U) по всем участникам равна нулю. Сумма одних R нулём
+  // НЕ является: связка реализует базис сразу (R>0), а переводчики держат нереализованные остатки (U<0), ΣR = −ΣU.
+  {
+    const auto cycle = [](LedgerUseCases& uc) {
+      uc.ApplyPositionDelta("z1", 1000, {},
+                            {MkDelta("T_BTC_binance", "translator", "BTC", "binance", -10.0, 80000.0, 80040.0),
+                             MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
+                             MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0),
+                             MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 10.0, 80080.0, 80040.0)});
+    };
+    const auto sums = [](LedgerUseCases& uc, double* r, double* u) {
+      const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+      *r = 0.0; *u = 0.0;
+      for (const auto& a : resp.agents()) {
+        if (!a.internal().has_data()) continue;
+        *r += Num(a.internal().r());
+        *u += Num(a.internal().u());
+      }
+    };
+    double r = 0.0, u = 0.0;
+    // (а) цикл открыт: общая цена оценки 80 040 у всех трёх.
+    {
+      LedgerUseCases uc(LedgerUseCases::InitOptions{});
+      cycle(uc);
+      sums(uc, &r, &u);
+      Near(r, 9.9900096, 1e-5, "Z: ΣR = базис связки (переводчики пока держат остатки)");
+      Near(u, -9.9900096, 1e-5, "Z: ΣU = −ΣR");
+      Near(r + u, 0.0, 1e-6, "Z: Σ(R+U) по всем участникам = 0 (замкнутая биржа)");
+    }
+    // (б) оба переводчика выходят в хедже по одной F_0 (80 040): внутренняя группа остаётся нуль-суммарной.
+    {
+      LedgerUseCases uc(LedgerUseCases::InitOptions{});
+      cycle(uc);
+      uc.RememberExecutionIntent(MkBuyIntent("T_BTC_binance", "BTC", "binance", 10.0, 80000.0));
+      Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 0.125, 80030.0, "z-rep-1"));
+      uc.RememberExecutionIntent(MkSellIntent("T_BTC_kraken", "BTC", "kraken", 10.0, 80080.0));
+      Apply(uc, MkFill("T_BTC_kraken", "BTC", "kraken", 0.12487512, 80100.0, "z-rep-2"));
+      sums(uc, &r, &u);
+      Near(r + u, 0.0, 1e-6, "Z: выход обоих по одной F_0 — Σ(R+U) = 0");
+      Near(r, -0.0049952, 1e-5, "Z: ΣR после выхода = −остаток паритета связки (он остаётся её U)");
+    }
+    // (в) T2 выходит позже, когда F_0 выросла до 80 050: Σ(R+U) ≠ 0 и равна q·ΔF_0 — это риск разновременности ног, не ошибка учёта.
+    {
+      LedgerUseCases uc(LedgerUseCases::InitOptions{});
+      cycle(uc);
+      uc.RememberExecutionIntent(MkBuyIntent("T_BTC_binance", "BTC", "binance", 10.0, 80000.0));
+      Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 0.125, 80030.0, "z-rep-1"));
+      uc.ApplyPositionDelta("z2", 2000, {}, {MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 0.0008, 80080.0, 80050.0)});
+      uc.RememberExecutionIntent(MkSellIntent("T_BTC_kraken", "BTC", "kraken", 10.0, 80080.0));
+      Apply(uc, MkFill("T_BTC_kraken", "BTC", "kraken", 0.12487512, 80100.0, "z-rep-2"));
+      sums(uc, &r, &u);
+      Near(r + u, 0.12487512 * (80050.0 - 80040.0), 0.01, "Z: выход T2 при F_0 выше на 10 — Σ(R+U) ≈ q·ΔF_0 = +1,2488");
+    }
   }
 
   // --- 5g) итоги по видам агентов (панель «Живые позиции» не суммирует в браузере) -------------------------
