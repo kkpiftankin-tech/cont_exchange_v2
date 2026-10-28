@@ -19,7 +19,7 @@ related:
 
 ## Owner
 
-[venue-execution-adapter](../05-components/venue-execution-adapter/overview.md) — единственный writer. Read access: REST gateway (GET `/api/v1/hedge/flows/{id}/child-orders`).
+[venue-execution-adapter](../05-components/venue-execution-adapter/overview.md) — единственный writer. Read access: REST gateway (GET `/api/v1/hedge/flows/{id}/child-orders`); frontend-api (BFF) читает состоявшиеся band-хеджи агентов CE (`hedge_flow_id` вида `ce|band|…`) для панели «Живые позиции», вкладки «Граф» и графика «Сделки на внешних биржах по парам» на вкладке «PnL» ([pair-trades-history](../06-api/rest/pair-trades-history.md), запрос по индексу `idx_child_orders_created`).
 
 ## Purpose
 

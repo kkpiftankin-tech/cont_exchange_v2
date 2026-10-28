@@ -22,6 +22,7 @@ COPY band_config.js .
 COPY agent_placeholders.js .
 COPY hedge_orders_view.js .
 COPY agent_pnl_history.js .
+COPY pair_trades_history.js .
 COPY ce_surplus_accum.js .
 COPY system_pnl.js .
 COPY agent_pnl_dto.js .

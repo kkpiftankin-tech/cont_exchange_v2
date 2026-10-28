@@ -6,6 +6,7 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
+const { bucketMsForHours, buildPairTradesDto } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
@@ -7655,6 +7656,51 @@ async function fetchHedgePositionRows() {
   return hedgePosCache.value;
 }
 
+// Вкладка «PnL», график «Сделки на внешних биржах по парам» (CR-F18-006, CALC-CE-PAIR-TRADES): состоявшиеся band-хеджи агентов CE
+// (child_orders) по паре и интервалу окна. SQL отдаёт БЕЗЗНАКОВЫЕ суммы (количество и стоимость покупок и продаж, число заявок) по
+// (пара, интервал); средневзвешенные цены и накопленные объёмы считает buildPairTradesDto (чистая, покрыта pair_trades_history.test.js).
+// Время заявки — created_at (с ним согласована статистика сделок панели «Живые позиции»). Индекс idx_child_orders_created обслуживает окно;
+// запрос за 7 суток ~3 с, поэтому кэш 30 с на окно и один запрос на всех ожидающих.
+const PAIR_TRADES_TTL_MS = 30000;
+const PAIR_TRADES_TIMEOUT_MS = 25000;   // зависший запрос не должен держать общий inflight вечно
+const PAIR_TRADES_CACHE_MAX = 8;        // окон может быть до 168 разных, кэш хранит не больше нескольких последних
+const pairTradesCache = new Map();      // hours → { at, value }
+const pairTradesInflight = new Map();   // hours → Promise
+async function loadPairTradesRows(hours) {
+  const pool = getPgPool();
+  if (!pool) throw new Error("postgres_unavailable");
+  const bucketMs = bucketMsForHours(hours);
+  const r = await pool.query(
+    `SELECT symbol,
+            (floor(extract(epoch from created_at) * 1000 / $1::bigint)::bigint * $1::bigint)::bigint AS t,
+            SUM(CASE WHEN side = 'BUY'  THEN filled_qty END)::float8 AS buy_qty,
+            SUM(CASE WHEN side = 'SELL' THEN filled_qty END)::float8 AS sell_qty,
+            SUM(CASE WHEN side = 'BUY'  THEN filled_qty * avg_price END)::float8 AS buy_notional,
+            SUM(CASE WHEN side = 'SELL' THEN filled_qty * avg_price END)::float8 AS sell_notional,
+            COUNT(*)::int AS fills
+       FROM child_orders
+      WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0
+            AND created_at > now() - make_interval(hours => $2::int)
+      GROUP BY 1, 2
+      ORDER BY 1, 2`, [bucketMs, hours]);
+  return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs);
+}
+function fetchPairTrades(hours) {
+  const hit = pairTradesCache.get(hours);
+  if (hit && Date.now() - hit.at < PAIR_TRADES_TTL_MS) return Promise.resolve(hit.value);
+  if (!pairTradesInflight.has(hours)) {
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("pair_trades_timeout")), PAIR_TRADES_TIMEOUT_MS).unref());
+    pairTradesInflight.set(hours, Promise.race([loadPairTradesRows(hours), timeout])
+      .then((value) => {
+        pairTradesCache.set(hours, { at: Date.now(), value });
+        while (pairTradesCache.size > PAIR_TRADES_CACHE_MAX) pairTradesCache.delete(pairTradesCache.keys().next().value);   // самое старое окно
+        return value;
+      })
+      .finally(() => pairTradesInflight.delete(hours)));
+  }
+  return pairTradesInflight.get(hours);
+}
+
 // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7, ADR-063): per-agent
 // дельты ИМЕННО ЭТОГО такта клиринга (batch_id) — ДО→Δ→ПОСЛЕ, через
 // ledger.GetAgentPositionDeltas (без SQL в обход сервиса-владельца). Пустой
@@ -8425,6 +8471,18 @@ async function handleVectorClearing(req, res, pathname, query) {
           WHERE scope = $1 AND ts > now() - make_interval(hours => $2)
           ORDER BY ts`, [scope, hours]);
       return writeJson(res, 200, { ...buildTotalsHistoryDto(scope, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+    }
+  }
+  if (pathname === "/api/vector-clearing/pair-trades-history") {
+    // График «Сделки на внешних биржах по парам» на вкладке «PnL»: накопленный объём базовой валюты и цены покупки и продажи (вторая
+    // валюта пары) по состоявшимся хеджам агентов CE; всё посчитано здесь, браузер только рисует (CALC-CE-PAIR-TRADES).
+    const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
+    if (!getPgPool()) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      const dto = await fetchPairTrades(hours);
+      return writeJson(res, 200, { ...dto, generatedAt: new Date().toISOString() });
     } catch (e) {
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
@@ -9712,6 +9770,7 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/agent-pnl"
         || pathname === "/api/vector-clearing/agent-pnl-history"
         || pathname === "/api/vector-clearing/pnl-history"
+        || pathname === "/api/vector-clearing/pair-trades-history"
         || pathname === "/api/vector-clearing/system-pnl"
         || pathname === "/api/vector-clearing/agent-detail"
         || pathname === "/api/vector-clearing/ce-graph"

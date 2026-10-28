@@ -88,3 +88,16 @@ screens:
         capability: CAP-F18-AGENT-PNL
         refresh: poll 30s
         states: {empty: "«За выбранное окно записей пока нет: история копится раз в минуту»", stale: "«не удалось загрузить историю заработка», прежние данные остаются"}
+      - id: UI-PNL-PAIR-TRADES
+        generated: {component: frontend/web/src/pages/HedgePnlDashboard/PairTradesChart.js, line: 145}  # tools/ui-map/scan.py (строку обновит --write)
+        label: Блок «Сделки на внешних биржах по парам — объём и цены»
+        kind: chart
+        meaning: По каждой выбранной (чекбоксом) паре валют — накопленный объём базовой валюты (левая ось) и цены покупки и продажи на внешних биржах во второй валюте пары (правая ось); режим объёма общий, нетто или раздельно
+        unit: объём — базовая валюта, цена — вторая валюта пары
+        field: "pairs[].points[].{cum_total_qty,cum_net_qty,cum_buy_qty,cum_sell_qty,buy_price,sell_price}; pairs[].totals"
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1pair-trades-history/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
+        contract: docs/06-api/rest/pair-trades-history.md
+        calc: CALC-CE-PAIR-TRADES
+        capability: CAP-F18-AGENT-PNL
+        refresh: poll 30s
+        states: {empty: "«За выбранное окно внешних сделок по хеджам агентов CE нет»", stale: "«не удалось загрузить сделки по парам», прежние данные остаются"}

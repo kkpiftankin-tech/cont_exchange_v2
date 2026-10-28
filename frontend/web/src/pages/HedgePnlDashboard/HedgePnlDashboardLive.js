@@ -7,6 +7,7 @@ import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
 import AgentPnlTable from './AgentPnlTable';
 import PnlHistoryChart from './PnlHistoryChart';
+import PairTradesChart from './PairTradesChart';
 import './HedgePnlDashboardLive.css';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
@@ -154,6 +155,7 @@ const HedgePnlDashboardLive = () => {
 
         <AgentPnlTable selectedId={selectedAgent} onSelectAgent={setSelectedAgent} />
         <PnlHistoryChart selectedAgent={selectedAgent} onClearAgent={() => setSelectedAgent(null)} />
+        <PairTradesChart />
 
         <section className="hedge-pnl-toolbar">
           <div className="hedge-pnl-field">
