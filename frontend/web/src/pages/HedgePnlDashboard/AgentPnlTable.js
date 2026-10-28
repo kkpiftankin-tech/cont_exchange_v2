@@ -54,7 +54,8 @@ function Cells({ group, idPrefix }) {
 
 // Таблица «Заработок агентов» на вкладке PnL (ADR-087, CALC-CE-AGENT-PNL): по каждому агенту R, U и R+U для внутренней биржи CE,
 // внешних бирж и суммарно. Все числа посчитаны в ledger (GetAgentPnl) и пришли из BFF готовыми — здесь только отображение.
-export default function AgentPnlTable({ pollMs = 5000 }) {
+// selectedId / onSelectAgent (необязательные): клик по строке выбирает агента для графика «Заработок во времени», повторный клик снимает выбор.
+export default function AgentPnlTable({ pollMs = 5000, selectedId = null, onSelectAgent = null }) {
   const [state, setState] = useState({ loading: true, error: '', data: null });
   const reqSeq = useRef(0);
 
@@ -84,7 +85,7 @@ export default function AgentPnlTable({ pollMs = 5000 }) {
     <section className="agent-pnl" data-testid="agent-pnl" data-ui-id="UI-PNL-AGENTS">
       <div className="agent-pnl-head">
         <h3>Заработок агентов — R / U / R+U</h3>
-        <span className="agent-pnl-sub">USDT, без комиссий. Числа считает ledger; обновление каждые 5 сек.</span>
+        <span className="agent-pnl-sub">USDT, без комиссий. Числа считает ledger; обновление каждые 5 сек.{onSelectAgent ? ' Клик по строке — график агента ниже.' : ''}</span>
       </div>
       <p className="agent-pnl-explain" data-testid="agent-pnl-explain">
         <b>Внутренняя биржа CE</b> — всё реализуется в такте клиринга, поэтому там только <b>R</b>: выгода агента относительно
@@ -121,7 +122,14 @@ export default function AgentPnlTable({ pollMs = 5000 }) {
             </thead>
             <tbody>
               {agents.map((a) => (
-                <tr key={a.agent_id} data-testid={`agent-pnl-row-${a.agent_id}`}>
+                <tr key={a.agent_id} data-testid={`agent-pnl-row-${a.agent_id}`}
+                  className={`${onSelectAgent ? 'agent-pnl-row-click' : ''}${selectedId === a.agent_id ? ' agent-pnl-row-selected' : ''}`.trim() || undefined}
+                  tabIndex={onSelectAgent ? 0 : undefined}
+                  data-selected={onSelectAgent ? String(selectedId === a.agent_id) : undefined}
+                  onClick={onSelectAgent ? () => onSelectAgent(selectedId === a.agent_id ? null : a.agent_id) : undefined}
+                  onKeyDown={onSelectAgent ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectAgent(selectedId === a.agent_id ? null : a.agent_id); }
+                  } : undefined}>
                   <td className="strong agent-pnl-left"
                     title={`накопление с ${fmtSince(a.since_ms)}; внешних исполнений: ${a.ext_fills}${a.mark_age_ms == null ? '' : `; возраст цены оценки: ${Math.round(a.mark_age_ms / 1000)} с`}`}>
                     {a.agent_id}

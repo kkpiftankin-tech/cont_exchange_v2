@@ -6,7 +6,7 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
-const { pnlSamples, buildPnlHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента во времени
+const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
 const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
@@ -6974,9 +6974,16 @@ async function loadLiveAgentRows() {
 // BFF здесь единственный писатель таблицы; сбой семплера не влияет на ответы панели. ──
 const PNL_HISTORY_SAMPLE_MS = Math.max(0, parseInt(process.env.PNL_HISTORY_SAMPLE_MS || "60000", 10) || 0);
 const PNL_HISTORY_RETENTION_DAYS = Math.max(1, parseInt(process.env.PNL_HISTORY_RETENTION_DAYS || "7", 10) || 7);
+const PNL_HISTORY_MAX_HOURS = Math.min(168, PNL_HISTORY_RETENTION_DAYS * 24);   // окно графика не длиннее срока хранения (и не больше 7 суток)
 let pnlSamplerBusy = false;
 let pnlLastPruneMs = 0;
-let pnlTableReady = false;
+// DDL выполняется один раз и одним вызовом: семплер и маршруты чтения ждут общий промис (параллельный CREATE TABLE IF NOT EXISTS одной и той же
+// таблицы может упасть на уникальном индексе pg_type); сбой сбрасывает промис, и следующий вызов пробует снова.
+let pnlTableInit = null;
+function ensurePnlHistoryReady(pool) {
+  if (!pnlTableInit) pnlTableInit = ensurePnlHistoryTable(pool).catch((e) => { pnlTableInit = null; throw e; });
+  return pnlTableInit;
+}
 async function ensurePnlHistoryTable(pool) {
   await pool.query(
     `CREATE TABLE IF NOT EXISTS ce_agent_pnl_history (
@@ -6986,20 +6993,43 @@ async function ensurePnlHistoryTable(pool) {
        unrealized_usdt NUMERIC(38, 12),
        trade_fills     INTEGER NOT NULL DEFAULT 0,
        PRIMARY KEY (agent_id, ts))`);
+  // Итоги ledger по охватам (все агенты, переводчики, арбитражёры) для графика на вкладке «PnL»: журнал значений ledger, не второй расчёт.
+  // Создаётся до ALTER ниже: таймаут блокировки ALTER не должен оставлять график без таблицы.
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS ce_pnl_totals_history (
+       scope        TEXT NOT NULL CHECK (scope IN ('all', 'translator', 'arbitrageur')),
+       ts           TIMESTAMPTZ NOT NULL,
+       internal_r   NUMERIC(38, 12),
+       internal_u   NUMERIC(38, 12),
+       external_r   NUMERIC(38, 12),
+       external_u   NUMERIC(38, 12),
+       agents       INTEGER NOT NULL DEFAULT 0,
+       incomplete   INTEGER NOT NULL DEFAULT 0,
+       PRIMARY KEY (scope, ts))`);
   // ADR-083: выгода участника в клиринге — приращение за интервал и число тактов (учтено / ожидалось) + индекс по времени.
-  // ALTER берёт эксклюзивную блокировку даже когда колонка есть, поэтому сначала проверяем каталог и меняем схему, только если надо,
-  // с коротким lock_timeout (иначе DDL встанет в очередь за долгим SELECT и заблокирует всё, что идёт за ним).
-  const cols = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'ce_agent_pnl_history'");
+  // ALTER берёт эксклюзивную блокировку даже когда колонка есть, поэтому сначала проверяем каталог (в текущей схеме) и меняем схему, только если надо,
+  // в одной транзакции с коротким SET LOCAL lock_timeout (иначе DDL встанет в очередь за долгим SELECT и заблокирует всё, что идёт за ним;
+  // SET LOCAL не оставляет таймаут на соединении, вернувшемся в пул).
+  const cols = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'ce_agent_pnl_history'");
   const have = new Set(cols.rows.map((r) => r.column_name));
-  const need = [["surplus_inc_usdt", "NUMERIC(38, 12)"], ["surplus_tacts", "INTEGER"], ["surplus_tacts_expected", "INTEGER"]].filter(([c]) => !have.has(c));
-  const idx = await pool.query("SELECT 1 FROM pg_indexes WHERE tablename = 'ce_agent_pnl_history' AND indexname = 'idx_ce_pnl_hist_ts'");
+  // ADR-087 (модель C′): внутренняя группа заработка агента (R, U) — журнал значений ledger для графика на вкладке «PnL».
+  const need = [["surplus_inc_usdt", "NUMERIC(38, 12)"], ["surplus_tacts", "INTEGER"], ["surplus_tacts_expected", "INTEGER"],
+                ["internal_realized_usdt", "NUMERIC(38, 12)"], ["internal_unrealized_usdt", "NUMERIC(38, 12)"]].filter(([c]) => !have.has(c));
+  const idx = await pool.query("SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'ce_agent_pnl_history' AND indexname = 'idx_ce_pnl_hist_ts'");
   if (need.length || idx.rowCount === 0) {
     const c = await pool.connect();
+    let broken = false;
     try {
-      await c.query("SET lock_timeout = '3s'");
-      for (const [col, typ] of need) await c.query(`ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS ${col} ${typ}`);
+      await c.query("BEGIN");
+      await c.query("SET LOCAL lock_timeout = '3s'");
+      if (need.length) await c.query(`ALTER TABLE ce_agent_pnl_history ${need.map(([col, typ]) => `ADD COLUMN IF NOT EXISTS ${col} ${typ}`).join(", ")}`);
       if (idx.rowCount === 0) await c.query("CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts)");
-    } finally { try { await c.query("RESET lock_timeout"); } catch (_) { /* соединение */ } c.release(); }
+      await c.query("COMMIT");
+    } catch (e) {
+      broken = true;
+      try { await c.query("ROLLBACK"); broken = false; } catch (_) { /* соединение оборвано: в пул не возвращаем */ }
+      throw e;
+    } finally { c.release(broken); }
   }
 }
 
@@ -7176,16 +7206,17 @@ async function samplePnlHistoryOnce() {
   pnlSamplerBusy = true;
   let drained = null;
   try {
-    if (!pnlTableReady) { await ensurePnlHistoryTable(pool); pnlTableReady = true; }   // PG мог быть недоступен при старте BFF
-    const { agentRows } = await loadLiveAgentRows();
+    await ensurePnlHistoryReady(pool);   // PG мог быть недоступен при старте BFF
+    const { agentRows, pnlTotals } = await loadLiveAgentRows();
     const nowMs = Date.now();
     drained = drainTacts(surplusAcc);   // выгода за интервал с прошлой записи (по тактам клиринга)
     surplusInflight = drained;          // до записи и обновления итогов панель добавляет эту часть сама
     const samples = pnlSamples(agentRows.filter((a) => !a.stale && !a.inactive), nowMs, drained);
     if (samples.length) {
       await pool.query(
-        `INSERT INTO ce_agent_pnl_history (agent_id, ts, realized_usdt, unrealized_usdt, trade_fills, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected)
-         SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::int[], $6::numeric[], $7::int[], $8::int[])
+        `INSERT INTO ce_agent_pnl_history (agent_id, ts, realized_usdt, unrealized_usdt, trade_fills, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected,
+                                           internal_realized_usdt, internal_unrealized_usdt)
+         SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::int[], $6::numeric[], $7::int[], $8::int[], $9::numeric[], $10::numeric[])
          ON CONFLICT (agent_id, ts) DO UPDATE SET
            surplus_inc_usdt = CASE WHEN EXCLUDED.surplus_inc_usdt IS NULL THEN ce_agent_pnl_history.surplus_inc_usdt
                                    ELSE COALESCE(ce_agent_pnl_history.surplus_inc_usdt, 0) + EXCLUDED.surplus_inc_usdt END,
@@ -7195,15 +7226,32 @@ async function samplePnlHistoryOnce() {
                                          ELSE COALESCE(ce_agent_pnl_history.surplus_tacts_expected, 0) + EXCLUDED.surplus_tacts_expected END`,
         [samples.map((x) => x.agent_id), samples.map((x) => new Date(x.ts_ms).toISOString()),
          samples.map((x) => x.realized), samples.map((x) => x.unrealized), samples.map((x) => x.fills),
-         samples.map((x) => x.surplus_inc), samples.map((x) => x.surplus_tacts), samples.map((x) => x.surplus_expected)]);
+         samples.map((x) => x.surplus_inc), samples.map((x) => x.surplus_tacts), samples.map((x) => x.surplus_expected),
+         samples.map((x) => x.internal_realized), samples.map((x) => x.internal_unrealized)]);
     }
-    // записано: обновляем итоги панели и только тогда снимаем «в пути» (если обновить не удалось — «в пути» остаётся, пока итоги не обновятся)
+    // Записи агентов сохранены: выгода за интервал ушла в историю и возвращаться в копилку не должна, даже если сбой случится ниже
+    // (иначе повторная запись удвоила бы приращение). Итоги ledger по охватам пишутся отдельно: их сбой не откатывает записанное.
     const wasWritten = drained;
     drained = null;
+    // Итоги ledger по охватам: нет итогов (ledger недоступен) — записей нет, пропуск на графике, а не нули
+    const totals = totalsSamples(pnlTotals, nowMs);
+    if (totals.length) try {
+      await pool.query(
+        `INSERT INTO ce_pnl_totals_history (scope, ts, internal_r, internal_u, external_r, external_u, agents, incomplete)
+         SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[], $7::int[], $8::int[])
+         ON CONFLICT (scope, ts) DO NOTHING`,
+        [totals.map((x) => x.scope), totals.map((x) => new Date(x.ts_ms).toISOString()),
+         totals.map((x) => x.internal_r), totals.map((x) => x.internal_u), totals.map((x) => x.external_r), totals.map((x) => x.external_u),
+         totals.map((x) => x.agents), totals.map((x) => x.incomplete)]);
+    } catch (e) {
+      console.error("[pnl-history] totals insert failed:", e.message || e);
+    }
+    // обновляем итоги панели и только тогда снимаем «в пути» (если обновить не удалось — «в пути» остаётся, пока итоги не обновятся)
     if (await refreshSurplusTotalsAfterWrite()) { if (surplusInflight === wasWritten) surplusInflight = null; }
     if (nowMs - pnlLastPruneMs > 3600 * 1000) {   // раз в час убираем записи старше срока хранения
       pnlLastPruneMs = nowMs;
       await pool.query("DELETE FROM ce_agent_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
+      await pool.query("DELETE FROM ce_pnl_totals_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
     }
   } catch (e) {
     if (drained) { restoreTacts(surplusAcc, drained); if (surplusInflight === drained) surplusInflight = null; }   // выгода не теряется: уйдёт со следующим проходом
@@ -8361,15 +8409,37 @@ async function handleVectorClearing(req, res, pathname, query) {
       return writeJson(res, 502, { error: "system_pnl_error", message: String(e.message || e) });
     }
   }
-  if (pathname === "/api/vector-clearing/agent-pnl-history") {
-    const agentId = String((query && query.agent_id) || "").slice(0, 120);
-    if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
-    const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
+  if (pathname === "/api/vector-clearing/pnl-history") {
+    // График заработка агентов во времени на вкладке «PnL»: итоги ledger по охвату (все агенты / переводчики / арбитражёры), записанные
+    // семплером раз в минуту (ce_pnl_totals_history). Ничего не пересчитывается: группы внутренняя / внешние / итого — как в ledger.
+    const scope = String((query && query.scope) || "all");
+    if (!["all", "translator", "arbitrageur"].includes(scope)) return writeJson(res, 400, { error: "bad_scope" });
+    const hours = Math.max(1, Math.min(PNL_HISTORY_MAX_HOURS, parseInt(query && query.hours, 10) || 24));
     const pool = getPgPool();
     if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
+      await ensurePnlHistoryReady(pool);   // таблицы создаёт семплер; при чтении до его первого прохода — создаём здесь
+      const r = await pool.query(
+        `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, internal_r, internal_u, external_r, external_u, agents, incomplete
+           FROM ce_pnl_totals_history
+          WHERE scope = $1 AND ts > now() - make_interval(hours => $2)
+          ORDER BY ts`, [scope, hours]);
+      return writeJson(res, 200, { ...buildTotalsHistoryDto(scope, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+    }
+  }
+  if (pathname === "/api/vector-clearing/agent-pnl-history") {
+    const agentId = String((query && query.agent_id) || "").slice(0, 120);
+    if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
+    const hours = Math.max(1, Math.min(PNL_HISTORY_MAX_HOURS, parseInt(query && query.hours, 10) || 24));
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      await ensurePnlHistoryReady(pool);   // колонки внутренней группы создаёт семплер (или этот вызов), иначе SELECT до первого прохода упал бы
       const r = await pool.query(
         `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, realized_usdt, unrealized_usdt,
+                internal_realized_usdt, internal_unrealized_usdt,
                 surplus_inc_usdt, surplus_tacts, surplus_tacts_expected
            FROM ce_agent_pnl_history
           WHERE agent_id = $1 AND ts > now() - make_interval(hours => $2)
@@ -9641,6 +9711,7 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/agent-positions"
         || pathname === "/api/vector-clearing/agent-pnl"
         || pathname === "/api/vector-clearing/agent-pnl-history"
+        || pathname === "/api/vector-clearing/pnl-history"
         || pathname === "/api/vector-clearing/system-pnl"
         || pathname === "/api/vector-clearing/agent-detail"
         || pathname === "/api/vector-clearing/ce-graph"

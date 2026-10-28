@@ -61,6 +61,17 @@ test('buildPnlChartModel: отсутствующее значение разры
   expect(m.pathR.includes('L')).toBe(false);
 });
 
+test('buildPnlChartModel: пропуск записей во времени разрывает линию (неизвестное не интерполируется), обычный шаг — нет', () => {
+  const step = 60000;
+  const pts = [0, 1, 2, 3, 12, 13, 14].map((i) => ({ t: 1000 + i * step, r: i }));   // между 3-й и 5-й точками выпало 8 минут записей
+  const d = buildPnlChartModel(pts, 700, 230, { r: true }).pathR;
+  expect((d.match(/M/g) || []).length).toBe(2);
+  const even = [0, 1, 2, 3, 4, 5].map((i) => ({ t: 1000 + i * step, r: i }));
+  expect((buildPnlChartModel(even, 700, 230, { r: true }).pathR.match(/M/g) || []).length).toBe(1);
+  const sparse = [0, 1, 2, 3].map((i) => ({ t: 1000 + i * 20 * 60000, r: i }));      // прореженный ряд: шаг 20 мин — тоже норма
+  expect((buildPnlChartModel(sparse, 700, 230, { r: true }).pathR.match(/M/g) || []).length).toBe(1);
+});
+
 test('buildPnlChartModel: одна точка и плоский ряд не дают деления на ноль', () => {
   const m = buildPnlChartModel([{ t: 5000, r: 0, u: 0, total: 0 }], 700, 230);
   expect(Number.isFinite(m.X(5000))).toBe(true);

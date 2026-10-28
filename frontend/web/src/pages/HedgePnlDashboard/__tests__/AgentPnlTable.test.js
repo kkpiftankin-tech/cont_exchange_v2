@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import axios from 'axios';
 import AgentPnlTable from '../AgentPnlTable';
 
@@ -127,4 +127,40 @@ test('нет агентов — пустое состояние', async () => {
   axios.get.mockResolvedValue({ data: dto({ agents: [], totals: dto().totals }) });
   render(<AgentPnlTable pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('agent-pnl-empty')).toBeTruthy());
+});
+
+test('клик по строке выбирает агента для графика, повторный клик снимает выбор; без обработчика строки не кликабельны', async () => {
+  axios.get.mockResolvedValue({ data: dto() });
+  const onSelect = jest.fn();
+  const { rerender } = render(<AgentPnlTable pollMs={600000} selectedId={null} onSelectAgent={onSelect} />);
+  await waitFor(() => expect(screen.getByTestId('agent-pnl-row-T_BTC_binance')).toBeTruthy());
+  fireEvent.click(screen.getByTestId('agent-pnl-row-T_BTC_binance'));
+  expect(onSelect).toHaveBeenLastCalledWith('T_BTC_binance');
+  rerender(<AgentPnlTable pollMs={600000} selectedId="T_BTC_binance" onSelectAgent={onSelect} />);
+  expect(screen.getByTestId('agent-pnl-row-T_BTC_binance').className).toMatch(/agent-pnl-row-selected/);
+  fireEvent.click(screen.getByTestId('agent-pnl-row-T_BTC_binance'));
+  expect(onSelect).toHaveBeenLastCalledWith(null);
+  expect(screen.getByTestId('agent-pnl-row-T_ETH_okx').className).not.toMatch(/selected/);
+});
+
+test('без onSelectAgent строки обычные (компонент по-прежнему работает отдельно)', async () => {
+  axios.get.mockResolvedValue({ data: dto() });
+  render(<AgentPnlTable pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('agent-pnl-row-T_BTC_binance')).toBeTruthy());
+  expect(screen.getByTestId('agent-pnl-row-T_BTC_binance').className).toBe('');
+});
+
+test('строка выбирается и с клавиатуры: Enter и пробел, фокус через Tab', async () => {
+  axios.get.mockResolvedValue({ data: dto() });
+  const onSelect = jest.fn();
+  render(<AgentPnlTable pollMs={600000} selectedId={null} onSelectAgent={onSelect} />);
+  await waitFor(() => expect(screen.getByTestId('agent-pnl-row-T_BTC_binance')).toBeTruthy());
+  const row = screen.getByTestId('agent-pnl-row-T_BTC_binance');
+  expect(row.getAttribute('tabindex')).toBe('0');
+  fireEvent.keyDown(row, { key: 'Enter' });
+  expect(onSelect).toHaveBeenLastCalledWith('T_BTC_binance');
+  fireEvent.keyDown(row, { key: ' ' });
+  expect(onSelect).toHaveBeenCalledTimes(2);
+  fireEvent.keyDown(row, { key: 'a' });
+  expect(onSelect).toHaveBeenCalledTimes(2);
 });

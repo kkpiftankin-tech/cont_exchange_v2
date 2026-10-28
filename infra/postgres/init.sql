@@ -221,6 +221,24 @@ ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_inc_usdt NUMER
 ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts INTEGER;
 ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts_expected INTEGER;
 CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts);   -- сумма выгоды с момента сброса и часовая очистка читают таблицу по времени без agent_id
+-- ADR-087 (CR-F18-005): внутренняя группа заработка агента (R, U) — для графика «Заработок во времени» на вкладке «PnL».
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_realized_usdt NUMERIC(38, 12);
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_unrealized_usdt NUMERIC(38, 12);
+
+-- ce_pnl_totals_history: история итогов заработка агентов по охватам (все агенты / переводчики / арбитражёры) для графика на вкладке «PnL».
+-- Единственный писатель — BFF (тот же семплер раз в минуту): переписывает итоги ledger (GetAgentPnl) как есть, ничего не считает. Только
+-- отображение. Хранение — PNL_HISTORY_RETENTION_DAYS. Схему BFF также создаёт при старте (IF NOT EXISTS). Описание: docs/07-data/ce-pnl-totals-history.md.
+CREATE TABLE IF NOT EXISTS ce_pnl_totals_history (
+  scope        TEXT NOT NULL CHECK (scope IN ('all', 'translator', 'arbitrageur')),
+  ts           TIMESTAMPTZ NOT NULL,
+  internal_r   NUMERIC(38, 12),
+  internal_u   NUMERIC(38, 12),
+  external_r   NUMERIC(38, 12),
+  external_u   NUMERIC(38, 12),
+  agents       INTEGER NOT NULL DEFAULT 0,
+  incomplete   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, ts)
+);
 
 -- ce_system_pnl_baseline / ce_system_pnl_history: прибыль системы CE по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083).
 -- Единственный писатель — BFF (frontend/api/server.js, тот же семплер раз в минуту). База (остатки и цены) задаётся при первом замере и

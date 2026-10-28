@@ -65,13 +65,22 @@ export function buildPnlChartModel(points, W, H, visible = DEFAULT_PNL_VISIBLE, 
   const yMin = lo - pad, yMax = hi + pad;
   const X = (t) => m.l + ((Number(t) - t0) / (t1 - t0)) * pw;
   const Y = (v) => m.t + (1 - (Number(v) - yMin) / (yMax - yMin)) * ph;
-  // путь серии; при пропуске значения (null) линия разрывается, а не соединяет через дыру
+  // Порог разрыва по времени: запись раз в минуту, при прореживании шаг больше; пропуск записей (ledger или BFF были недоступны) длиннее
+  // max(3 мин, 4 × типичный шаг) не соединяется прямой — неизвестное не интерполируется.
+  const dts = [];
+  for (let i = 1; i < pts.length; i++) dts.push(Number(pts[i].t) - Number(pts[i - 1].t));
+  dts.sort((a, b) => a - b);
+  const typicalStep = dts.length ? dts[Math.floor(dts.length / 2)] : 0;
+  const gapMs = Math.max(180000, 4 * typicalStep);
+  // путь серии; при пропуске значения (null) или записей (разрыв по времени) линия разрывается, а не соединяет через дыру
   const path = (key) => {
-    let d = '', pen = false;
+    let d = '', pen = false, prevT = 0;
     for (const p of pts) {
       if (!finite(p[key])) { pen = false; continue; }
+      if (pen && Number(p.t) - prevT > gapMs) pen = false;
       d += `${pen ? 'L' : 'M'}${X(p.t).toFixed(1)} ${Y(p[key]).toFixed(1)} `;
       pen = true;
+      prevT = Number(p.t);
     }
     return d.trim();
   };

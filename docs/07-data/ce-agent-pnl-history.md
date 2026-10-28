@@ -1,7 +1,7 @@
 ---
 id: DOC-DATA-CE-AGENT-PNL-HISTORY
 phase: 07-data
-status: implemented (2026-10-22; колонки выгоды добавлены 2026-10-22, ADR-083)
+status: implemented (2026-10-22; колонки выгоды добавлены 2026-10-22, ADR-083; колонки internal_* — 2026-10-28, CR-F18-005)
 level: sea
 owner: core-team
 source:
@@ -27,7 +27,7 @@ related:
 
 ## Owner
 
-- **Writer: frontend-api (BFF).** Семплер в `frontend/api/server.js` (`startPnlHistorySampler`) каждые `PNL_HISTORY_SAMPLE_MS` (деф. 60000; `0` — выключен) берёт строки панели тем же кодом, что отвечает на `GET /api/vector-clearing/agent-positions` (`loadLiveAgentRows`), отбирает чистой функцией `pnlSamples` (`frontend/api/agent_pnl_history.js`) агентов с данными и пишет одним `INSERT … unnest` с `ON CONFLICT DO NOTHING`. Агент без значений R, U и выгоды в выборку не попадает: «нет данных» остаётся отсутствием строки, а не нулём. Строки агентов, помеченные как устаревшие (`stale`) или без позиции (`inactive`), по R и U не пишутся. Выгоду копит отдельный опрос снимка клиринга (`CE_SURPLUS_POLL_MS`, деф. 700 мс, модуль `frontend/api/ce_surplus_accum.js`), по одному разу на каждый такт (`batchId`); на каждом проходе записи копилка сбрасывается, а приращения пишутся строками с тем же `ts` (при совпадении `(agent_id, ts)` приращения складываются, R и U не перезаписываются). Сбой записи только логируется, ответы панели не страдают. Таблицу семплер создаёт лениво, при первом успешном проходе, поэтому BFF, стартовавший раньше PostgreSQL, начинает писать сам, без рестарта. После сброса статистики сделок кэши панели обнуляются, и в историю не попадает смешанная точка.
+- **Writer: frontend-api (BFF).** Семплер в `frontend/api/server.js` (`startPnlHistorySampler`) каждые `PNL_HISTORY_SAMPLE_MS` (деф. 60000; `0` — выключен) берёт строки панели тем же кодом, что отвечает на `GET /api/vector-clearing/agent-positions` (`loadLiveAgentRows`), отбирает чистой функцией `pnlSamples` (`frontend/api/agent_pnl_history.js`) агентов с данными и пишет одним `INSERT … unnest` с `ON CONFLICT (agent_id, ts) DO UPDATE`: приращения выгоды складываются, а R, U и внутренняя группа не перезаписываются. Агент без значений R, U и выгоды в выборку не попадает: «нет данных» остаётся отсутствием строки, а не нулём. Строки агентов, помеченные как устаревшие (`stale`) или без позиции (`inactive`), по R и U не пишутся. Выгоду копит отдельный опрос снимка клиринга (`CE_SURPLUS_POLL_MS`, деф. 700 мс, модуль `frontend/api/ce_surplus_accum.js`), по одному разу на каждый такт (`batchId`); на каждом проходе записи копилка сбрасывается, а приращения пишутся строками с тем же `ts` (при совпадении `(agent_id, ts)` приращения складываются, R и U не перезаписываются). Сбой записи только логируется, ответы панели не страдают. Таблицу семплер создаёт лениво, при первом успешном проходе, поэтому BFF, стартовавший раньше PostgreSQL, начинает писать сам, без рестарта. После сброса статистики сделок кэши панели обнуляются, и в историю не попадает смешанная точка.
 - **Reader: frontend-api**, `GET /api/vector-clearing/agent-pnl-history` и поля панели (контракт — `docs/06-api/rest/agent-pnl-history.md`).
 - Хранение: раз в час BFF удаляет строки старше `PNL_HISTORY_RETENTION_DAYS` (деф. 7). Накопленная с сброса выгода в панели считается суммой приращений за доступный срок хранения.
 
@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS ce_agent_pnl_history (
 ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_inc_usdt NUMERIC(38, 12);
 ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts INTEGER;
 ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts_expected INTEGER;
+-- ADR-087 (CR-F18-005): внутренняя группа заработка агента для графика на вкладке «PnL»
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_realized_usdt NUMERIC(38, 12);
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_unrealized_usdt NUMERIC(38, 12);
+CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts);
 ```
 
 | Поле | Смысл | Единицы |
@@ -54,6 +58,8 @@ ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts_expected
 | `realized_usdt` | R на момент `ts`; `NULL` — нет внешних сделок или данные не определены | USDT |
 | `unrealized_usdt` | U на момент `ts`; `NULL` — не определён | USDT |
 | `trade_fills` | сколько состоявшихся сделок учтено на момент `ts` | штуки |
+| `internal_realized_usdt` | R внутренней биржи агента на момент `ts` (ledger, ADR-087): накопленная выгода сделок к справедливой цене; `NULL` — не определён или запись сделана до CR-F18-005 | USDT |
+| `internal_unrealized_usdt` | U внутренней биржи агента на момент `ts`; ledger отдаёт 0 (на внутренней бирже всё реализуется в такте), `NULL` — не определён | USDT |
 | `surplus_inc_usdt` | выгода участника в клиринге за интервал с прошлой записи (сумма $S$ по учтённым тактам); `NULL` — потока не было | USDT |
 | `surplus_tacts` | сколько тактов клиринга учтено в интервале (общее для всех участников: полнота опроса) | штуки |
 | `surplus_tacts_expected` | сколько тактов было в интервале по шагу `batchId`; доля учтённых = `surplus_tacts / surplus_tacts_expected` | штуки |

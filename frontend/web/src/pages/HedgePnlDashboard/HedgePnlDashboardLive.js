@@ -6,6 +6,7 @@ import { isAuthenticated, logout } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import logo from '../../assets/logo-purple.svg';
 import AgentPnlTable from './AgentPnlTable';
+import PnlHistoryChart from './PnlHistoryChart';
 import './HedgePnlDashboardLive.css';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
@@ -82,6 +83,7 @@ const HedgePnlDashboardLive = () => {
   const [period, setPeriod] = useState('24h');
   const [symbolFilter, setSymbolFilter] = useState('all');
   const [venueFilter, setVenueFilter] = useState('all');
+  const [selectedAgent, setSelectedAgent] = useState(null);   // агент, выбранный кликом по строке таблицы «Заработок агентов» для графика
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -150,7 +152,8 @@ const HedgePnlDashboardLive = () => {
           </div>
         </section>
 
-        <AgentPnlTable />
+        <AgentPnlTable selectedId={selectedAgent} onSelectAgent={setSelectedAgent} />
+        <PnlHistoryChart selectedAgent={selectedAgent} onClearAgent={() => setSelectedAgent(null)} />
 
         <section className="hedge-pnl-toolbar">
           <div className="hedge-pnl-field">

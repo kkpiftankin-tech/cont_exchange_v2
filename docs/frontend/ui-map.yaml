@@ -63,7 +63,7 @@ screens:
     features: [F-18, F-12]
     elements:
       - id: UI-PNL-AGENTS
-        generated: {component: frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js, line: 81}  # tools/ui-map/scan.py (строку обновит --write)
+        generated: {component: frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js, line: 85}  # tools/ui-map/scan.py (строку обновит --write)
         label: Таблица «Заработок агентов — R / U / R+U»
         kind: table
         meaning: По каждому агенту R (реализованный) и U (нереализованный) внутренней биржи CE, внешних бирж и итого; строка «все агенты»
@@ -75,3 +75,16 @@ screens:
         capability: CAP-F18-AGENT-PNL
         refresh: poll 5s
         states: {empty: "«Нет агентов с позицией»", stale: "«ledger недоступен» (502), прежние данные остаются"}
+      - id: UI-PNL-HISTORY
+        generated: {component: frontend/web/src/pages/HedgePnlDashboard/PnlHistoryChart.js, line: 90}  # tools/ui-map/scan.py (строку обновит --write)
+        label: График «Заработок во времени — R / U / R+U»
+        kind: chart
+        meaning: Как менялись во времени R, U и R+U заработка агентов — по охвату (все агенты, переводчики, арбитражёры или один агент по клику на строку таблицы) и группе (итого, внутренняя биржа CE, внешние биржи); ряды отмечаются галочками
+        unit: USDT
+        field: "points[].groups.{internal,external,total}.{r,u,total}; points[].agents, incomplete (итоги, /pnl-history); для одного агента — /agent-pnl-history, points[].groups"
+        openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1pnl-history/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
+        contract: docs/06-api/rest/agent-pnl-history.md
+        calc: CALC-CE-AGENT-PNL
+        capability: CAP-F18-AGENT-PNL
+        refresh: poll 30s
+        states: {empty: "«За выбранное окно записей пока нет: история копится раз в минуту»", stale: "«не удалось загрузить историю заработка», прежние данные остаются"}

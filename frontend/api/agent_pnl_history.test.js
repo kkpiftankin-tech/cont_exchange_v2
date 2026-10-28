@@ -1,5 +1,5 @@
 // Self-contained node-тест: `node agent_pnl_history.test.js` (у frontend/api нет jest).
-const { pnlSamples, downsample, buildPnlHistoryDto } = require('./agent_pnl_history');
+const { pnlSamples, downsample, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, groupsOf } = require('./agent_pnl_history');
 
 let failed = 0;
 function check(name, cond) {
@@ -72,6 +72,59 @@ check('DTO выгода: у связки без внешних сделок tota
 check('DTO выгода: когда R и U есть, total = R+U = 3', dto2.points[2].total === 3);
 check('DTO выгода: итог и доля учтённых тактов (165 из 180)', dto2.surplus_total === 6 && Math.abs(dto2.surplus_coverage - 165 / 180) < 1e-12 && dto2.has_surplus === true);
 check('DTO без выгоды: has_surplus=false, s = null', buildPnlHistoryDto('x', [{ ts_ms: 1, realized_usdt: 1, unrealized_usdt: 1 }], 24, 5).points[0].s === null && buildPnlHistoryDto('x', [{ ts_ms: 1, realized_usdt: 1, unrealized_usdt: 1 }], 24, 5).has_surplus === false);
+
+// --- внутренняя группа агента (ADR-087, модель C′): пишется как есть, неизвестное — null
+const sInt = pnlSamples([
+  { agent_id: 'T_BTC_binance', realized_usdt: 93.3, unrealized_usdt: 36.7, pnl_internal: { has_data: true, u_has_data: true, r: 10, u: 0, r_plus_u: 10 } },
+  { agent_id: 'T_ETH_okx', realized_usdt: null, unrealized_usdt: null, pnl_internal: { has_data: true, u_has_data: true, r: -2.5, u: 0 } },   // только внутренняя группа
+  { agent_id: 'T_SOL_okx', realized_usdt: 1, unrealized_usdt: null, pnl_internal: { has_data: false, u_has_data: false, r: null, u: null } },
+], 1700000000000);
+check('внутренняя группа: R и U записаны из ledger (U = 0 — данные, а не подстановка)', sInt[0].internal_realized === 10 && sInt[0].internal_unrealized === 0);
+check('агент только с внутренней группой попадает в выборку', sInt.some((x) => x.agent_id === 'T_ETH_okx' && x.internal_realized === -2.5 && x.realized === null));
+check('внутренняя группа неизвестна → null', sInt.find((x) => x.agent_id === 'T_SOL_okx').internal_realized === null);
+
+// --- группы точки: итого = внутренняя + внешние; неизвестная часть → null
+const g = groupsOf(10, 0, 93.3, 36.7);
+check('группы: внутренняя R=10 U=0', g.internal.r === 10 && g.internal.u === 0 && g.internal.total === 10);
+check('группы: внешние R+U', Math.abs(g.external.total - 130) < 1e-9);
+check('группы: итого R = внутр. + внеш., U = внутр. + внеш., R+U', Math.abs(g.total.r - 103.3) < 1e-9 && Math.abs(g.total.u - 36.7) < 1e-9 && Math.abs(g.total.total - 140) < 1e-9);
+const gp = groupsOf(10, 0, 93.3, null);
+check('группы: U внешних неизвестно → U итого и R+U итого = null (частичной суммы нет), R известен', gp.total.r !== null && gp.total.u === null && gp.total.total === null && gp.external.total === null);
+const gn = groupsOf(null, null, 5, 1);
+check('группы: внутренняя неизвестна → итого null, внешние как есть', gn.total.r === null && gn.total.total === null && gn.external.total === 6);
+
+// --- DTO агента: группы в точках
+const dtoG = buildPnlHistoryDto('T_BTC_binance', [
+  { ts_ms: 1000, realized_usdt: 93.3, unrealized_usdt: 36.7, internal_realized_usdt: 10, internal_unrealized_usdt: 0 },
+  { ts_ms: 2000, realized_usdt: null, unrealized_usdt: null, internal_realized_usdt: 11, internal_unrealized_usdt: 0 },
+], 24, 5000);
+check('DTO агента: группы в точке, старые поля r/u/total (внешние) сохранены', dtoG.points[0].groups.total.total !== null && dtoG.points[0].r === 93.3 && dtoG.points[0].total !== null);
+check('DTO агента: точка только с внутренней группой не пропадает', dtoG.points.length === 2 && dtoG.points[1].groups.internal.r === 11 && dtoG.points[1].groups.external.r === null && dtoG.points[1].groups.total.r === null);
+
+// --- итоги ledger для графика вкладки «PnL»
+const grp = (r, u) => ({ has_data: r !== null, u_has_data: u !== null, r, u, r_plus_u: (r !== null && u !== null) ? r + u : null });
+const tot = totalsSamples({
+  all: { internal: grp(10, 0), external: grp(93.3, 36.7), total: grp(103.3, 36.7), agent_count: 61, incomplete_agents: 4 },
+  translator: { internal: grp(8, 0), external: grp(90, 30), total: grp(98, 30), agent_count: 45, incomplete_agents: 3 },
+  arbitrageur: null,
+}, 1700000000000);
+check('итоги: записи по охватам all и translator, арбитражёров без итога нет', tot.length === 2 && tot[0].scope === 'all' && tot[1].scope === 'translator');
+check('итоги: части переписаны как есть, счётчики агентов', tot[0].internal_r === 10 && tot[0].internal_u === 0 && tot[0].external_r === 93.3 && tot[0].external_u === 36.7 && tot[0].agents === 61 && tot[0].incomplete === 4);
+check('итоги: ledger недоступен (null) → ничего не пишем', totalsSamples(null, 1).length === 0);
+const totU = totalsSamples({ all: { internal: grp(1, 0), external: grp(2, null), total: grp(3, null), agent_count: 2, incomplete_agents: 2 } }, 5);
+check('итоги: U внешних неизвестно → null, R пишется', totU[0].external_r === 2 && totU[0].external_u === null && totU[0].internal_u === 0);
+check('итоги: охват без единого значения пропускается', totalsSamples({ all: { internal: grp(null, null), external: grp(null, null), agent_count: 0, incomplete_agents: 0 } }, 5).length === 0);
+
+const dtoT = buildTotalsHistoryDto('all', [
+  { ts_ms: 2000, internal_r: 11, internal_u: 0, external_r: 94, external_u: 30, agents: 61, incomplete: 0 },
+  { ts_ms: 1000, internal_r: 10, internal_u: 0, external_r: 93, external_u: 36, agents: 61, incomplete: 4 },
+  { ts_ms: 3000, internal_r: null, internal_u: null, external_r: null, external_u: null },   // пустая запись пропускается
+  { ts_ms: 'x', internal_r: 1 },
+], 24, 10000000);
+check('DTO итогов: две валидные точки по возрастанию времени', dtoT.points.length === 2 && dtoT.points[0].t === 1000 && dtoT.points[1].t === 2000 && dtoT.scope === 'all');
+check('DTO итогов: группы и неполнота', dtoT.points[0].groups.total.total === 139 && dtoT.points[0].incomplete === 4 && dtoT.points[1].agents === 61);
+check('DTO итогов: окно, начало, has_data', dtoT.window_hours === 24 && dtoT.first_ms === 1000 && dtoT.since_ms === 10000000 - 24 * 3600 * 1000 && dtoT.has_data === true);
+check('DTO итогов: пустой ответ → has_data=false', buildTotalsHistoryDto('all', [], 24, 5).has_data === false);
 
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');

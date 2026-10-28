@@ -1,5 +1,5 @@
 'use strict';
-// История заработка и выгоды агента во времени (график по клику на агента в панели «Живые позиции»).
+// История заработка и выгоды агента во времени (график по клику на агента в панели «Живые позиции» и график на вкладке «PnL»).
 // Ряд R/U — это ровно те числа, что панель показывает в колонке «заработок R / U»: BFF раз в минуту записывает их в
 // ce_agent_pnl_history (realized, unrealized), график читает записанное. Выгода участника в клиринге (CALC-CE-CLEARING-SURPLUS,
 // ADR-083) пишется в те же строки приращением за интервал (surplus_inc_usdt). Ничего не считается заново, поэтому график не может
@@ -26,11 +26,15 @@ function pnlSamples(rows, tsMs, surplus) {
     // R и U приходят из ledger независимо (ADR-087, модель C′): R известен без цены оценки, U — только с ней; подмены неизвестного нулём нет
     const r = finite(a.realized_usdt) ? Number(a.realized_usdt) : null;
     const u = finite(a.unrealized_usdt) ? Number(a.unrealized_usdt) : null;
+    // Внутренняя группа (ADR-087): R и U из ledger как есть (U внутренней биржи ledger отдаёт нулём; константа здесь не подставляется)
+    const pi = a.pnl_internal || {};
+    const ir = pi.has_data && finite(pi.r) ? Number(pi.r) : null;
+    const iu = pi.u_has_data && finite(pi.u) ? Number(pi.u) : null;
     const sp = sPart(a.agent_id);
-    if (r === null && u === null && sp.surplus_inc === null) continue;
+    if (r === null && u === null && ir === null && iu === null && sp.surplus_inc === null) continue;
     seen.add(a.agent_id);
     out.push({
-      agent_id: a.agent_id, ts_ms: Number(tsMs), realized: r, unrealized: u,
+      agent_id: a.agent_id, ts_ms: Number(tsMs), realized: r, unrealized: u, internal_realized: ir, internal_unrealized: iu,
       fills: finite(a.trade_fills) ? Math.trunc(Number(a.trade_fills)) : 0, ...sp,
     });
   }
@@ -39,7 +43,7 @@ function pnlSamples(rows, tsMs, surplus) {
     if (seen.has(id) || !id) continue;
     const sp = sPart(id);
     if (sp.surplus_inc === null) continue;
-    out.push({ agent_id: id, ts_ms: Number(tsMs), realized: null, unrealized: null, fills: 0, ...sp });
+    out.push({ agent_id: id, ts_ms: Number(tsMs), realized: null, unrealized: null, internal_realized: null, internal_unrealized: null, fills: 0, ...sp });
   }
   return out;
 }
@@ -65,6 +69,64 @@ function downsample(points, maxPoints) {
   return out;
 }
 
+// Три группы значений точки (ADR-087): внутренняя биржа, внешние биржи, итого. Все слагаемые записаны из ledger; здесь только их сумма
+// для отображения (R+U и «итого» = внутренняя + внешние). Неизвестная часть даёт null, а не ноль: частичной суммы не бывает.
+const sumKnown = (x, y) => (x !== null && y !== null ? x + y : null);
+function groupOf(r, u) { return { r, u, total: sumKnown(r, u) }; }
+function groupsOf(ir, iu, er, eu) {
+  return { internal: groupOf(ir, iu), external: groupOf(er, eu), total: groupOf(sumKnown(ir, er), sumKnown(iu, eu)) };
+}
+const numOrNull = (v) => (finite(v) ? Number(v) : null);
+
+// Выборка итогов ledger для вкладки «PnL»: pnlTotals — результат pnlTotalsDto ({ translator, arbitrageur, all }); по строке на охват. Каждая
+// часть пишется, только когда ledger её знает (has_data для R, u_has_data для U); охват без единого значения пропускается.
+const TOTALS_SCOPES = [['all', 'all'], ['translator', 'translator'], ['arbitrageur', 'arbitrageur']];
+function totalsSamples(pnlTotals, tsMs) {
+  const out = [];
+  if (!pnlTotals) return out;
+  for (const [scope, key] of TOTALS_SCOPES) {
+    const g = pnlTotals[key];
+    if (!g) continue;
+    const i = g.internal || {}, e = g.external || {};
+    const ir = i.has_data ? numOrNull(i.r) : null, iu = i.u_has_data ? numOrNull(i.u) : null;
+    const er = e.has_data ? numOrNull(e.r) : null, eu = e.u_has_data ? numOrNull(e.u) : null;
+    if (ir === null && iu === null && er === null && eu === null) continue;
+    out.push({
+      scope, ts_ms: Number(tsMs), internal_r: ir, internal_u: iu, external_r: er, external_u: eu,
+      agents: finite(g.agent_count) ? Math.trunc(Number(g.agent_count)) : 0,
+      incomplete: finite(g.incomplete_agents) ? Math.trunc(Number(g.incomplete_agents)) : 0,
+    });
+  }
+  return out;
+}
+
+// DTO графика итогов: dbRows — строки ce_pnl_totals_history одного охвата { ts_ms, internal_r, internal_u, external_r, external_u, agents,
+// incomplete } за окно. Точка: { t, groups: { internal, external, total }, agents, incomplete }; incomplete — сколько агентов в итог не вошло.
+function buildTotalsHistoryDto(scope, dbRows, hours, nowMs, maxPoints = 500) {
+  const raw = [];
+  const sorted = (Array.isArray(dbRows) ? dbRows : []).slice().sort((x, y) => Number(x.ts_ms) - Number(y.ts_ms));
+  for (const r of sorted) {
+    const t = Number(r.ts_ms);
+    if (!Number.isFinite(t)) continue;
+    const ir = numOrNull(r.internal_r), iu = numOrNull(r.internal_u), er = numOrNull(r.external_r), eu = numOrNull(r.external_u);
+    if (ir === null && iu === null && er === null && eu === null) continue;
+    raw.push({
+      t, groups: groupsOf(ir, iu, er, eu),
+      agents: finite(r.agents) ? Math.trunc(Number(r.agents)) : 0,
+      incomplete: finite(r.incomplete) ? Math.trunc(Number(r.incomplete)) : 0,
+    });
+  }
+  const points = downsample(raw, maxPoints);
+  return {
+    scope,
+    window_hours: hours,
+    since_ms: Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null,
+    first_ms: points.length ? points[0].t : null,
+    points,
+    has_data: points.length > 0,
+  };
+}
+
 // dbRows — строки PG { ts_ms, realized_usdt, unrealized_usdt, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected } одного агента за
 // окно. DTO для графика: R, U, R+U (total) и накопленная за окно выгода s. R+U считается только когда известны обе части; иначе null
 // (неизвестное U не превращается в ноль, чтобы после перезапуска ledger R+U на графике не проваливалось на размер U).
@@ -77,8 +139,9 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
     if (!Number.isFinite(t)) continue;
     const rr = finite(r.realized_usdt) ? Number(r.realized_usdt) : null;
     const uu = finite(r.unrealized_usdt) ? Number(r.unrealized_usdt) : null;
+    const ir = numOrNull(r.internal_realized_usdt), iu = numOrNull(r.internal_unrealized_usdt);
     const si = finite(r.surplus_inc_usdt) ? Number(r.surplus_inc_usdt) : null;
-    if (rr === null && uu === null && si === null) continue;
+    if (rr === null && uu === null && ir === null && iu === null && si === null) continue;
     if (si !== null) {
       sCum += si; hasS = true;
       tactsSeen += finite(r.surplus_tacts) ? Number(r.surplus_tacts) : 0;
@@ -87,6 +150,7 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
     raw.push({
       t, r: rr, u: uu,
       total: (rr === null || uu === null) ? null : rr + uu,
+      groups: groupsOf(ir, iu, rr, uu),   // внутренняя, внешние (r, u выше), итого — для графика на вкладке «PnL»
       s: hasS ? sCum : null,
     });
   }
@@ -104,4 +168,4 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
   };
 }
 
-module.exports = { pnlSamples, downsample, buildPnlHistoryDto };
+module.exports = { pnlSamples, downsample, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, groupsOf };

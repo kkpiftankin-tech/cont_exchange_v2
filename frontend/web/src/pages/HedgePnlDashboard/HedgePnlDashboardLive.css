@@ -363,3 +363,17 @@
   border-top: 1px solid rgba(255, 255, 255, 0.18);
   font-weight: 700;
 }
+
+/* Выбор агента кликом по строке таблицы «Заработок агентов» (ADR-087, CR-F18-005) */
+.agent-pnl-table tbody tr.agent-pnl-row-click { cursor: pointer; }
+.agent-pnl-table tbody tr.agent-pnl-row-click:hover { background: rgba(255, 255, 255, 0.05); }
+.agent-pnl-table tbody tr.agent-pnl-row-selected { background: rgba(79, 176, 216, 0.16); }
+
+/* График «Заработок во времени» под таблицей */
+.agent-pnl-history {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+}

@@ -2096,6 +2096,13 @@ nodes:
     path: infra/postgres/init.sql
     store: postgresql
     tableName: ce_agent_pnl_history
+  - id: postgresql:ce_pnl_totals_history
+    type: table
+    class: normative
+    title: ce_pnl_totals_history
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_pnl_totals_history
   - id: postgresql:ce_system_pnl_baseline
     type: table
     class: normative
