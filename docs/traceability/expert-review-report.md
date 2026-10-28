@@ -91,7 +91,7 @@
 
 - **CALC-CE-AGENT-PNL** (F-18, `accepted`) — Заработок агента CE по биржам — R, U и R+U внутренней биржи, внешних бирж и итого · [docs/04-domain/calculations/CALC-CE-AGENT-PNL.md](../04-domain/calculations/CALC-CE-AGENT-PNL.md)
 - **CALC-CE-ANCHOR** (F-18, `partial`) — Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017) · [docs/04-domain/calculations/CALC-CE-ANCHOR.md](../04-domain/calculations/CALC-CE-ANCHOR.md)
-- **CALC-CE-PAIR-TRADES** (F-18, `accepted`) — Сделки на внешних биржах по паре — накопленный объём базовой валюты, цены покупки и продажи и цена покупки с комиссией · [docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md](../04-domain/calculations/CALC-CE-PAIR-TRADES.md)
+- **CALC-CE-PAIR-TRADES** (F-18, `accepted`) — Сделки на внешних биржах по паре — накопленный объём базовой валюты, цены покупки и продажи и цены с расчётной комиссией · [docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md](../04-domain/calculations/CALC-CE-PAIR-TRADES.md)
 - **CALC-CE-SKEW-BAND-CALIBRATION** (F-18, `calibrated`) — Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка переводчика · [docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md](../04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md)
 - **CALC-CE-SYSTEM-PNL** (F-18, `partial`) — P&L системы CE (MTM реальных остатков) и инварианты · [docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md](../04-domain/calculations/CALC-CE-SYSTEM-PNL.md)
 - **CALC-CE-TRANSLATOR-PNL** (F-18, `partial`) — Прибыль переводчика — realized (закрытые round-trip) и unrealized (MTM остатка) · [docs/04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md](../04-domain/calculations/CALC-CE-TRANSLATOR-PNL.md)

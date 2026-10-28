@@ -50,8 +50,8 @@ const normFee = (fee) => ({
   source: fee && fee.source ? String(fee.source) : 'default',
 });
 
-// rows — строки SQL по (symbol, t): { symbol, t, buy_qty, sell_qty, buy_notional, sell_notional, buy_fee, fills }; t — начало интервала, мс;
-// buy_fee — расчётная комиссия покупок интервала во второй валюте пары (SQL: стоимость × ставка по типу заявки, CALC-CE-PAIR-TRADES §2.1).
+// rows — строки SQL по (symbol, t): { symbol, t, buy_qty, sell_qty, buy_notional, sell_notional, buy_fee, sell_fee, fills }; t — начало интервала, мс;
+// buy_fee и sell_fee — расчётная комиссия покупок и продаж интервала во второй валюте пары (SQL: стоимость × ставка по типу заявки, CALC-CE-PAIR-TRADES §2.1).
 // fee — ставки, по которым она посчитана (попадают в ответ). Возвращает DTO графика: пары (по убыванию числа исполнений, затем по имени), у пары
 // точки по возрастанию t с ценами интервала (в том числе покупки с комиссией) и накопленными от начала окна объёмами, плюс итоги пары за окно.
 function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
@@ -68,17 +68,22 @@ function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
   let firstMs = null;
   for (const [symbol, list] of by) {
     list.sort((x, y) => Number(x.t) - Number(y.t));
-    let cb = 0, cs = 0, fills = 0, nb = 0, ns = 0, fb = 0;
+    let cb = 0, cs = 0, fills = 0, nb = 0, ns = 0, fb = 0, fs = 0, buyFeeGap = false, sellFeeGap = false;
     const points = [];
     for (const r of list) {
       const bq = num(r.buy_qty), sq = num(r.sell_qty);
       if (!(bq > 0) && !(sq > 0)) continue;   // интервал без исполнений в ответ не идёт
-      cb += bq; cs += sq; nb += num(r.buy_notional); ns += num(r.sell_notional); fb += num(r.buy_fee); fills += Math.trunc(num(r.fills));
+      // У стороны с объёмом нет комиссии (устаревший запрос или фикстура) — комиссия неизвестна, а не нулевая: цена с комиссией null, а не равна цене без неё
+      const buyFeeOk = !(bq > 0) || finite(r.buy_fee), sellFeeOk = !(sq > 0) || finite(r.sell_fee);
+      if (!buyFeeOk) buyFeeGap = true;
+      if (!sellFeeOk) sellFeeGap = true;
+      cb += bq; cs += sq; nb += num(r.buy_notional); ns += num(r.sell_notional); fb += num(r.buy_fee); fs += num(r.sell_fee); fills += Math.trunc(num(r.fills));
       points.push({
         t: Number(r.t),
         buy_qty: bq, sell_qty: sq,
         buy_price: vwap(r.buy_notional, bq), sell_price: vwap(r.sell_notional, sq),
-        buy_price_fee: feeKnown ? vwap(num(r.buy_notional) + num(r.buy_fee), bq) : null,   // цена покупки с комиссией: цена + комиссия на единицу базовой валюты
+        buy_price_fee: feeKnown && buyFeeOk ? vwap(num(r.buy_notional) + num(r.buy_fee), bq) : null,   // цена покупки с комиссией: цена + комиссия на единицу базовой валюты
+        sell_price_fee: feeKnown && sellFeeOk ? vwap(num(r.sell_notional) - num(r.sell_fee), sq) : null,  // цена продажи за вычетом комиссии: цена − комиссия на единицу базовой валюты
         cum_buy_qty: cb, cum_sell_qty: cs, cum_total_qty: cb + cs, cum_net_qty: cb - cs,
       });
     }
@@ -87,7 +92,8 @@ function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
     const { base, quote } = splitPair(symbol);
     pairs.push({
       pair: symbol, base, quote, fills,
-      totals: { buy_qty: cb, sell_qty: cs, total_qty: cb + cs, net_qty: cb - cs, buy_price: vwap(nb, cb), sell_price: vwap(ns, cs), buy_price_fee: feeKnown ? vwap(nb + fb, cb) : null, buy_fee: feeKnown ? fb : null },
+      totals: { buy_qty: cb, sell_qty: cs, total_qty: cb + cs, net_qty: cb - cs, buy_price: vwap(nb, cb), sell_price: vwap(ns, cs), buy_price_fee: feeKnown && !buyFeeGap ? vwap(nb + fb, cb) : null, buy_fee: feeKnown && !buyFeeGap ? fb : null,
+        sell_price_fee: feeKnown && !sellFeeGap ? vwap(ns - fs, cs) : null, sell_fee: feeKnown && !sellFeeGap ? fs : null },
       points,
     });
   }

@@ -7691,6 +7691,8 @@ async function loadPairTradesRows(hours) {
             SUM(CASE WHEN side = 'SELL' THEN filled_qty * avg_price END)::float8 AS sell_notional,
             SUM(CASE WHEN side = 'BUY' THEN filled_qty * avg_price
                        * (CASE WHEN order_type IN ('LIMIT', 'POST_ONLY') THEN $3::float8 ELSE $4::float8 END) / 10000.0 END)::float8 AS buy_fee,
+            SUM(CASE WHEN side = 'SELL' THEN filled_qty * avg_price
+                       * (CASE WHEN order_type IN ('LIMIT', 'POST_ONLY') THEN $3::float8 ELSE $4::float8 END) / 10000.0 END)::float8 AS sell_fee,
             COUNT(*)::int AS fills
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0

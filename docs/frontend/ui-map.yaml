@@ -94,7 +94,7 @@ screens:
         kind: chart
         meaning: По каждой выбранной (чекбоксом) паре валют — накопленный объём базовой валюты (левая ось) и цены покупки и продажи на внешних биржах во второй валюте пары (правая ось); режим объёма общий, нетто или раздельно
         unit: объём — базовая валюта, цена — вторая валюта пары
-        field: "pairs[].points[].{cum_total_qty,cum_net_qty,cum_buy_qty,cum_sell_qty,buy_price,buy_price_fee,sell_price}; pairs[].totals; fee"
+        field: "pairs[].points[].{cum_total_qty,cum_net_qty,cum_buy_qty,cum_sell_qty,buy_price,buy_price_fee,sell_price,sell_price_fee}; pairs[].totals; fee"
         openapi: "contracts/openapi/fob/bff/v1/api/bff.yaml#/paths/~1api~1vector-clearing~1pair-trades-history/get"  # TODO Этап 3 п.3 — OpenAPI BFF ещё не создан
         contract: docs/06-api/rest/pair-trades-history.md
         calc: CALC-CE-PAIR-TRADES

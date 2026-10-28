@@ -82,5 +82,37 @@ check('комиссия: кросс-пара — надбавка в едини�
   return near(d.pairs[0].points[0].buy_price_fee, 0.051 * 1.0002, 1e-12);
 })());
 
+// --- комиссия с цены продажи: зеркально покупке, но вычитается (цена продажи за вычетом комиссии)
+// Интервал: лимитная продажа 0,20 BTC по 80 100 (maker 2 б.п.) и рыночная 0,05 BTC по 80 060 (taker 10 б.п.).
+const SN_L = 0.2 * 80100, SN_M = 0.05 * 80060;
+const SFEE = SN_L * 0.0002 + SN_M * 0.001;                              // 3,204 + 4,003 = 7,207 USDT
+const sellDto = buildPairTradesDto([
+  { symbol: 'BTC/USDT', t: T0, buy_qty: 0.1, sell_qty: 0.25, buy_notional: 8000, sell_notional: SN_L + SN_M, buy_fee: 1.6, sell_fee: SFEE, fills: 3 },
+  { symbol: 'BTC/USDT', t: T0 + 60000, buy_qty: 0.1, sell_qty: 0, buy_notional: 8010, sell_notional: null, buy_fee: 1.6, sell_fee: null, fills: 1 },
+], 1, T0 + 3600000, 60000, { maker_bps: 2, taker_bps: 10, source: 'config' });
+const sp = sellDto.pairs[0];
+check('комиссия продаж: цена продажи за вычетом комиссии = цена − комиссия на единицу базовой (80 092 − 7,207/0,25 = 80 063,17)', near(sp.points[0].sell_price_fee, (SN_L + SN_M) / 0.25 - SFEE / 0.25, 1e-6) && near(sp.points[0].sell_price, (SN_L + SN_M) / 0.25, 1e-6));
+check('комиссия продаж: цена с вычетом ниже цены продажи, а цена покупки с комиссией выше цены покупки (спред круга сужается с обеих сторон)', sp.points[0].sell_price_fee < sp.points[0].sell_price && sp.points[0].buy_price_fee > sp.points[0].buy_price);
+check('комиссия продаж: интервал без продаж — цены продажи с вычетом нет (null, не ноль); покупка интервала на неё не влияет', sp.points[1].sell_price_fee === null && sp.points[1].buy_price_fee !== null);
+check('комиссия продаж: итоги пары — цена продажи за вычетом комиссии и сумма комиссии продаж', near(sp.totals.sell_fee, SFEE, 1e-9) && near(sp.totals.sell_price_fee, (SN_L + SN_M - SFEE) / 0.25, 1e-6));
+check('комиссия продаж: ставок нет — цена продажи за вычетом комиссии и комиссия null', (() => {
+  const d = buildPairTradesDto([{ symbol: 'BTC/USDT', t: T0, sell_qty: 1, sell_notional: 80000, fills: 1 }], 1, 5, 60000);
+  return d.pairs[0].points[0].sell_price_fee === null && d.pairs[0].totals.sell_fee === null && d.pairs[0].points[0].sell_price === 80000;
+})());
+check('комиссия продаж: кросс-пара — вычет в единицах второй валюты (BTC)', (() => {
+  const d = buildPairTradesDto([{ symbol: 'ETH/BTC', t: T0, sell_qty: 2, sell_notional: 2 * 0.0515, sell_fee: 2 * 0.0515 * 0.0002, fills: 1 }], 1, 5, 60000, { maker_bps: 2, taker_bps: 10, source: 'default' });
+  return near(d.pairs[0].points[0].sell_price_fee, 0.0515 * (1 - 0.0002), 1e-12);
+})());
+check('комиссия продаж: числа примера карточки зафиксированы литералами (80 092 → 80 063,17; комиссия 7,207)', near(sp.points[0].sell_price, 80092, 1e-6) && near(sp.points[0].sell_price_fee, 80063.172, 1e-3) && near(sp.totals.sell_fee, 7.207, 1e-9));
+check('комиссия: у стороны с объёмом нет комиссии (устаревшая строка) — цена с комиссией null, а не равна цене без комиссии; итоги тоже null', (() => {
+  const d = buildPairTradesDto([
+    { symbol: 'BTC/USDT', t: T0, buy_qty: 1, sell_qty: 1, buy_notional: 80000, sell_notional: 80100, buy_fee: 1.6, fills: 2 },   // sell_fee отсутствует
+  ], 1, 5, 60000, { maker_bps: 2, taker_bps: 10, source: 'config' });
+  const p = d.pairs[0];
+  return near(p.points[0].buy_price_fee, 80001.6, 1e-9) && p.points[0].sell_price_fee === null && p.totals.sell_fee === null && p.totals.sell_price_fee === null
+    && near(p.totals.buy_fee, 1.6, 1e-9) && p.points[0].sell_price === 80100;
+})());
+check('комиссия не искажает объёмы и цены без комиссии', near(sp.totals.sell_qty, 0.25) && near(sp.totals.buy_qty, 0.2) && near(sp.points[0].sell_price, (SN_L + SN_M) / 0.25, 1e-6));
+
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');
