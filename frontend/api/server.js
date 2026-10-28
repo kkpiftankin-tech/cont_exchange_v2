@@ -6,7 +6,7 @@ const { join } = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { combineTradeStats, combineTradeStatsByVenue, totalPosition, arbPositionParts } = require("./trade_stats_math");
 const { buildHedgeMap } = require("./hedge_orders_view");  // заявки агентов из child_orders (итог с дозаполнением резидентных лимитов)
-const { bucketMsForHours, buildPairTradesDto, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
+const { bucketMsForHours, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require("./pair_trades_history");  // график сделок на внешних биржах по парам (CR-F18-006): объём и цены
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
@@ -7701,12 +7701,43 @@ async function loadPairTradesRows(hours) {
       ORDER BY 1, 2`, [bucketMs, hours, fee.maker_bps, fee.taker_bps]);
   return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs, fee);
 }
+// Пары, по которым были исполненные band-хеджи за последние 7 суток (для чекбоксов: пара без сделок в окне остаётся в списке). Запрос идёт по
+// индексу idx_child_orders_created и агрегирует около 190 тыс. подходящих строк (dev 2026-10-28: 0,26 с на тёплом кэше PostgreSQL), но при
+// росте таблицы дорожает, поэтому: кэш 10 минут (в том числе пустой успешный результат — отметка времени ставится только при успехе, сбой
+// повторяется), один запрос на всех ожидающих, а ожидание ответа ограничено 3 с — по истечении отдаётся прежний список (в крайнем случае
+// пустой), а запрос дорабатывает в фоне и обновляет кэш. Основной график от него не зависит.
+const KNOWN_PAIRS_TTL_MS = 600000;
+const KNOWN_PAIRS_WAIT_MS = 3000;
+const KNOWN_PAIRS_QUERY_TIMEOUT_MS = 25000;   // зависший запрос не должен держать общий inflight вечно
+let knownPairsCache = { at: 0, rows: [] };
+let knownPairsInflight = null;
+function refreshKnownPairs() {
+  if (knownPairsInflight) return knownPairsInflight;
+  const pool = getPgPool();
+  if (!pool) return Promise.resolve(knownPairsCache.rows);
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("known_pairs_timeout")), KNOWN_PAIRS_QUERY_TIMEOUT_MS).unref());
+  const query = pool.query(
+    `SELECT symbol, (EXTRACT(EPOCH FROM MAX(created_at)) * 1000)::bigint AS last_trade_ms
+       FROM child_orders
+      WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0 AND created_at > now() - interval '7 days'
+      GROUP BY symbol`);
+  knownPairsInflight = Promise.race([query, timeout])
+    .then((r) => { knownPairsCache = { at: Date.now(), rows: r.rows }; return r.rows; })
+    .catch(() => knownPairsCache.rows)
+    .finally(() => { knownPairsInflight = null; });
+  return knownPairsInflight;
+}
+function loadKnownPairs() {
+  if (knownPairsCache.at && Date.now() - knownPairsCache.at < KNOWN_PAIRS_TTL_MS) return Promise.resolve(knownPairsCache.rows);
+  const wait = new Promise((resolve) => setTimeout(() => resolve(knownPairsCache.rows), KNOWN_PAIRS_WAIT_MS).unref());
+  return Promise.race([refreshKnownPairs(), wait]);
+}
 function fetchPairTrades(hours) {
   const hit = pairTradesCache.get(hours);
   if (hit && Date.now() - hit.at < PAIR_TRADES_TTL_MS) return Promise.resolve(hit.value);
   if (!pairTradesInflight.has(hours)) {
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("pair_trades_timeout")), PAIR_TRADES_TIMEOUT_MS).unref());
-    pairTradesInflight.set(hours, Promise.race([loadPairTradesRows(hours), timeout])
+    pairTradesInflight.set(hours, Promise.race([Promise.all([loadPairTradesRows(hours), loadKnownPairs()]).then(([dto, known]) => ({ ...dto, known_pairs: buildKnownPairs(dto.pairs, known) })), timeout])
       .then((value) => {
         pairTradesCache.set(hours, { at: Date.now(), value });
         while (pairTradesCache.size > PAIR_TRADES_CACHE_MAX) pairTradesCache.delete(pairTradesCache.keys().next().value);   // самое старое окно

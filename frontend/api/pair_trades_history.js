@@ -109,4 +109,31 @@ function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
   };
 }
 
-module.exports = { bucketMsForHours, splitPair, buildPairTradesDto, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS };
+// Все известные пары для чекбоксов экрана: пары с исполнениями в окне плюс пары, торговавшиеся раньше (knownRows — строки SQL за 7 суток
+// { symbol, last_trade_ms }). Пара без исполнений в окне остаётся в списке (in_window = false) — экран показывает её неактивной с датой последней
+// сделки, а не прячет. Порядок: сначала пары окна по числу исполнений, затем остальные по давности последней сделки (свежие выше).
+function buildKnownPairs(windowPairs, knownRows) {
+  const byName = new Map();
+  for (const r of Array.isArray(knownRows) ? knownRows : []) {
+    if (!r || !r.symbol) continue;
+    byName.set(r.symbol, { last_trade_ms: finite(r.last_trade_ms) ? Number(r.last_trade_ms) : null });
+  }
+  const out = [];
+  const inWindow = new Set();
+  for (const p of Array.isArray(windowPairs) ? windowPairs : []) {
+    inWindow.add(p.pair);
+    const last = p.points && p.points.length ? p.points[p.points.length - 1].t : null;
+    const known = byName.get(p.pair);
+    out.push({ pair: p.pair, base: p.base, quote: p.quote, in_window: true, fills: p.fills, last_trade_ms: Math.max(known && known.last_trade_ms !== null ? known.last_trade_ms : 0, finite(last) ? Number(last) : 0) || null });
+  }
+  const rest = [];
+  for (const [symbol, v] of byName) {
+    if (inWindow.has(symbol)) continue;
+    const { base, quote } = splitPair(symbol);
+    rest.push({ pair: symbol, base, quote, in_window: false, fills: 0, last_trade_ms: v.last_trade_ms });
+  }
+  rest.sort((a, b) => (Number(b.last_trade_ms) || 0) - (Number(a.last_trade_ms) || 0) || a.pair.localeCompare(b.pair));
+  return out.concat(rest);
+}
+
+module.exports = { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS };

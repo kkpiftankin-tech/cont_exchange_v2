@@ -132,21 +132,32 @@ export default function PairTradesChart({ pollMs = 30000 }) {
 
   const data = state.data;
   const pairs = data && Array.isArray(data.pairs) ? data.pairs : [];
-  // До первого выбора показываем самую активную пару (список приходит по убыванию числа заявок). Сохранённый выбор, ни одной пары из которого
-  // нет в ответе (другое окно, пара без сделок), тоже сводится к самой активной паре, а не к пустому экрану; пользовательский выбор «ничего» (пустой
-  // список) уважается.
-  const names = pairs.map((p) => p.pair);
-  const valid = selected === null ? [] : selected.filter((n) => names.includes(n));
-  const chosen = selected === null || (selected.length > 0 && valid.length === 0) ? names.slice(0, 1) : valid;
+  // Все известные пары (с исполнениями за последние 7 суток) показываются чекбоксами всегда; график есть только у пар с исполнениями в выбранном окне,
+  // остальные неактивны с подписью и датой последней сделки. До первого выбора (и если сохранённый выбор не содержит ни одной известной пары)
+  // отмечены все пары с данными; пользовательский выбор «ничего» (пустой список) уважается.
+  const allPairs = data && Array.isArray(data.known_pairs) && data.known_pairs.length
+    ? data.known_pairs
+    : pairs.map((p) => ({ pair: p.pair, base: p.base, quote: p.quote, in_window: true, fills: p.fills, last_trade_ms: null }));
+  const known = allPairs.map((p) => p.pair);
+  const withData = pairs.map((p) => p.pair);
+  const valid = selected === null ? [] : selected.filter((n) => known.includes(n));
+  const useDefault = selected === null || (selected.length > 0 && valid.length === 0);
+  const chosen = useDefault ? withData : valid.filter((n) => withData.includes(n));
+  const saveSelected = (names) => {
+    // сохраняем отметки известных пар, в том числе пар без сделок в этом окне (в другом окне они получат график); неизвестные имена отбрасываются
+    const next = known.filter((n) => names.includes(n));
+    setSelected(next);
+    writeLs(LS_PAIRS, next);
+  };
   const togglePair = (name) => {
     const cur = new Set(chosen);
     if (cur.has(name)) cur.delete(name); else cur.add(name);
-    const next = names.filter((n) => cur.has(n));
-    const keep = (selected || []).filter((n) => !names.includes(n));   // выбор пар, которых сейчас нет в ответе, не теряем
-    const merged = [...keep, ...next];
-    setSelected(merged);
-    writeLs(LS_PAIRS, merged);
+    // отметки пар без сделок в окне не теряем: при выборе по умолчанию они считаются отмеченными (в другом окне у них появится график)
+    const noData = (useDefault ? known : valid).filter((n) => !withData.includes(n));
+    saveSelected([...cur, ...noData]);
   };
+  const selectAll = () => saveSelected(known);
+  const selectNone = () => saveSelected([]);
   const changeMode = (m) => { setMode(m); writeLs(LS_MODE, m); };
   const toggleFee = () => setWithFee((cur) => { writeLs(LS_FEE, !cur); return !cur; });
   const toggleSellFee = () => setWithSellFee((cur) => { writeLs(LS_FEE_SELL, !cur); return !cur; });
@@ -210,21 +221,31 @@ export default function PairTradesChart({ pollMs = 30000 }) {
       {state.loading && !data && <div className="hedge-pnl-state">Загрузка сделок по парам…</div>}
       {state.error && <div className="hedge-pnl-state error" data-testid="pair-error">{state.error}</div>}
       {data && !data.has_data && (
-        <div className="hedge-pnl-state" data-testid="pair-empty">За выбранное окно внешних сделок по хеджам агентов CE нет.</div>
+        <div className="hedge-pnl-state" data-testid="pair-empty">За выбранное окно внешних сделок по хеджам агентов CE нет{allPairs.length > 0 ? ' ни по одной паре (последние сделки — у пар ниже)' : ''}.</div>
       )}
 
-      {pairs.length > 0 && (
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', margin: '4px 0 10px' }} data-testid="pair-list">
+      {allPairs.length > 0 && (
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', margin: '4px 0 10px' }} data-testid="pair-list">
           <span style={{ fontSize: 13, color: '#8a9aa8' }}>пары:</span>
-          {pairs.map((p) => (
-            <label key={p.pair} style={{ cursor: 'pointer', fontSize: 13, color: chosen.includes(p.pair) ? '#dfe6ee' : '#7a8a98', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-              <input type="checkbox" checked={chosen.includes(p.pair)} onChange={() => togglePair(p.pair)} data-testid={`pair-check-${p.pair}`} />
-              <b>{p.pair}</b> <span style={{ fontSize: 11, color: '#6a7a88' }}>({p.fills})</span>
-            </label>
-          ))}
+          {allPairs.map((p) => {
+            const has = withData.includes(p.pair);
+            const on = chosen.includes(p.pair);
+            return (
+              <label key={p.pair} title={has ? undefined : 'за выбранное окно исполненных хедж-заявок по этой паре нет'}
+                style={{ cursor: has ? 'pointer' : 'default', fontSize: 13, color: on ? '#dfe6ee' : '#7a8a98', opacity: has ? 1 : 0.55, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <input type="checkbox" checked={on} disabled={!has} onChange={() => togglePair(p.pair)} data-testid={`pair-check-${p.pair}`} />
+                <b>{p.pair}</b>{' '}
+                {has
+                  ? <span style={{ fontSize: 11, color: '#6a7a88' }}>({p.fills})</span>
+                  : <span style={{ fontSize: 11, color: '#c9a44a' }} data-testid={`pair-idle-${p.pair}`}>нет сделок за окно{p.last_trade_ms ? `, последняя ${fmtTime(p.last_trade_ms)}` : ''}</span>}
+              </label>
+            );
+          })}
+          <button type="button" style={btn(false)} onClick={selectAll} data-testid="pair-select-all">все</button>
+          <button type="button" style={btn(false)} onClick={selectNone} data-testid="pair-select-none">снять</button>
         </div>
       )}
-      {pairs.length > 0 && chosen.length === 0 && <div style={{ fontSize: 13, color: '#e0b84a' }} data-testid="pair-none">Отметьте хотя бы одну пару, чтобы увидеть график.</div>}
+      {withData.length > 0 && chosen.length === 0 && <div style={{ fontSize: 13, color: '#e0b84a' }} data-testid="pair-none">Отметьте хотя бы одну пару, чтобы увидеть график.</div>}
 
       {stale && <div style={{ fontSize: 12, color: '#e0b84a' }} data-testid="pair-stale">загрузка окна {hours} ч… (показан график прежнего окна)</div>}
       <div style={{ opacity: stale ? 0.45 : 1 }}>

@@ -21,15 +21,16 @@ const PAIRS = [pair('BTC/USDT', 'BTC', 'USDT', 120), pair('ETH/BTC', 'ETH', 'BTC
 
 afterEach(() => { jest.clearAllMocks(); try { window.localStorage.clear(); } catch (e) { /* нет хранилища */ } });
 
-test('по умолчанию отмечена самая активная пара; запрос окна 24 ч; две оси и линии объёма и цены', async () => {
+test('по умолчанию отмечены все пары с данными и для каждой свой график; запрос окна 24 ч; две оси и линии объёма и цены', async () => {
   axios.get.mockResolvedValue({ data: dto(PAIRS) });
   render(<PairTradesChart pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
   expect(axios.get.mock.calls[0][0]).toMatch(/\/vector-clearing\/pair-trades-history$/);
   expect(axios.get.mock.calls[0][1].params).toEqual({ hours: 24 });
-  expect(screen.getByTestId('pair-check-BTC/USDT').checked).toBe(true);
-  expect(screen.getByTestId('pair-check-ETH/BTC').checked).toBe(false);
-  expect(screen.queryByTestId('pair-chart-ETH/BTC')).toBeNull();
+  ['BTC/USDT', 'ETH/BTC', 'SOL/USDT'].forEach((n) => {
+    expect(screen.getByTestId(`pair-check-${n}`).checked).toBe(true);
+    expect(screen.getByTestId(`pair-chart-${n}`)).toBeTruthy();
+  });
   expect(screen.getByTestId('pair-line-cum_total_qty-BTC/USDT').getAttribute('d')).toMatch(/^M/);
   expect(screen.getByTestId('pair-line-buy_price-BTC/USDT').getAttribute('d')).toMatch(/^M/);
   expect(screen.queryByTestId('pair-line-sell_price-BTC/USDT')).toBeNull();   // продаж в точках нет — линии цены продажи нет
@@ -39,19 +40,21 @@ test('по умолчанию отмечена самая активная па�
   expect(screen.getByTestId('pair-totals-BTC/USDT').textContent).toMatch(/куплено 1\.20 BTC по 80\s?030/);
 });
 
-test('чекбоксы пар включают и выключают графики; выбор запоминается; кросс-пара подписана во второй валюте', async () => {
+test('чекбоксы пар выключают и включают графики; выбор запоминается; кросс-пара подписана во второй валюте', async () => {
   axios.get.mockResolvedValue({ data: dto(PAIRS) });
   render(<PairTradesChart pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
-  fireEvent.click(screen.getByTestId('pair-check-ETH/BTC'));
-  expect(screen.getByTestId('pair-chart-ETH/BTC')).toBeTruthy();
-  expect(screen.getByTestId('pair-svg-ETH/BTC').textContent).toMatch(/цена, BTC/);
+  expect(screen.getByTestId('pair-svg-ETH/BTC').textContent).toMatch(/цена, BTC/);      // кросс-пара подписана во второй валюте
   expect(screen.getByTestId('pair-line-sell_price-ETH/BTC')).toBeTruthy();
   fireEvent.click(screen.getByTestId('pair-check-BTC/USDT'));
   expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
-  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['ETH/BTC']);
+  expect(screen.getByTestId('pair-chart-ETH/BTC')).toBeTruthy();
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['ETH/BTC', 'SOL/USDT']);
   fireEvent.click(screen.getByTestId('pair-check-ETH/BTC'));
+  fireEvent.click(screen.getByTestId('pair-check-SOL/USDT'));
   expect(screen.getByTestId('pair-none')).toBeTruthy();
+  fireEvent.click(screen.getByTestId('pair-check-SOL/USDT'));
+  expect(screen.getByTestId('pair-chart-SOL/USDT')).toBeTruthy();
 });
 
 test('режим объёма выбирает готовое поле без запроса: нетто — одна линия, раздельно — две', async () => {
@@ -119,15 +122,15 @@ test('нет сделок → сообщение; ошибка загрузки 
   await waitFor(() => expect(screen.getByTestId('pair-error')).toBeTruthy());
 });
 
-test('сохранённый выбор без пар из ответа не оставляет пустой экран: показывается самая активная пара', async () => {
+test('сохранённый выбор без известных пар не оставляет пустой экран: отмечены все пары с данными; неизвестные имена отбрасываются при следующем выборе', async () => {
   window.localStorage.setItem('pnl.pairs.selected', JSON.stringify(['DOGE/USDT']));
   axios.get.mockResolvedValue({ data: dto(PAIRS) });
   render(<PairTradesChart pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
-  expect(screen.getByTestId('pair-check-BTC/USDT').checked).toBe(true);
+  ['BTC/USDT', 'ETH/BTC', 'SOL/USDT'].forEach((n) => expect(screen.getByTestId(`pair-check-${n}`).checked).toBe(true));
   expect(screen.queryByTestId('pair-none')).toBeNull();
-  fireEvent.click(screen.getByTestId('pair-check-ETH/BTC'));          // пара, которой нет в ответе, в сохранённом выборе не теряется
-  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['DOGE/USDT', 'BTC/USDT', 'ETH/BTC']);
+  fireEvent.click(screen.getByTestId('pair-check-ETH/BTC'));
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['BTC/USDT', 'SOL/USDT']);
 });
 
 test('пользователь снял все пары: пустой выбор уважается и показывается подсказка', async () => {
@@ -247,4 +250,65 @@ test('нет цены продажи с вычетом комиссии — ли
   expect(screen.getByTestId('pair-fee-sell').checked).toBe(true);
   expect(screen.queryByTestId('pair-line-sell_price-BTC/USDT')).toBeNull();
   expect(screen.getByTestId('pair-line-buy_price-BTC/USDT').getAttribute('d')).toMatch(/^M/);
+});
+
+test('все известные пары показаны всегда: пара без сделок в окне неактивна с подписью и датой последней сделки, графика у неё нет', async () => {
+  const known = [
+    { pair: 'BTC/USDT', base: 'BTC', quote: 'USDT', in_window: true, fills: 120, last_trade_ms: T0 + 2 * STEP },
+    { pair: 'SOL/BTC', base: 'SOL', quote: 'BTC', in_window: false, fills: 0, last_trade_ms: T0 - 3600000 },
+  ];
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]], { known_pairs: known }) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.getByTestId('pair-check-SOL/BTC')).toBeTruthy();
+  expect(screen.getByTestId('pair-check-SOL/BTC').disabled).toBe(true);
+  expect(screen.getByTestId('pair-check-SOL/BTC').checked).toBe(false);
+  expect(screen.getByTestId('pair-idle-SOL/BTC').textContent).toMatch(/нет сделок за окно, последняя \d{2}\.\d{2}\.\d{4}/);
+  expect(screen.queryByTestId('pair-chart-SOL/BTC')).toBeNull();
+  expect(screen.getByTestId('pair-check-BTC/USDT').disabled).toBe(false);
+  fireEvent.click(screen.getByTestId('pair-select-all'));                  // «все» отмечает известные пары, график появляется только у пар с данными
+  expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy();
+  expect(screen.queryByTestId('pair-chart-SOL/BTC')).toBeNull();
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['BTC/USDT', 'SOL/BTC']);
+});
+
+test('выбор по умолчанию + снять одну пару + сменить окно: пара, неактивная в первом окне, получает график во втором (отметка не теряется)', async () => {
+  const known = [
+    { pair: 'BTC/USDT', base: 'BTC', quote: 'USDT', in_window: true, fills: 120, last_trade_ms: T0 },
+    { pair: 'SOL/BTC', base: 'SOL', quote: 'BTC', in_window: false, fills: 0, last_trade_ms: T0 - 7200000 },
+  ];
+  const wide = [pair('BTC/USDT', 'BTC', 'USDT', 120), pair('SOL/BTC', 'SOL', 'BTC', 7, 3, (i) => pt(i, { buy_price: 0.0021 }))];
+  axios.get
+    .mockResolvedValueOnce({ data: dto([wide[0]], { known_pairs: known }) })
+    .mockResolvedValue({ data: dto(wide, { window_hours: 168, known_pairs: known.map((k) => ({ ...k, in_window: true, fills: 5 })) }) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  fireEvent.click(screen.getByTestId('pair-check-BTC/USDT'));           // снимаем единственную пару с данными
+  expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual(['SOL/BTC']);
+  fireEvent.click(screen.getByTestId('pair-window-168'));
+  await waitFor(() => expect(screen.getByTestId('pair-chart-SOL/BTC')).toBeTruthy());
+  expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
+});
+
+test('кнопки «все» и «снять»: снять убирает все графики и показывает подсказку, все возвращает', async () => {
+  axios.get.mockResolvedValue({ data: dto(PAIRS) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  fireEvent.click(screen.getByTestId('pair-select-none'));
+  expect(screen.queryByTestId('pair-chart-BTC/USDT')).toBeNull();
+  expect(screen.getByTestId('pair-none')).toBeTruthy();
+  expect(JSON.parse(window.localStorage.getItem('pnl.pairs.selected'))).toEqual([]);
+  fireEvent.click(screen.getByTestId('pair-select-all'));
+  ['BTC/USDT', 'ETH/BTC', 'SOL/USDT'].forEach((n) => expect(screen.getByTestId(`pair-chart-${n}`)).toBeTruthy());
+});
+
+test('в окне нет ни одной сделки: список пар остаётся (все неактивны), сообщение объясняет, где последние сделки', async () => {
+  const known = [{ pair: 'ETH/BTC', base: 'ETH', quote: 'BTC', in_window: false, fills: 0, last_trade_ms: T0 - 7200000 }];
+  axios.get.mockResolvedValue({ data: dto([], { known_pairs: known }) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-empty')).toBeTruthy());
+  expect(screen.getByTestId('pair-empty').textContent).toMatch(/ни по одной паре/);
+  expect(screen.getByTestId('pair-check-ETH/BTC').disabled).toBe(true);
+  expect(screen.queryByTestId('pair-none')).toBeNull();
 });

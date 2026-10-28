@@ -1,5 +1,5 @@
 // Self-contained node-тест: `node pair_trades_history.test.js` (у frontend/api нет jest).
-const { bucketMsForHours, splitPair, buildPairTradesDto, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require('./pair_trades_history');
+const { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS } = require('./pair_trades_history');
 
 let failed = 0;
 function check(name, cond) {
@@ -113,6 +113,33 @@ check('комиссия: у стороны с объёмом нет комисс
     && near(p.totals.buy_fee, 1.6, 1e-9) && p.points[0].sell_price === 80100;
 })());
 check('комиссия не искажает объёмы и цены без комиссии', near(sp.totals.sell_qty, 0.25) && near(sp.totals.buy_qty, 0.2) && near(sp.points[0].sell_price, (SN_L + SN_M) / 0.25, 1e-6));
+
+// known_pairs: все пары, по которым когда-либо были исполнения (7 суток), а не только пары окна — чтобы график не «пропадал» у пар без сделок в окне.
+const winPairs = [
+  { pair: 'BTC/USDT', base: 'BTC', quote: 'USDT', fills: 812, points: [{ t: T0 }, { t: T0 + 60000 }] },
+  { pair: 'ETH/USDT', base: 'ETH', quote: 'USDT', fills: 40, points: [{ t: T0 }] },
+];
+const knownRows = [
+  { symbol: 'SOL/BTC', last_trade_ms: T0 - 3600000 },
+  { symbol: 'ETH/BTC', last_trade_ms: T0 - 60000 },
+  { symbol: 'BTC/USDT', last_trade_ms: T0 + 90000 },
+  { symbol: 'XRP/BTC', last_trade_ms: null },
+];
+const kp = buildKnownPairs(winPairs, knownRows);
+check('known_pairs: сначала пары окна в прежнем порядке (по числу заявок), затем остальные по давности последней сделки (новее — выше), без даты — в конце',
+  JSON.stringify(kp.map((x) => x.pair)) === JSON.stringify(['BTC/USDT', 'ETH/USDT', 'ETH/BTC', 'SOL/BTC', 'XRP/BTC']));
+check('known_pairs: у пар окна in_window=true и число исполнений из окна; у остальных in_window=false и fills=0',
+  kp[0].in_window === true && kp[0].fills === 812 && kp[2].in_window === false && kp[2].fills === 0 && kp[4].in_window === false);
+check('known_pairs: база и вторая валюта разобраны (кросс-пара ETH/BTC → BTC)', kp[2].base === 'ETH' && kp[2].quote === 'BTC' && kp[0].quote === 'USDT');
+check('known_pairs: последняя сделка пары окна берётся из 7-суточного агрегата, если он есть, иначе из последней точки окна',
+  kp[0].last_trade_ms === T0 + 90000 && kp[1].last_trade_ms === T0 && kp[3].last_trade_ms === T0 - 3600000 && kp[4].last_trade_ms === null);
+check('known_pairs: кэш старше окна не отодвигает последнюю сделку назад — берётся более поздняя из кэша и последней точки окна',
+  buildKnownPairs([{ pair: 'BTC/USDT', base: 'BTC', quote: 'USDT', fills: 3, points: [{ t: T0 + 600000 }] }], [{ symbol: 'BTC/USDT', last_trade_ms: T0 }])[0].last_trade_ms === T0 + 600000);
+check('known_pairs: пара окна не дублируется среди остальных', kp.filter((x) => x.pair === 'BTC/USDT').length === 1);
+check('known_pairs: пустые и некорректные входы дают пустой список, без падения',
+  buildKnownPairs([], []).length === 0 && buildKnownPairs(undefined, null).length === 0 && buildKnownPairs([], [null, {}, { symbol: '' }]).length === 0);
+check('known_pairs: нет 7-суточных строк — остаются пары окна (запрос известных пар упал → график не ломается)',
+  JSON.stringify(buildKnownPairs(winPairs, []).map((x) => x.pair)) === JSON.stringify(['BTC/USDT', 'ETH/USDT']) && buildKnownPairs(winPairs, [])[0].last_trade_ms === T0 + 60000);
 
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');
