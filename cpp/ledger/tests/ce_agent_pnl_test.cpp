@@ -1,16 +1,19 @@
 // ============================================================================
-// ce_agent_pnl_test.cpp — ADR-087 / CALC-CE-AGENT-PNL. Заработок агентов CE по биржам через ledger целиком:
-//   1) переводчик: покупки на CE → хедж → GetAgentPnl (числа §3.1 карточки);
-//   2) связка: круговая сделка за такт (§3.3), внешняя группа — нули с признаком «есть данные»;
+// ce_agent_pnl_test.cpp — ADR-087 / CALC-CE-AGENT-PNL (модель C′). Заработок агентов CE по биржам через ledger целиком:
+//   1) переводчик: покупки на CE → хедж → GetAgentPnl (R внутренней биржи = выгода к справедливой цене, R внешних = дрейф + исполнение,
+//      U = остаток по текущей справедливой цене);
+//   2) связка: круговая сделка за такт, справедливая цена берётся у переводчиков того же актива;
 //   3) сброс позиций обнуляет всё; выключатель CE_AGENT_PNL_ENABLED=0;
-//   4) перезапуск: книги и внешние суммы восстанавливаются из репозитория (заглушка вместо PostgreSQL);
+//   4) перезапуск: книги восстанавливаются из репозитория (заглушка вместо PostgreSQL); R известен сразу, U — после первой цены;
 //   5) повторная доставка такта не удваивает книгу; засев книги по существующей позиции; хедж связки; кросс-пара (ρ≠1);
-//      регресс при CE_AGENT_PNL_ENABLED=0; сбой загрузки книг не затирает сохранённые и после восстановления учёт продолжается.
+//      регресс при CE_AGENT_PNL_ENABLED=0; сбой загрузки книг не затирает сохранённые и после восстановления учёт продолжается;
+//   6) закон сохранения внутренней биржи: Σ R внутренней группы по всем агентам равна нулю; R+U каждого агента сверен с прямым пересчётом.
 // Pure unit: без PG и Kafka. CE_AGENT_BAND не задан ⇒ автоматической эмиссии хеджа нет, исполнение регистрируется
 // через RememberExecutionIntent, как в ce_band_house_realized_test.
 // ============================================================================
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -27,7 +30,6 @@ using cex::common::Decimal;
 using cex::ledger::app::AgentPnlBookRow;
 using cex::ledger::app::AgentPositionRepositoryPort;
 using cex::ledger::app::AgentPositionRow;
-using cex::ledger::app::ExternalFillDelta;
 using cex::ledger::app::LedgerUseCases;
 
 namespace {
@@ -46,7 +48,7 @@ void Check(bool ok, const char* msg) {
 
 double Num(const fob::common::v1::Decimal& d) { return static_cast<double>(Decimal::from_proto(d)); }
 
-// Заглушка репозитория (вместо PostgreSQL): накапливает позиции, внешние суммы и книги в памяти — как это делает PG.
+// Заглушка репозитория (вместо PostgreSQL): накапливает позиции и книги в памяти — как это делает PG.
 class FakeRepo : public AgentPositionRepositoryPort {
  public:
   using Key = std::tuple<std::string, std::string, std::string>;
@@ -80,17 +82,6 @@ class FakeRepo : public AgentPositionRepositoryPort {
     r.in_flight = Decimal::add(r.in_flight, dif);
     r.realized_vs_fair = Decimal::add(r.realized_vs_fair, drealized);
   }
-  void ApplyExternalFill(const std::string& agent_id, const std::string& asset, const std::string& venue,
-                         const Decimal& dif, const Decimal& drealized, const ExternalFillDelta& ext, int64_t) override {
-    auto& r = rows[Key{agent_id, asset, venue}];
-    r.in_flight = Decimal::add(r.in_flight, dif);
-    r.realized_vs_fair = Decimal::add(r.realized_vs_fair, drealized);
-    r.ext_buy_base = Decimal::add(r.ext_buy_base, ext.buy_base);
-    r.ext_sell_base = Decimal::add(r.ext_sell_base, ext.sell_base);
-    r.ext_buy_notional = Decimal::add(r.ext_buy_notional, ext.buy_notional);
-    r.ext_sell_notional = Decimal::add(r.ext_sell_notional, ext.sell_notional);
-    r.ext_fair_signed = Decimal::add(r.ext_fair_signed, ext.fair_signed);
-  }
   void SaveBooks(const std::vector<AgentPnlBookRow>& b) override {
     for (const auto& x : b) books[x.agent_id] = x;
   }
@@ -104,11 +95,6 @@ class FakeRepo : public AgentPositionRepositoryPort {
     ++reset_calls;
     for (auto it = books.begin(); it != books.end();) {
       if (ids.empty() || std::find(ids.begin(), ids.end(), it->first) != ids.end()) it = books.erase(it); else ++it;
-    }
-    for (auto& kv : rows) {
-      if (!ids.empty() && std::find(ids.begin(), ids.end(), std::get<0>(kv.first)) == ids.end()) continue;
-      kv.second.ext_buy_base = kv.second.ext_sell_base = kv.second.ext_buy_notional = kv.second.ext_sell_notional =
-          kv.second.ext_fair_signed = kv.second.rvf_base = Decimal::zero();
     }
   }
 };
@@ -167,7 +153,7 @@ fob::execution::v1::ExecutionIntent MkBuyIntent(const std::string& agent, const 
 }
 
 fob::execution::v1::ExecutionReport MkFill(const std::string& agent, const std::string& asset, const std::string& venue,
-                                           double filled, double avg_price, const std::string& report_id) {
+                                           double filled, double avg_price, const std::string& report_id, int price_scale = 2) {
   fob::execution::v1::ExecutionReport r;
   const std::string flow = "ce|band|" + agent + "|" + asset + "|" + venue;
   r.set_intent_id(flow + "|1");
@@ -182,7 +168,7 @@ fob::execution::v1::ExecutionReport MkFill(const std::string& agent, const std::
   r.set_status(fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED);
   *r.mutable_filled_qty() = Dec(filled, 8).to_proto();
   *r.mutable_remaining_qty() = Dec(0.0, 8).to_proto();
-  *r.mutable_average_price() = Dec(avg_price, 2).to_proto();
+  *r.mutable_average_price() = Dec(avg_price, price_scale).to_proto();
   return r;
 }
 
@@ -197,13 +183,15 @@ const fob::ledger::v1::AgentPnl* Find(const fob::ledger::v1::GetAgentPnlResponse
   return nullptr;
 }
 
-// Переводчик из §3.1: +2 BTC @ 80 000, +1 BTC @ 80 030 (F_0 = 80 040), хедж 2 BTC @ 80 060, затем цена оценки → 80 050.
+// Переводчик §3 карточки: +2 BTC @ 80 000 (F_0 = 80 000), +1 BTC @ 80 030 (F_0 = 80 040), хедж SELL 2 BTC @ 80 060, затем малая сделка при F_0 = 80 050.
+//   R внутр. = (80040−80030)·1 = 10; R внеш. = исполнение (80060−80040)·2 = 40 + дрейф 2·(80040−80013,33) = 53,33 ⇒ 93,33;
+//   остаток 1 BTC со стоимостью входа 80 013,33 при F_0 = 80 050 ⇒ U = 36,67; R+U = 140 = −160000 − 80030 + 160120 + 80050 по кассе.
 void RunTranslatorScenario(LedgerUseCases& uc, double tick3_kusd = 0.0008, double tick3_price = 80050.0) {
   uc.ApplyPositionDelta("b1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 160.0, 80000.0, 80000.0)});
   uc.ApplyPositionDelta("b2", 2000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 80.03, 80030.0, 80040.0)});
   uc.RememberExecutionIntent(MkSellIntent("T_BTC_binance", "BTC", "binance", 160.06, 80030.0));
   Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 2.0, 80060.0, "rep-1"));
-  // Цена оценки обновилась до 80 050: малая сделка (0,8 USDT) по новой цене, F_0 = 80 050.
+  // Малая сделка по новой цене: F_0 = 80 050 (цена сделки может отличаться — тогда она даёт выгоду к F_0).
   uc.ApplyPositionDelta("b3", 3000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", tick3_kusd, tick3_price, 80050.0)});
 }
 
@@ -211,14 +199,15 @@ void CheckTranslator(const fob::ledger::v1::GetAgentPnlResponse& r, const char* 
   const auto* a = Find(r, "T_BTC_binance");
   if (a == nullptr) { std::cerr << "FAILED: " << tag << ": агент не найден\n"; ++g_fail; return; }
   Check(a->internal().has_data() && a->external().has_data() && a->total().has_data(), tag);
-  Near(Num(a->internal().r()), 60.0, 1e-4, "T: R внутренней биржи = 2·(80040−80010)");
-  Near(Num(a->internal().u()), 40.0, 0.01, "T: U внутренней биржи = остаток по цене оценки 80 050");
-  Near(Num(a->external().r()), 40.0, 1e-4, "T: R внешних = 2·(80060−80040)");
-  Near(Num(a->external().u()), 0.0, 1e-9, "T: U внешних = 0 (хедж сопоставлен с книгой)");
-  Near(Num(a->total().r()), 100.0, 1e-4, "T: R итого");
-  Near(Num(a->total().r_plus_u()), 140.0, 0.01, "T: R+U итого = реальный результат (140)");
-  Near(Num(a->total().r_plus_u()), Num(a->internal().r_plus_u()) + Num(a->external().r_plus_u()), 1e-9,
-       "T: итого = внутренняя + внешняя");
+  Check(a->internal().u_has_data() && a->external().u_has_data() && a->total().u_has_data(), "T: U известен (есть цена оценки)");
+  Near(Num(a->internal().r()), 10.0, 1e-3, "T: R внутренней биржи = (80040−80030)·1");
+  Near(Num(a->internal().u()), 0.0, 1e-12, "T: U внутренней биржи ≡ 0 — на внутренней бирже всё реализуется");
+  Near(Num(a->internal().r_plus_u()), Num(a->internal().r()), 1e-12, "T: на внутренней бирже R+U = R");
+  Near(Num(a->external().r()), 93.3333, 1e-3, "T: R внешних = исполнение 40 + дрейф 53,33");
+  Near(Num(a->external().u()), 36.6667, 0.01, "T: U внешних = остаток 1 BTC · (80050 − 80013,33)");
+  Near(Num(a->total().r()), 103.3333, 1e-3, "T: R итого = R внутр. + R внеш.");
+  Near(Num(a->total().u()), Num(a->external().u()), 1e-12, "T: U итого = U внешних");
+  Near(Num(a->total().r_plus_u()), 140.0, 0.01, "T: R+U = результат агента по кассе (140)");
   Check(a->ext_fills() == 1, "T: одно внешнее исполнение");
   Check(a->since_ms() > 0, "T: начало накопления задано");
   Check(a->mark_age_ms() >= 0, "T: возраст цены известен");
@@ -228,12 +217,31 @@ void CheckTranslator(const fob::ledger::v1::GetAgentPnlResponse& r, const char* 
   Check(r.totals().agent_count() == 1 && r.totals().incomplete_agents() == 0, "T: totals — счётчики");
 }
 
+// Замкнутый цикл за один такт при общей справедливой цене F_0 = 80 040: переводчик T1 (binance) продаёт связке 0,125 BTC по 80 000, связка
+// везёт на kraken и продаёт переводчику T2 по 80 080 (та же стоимость 10 тыс. USDT на обеих ногах).
+void Cycle(LedgerUseCases& uc) {
+  uc.ApplyPositionDelta("z1", 1000, {},
+                        {MkDelta("T_BTC_binance", "translator", "BTC", "binance", -10.0, 80000.0, 80040.0),
+                         MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
+                         MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0),
+                         MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 10.0, 80080.0, 80040.0)});
+}
+
+double SumInternalR(LedgerUseCases& uc) {
+  const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+  double sum = 0.0;
+  for (const auto& a : resp.agents())
+    if (a.internal().has_data()) sum += Num(a.internal().r());
+  return sum;
+}
+
 }  // namespace
 
 int main() {
   setenv("CE_NUMERAIRE", "USDT", 1);
   unsetenv("CE_AGENT_BAND");
   unsetenv("CE_AGENT_PNL_ENABLED");
+  setenv("CE_AGENT_PNL_FAIR_MAX_AGE_MS", "0", 1);  // метки времени в сценариях условные (1000, 2000, …): свежесть проверяет отдельный сценарий 5j
 
   // --- 1) переводчик без репозитория ---------------------------------------------------------
   {
@@ -245,18 +253,17 @@ int main() {
   // --- 2) связка: круговая сделка за такт ---------------------------------------------------
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
-    // f = 10 тыс. USDT: источник (binance) Δ=−10 @ 80 000, назначение (kraken) Δ=+10 @ 80 080, один такт.
-    uc.ApplyPositionDelta("l1", 1000, {},
-                          {MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
-                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
+    Cycle(uc);
     const auto r = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a = Find(r, "A_BTC_binancekraken");
     if (a == nullptr) { std::cerr << "FAILED: связка не найдена\n"; ++g_fail; }
     else {
-      Near(Num(a->internal().r()), 9.9900096, 1e-5, "L: R внутренней биржи = базис круговой сделки");
-      Near(Num(a->internal().u()), 0.0049952, 1e-5, "L: U = остаток паритета по среднему 80 040");
-      Check(a->external().has_data(), "L: внешняя группа — данные есть");
-      Near(Num(a->external().r_plus_u()), 0.0, 1e-12, "L: внешних исполнений нет ⇒ нули");
+      // Покупка на источнике 0,125 BTC по 80 000: (80040−80000)·0,125 = 5; продажа на назначении 0,12487512 BTC по 80 080: (80080−80040)·0,12487512 = 4,995.
+      Near(Num(a->internal().r()), 9.9950048, 1e-5, "L: R внутренней биржи = выгода обеих ног к справедливой цене пары");
+      Near(Num(a->internal().u()), 0.0, 1e-12, "L: U внутренней биржи ≡ 0");
+      Check(a->external().has_data() && a->external().u_has_data(), "L: внешняя группа — данные есть");
+      // Остаток паритета 0,00012488 BTC открыт по справедливой стоимости 80 040 и оценён по ней же ⇒ U = 0.
+      Near(Num(a->external().r_plus_u()), 0.0, 1e-9, "L: внешних исполнений нет, остаток паритета при F_0 входа ⇒ нули");
       Near(Num(a->total().r_plus_u()), Num(a->internal().r_plus_u()), 1e-9, "L: итого = внутренняя");
       Check(a->venues_size() == 2, "L: две площадки");
     }
@@ -271,9 +278,10 @@ int main() {
     const auto* a = Find(r, "T_BTC_binance");
     Check(a != nullptr, "R: агент остаётся после сброса");
     if (a != nullptr) {
+      Check(a->total().has_data() && a->total().u_has_data(), "R: после сброса данные известны (позиции нет — оценивать нечего)");
       Near(Num(a->internal().r()), 0.0, 1e-12, "R: внутренний R обнулён");
-      Near(Num(a->internal().u()), 0.0, 1e-12, "R: внутренний U обнулён");
       Near(Num(a->external().r()), 0.0, 1e-12, "R: внешний R обнулён");
+      Near(Num(a->external().u()), 0.0, 1e-12, "R: внешний U обнулён");
       Check(a->ext_fills() == 0 && a->since_ms() == 0, "R: счётчик и начало накопления сброшены");
     }
     setenv("CE_AGENT_PNL_ENABLED", "0", 1);
@@ -282,7 +290,7 @@ int main() {
     unsetenv("CE_AGENT_PNL_ENABLED");
   }
 
-  // --- 4) перезапуск: состояние из репозитория --------------------------------------------------
+  // --- 4) перезапуск: R известен сразу из книги, U — после первой цены -----------------------------
   {
     auto repo = std::make_shared<FakeRepo>();
     {
@@ -291,25 +299,35 @@ int main() {
       RunTranslatorScenario(uc);
       CheckTranslator(uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{}), "P: до перезапуска");
       Check(repo->books.count("T_BTC_binance") == 1, "P: книга записана в репозиторий");
+      Check(repo->books["T_BTC_binance"].quote == "USDT", "P: валюта котировки записана вместе с книгой");
     }
     LedgerUseCases uc2(LedgerUseCases::InitOptions{});
-    uc2.SetAgentPositionRepo(repo);  // LoadAgentPositionsFromRepo: позиции, внешние суммы и книги
+    uc2.SetAgentPositionRepo(repo);  // LoadAgentPositionsFromRepo: позиции и книги
     const auto r = uc2.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a = Find(r, "T_BTC_binance");
     Check(a != nullptr, "P: агент восстановлен");
     if (a != nullptr) {
-      // Цена оценки после перезапуска ещё не пришла (last_price хранится в памяти): группы «нет данных», а не ноль.
-      Check(!a->internal().has_data() && !a->external().has_data() && !a->total().has_data(),
-            "P: после перезапуска без цены — признак «нет данных»");
+      // R цены оценки не требует: накопленное известно сразу. U — остаток 1 BTC — без текущей справедливой цены не определён.
+      Check(a->internal().has_data() && a->external().has_data() && a->total().has_data(), "P: после перезапуска R известен без цены");
+      Check(a->internal().u_has_data() && !a->external().u_has_data() && !a->total().u_has_data(),
+            "P: U внешних не определён до первой цены (внутренний U ≡ 0 известен)");
+      Near(Num(a->internal().r()), 10.0, 1e-3, "P: R внутренней биржи сохранён через перезапуск");
+      Near(Num(a->external().r()), 93.3333, 1e-3, "P: R внешних сохранён через перезапуск");
+      Check(!a->total().has_r_plus_u(), "P: R+U не задан, пока U не известен");
+      Near(Num(r.totals().internal().r()), Num(a->internal().r()), 1e-12, "P: итоги включают R агента без U");
+      Check(r.totals().incomplete_agents() == 1, "P: агент с неизвестным U помечен неполным");
+      Check(!r.totals().total().has_r_plus_u() && r.totals().total().has_data() && !r.totals().total().u_has_data(),
+            "P: итоги при неполных агентах — R есть, U нет, R+U не отдаётся (разные выборки)");
     }
-    // Первая же дельта с ценой возвращает числа; прежний R_int и R_ext сохранились.
+    // Первая же дельта с ценой возвращает U; накопленные R сохранились.
     uc2.ApplyPositionDelta("b4", 4000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80050.0, 80050.0)});
     const auto r2 = uc2.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* b = Find(r2, "T_BTC_binance");
-    if (b == nullptr || !b->total().has_data()) { std::cerr << "FAILED: P: после дельты данные должны появиться\n"; ++g_fail; }
+    if (b == nullptr || !b->total().has_data() || !b->total().u_has_data()) { std::cerr << "FAILED: P: после дельты данные должны появиться\n"; ++g_fail; }
     else {
-      Near(Num(b->internal().r()), 60.0, 1e-4, "P: R внутренней биржи сохранён через перезапуск");
-      Near(Num(b->external().r()), 40.0, 1e-4, "P: R внешних сохранён через перезапуск");
+      Near(Num(b->internal().r()), 10.0, 1e-3, "P: R внутренней биржи после дельты");
+      Near(Num(b->external().r()), 93.3333, 1e-3, "P: R внешних после дельты");
+      Near(Num(b->total().r_plus_u()), 140.0, 0.01, "P: R+U после перезапуска и первой цены тот же, что до него");
     }
     uc2.ResetAgentPositions(fob::ledger::v1::ResetAgentPositionsRequest{});
     Check(repo->reset_calls == 1 && repo->books.empty(), "P: сброс очищает книги в репозитории");
@@ -322,11 +340,12 @@ int main() {
     {
       LedgerUseCases uc(LedgerUseCases::InitOptions{});
       uc.SetAgentPositionRepo(repo);
-      RunTranslatorScenario(uc, 8.0, 80100.0);  // третий такт "b3": ≈0,1 BTC по 80 100 при оценке 80 050 — двойной учёт был бы заметен в U
+      // Третий такт "b3": 0,0999 BTC по 80 100 при F_0 = 80 050 ⇒ R внутр. += (80050−80100)·0,0999 = −4,99 (двойной учёт дал бы −9,99).
+      RunTranslatorScenario(uc, 8.0, 80100.0);
       const auto resp_a = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
-    const auto* a = Find(resp_a, "T_BTC_binance");
+      const auto* a = Find(resp_a, "T_BTC_binance");
       if (a == nullptr || !a->total().has_data()) { std::cerr << "FAILED: D: нет данных до перезапуска\n"; ++g_fail; }
-      else { r_ref = Num(a->internal().r()); u_ref = Num(a->internal().u()); }
+      else { r_ref = Num(a->internal().r()); u_ref = Num(a->external().u()); }
     }
     LedgerUseCases uc2(LedgerUseCases::InitOptions{});
     uc2.SetAgentPositionRepo(repo);
@@ -334,12 +353,12 @@ int main() {
     uc2.ApplyPositionDelta("b3", 3000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 8.0, 80100.0, 80050.0)});
     const auto resp_a2 = uc2.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a2 = Find(resp_a2, "T_BTC_binance");
-    if (a2 == nullptr || !a2->total().has_data()) { std::cerr << "FAILED: D: нет данных после повторной доставки\n"; ++g_fail; }
+    if (a2 == nullptr || !a2->total().has_data() || !a2->total().u_has_data()) { std::cerr << "FAILED: D: нет данных после повторной доставки\n"; ++g_fail; }
     else {
       Near(Num(a2->internal().r()), r_ref, 1e-9, "D: R внутренней биржи не изменился");
-      Near(Num(a2->internal().u()), u_ref, 1e-6, "D: повторный такт не удвоил остаток книги");
+      Near(Num(a2->external().u()), u_ref, 1e-6, "D: повторный такт не изменил остаток книги");
     }
-    Check(u_ref > 34.0 && u_ref < 36.0, "D: контроль — U = 40 − 0,0999·50 ≈ 35,0; удвоение третьего такта дало бы ≈30,0");
+    Check(r_ref > 5.0 && r_ref < 5.01, "D: контроль — R внутр. = 10 − 4,99 ≈ 5,006; удвоение третьего такта дало бы ≈ 0,01");
   }
 
   // --- 5b) засев книги по существующей позиции -------------------------------------------------
@@ -347,57 +366,59 @@ int main() {
     auto repo = std::make_shared<FakeRepo>();
     AgentPositionRow row;
     row.agent_id = "T_BTC_binance"; row.agent_kind = "translator"; row.asset = "BTC"; row.venue = "binance";
-    row.position = Dec(80.03, 6);  // позиция 1 BTC по 80 030, книги ещё нет
+    row.position = Dec(80.03, 6);  // позиция 1 BTC (по 80 030), книги ещё нет
     repo->rows[FakeRepo::Key{"T_BTC_binance", "BTC", "binance"}] = row;
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetAgentPositionRepo(repo);
     uc.ApplyPositionDelta("s1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80030.0, 80040.0)});
     const auto resp_a = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a = Find(resp_a, "T_BTC_binance");
-    Check(a != nullptr && a->internal().has_data(), "S: данные есть");
-    if (a != nullptr) Near(Num(a->internal().u()), 0.0, 0.01, "S: сразу после засева U внутренней биржи ≈ 0");
-    // Хедж 1 BTC сопоставляется с засеянным остатком; цена оценки потом уходит на 80 050.
+    Check(a != nullptr && a->external().u_has_data(), "S: данные есть");
+    if (a != nullptr) Near(Num(a->external().u()), 0.0, 0.01, "S: сразу после засева U внешних ≈ 0 (позиция входит по текущей F_0)");
+    // Хедж 1 BTC закрывает засеянный остаток по его справедливой стоимости; потом F_0 уходит на 80 050.
     uc.RememberExecutionIntent(MkSellIntent("T_BTC_binance", "BTC", "binance", 80.03, 80030.0));
     Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 1.0, 80060.0, "seed-rep"));
     uc.ApplyPositionDelta("s2", 2000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80050.0, 80050.0)});
     const auto resp_b = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* b = Find(resp_b, "T_BTC_binance");
     if (b == nullptr) { std::cerr << "FAILED: S: агент не найден\n"; ++g_fail; }
-    else Near(Num(b->external().u()), 0.0, 1e-6, "S: хедж сопоставлен с засеянным остатком ⇒ внешний U = 0 (без засева был бы −10)");
+    else {
+      Near(Num(b->external().r()), 20.0, 0.01, "S: R внешних = (80060−80040)·1 (исполнение; дрейфа нет — F_0 входа = F_0 выхода)");
+      Near(Num(b->external().u()), 0.0, 0.01, "S: хедж закрыл засеянный остаток ⇒ внешний U ≈ 0 (без засева был бы −10)");
+    }
   }
 
-  // --- 5c) хедж связки через ledger: внутренняя книга не трогается, внешняя корзина считается -------
+  // --- 5c) хедж связки: в книгу не пишется (знак рыночного хеджа ноги противоположен знаку её книги, OQ-F18v2-31); счётчик исполнений растёт ---
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
-    uc.ApplyPositionDelta("l1", 1000, {},
-                          {MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
-                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
+    Cycle(uc);
     uc.RememberExecutionIntent(MkSellIntent("A_BTC_binancekraken", "BTC", "kraken", 40.045, 80090.0));
     Apply(uc, MkFill("A_BTC_binancekraken", "BTC", "kraken", 0.5, 80090.0, "link-rep"));
     const auto resp_a = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a = Find(resp_a, "A_BTC_binancekraken");
     if (a == nullptr) { std::cerr << "FAILED: L2: связка не найдена\n"; ++g_fail; }
     else {
-      Near(Num(a->internal().r()), 9.9900096, 1e-5, "L2: внутренняя книга связки не тронута хеджем");
-      Near(Num(a->external().r()), 0.0, 1e-9, "L2: только продажи ⇒ круговой оборот 0");
-      // Корзина ноги kraken: (0 − 0,5)·80 080 + 0,5·80 090 = +5.
-      Near(Num(a->external().u()), 5.0, 1e-6, "L2: внешний U = корзина по ценам ноги");
-      Check(a->ext_fills() == 1, "L2: одно внешнее исполнение");
+      Near(Num(a->internal().r()), 9.9950048, 1e-5, "L2: R внутренней биржи связки не тронут хеджем");
+      Near(Num(a->external().r()), 0.0, 1e-12, "L2: хедж связки в R внешних не попадает (OQ-F18v2-31)");
+      Near(Num(a->external().u()), 0.0, 1e-6, "L2: остаток паритета при F_0 входа ⇒ U = 0");
+      Check(a->ext_fills() == 1, "L2: одно внешнее исполнение посчитано");
     }
   }
 
-  // --- 5d) кросс-пара ETH/BTC: курс валюты котировки ρ = P_b / p ≠ 1 ------------------------------
+  // --- 5d) кросс-пара ETH/BTC: курс валюты котировки ρ = P_b / F_0 ≠ 1 --------------------------
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.ApplyPositionDelta("x1", 1000, {}, {MkDeltaX("T_ETH_binance", "translator", "ETH", "binance", 3.0, 3000.0, 0.05, 0.05, "BTC")});
     uc.ApplyPositionDelta("x2", 2000, {}, {MkDeltaX("T_ETH_binance", "translator", "ETH", "binance", 3.06, 3060.0, 0.051, 0.0515, "BTC")});
     const auto resp_a = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a = Find(resp_a, "T_ETH_binance");
-    Check(a != nullptr && a->internal().has_data(), "X: данные есть");
+    Check(a != nullptr && a->internal().has_data() && a->external().u_has_data(), "X: данные есть");
     if (a != nullptr) {
-      // L = 2 ETH, p̄ = 0,0505 BTC, оценка 0,0515 BTC ⇒ U = 0,002 BTC; ρ = 3060/0,051 = 60 000 ⇒ 120 USDT.
-      Near(Num(a->internal().u()), 120.0, 0.01, "X: U в USDT через курс BTC");
-      Near(Num(a->internal().r()), 0.0, 1e-9, "X: R внутренней биржи = 0 (позиция только росла)");
+      // ρ = 3060/0,0515 ≈ 59 417,5 USDT за BTC. Вторая покупка 1 ETH по 0,051 при F_0 = 0,0515 ⇒ R = 0,0005 BTC ≈ 29,71 USDT.
+      Near(Num(a->internal().r()), 29.7087, 0.01, "X: R внутренней биржи в USDT через курс BTC");
+      // L = 2 ETH, F_in = 0,05075, оценка 0,0515 ⇒ U = 0,0015 BTC ≈ 89,13 USDT.
+      Near(Num(a->external().u()), 89.1262, 0.01, "X: U внешних в USDT через курс BTC");
+      Near(Num(a->external().r()), 0.0, 1e-9, "X: внешних исполнений нет");
       Check(a->quote() == "BTC", "X: котируемая валюта BTC");
     }
   }
@@ -436,7 +457,7 @@ int main() {
       RunTranslatorScenario(uc, 8.0);
     }
     const Decimal qty_saved = repo->books["T_BTC_binance"].qty;
-    const Decimal realized_saved = repo->books["T_BTC_binance"].realized;
+    const Decimal edge_saved = repo->books["T_BTC_binance"].edge;
     repo->fail_books = true;
     setenv("CE_AGENT_PNL_RETRY_MS", "0", 1);
     LedgerUseCases uc2(LedgerUseCases::InitOptions{});
@@ -453,16 +474,16 @@ int main() {
           "F: by_kind при незагруженных книгах — все агенты неполные, итогов нет");
     uc2.ApplyPositionDelta("f1", 5000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 8.0, 80050.0, 80050.0)});
     Check(repo->books["T_BTC_binance"].qty.units == qty_saved.units && repo->books["T_BTC_binance"].qty.scale == qty_saved.scale &&
-              Decimal::cmp(repo->books["T_BTC_binance"].realized, realized_saved) == 0,
+              Decimal::cmp(repo->books["T_BTC_binance"].edge, edge_saved) == 0,
           "F: пока книги не загружены, сохранённая книга не перезаписывается");
     repo->fail_books = false;
     uc2.ApplyPositionDelta("f2", 6000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 8.0, 80050.0, 80050.0)});
     const auto resp_a1 = uc2.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
     const auto* a1 = Find(resp_a1, "T_BTC_binance");
-    Check(a1 != nullptr && a1->total().has_data(), "F: после восстановления учёт возобновлён");
+    Check(a1 != nullptr && a1->total().has_data() && a1->total().u_has_data(), "F: после восстановления учёт возобновлён");
     if (a1 != nullptr && a1->total().has_data()) {
-      Near(Num(a1->internal().r()), 60.0, 1e-4, "F: накопленный R внутренней биржи сохранён");
-      Near(Num(a1->external().r()), 40.0, 1e-4, "F: накопленный R внешних сохранён");
+      Near(Num(a1->internal().r()), 10.0, 1e-3, "F: накопленный R внутренней биржи сохранён");
+      Near(Num(a1->external().r()), 93.3333, 1e-3, "F: накопленный R внешних сохранён");
     }
     unsetenv("CE_AGENT_PNL_RETRY_MS");
   }
@@ -477,66 +498,183 @@ int main() {
   }
 
   // --- 5i) закон сохранения внутренней биржи (вопрос владельца 2026-10-28: «суммарный R по всем агентам должен быть нулём»).
-  // Замкнутый цикл за один такт: переводчик T1 (binance) продаёт связке 0,125 BTC по 80 000, связка везёт на kraken и продаёт переводчику
-  // T2 по 80 080. Деньги и штуки сохраняются, поэтому при ОБЩЕЙ цене оценки Σ(R+U) по всем участникам равна нулю. Сумма одних R нулём
-  // НЕ является: связка реализует базис сразу (R>0), а переводчики держат нереализованные остатки (U<0), ΣR = −ΣU.
+  // Внутренняя биржа бесплатна и замкнута, справедливая цена пары общая, поэтому Σ R внутренней группы по всем агентам равна нулю;
+  // внутренний U ≡ 0. Внешний результат каждого агента сверен с прямым пересчётом по кассе.
   {
-    const auto cycle = [](LedgerUseCases& uc) {
-      uc.ApplyPositionDelta("z1", 1000, {},
-                            {MkDelta("T_BTC_binance", "translator", "BTC", "binance", -10.0, 80000.0, 80040.0),
-                             MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
-                             MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0),
-                             MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 10.0, 80080.0, 80040.0)});
-    };
-    const auto sums = [](LedgerUseCases& uc, double* r, double* u) {
+    // (а) цикл открыт: у каждого агента R внутр. — выгода его сделки к F_0, и сумма равна нулю.
+    {
+      LedgerUseCases uc(LedgerUseCases::InitOptions{});
+      Cycle(uc);
+      Near(SumInternalR(uc), 0.0, 1e-6, "Z: Σ R внутренней группы по всем агентам = 0");
       const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
-      *r = 0.0; *u = 0.0;
-      for (const auto& a : resp.agents()) {
-        if (!a.internal().has_data()) continue;
-        *r += Num(a.internal().r());
-        *u += Num(a.internal().u());
+      const auto* t1 = Find(resp, "T_BTC_binance");
+      const auto* t2 = Find(resp, "T_BTC_kraken");
+      const auto* l = Find(resp, "A_BTC_binancekraken");
+      Check(t1 != nullptr && t2 != nullptr && l != nullptr, "Z: все три агента найдены");
+      if (t1 != nullptr && t2 != nullptr && l != nullptr) {
+        Near(Num(t1->internal().r()), -5.0, 1e-6, "Z: T1 продал по 80 000 при F=80 040 ⇒ −(40·0,125)");
+        Near(Num(t2->internal().r()), -4.9950048, 1e-5, "Z: T2 купил по 80 080 при F=80 040 ⇒ −(40·0,12487512)");
+        Near(Num(l->internal().r()), 9.9950048, 1e-5, "Z: связка получила обе выгоды");
+        for (const auto* g : {t1, t2, l})
+          Near(Num(g->internal().u()), 0.0, 1e-12, "Z: внутренний U ≡ 0 у каждого");
+        // Позиции открыты по F_0, оценены по ней же: внешний результат пока нулевой.
+        Near(Num(t1->total().r_plus_u()) + Num(t2->total().r_plus_u()) + Num(l->total().r_plus_u()), 0.0, 1e-6,
+             "Z: Σ(R+U) = 0 пока ни один агент не вышел на внешнюю биржу");
       }
-    };
-    double r = 0.0, u = 0.0;
-    // (а) цикл открыт: общая цена оценки 80 040 у всех трёх.
-    {
-      LedgerUseCases uc(LedgerUseCases::InitOptions{});
-      cycle(uc);
-      sums(uc, &r, &u);
-      Near(r, 9.9900096, 1e-5, "Z: ΣR = базис связки (переводчики пока держат остатки)");
-      Near(u, -9.9900096, 1e-5, "Z: ΣU = −ΣR");
-      Near(r + u, 0.0, 1e-6, "Z: Σ(R+U) по всем участникам = 0 (замкнутая биржа)");
     }
-    // (б) оба переводчика выходят в хедже по одной F_0 (80 040): внутренняя группа остаётся нуль-суммарной.
+    // (б) оба переводчика выходят в хедже: внутренний R не меняется, Σ R внутр. остаётся 0, R+U каждого равен результату по кассе.
     {
       LedgerUseCases uc(LedgerUseCases::InitOptions{});
-      cycle(uc);
+      Cycle(uc);
       uc.RememberExecutionIntent(MkBuyIntent("T_BTC_binance", "BTC", "binance", 10.0, 80000.0));
       Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 0.125, 80030.0, "z-rep-1"));
       uc.RememberExecutionIntent(MkSellIntent("T_BTC_kraken", "BTC", "kraken", 10.0, 80080.0));
       Apply(uc, MkFill("T_BTC_kraken", "BTC", "kraken", 0.12487512, 80100.0, "z-rep-2"));
-      sums(uc, &r, &u);
-      Near(r + u, 0.0, 1e-6, "Z: выход обоих по одной F_0 — Σ(R+U) = 0");
-      Near(r, -0.0049952, 1e-5, "Z: ΣR после выхода = −остаток паритета связки (он остаётся её U)");
+      Near(SumInternalR(uc), 0.0, 1e-6, "Z: после выхода на внешние биржи Σ R внутренней группы по-прежнему 0");
+      const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+      const auto* t1 = Find(resp, "T_BTC_binance");
+      const auto* t2 = Find(resp, "T_BTC_kraken");
+      if (t1 == nullptr || t2 == nullptr) { std::cerr << "FAILED: Z: переводчики не найдены\n"; ++g_fail; }
+      else {
+        // T1: продал 0,125 по 80 000, откупил по 80 030 ⇒ −3,75 по кассе = R внутр. −5 + R внеш. +1,25.
+        Near(Num(t1->total().r_plus_u()), -3.75, 1e-6, "Z: T1: R+U = результат по кассе");
+        Near(Num(t1->external().r()), 1.25, 1e-6, "Z: T1: R внеш. = откуп дешевле F_0 на 10 за BTC");
+        // T2: купил 0,12487512 по 80 080, продал по 80 100 ⇒ +2,4975 = R внутр. −4,995 + R внеш. +7,4925.
+        Near(Num(t2->total().r_plus_u()), 2.4975024, 1e-5, "Z: T2: R+U = результат по кассе");
+        Near(Num(t2->external().r()), 7.4925072, 1e-5, "Z: T2: R внеш. = (80100 − 80040)·q");
+        Near(Num(t2->external().u()), 0.0, 1e-9, "Z: T2: позиция закрыта ⇒ U внеш. = 0");
+      }
     }
-    // (в) T2 выходит позже, когда F_0 выросла до 80 050: Σ(R+U) ≠ 0 и равна q·ΔF_0 — это риск разновременности ног, не ошибка учёта.
+    // (в) T2 выходит позже, когда F_0 выросла до 80 050: его итог по позиции тот же — риск разновременности целиком внутри R внеш. агента.
     {
       LedgerUseCases uc(LedgerUseCases::InitOptions{});
-      cycle(uc);
-      uc.RememberExecutionIntent(MkBuyIntent("T_BTC_binance", "BTC", "binance", 10.0, 80000.0));
-      Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 0.125, 80030.0, "z-rep-1"));
+      Cycle(uc);
       uc.ApplyPositionDelta("z2", 2000, {}, {MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 0.0008, 80080.0, 80050.0)});
       uc.RememberExecutionIntent(MkSellIntent("T_BTC_kraken", "BTC", "kraken", 10.0, 80080.0));
       Apply(uc, MkFill("T_BTC_kraken", "BTC", "kraken", 0.12487512, 80100.0, "z-rep-2"));
-      sums(uc, &r, &u);
-      Near(r + u, 0.12487512 * (80050.0 - 80040.0), 0.01, "Z: выход T2 при F_0 выше на 10 — Σ(R+U) ≈ q·ΔF_0 = +1,2488");
+      const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+      const auto* t2 = Find(resp, "T_BTC_kraken");
+      if (t2 == nullptr) { std::cerr << "FAILED: Z: T2 не найден\n"; ++g_fail; }
+      else {
+        // (80100 − F_in)·q со стоимостью входа F_in = 80 040 (исполнение 6,24 + дрейф 1,25), не зависит от F_0 в момент выхода.
+        Near(Num(t2->external().r()), 7.4925072, 0.01, "Z: T2 вышел при F_0=80 050: R внеш. = (80100−80040)·q");
+      }
+    }
+  }
+
+  // --- 5j) свежесть справедливой цены: протухшая F_0 для связки не используется ----------------------------------------------------------
+  {
+    setenv("CE_AGENT_PNL_FAIR_MAX_AGE_MS", "30000", 1);
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    // Переводчик BTC прислал F_0 две минуты назад; связка торгует сейчас, а переводчиков актива в такте нет.
+    uc.ApplyPositionDelta("st1", now - 120000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80000.0, 80040.0)});
+    uc.ApplyPositionDelta("st2", now, {},
+                          {MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
+                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* l = Find(resp, "A_BTC_binancekraken");
+    Check(l != nullptr, "J: связка найдена");
+    if (l != nullptr) {
+      Near(Num(l->internal().r()), 0.0, 1e-12, "J: F_0 протухла ⇒ выгода сделок связки не считается (F := цена сделки)");
+      Check(l->external().has_data() && !l->external().u_has_data(), "J: остаток паритета есть, свежей F_0 нет ⇒ U не определён");
+    }
+    // Свежая F_0 в том же такте возвращает выгоду.
+    uc.ApplyPositionDelta("st3", now + 1000, {},
+                          {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80000.0, 80040.0),
+                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
+                           MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
+    const auto resp2 = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* l2 = Find(resp2, "A_BTC_binancekraken");
+    if (l2 != nullptr) Near(Num(l2->internal().r()), 9.9950048, 1e-5, "J: F_0 такта свежая ⇒ выгода круга считается");
+    setenv("CE_AGENT_PNL_FAIR_MAX_AGE_MS", "0", 1);
+  }
+
+  // --- 5k) F_0 общая для пары: метка U переводчика берётся по последней дельте ЛЮБОГО переводчика пары -------------------------------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.ApplyPositionDelta("sp1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 80.0, 80000.0, 80000.0)});  // 1 BTC по F_0=80 000
+    // T_BTC_binance больше дельт не получает; переводчик kraken присылает новую F_0 пары.
+    uc.ApplyPositionDelta("sp2", 2000, {}, {MkDelta("T_BTC_kraken", "translator", "BTC", "kraken", 0.0008, 80100.0, 80100.0)});
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* t1 = Find(resp, "T_BTC_binance");
+    Check(t1 != nullptr && t1->external().u_has_data(), "SP: данные есть");
+    if (t1 != nullptr) Near(Num(t1->external().u()), 100.0, 1e-3, "SP: U = 1·(80100 − 80000) по общей F_0 пары, хотя собственных дельт нет");
+  }
+
+  // --- 5l) F_0 связки на кросс-активе: F_0 пары × справедливая USDT-цена валюты котировки этого же такта ------------------------------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    // T_BTC (пара к USDT) F_0 = 80 000; T_ETH (ETH/BTC) F_0 = 0,05 BTC ⇒ F_0 ETH = 0,05·80 000 = 4 000 USDT. Связка ETH покупает по 3 990 и продаёт по 4 010.
+    uc.ApplyPositionDelta("sx1", 1000, {},
+                          {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 0.0008, 80000.0, 80000.0),
+                           MkDeltaX("T_ETH_binance", "translator", "ETH", "binance", 0.0008, 4000.0, 0.05, 0.05, "BTC"),
+                           MkDelta("A_ETH_binancekraken", "arbitrageur", "ETH", "binance", -4.0, 3990.0),
+                           MkDelta("A_ETH_binancekraken", "arbitrageur", "ETH", "kraken", 4.0, 4010.0)});
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* l = Find(resp, "A_ETH_binancekraken");
+    Check(l != nullptr, "XL: связка найдена");
+    // Источник: 4000/3990 = 1,00250627 ETH · (4000 − 3990) = 10,0251; назначение: 4000/4010 = 0,99750623 ETH · (4010 − 4000) = 9,9751.
+    if (l != nullptr) Near(Num(l->internal().r()), 20.0002, 1e-3, "XL: выгода связки оценена по F_0 = 4 000 USDT, а не по цене узла");
+  }
+
+  // --- 5m) хедж переводчика без книги (позиция накоплена, пока учёт был выключен): книга засевается позицией до исполнения по F_0 --------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    setenv("CE_AGENT_PNL_ENABLED", "0", 1);
+    uc.ApplyPositionDelta("nb1", 1000, {}, {MkDelta("T_BTC_binance", "translator", "BTC", "binance", 80.0, 80000.0, 80000.0)});  // 1 BTC по F_0=80 000
+    unsetenv("CE_AGENT_PNL_ENABLED");
+    uc.RememberExecutionIntent(MkSellIntent("T_BTC_binance", "BTC", "binance", 80.0, 80000.0));
+    Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 1.0, 80060.0, "nb-rep"));
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* a = Find(resp, "T_BTC_binance");
+    Check(a != nullptr && a->external().has_data(), "NB: данные есть");
+    if (a != nullptr) {
+      Near(Num(a->external().r()), 60.0, 1e-6, "NB: засев по F_0 и хедж 1 BTC по 80 060 ⇒ R внешних = (80060 − 80000)·1");
+      Near(Num(a->internal().r()), 0.0, 1e-12, "NB: внутренних сделок учёт не видел ⇒ R внутр. = 0");
+    }
+  }
+
+  // --- 5n) хедж переводчика, когда завести книгу не из чего (после рестарта нет F_0 и цены базы): исполнение в R не попадает, падения нет ------
+  {
+    auto repo = std::make_shared<FakeRepo>();
+    AgentPositionRow row;
+    row.agent_id = "T_BTC_binance"; row.agent_kind = "translator"; row.asset = "BTC"; row.venue = "binance";
+    row.position = Dec(80.0, 6);
+    repo->rows[FakeRepo::Key{"T_BTC_binance", "BTC", "binance"}] = row;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetAgentPositionRepo(repo);
+    uc.RememberExecutionIntent(MkSellIntent("T_BTC_binance", "BTC", "binance", 80.0, 80000.0));
+    Apply(uc, MkFill("T_BTC_binance", "BTC", "binance", 1.0, 80060.0, "nb2-rep"));
+    Check(repo->books.empty(), "NS: книгу заводить не из чего — в репозиторий ничего не записано");
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* a = Find(resp, "T_BTC_binance");
+    Check(a != nullptr && !a->total().has_data(), "NS: валюта котировки неизвестна ⇒ «нет данных», а не нули");
+  }
+
+  // --- 5o) хедж кросс-пары ETH/BTC: цена исполнения в BTC, результат в USDT по курсу ρ = P_b / F_0 ---------------------------------------------
+  {
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.ApplyPositionDelta("xh1", 1000, {}, {MkDeltaX("T_ETH_binance", "translator", "ETH", "binance", 3.0, 3000.0, 0.05, 0.05, "BTC")});
+    uc.ApplyPositionDelta("xh2", 2000, {}, {MkDeltaX("T_ETH_binance", "translator", "ETH", "binance", 3.06, 3060.0, 0.051, 0.0515, "BTC")});
+    uc.RememberExecutionIntent(MkSellIntent("T_ETH_binance", "ETH", "binance", 3.06, 3060.0));
+    Apply(uc, MkFill("T_ETH_binance", "ETH", "binance", 1.0, 0.0516, "xh-rep", 8));
+    const auto resp = uc.GetAgentPnl(fob::ledger::v1::GetAgentPnlRequest{});
+    const auto* a = Find(resp, "T_ETH_binance");
+    Check(a != nullptr && a->external().u_has_data(), "XH: данные есть");
+    if (a != nullptr) {
+      // Исполнение (0,0516 − 0,0515)·1 = 0,0001 BTC; дрейф (0,0515 − 0,05075)·1 = 0,00075 BTC; всего 0,00085 BTC · ρ(59 417,48) ≈ 50,51 USDT.
+      Near(Num(a->external().r()), 50.5049, 0.01, "XH: R внешних кросс-пары в USDT");
+      // Остаток 1 ETH по стоимости входа 0,05075 при F_0 = 0,0515 ⇒ U = 0,00075 BTC ≈ 44,56 USDT.
+      Near(Num(a->external().u()), 44.5631, 0.01, "XH: U остатка в USDT");
     }
   }
 
   // --- 5g) итоги по видам агентов (панель «Живые позиции» не суммирует в браузере) -------------------------
   {
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
-    RunTranslatorScenario(uc);  // переводчик: R=100, U≈40
+    RunTranslatorScenario(uc);  // переводчик: R = 103,33, U ≈ 36,67; F_0 актива BTC = 80 050
+    // Связка в отдельном такте: своей F_0 нет, берётся последняя известная у переводчиков актива (80 050).
     uc.ApplyPositionDelta("m1", 7000, {},
                           {MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "binance", -10.0, 80000.0),
                            MkDelta("A_BTC_binancekraken", "arbitrageur", "BTC", "kraken", 10.0, 80080.0)});
@@ -550,14 +688,16 @@ int main() {
     Check(resp.by_kind_size() == 2 && tr != nullptr && ar != nullptr, "K: две записи by_kind — переводчики и арбитражёры");
     if (tr != nullptr && ar != nullptr) {
       Check(tr->agent_count() == 1 && ar->agent_count() == 1, "K: по одному агенту каждого вида");
-      Near(Num(tr->total().r()), 100.0, 1e-4, "K: R переводчиков");
-      Near(Num(ar->total().r()), 9.9900096, 1e-5, "K: R арбитражёров — базис круговой сделки");
+      Near(Num(tr->total().r()), 103.3333, 1e-3, "K: R переводчиков");
+      // Источник: 0,125·(80050−80000) = 6,25; назначение: 0,12487512·(80080−80050) = 3,7463 ⇒ 9,9963.
+      Near(Num(ar->total().r()), 9.9962536, 1e-4, "K: R арбитражёров — выгода обеих ног к F_0 пары");
       Near(Num(tr->total().r_plus_u()) + Num(ar->total().r_plus_u()), Num(resp.totals().total().r_plus_u()), 1e-9,
            "K: сумма по видам = строка «все агенты»");
       Near(Num(tr->external().r()) + Num(ar->external().r()), Num(resp.totals().external().r()), 1e-9,
            "K: внешний R: сумма по видам = общий");
-      Near(Num(tr->internal().u()) + Num(ar->internal().u()), Num(resp.totals().internal().u()), 1e-9,
-           "K: внутренний U: сумма по видам = общий");
+      Near(Num(tr->internal().r()) + Num(ar->internal().r()), Num(resp.totals().internal().r()), 1e-9,
+           "K: внутренний R: сумма по видам = общий");
+      Near(Num(tr->internal().u()) + Num(ar->internal().u()), 0.0, 1e-12, "K: внутренний U ≡ 0");
     }
     // Запрос по одному агенту: итоги и записи по видам считаются по выбранным.
     fob::ledger::v1::GetAgentPnlRequest one;

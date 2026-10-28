@@ -43,7 +43,7 @@ const dto = buildPnlHistoryDto('T_BTC_binance', [
 ], 24, 10000000);
 check('DTO: 3 валидные точки по возрастанию времени', dto.points.length === 3 && dto.points[0].t === 1000 && dto.points[2].t === 3000);
 check('DTO: R+U = сумма частей', dto.points[0].total === 0 && dto.points[1].total === 3);
-check('DTO: нет U ⇒ total = R, u = null', dto.points[2].u === null && dto.points[2].total === 3);
+check('DTO: нет U ⇒ u = null и total = null (R+U не подменяется одним R), R остаётся', dto.points[2].u === null && dto.points[2].total === null && dto.points[2].r === 3);
 check('DTO: окно и начало', dto.window_hours === 24 && dto.since_ms === 10000000 - 24 * 3600 * 1000 && dto.first_ms === 1000);
 check('DTO: has_data', dto.has_data === true);
 const empty = buildPnlHistoryDto('x', [], 24, 5);

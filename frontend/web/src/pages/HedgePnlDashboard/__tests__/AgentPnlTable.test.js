@@ -5,8 +5,8 @@ import AgentPnlTable from '../AgentPnlTable';
 
 jest.mock('axios', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
 
-const grp = (r, u, total) => ({ has_data: true, r, u, r_plus_u: total === undefined ? r + u : total });
-const NO = { has_data: false, r: null, u: null, r_plus_u: null };
+const grp = (r, u, total) => ({ has_data: true, u_has_data: true, r, u, r_plus_u: total === undefined ? r + u : total });
+const NO = { has_data: false, u_has_data: false, r: null, u: null, r_plus_u: null };
 
 const dto = (over = {}) => ({
   currency: 'USDT',
@@ -62,8 +62,8 @@ test('показывает числа агента по группам со зн
 test('фронт не считает: R+U, итого и строка «все агенты» показываются ровно как пришли', async () => {
   // Нарочно несогласованные числа: если бы компонент пересчитывал, увидели бы 30,00 вместо 7,77.
   const odd = dto({
-    agents: [{ ...dto().agents[0], total: { has_data: true, r: 10, u: 20, r_plus_u: 7.77 } }],
-    totals: { internal: grp(1, 1), external: grp(1, 1), total: { has_data: true, r: 1, u: 2, r_plus_u: 123.45 }, agent_count: 1, incomplete_agents: 0 },
+    agents: [{ ...dto().agents[0], total: { has_data: true, u_has_data: true, r: 10, u: 20, r_plus_u: 7.77 } }],
+    totals: { internal: grp(1, 1), external: grp(1, 1), total: { has_data: true, u_has_data: true, r: 1, u: 2, r_plus_u: 123.45 }, agent_count: 1, incomplete_agents: 0 },
   });
   axios.get.mockResolvedValue({ data: odd });
   render(<AgentPnlTable pollMs={600000} />);
@@ -78,7 +78,19 @@ test('нет данных — прочерк, а не ноль; подсказк
   await waitFor(() => expect(screen.getByTestId('agent-pnl-row-T_ETH_okx')).toBeTruthy());
   expect(screen.getByTestId('agent-pnl-T_ETH_okx-internal-r').textContent).toBe('—');
   expect(screen.getByTestId('agent-pnl-T_ETH_okx-total-r_plus_u').textContent).toBe('—');
-  expect(screen.getByTestId('agent-pnl-T_ETH_okx-internal-r').getAttribute('title')).toMatch(/нет цены оценки/);
+  expect(screen.getByTestId('agent-pnl-T_ETH_okx-internal-r').getAttribute('title')).toMatch(/нет данных/);
+});
+
+test('R известен, U — нет: R показан, U и R+U — прочерк с объяснением (после перезапуска, пока нет справедливой цены)', async () => {
+  const partial = { has_data: true, u_has_data: false, r: 93.33, u: null, r_plus_u: null };
+  const d = dto({ agents: [{ ...dto().agents[0], external: partial, total: partial }] });
+  axios.get.mockResolvedValue({ data: d });
+  render(<AgentPnlTable pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('agent-pnl-row-T_BTC_binance')).toBeTruthy());
+  expect(txt('agent-pnl-T_BTC_binance-external-r')).toBe('+93,33');
+  expect(screen.getByTestId('agent-pnl-T_BTC_binance-external-u').textContent).toBe('—');
+  expect(screen.getByTestId('agent-pnl-T_BTC_binance-external-u').getAttribute('title')).toMatch(/справедливой цены/);
+  expect(screen.getByTestId('agent-pnl-T_BTC_binance-total-r_plus_u').textContent).toBe('—');
 });
 
 test('строка «все агенты»: число агентов и сколько без данных', async () => {

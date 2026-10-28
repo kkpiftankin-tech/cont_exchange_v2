@@ -99,7 +99,7 @@ sequenceDiagram
 
 ## Заработок агентов по биржам (ADR-087)
 
-Путь числа для вкладки «PnL»: ledger ведёт книгу сделок агента на внутренней бирже и суммы внешних хедж-исполнений, а BFF только пересылает готовые R, U, R+U.
+Путь числа для вкладки «PnL»: ledger ведёт книгу агента по справедливой цене (внутренние сделки и хедж-исполнения), а BFF только пересылает готовые R, U, R+U.
 
 ```mermaid
 sequenceDiagram
@@ -114,11 +114,11 @@ sequenceDiagram
     participant UI as frontend-web (вкладка PnL)
 
     MB->>KP: AgentDelta (delta, price_used, base_price, fair_price)
-    KP->>L: consume — сделка внутренней биржи входит в книгу агента
+    KP->>L: consume — сделка входит в книгу агента по справедливой цене F_0 такта (выгода к F_0 — внутренний R)
     L->>PG: UPSERT ce_agent_pnl_book (пакетом на такт)
     V->>KV: ExecutionReport (исполнение хеджа)
-    KV->>L: consume — выход книги по F_0 момента исполнения, внешние суммы
-    L->>PG: UPDATE ce_agent_position (ext_*, realized_vs_fair); UPSERT ce_agent_pnl_book
+    KV->>L: consume — хедж-исполнение как сделка книги: качество исполнения и дрейф справедливой цены — внешний R
+    L->>PG: UPDATE ce_agent_position (in_flight, realized_vs_fair); UPSERT ce_agent_pnl_book
     UI->>BFF: GET /api/vector-clearing/agent-pnl (опрос раз в 5 с)
     BFF->>L: GetAgentPnl
     L-->>BFF: R, U, R+U внутренней биржи, внешних бирж и итого (USDT)
@@ -138,8 +138,7 @@ sequenceDiagram
 
 | Object | Store | Doc |
 | --- | --- | --- |
-| книга внутренней биржи агента | PostgreSQL `ce_agent_pnl_book` | [ce-agent-pnl-book](../../07-data/ce-agent-pnl-book.md) |
-| внешние суммы ноги, отметка `rvf_base` | PostgreSQL `ce_agent_position` (`ext_*`, `rvf_base`) | [ce-agent-position](../../07-data/ce-agent-position.md) |
+| книга агента по справедливой цене (остаток, F_in, R внутр., R внеш.) | PostgreSQL `ce_agent_pnl_book` | [ce-agent-pnl-book](../../07-data/ce-agent-pnl-book.md) |
 
 ## Related Components
 
@@ -148,7 +147,7 @@ sequenceDiagram
 ## Related ADR
 
 - ADR-061 (planned, supersede ADR-054/057; ревизии ADR-055/056/058).
-- ADR-087 — заработок агентов по биржам: книга внутренней биржи, внешние суммы, `GetAgentPnl`.
+- ADR-087 — заработок агентов по биржам: книга по справедливой цене (модель C′), `GetAgentPnl`.
 
 ## Source Fragments
 

@@ -23,7 +23,7 @@ function pnlSamples(rows, tsMs, surplus) {
   };
   for (const a of Array.isArray(rows) ? rows : []) {
     if (!a || !a.agent_id) continue;
-    // R и U приходят из ledger одной группой (ADR-087 п. 10): есть оба или нет обоих; подмены R суммой R+U нет
+    // R и U приходят из ledger независимо (ADR-087, модель C′): R известен без цены оценки, U — только с ней; подмены неизвестного нулём нет
     const r = finite(a.realized_usdt) ? Number(a.realized_usdt) : null;
     const u = finite(a.unrealized_usdt) ? Number(a.unrealized_usdt) : null;
     const sp = sPart(a.agent_id);
@@ -66,7 +66,8 @@ function downsample(points, maxPoints) {
 }
 
 // dbRows — строки PG { ts_ms, realized_usdt, unrealized_usdt, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected } одного агента за
-// окно. DTO для графика: R, U, R+U (total) и накопленная за окно выгода s. R+U считается только когда есть хотя бы одна часть; иначе null.
+// окно. DTO для графика: R, U, R+U (total) и накопленная за окно выгода s. R+U считается только когда известны обе части; иначе null
+// (неизвестное U не превращается в ноль, чтобы после перезапуска ledger R+U на графике не проваливалось на размер U).
 function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
   const raw = [];
   let sCum = 0, hasS = false, tactsSeen = 0, tactsExp = 0;
@@ -85,7 +86,7 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
     }
     raw.push({
       t, r: rr, u: uu,
-      total: (rr === null && uu === null) ? null : (rr === null ? 0 : rr) + (uu === null ? 0 : uu),
+      total: (rr === null || uu === null) ? null : rr + uu,
       s: hasS ? sCum : null,
     });
   }

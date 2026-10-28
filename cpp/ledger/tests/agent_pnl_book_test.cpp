@@ -1,7 +1,7 @@
 // ============================================================================
-// agent_pnl_book_test.cpp — ADR-087 / CALC-CE-AGENT-PNL. Чистая математика книги
-// внутренней биржи и внешних сумм (Decimal, без ledger_uc, PG и Kafka).
-// Числа §3.1 и §3.2 карточки воспроизведены один в один.
+// agent_pnl_book_test.cpp — ADR-087 / CALC-CE-AGENT-PNL (модель C′). Чистая математика книги агента по справедливой цене
+// (Decimal, без ledger_uc, PG и Kafka). Числа §3 карточки воспроизведены один в один; каждый сценарий сверен с прямым пересчётом
+// по кассе (деньги в кассе + остаток по цене оценки), а нулевая сумма внутренней биржи — на парах «покупатель/продавец».
 // ============================================================================
 #include <cmath>
 #include <cstdint>
@@ -35,206 +35,131 @@ void Check(bool ok, const char* msg) {
   if (!ok) { std::cerr << "FAILED: " << msg << '\n'; ++g_fail; }
 }
 
-// Книга переводчика из §3.1: +2 BTC @ 80 000 и +1 BTC @ 80 030 ⇒ L=3, p̄=80 010.
-InternalBook TranslatorBook() {
-  InternalBook b;
-  ApplyBookTrade(b, BookUnitsFromValue(+1, D(160), D(80000)), D(80000));
-  ApplyBookTrade(b, BookUnitsFromValue(+1, D(80.03), D(80030)), D(80030));
-  return b;
+// R итого и U по книге при цене оценки m.
+double R(const FairBook& b) { return X(b.edge) + X(b.ext_realized); }
+double U(const FairBook& b, double m) { return X(FairUnrealizedQuote(b, D(m))); }
+
+// §3.1 карточки: покупка 1 BTC по 80 010 при F_0=80 000; хедж SELL 0,6 BTC по 80 040 при F_0=80 030; остаток 0,4 при F_0=80 030.
+void TestOwnerExample() {
+  FairBook b;
+  ApplyInternalTrade(b, D(1), D(80010), D(80000));
+  Near(b.edge, -10.0, 1e-9, "E1: R внутренней биржи = (80000−80010)·1 = −10");
+  Near(b.qty, 1.0, 1e-12, "E1: позиция 1 BTC");
+  Near(b.avg_fair, 80000.0, 1e-9, "E1: справедливая стоимость входа = F_0 такта покупки");
+  Near(FairUnrealizedQuote(b, D(80000)), 0.0, 1e-9, "E1: при F_0 входа U_ext = 0");
+
+  ApplyHedgeFill(b, /*sell=*/true, D(0.6), D(80040), D(80030));
+  Near(b.ext_realized, 24.0, 1e-9, "E2: R внешних = (80040−80000)·0,6 = 24 (6 исполнение + 18 дрейф)");
+  Near(b.qty, 0.4, 1e-12, "E2: остаток 0,4");
+  Near(b.avg_fair, 80000.0, 1e-9, "E2: стоимость входа остатка не меняется при частичном выходе");
+  Near(FairUnrealizedQuote(b, D(80030)), 12.0, 1e-9, "E3: U внешних = 0,4·(80030−80000) = 12");
+  Near(Decimal::add(b.edge, b.ext_realized), 14.0, 1e-9, "E3: R итого = −10 + 24 = 14");
+  Near(Decimal::add(Decimal::add(b.edge, b.ext_realized), FairUnrealizedQuote(b, D(80030))), 26.0, 1e-9, "E3: R+U = 26");
+  // Прямой пересчёт по кассе: −80010 + 0,6·80040 + 0,4·80030 = −80010 + 48024 + 32012 = 26.
+  Near(D(-80010.0 + 0.6 * 80040.0 + 0.4 * 80030.0), 26.0, 1e-6, "E3: прямой пересчёт по кассе совпадает");
 }
 
-// §3.1: переводчик BTC/USDT. Две покупки на CE, хедж 2 BTC при F_0=80 040, оценка 80 050.
-void TestTranslatorExitIdentity() {
-  InternalBook b = TranslatorBook();
-  Near(b.qty, 3.0, 1e-9, "T1: L после двух покупок");
-  Near(b.avg_price, 80010.0, 1e-6, "T1: средняя цена входа (2·80000+80030)/3");
-
-  ExternalSums unmatched;
-  const Decimal rest = ApplyTranslatorHedgeFill(b, unmatched, /*sell=*/true, D(2), D(80060), D(80040));
-  Near(rest, 0.0, 1e-12, "T1: хедж целиком сопоставлен с книгой");
-  Near(b.realized, 60.0, 1e-6, "T1: R_int = 2·(80040−80010) = 60");
-  Near(b.qty, 1.0, 1e-9, "T1: остаток 1 BTC");
-  Near(b.avg_price, 80010.0, 1e-6, "T1: средняя цена открытого остатка не меняется при выходе");
-  Near(unmatched.sell_base, 0.0, 1e-12, "T1: внешнего несопоставленного объёма нет");
-
-  // Внешний R (realized_vs_fair) = 2·(80060−80040) = 40; сумма внутреннего и внешнего = полный результат 2 BTC.
-  const double r_ext = 2.0 * (80060.0 - 80040.0);
-  Check(std::fabs((X(b.realized) + r_ext) - 2.0 * (80060.0 - 80010.0)) < 1e-6, "T1: тождество R_int+R_ext = (p_f − p̄)·q");
-
-  // Оценка 80 050: U_int = 40; внешний U на сопоставленном объёме = 0; итого 100 + 40 = 140 — полный результат.
-  Near(BookUnrealizedQuote(b, D(80050)), 40.0, 1e-6, "T1: U_int");
-  Near(TranslatorExternalUnrealizedQuote(unmatched, D(80050)), 0.0, 1e-12, "T1: U_ext = 0");
-  Near(Decimal::add(Decimal::add(b.realized, D(r_ext)), BookUnrealizedQuote(b, D(80050))), 140.0, 1e-6,
-       "T1: R+U итого = 140");
-  // IB3: чувствительность итога к цене оценки равна остатку (+1 шт.), а не −1 шт.
-  Near(Decimal::sub(BookUnrealizedQuote(b, D(80100)), BookUnrealizedQuote(b, D(80050))), 50.0, 1e-6,
-       "T1: dU/dm = L");
+// Усреднение справедливой стоимости входа и закрытие частями: покупки 2 @ F=80 000 и 1 @ F=80 030, продажа 1 при F=80 060.
+void TestAveragingAndPartialClose() {
+  FairBook b;
+  ApplyFairTrade(b, D(2), D(80000));
+  ApplyFairTrade(b, D(1), D(80030));
+  Near(b.qty, 3.0, 1e-12, "A1: L = 3");
+  Near(b.avg_fair, 80010.0, 1e-6, "A1: F_in = (2·80000 + 80030)/3");
+  ApplyFairTrade(b, D(-1), D(80060));
+  Near(b.ext_realized, 50.0, 1e-5, "A2: дрейф закрытой единицы = (80060−80010)·1");
+  Near(b.qty, 2.0, 1e-12, "A2: остаток 2");
+  Near(b.avg_fair, 80010.0, 1e-6, "A2: F_in остатка не меняется");
+  Near(FairUnrealizedQuote(b, D(80060)), 100.0, 1e-5, "A2: U = 2·(80060−80010)");
 }
 
-// Цена оценки фиксируется на исполнении: дрейф F_0 после хеджа R_int не меняет.
-void TestExitUsesFairAtFill() {
-  InternalBook a = TranslatorBook();
-  InternalBook b = TranslatorBook();
-  ExternalSums ua, ub;
-  ApplyTranslatorHedgeFill(a, ua, true, D(2), D(80060), D(80040));
-  (void)BookUnrealizedQuote(a, D(80500));  // чтение при другой оценке состояние не меняет
-  ApplyTranslatorHedgeFill(b, ub, true, D(2), D(80060), D(80040));
-  Check(a.realized.units == b.realized.units && a.realized.scale == b.realized.scale, "T2: R_int не зависит от чтения");
+// Короткая позиция: падение справедливой цены — прибыль; переход через ноль открывает остаток по F закрытия.
+void TestShortAndFlip() {
+  FairBook s;
+  ApplyFairTrade(s, D(-2), D(80000));
+  Near(s.qty, -2.0, 1e-12, "S1: короткая позиция 2");
+  ApplyFairTrade(s, D(1), D(79900));
+  Near(s.ext_realized, 100.0, 1e-6, "S2: закрытие 1 при падении F на 100: +100");
+  Near(FairUnrealizedQuote(s, D(79900)), 100.0, 1e-6, "S2: U остатка −1 = −1·(79900−80000) = +100");
 
-  // F_0 неизвестна: выход по цене исполнения, весь результат уходит во внутренний R (внешний вклад 0).
-  InternalBook c = TranslatorBook();
-  ExternalSums uc;
-  ApplyTranslatorHedgeFill(c, uc, true, D(2), D(80060), Decimal::zero());
-  Near(c.realized, 100.0, 1e-6, "T2: F_0=0 ⇒ R_int = 2·(80060−80010)");
+  // Переход через ноль: длинная 1 @ F=80 000, продажа 1,5 при F=80 100 по цене 80 090.
+  FairBook f;
+  ApplyInternalTrade(f, D(1), D(80000), D(80000));
+  ApplyInternalTrade(f, D(-1.5), D(80090), D(80100));
+  Near(f.edge, -15.0, 1e-6, "F1: R внутренней биржи = (80100−80090)·(−1,5) = −15");
+  Near(f.ext_realized, 100.0, 1e-6, "F1: дрейф закрытой единицы = 80100−80000");
+  Near(f.qty, -0.5, 1e-12, "F1: остаток −0,5");
+  Near(f.avg_fair, 80100.0, 1e-9, "F1: остаток открыт заново по F закрытия");
+  Near(FairUnrealizedQuote(f, D(80050)), 25.0, 1e-6, "F1: U = −0,5·(80050−80100) = 25");
+  // Прямой пересчёт по кассе: −80000 + 1,5·80090 − 0,5·80050 = 110 = R(−15 + 100) + U(25).
+  Near(D(-80000.0 + 1.5 * 80090.0 - 0.5 * 80050.0), 110.0, 1e-6, "F1: прямой пересчёт по кассе");
+  Near(Decimal::add(Decimal::add(f.edge, f.ext_realized), FairUnrealizedQuote(f, D(80050))), 110.0, 1e-6, "F1: R+U = 110");
 }
 
-// Несопоставленный объём: хедж больше остатка, остаток противоположного знака, пустая книга.
-void TestUnmatchedVolume() {
-  // Книга пуста, продано 1 BTC @ 80 060 при F_0=80 040: внешняя позиция без внутренней опоры.
-  {
-    InternalBook b;
-    ExternalSums u;
-    const Decimal rest = ApplyTranslatorHedgeFill(b, u, true, D(1), D(80060), D(80040));
-    Near(rest, 1.0, 1e-12, "U1: всё несопоставлено");
-    Near(b.realized, 0.0, 1e-12, "U1: книга не тронута");
-    // U_ext = Σ s·q·(m_fill − mark) = 80040 − 80050 = −10; вместе с R_ext = 20 даёт (p_f − mark)·q = 10.
-    Near(TranslatorExternalUnrealizedQuote(u, D(80050)), -10.0, 1e-9, "U1: U_ext на несопоставленном объёме");
-  }
-  // Хедж 2 при остатке 1: сопоставлена 1 шт., вторая — внешняя.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, D(1), D(80000));
-    ExternalSums u;
-    const Decimal rest = ApplyTranslatorHedgeFill(b, u, true, D(2), D(80060), D(80040));
-    Near(rest, 1.0, 1e-12, "U2: сопоставлена 1 шт., 1 шт. — остаток");
-    Near(b.realized, 40.0, 1e-9, "U2: R_int = 1·(80040−80000)");
-    Near(b.qty, 0.0, 1e-12, "U2: книга закрыта");
-  }
-  // Покупка не закрывает длинный остаток: всё несопоставлено, книга не меняется.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, D(1), D(80000));
-    ExternalSums u;
-    const Decimal rest = ApplyTranslatorHedgeFill(b, u, /*sell=*/false, D(1), D(80010), D(80020));
-    Near(rest, 1.0, 1e-12, "U3: BUY не закрывает длинную позицию");
-    Near(b.qty, 1.0, 1e-12, "U3: остаток не тронут");
-    Near(u.buy_base, 1.0, 1e-12, "U3: учтена внешняя покупка");
-    // Покупка 1 @ 80 010 при m_fill=80 020: U_ext = s·q·(m_fill − mark) с s=−1: −1·(80020 − 80050) = +30.
-    Near(TranslatorExternalUnrealizedQuote(u, D(80050)), 30.0, 1e-9, "U3: U_ext покупки");
-  }
-  // Короткая позиция закрывается покупкой.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, D(-2), D(80100));
-    ExternalSums u;
-    const Decimal rest = ApplyTranslatorHedgeFill(b, u, false, D(2), D(80090), D(80095));
-    Near(rest, 0.0, 1e-12, "U4: BUY закрывает короткую");
-    Near(b.realized, 10.0, 1e-9, "U4: R_int = 2·(80100−80095)");
-  }
+// Хедж BUY закрывает короткую позицию; качество исполнения со знаком; нет F_0 ⇒ F := цена исполнения, исполнение 0.
+void TestHedgeSidesAndNoFair() {
+  FairBook b;
+  ApplyFairTrade(b, D(-0.125), D(80040));
+  ApplyHedgeFill(b, /*sell=*/false, D(0.125), D(80030), D(80040));
+  Near(b.ext_realized, 1.25, 1e-9, "H1: покупка дешевле F на 10 ⇒ +1,25, дрейф 0");
+  Near(b.qty, 0.0, 1e-12, "H1: позиция закрыта");
+  Check(b.avg_fair.units == 0, "H1: при нулевом остатке F_in = 0");
+
+  FairBook n;
+  ApplyFairTrade(n, D(1), D(80000));
+  ApplyHedgeFill(n, /*sell=*/true, D(1), D(80100), Decimal{0, 0});
+  Near(n.ext_realized, 100.0, 1e-9, "H2: нет F_0 ⇒ исполнение 0, весь результат — дрейф (80100−80000)");
 }
 
-// §3.2: связка. Покупка на источнике 0,125 BTC @ 80 000 и продажа на назначении @ 80 080 в одном такте.
-void TestLinkRoundTrip() {
-  for (int order = 0; order < 2; ++order) {
-    InternalBook b;
-    const Decimal src_dl = BookUnitsFromValue(-1, D(-10), D(80000));
-    const Decimal dst_dl = BookUnitsFromValue(-1, D(10), D(80080));
-    Near(src_dl, 0.125, 1e-9, "L1: нога источника — покупка 0,125");
-    Near(dst_dl, -0.12487512, 1e-9, "L1: нога назначения — продажа 0,12487512");
-    if (order == 0) {
-      ApplyBookTrade(b, src_dl, D(80000));
-      ApplyBookTrade(b, dst_dl, D(80080));
-    } else {
-      ApplyBookTrade(b, dst_dl, D(80080));
-      ApplyBookTrade(b, src_dl, D(80000));
-    }
-    Near(b.realized, 9.9900096, 1e-6, "L1: R_int = 80·0,12487512 (порядок ног при L=0 не важен)");
-    Near(b.qty, 0.00012488, 1e-9, "L1: остаток паритета");
-    Near(b.avg_price, 80000.0, 1e-6, "L1: цена входа остатка");
-    Near(BookUnrealizedQuote(b, D(80040)), 0.0049952, 1e-6, "L1: U_int по оценке 80 040");
-  }
+// Нулевая сумма внутренней биржи: на каждой сделке покупатель и продавец дают противоположную выгоду (цена и F общие).
+void TestInternalZeroSum() {
+  FairBook buyer, seller, link_dst, t2;
+  ApplyInternalTrade(buyer, D(0.125), D(80000), D(80040));          // покупатель на узле по 80 000
+  ApplyInternalTrade(seller, D(-0.125), D(80000), D(80040));        // продавец на том же узле
+  ApplyInternalTrade(link_dst, D(-0.12487512), D(80080), D(80040)); // связка продаёт на узле по 80 080
+  ApplyInternalTrade(t2, D(0.12487512), D(80080), D(80040));        // переводчик покупает на том же узле
+  Near(Decimal::add(buyer.edge, seller.edge), 0.0, 1e-12, "Z1: узел 80 000: сумма выгод 0");
+  Near(Decimal::add(link_dst.edge, t2.edge), 0.0, 1e-12, "Z1: узел 80 080: сумма выгод 0");
+  Near(buyer.edge, 5.0, 1e-9, "Z1: покупка по 80 000 при F=80 040 выгодна на 40 за BTC");
+  Near(t2.edge, -4.9950048, 1e-6, "Z1: покупка по 80 080 при F=80 040 невыгодна");
 }
 
-void TestEdgeCases() {
-  // Переход через ноль: длинная 1 @ 100, продажа 3 @ 110 → R=+10, короткая 2 @ 110; откуп 2 @ 100 → R += 20.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, D(1), D(100));
-    ApplyBookTrade(b, D(-3), D(110));
-    Near(b.realized, 10.0, 1e-9, "E1: R при закрытии длинной");
-    Near(b.qty, -2.0, 1e-9, "E1: перешла в короткую");
-    Near(b.avg_price, 110.0, 1e-9, "E1: цена входа короткой — цена сделки");
-    ApplyBookTrade(b, D(2), D(100));
-    Near(b.realized, 30.0, 1e-9, "E1: короткая закрыта с прибылью 20");
-    Near(b.qty, 0.0, 1e-12, "E1: остаток 0");
-    Near(b.avg_price, 0.0, 1e-12, "E1: цена входа сброшена");
-  }
-  // Выход больше остатка: закрывается весь остаток, новая позиция не открывается.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, D(1), D(100));
-    ApplyBookExit(b, D(5), D(103));
-    Near(b.qty, 0.0, 1e-12, "E2: остаток 0");
-    Near(b.realized, 3.0, 1e-9, "E2: R от закрытия 1 шт.");
-  }
-  // Выход при пустой книге и сделка без цены — без эффекта.
-  {
-    InternalBook b;
-    ApplyBookExit(b, D(1), D(100));
-    ApplyBookTrade(b, D(1), Decimal::zero());
-    Near(b.qty, 0.0, 1e-12, "E3: пустая книга не меняется");
-  }
-  // Начальное сальдо: вход по цене оценки, U в момент открытия = 0.
-  {
-    InternalBook b;
-    ApplyBookTrade(b, BookUnitsFromValue(+1, D(80.03), D(80030)), D(80040));
-    Near(b.qty, 1.0, 1e-9, "E4: открыт остаток 1 шт.");
-    Near(BookUnrealizedQuote(b, D(80040)), 0.0, 1e-9, "E4: U в момент открытия = 0");
-  }
-  // Нет цены базы: сделка не оценивается.
-  Check(BookUnitsFromValue(+1, D(80.03), Decimal::zero()).units == 0, "E5: P_b=0 ⇒ 0 штук");
+void TestUnitsAndRates() {
+  Near(BookUnitsFromValue(+1, D(160, 6), D(80000)), 2.0, 1e-12, "U1: 160 тыс. USDT по 80 000 = 2 BTC");
+  Near(BookUnitsFromValue(-1, D(10, 6), D(80000)), -0.125, 1e-12, "U1: σ=−1 меняет знак");
+  Check(PnlSign(BookUnitsFromValue(+1, D(10, 6), Decimal{0, 0})) == 0, "U1: нет цены базы ⇒ 0 штук");
+  Near(QuoteRate(true, D(3000), D(0.05)), 1.0, 1e-12, "Q1: котировка = нумерарий ⇒ курс 1");
+  Near(QuoteRate(false, D(3060), D(0.0515)), 3060.0 / 0.0515, 1e-3, "Q1: кросс-пара ⇒ курс P_b/p");
+  Near(QuoteRate(false, D(3060), Decimal{0, 0}), 1.0, 1e-12, "Q1: цена пары неизвестна ⇒ 1 (вызывающий проверяет сам)");
+  Near(FairUnrealizedQuote(FairBook{}, D(80000)), 0.0, 1e-12, "Q2: остатка нет ⇒ U = 0 без цены");
+  FairBook b;
+  ApplyFairTrade(b, D(1), D(80000));
+  Near(FairUnrealizedQuote(b, Decimal{0, 0}), 0.0, 1e-12, "Q2: цены нет ⇒ 0 (вызывающий не должен вызывать)");
 }
 
-void TestExternalAndTotals() {
-  // R_ext связки: куплено 1 @ 80 000, продано 0,9 @ 80 100 ⇒ min=0,9, R = 0,9·100 = 90.
-  ExternalSums s;
-  AddExternalFill(s, false, D(1), D(80000));
-  AddExternalFill(s, true, D(0.9), D(80100));
-  Near(ArbRealizedQuote(s), 90.0, 1e-6, "X1: R_ext круговой сделки связки");
-  // Корзина связки по ценам: (B−S)·P_b + (N_S−N_B) = 0,1·80050 + (72090 − 80000) = 8005 − 7910 = 95.
-  Near(BasketUsdt(s, D(80050), Decimal{1, 0}), 95.0, 1e-6, "X1: корзина связки");
-  // Односторонние исполнения круговой оборот не дают.
-  ExternalSums one;
-  AddExternalFill(one, true, D(1), D(80000));
-  Near(ArbRealizedQuote(one), 0.0, 1e-12, "X1: только продажи ⇒ 0");
-  // Сложение сумм по ногам.
-  const ExternalSums sum = AddExternalSums(s, one);
-  Near(sum.sell_base, 1.9, 1e-9, "X1: сумма продаж по ногам");
-  // Курс валюты котировки: ETH/BTC при P_b(ETH)=3000, цене пары 0,05 ⇒ ρ = 60 000 (цена BTC в USDT).
-  Near(QuoteRate(false, D(3000), D(0.05)), 60000.0, 1e-3, "X2: ρ кросс-пары");
-  Near(QuoteRate(true, D(3000), D(0.05)), 1.0, 1e-12, "X2: пара к нумерарию ⇒ ρ=1");
-  Near(QuoteRate(false, Decimal::zero(), D(0.05)), 1.0, 1e-12, "X2: нет цены ⇒ ρ=1");
-  // Итоги групп (§3.1: внутренний R=60, U=40; внешний R=40, U=0).
-  PnlGroup a, c;
-  a.r = D(60); a.u = D(40); a.has_data = true;
-  c.r = D(40); c.u = D(0); c.has_data = true;
-  const PnlGroup t = AddGroups(a, c);
-  Near(t.r, 100.0, 1e-9, "G1: R итого");
-  Near(t.u, 40.0, 1e-9, "G1: U итого");
-  Near(t.total(), 140.0, 1e-9, "G1: R+U итого (§3.1)");
-  PnlGroup none;
-  Check(!AddGroups(none, none).has_data, "G1: нет данных + нет данных");
+// R и U известны независимо: сумма R считает агентов с данными по R, сумма U — с данными по U.
+void TestGroupFlags() {
+  PnlGroup a, b, c;
+  a.r = D(10); a.u = D(1); a.has_data = a.u_has_data = true;
+  b.r = D(5); b.has_data = true;                    // U не известен (остаток есть, цены нет)
+  c.u = D(2); c.u_has_data = true;                  // R не известен (нет курса)
+  PnlGroup sum = AddGroups(AddGroups(AddGroups(PnlGroup{}, a), b), c);
+  Check(sum.has_data && sum.u_has_data, "G1: есть и R, и U");
+  Near(sum.r, 15.0, 1e-12, "G1: R = 10 + 5");
+  Near(sum.u, 3.0, 1e-12, "G1: U = 1 + 2");
+  Check(!AddGroups(PnlGroup{}, PnlGroup{}).has_data, "G1: пустая сумма — нет данных, не ноль");
 }
 
 }  // namespace
 
 int main() {
-  TestTranslatorExitIdentity();
-  TestExitUsesFairAtFill();
-  TestUnmatchedVolume();
-  TestLinkRoundTrip();
-  TestEdgeCases();
-  TestExternalAndTotals();
+  TestOwnerExample();
+  TestAveragingAndPartialClose();
+  TestShortAndFlip();
+  TestHedgeSidesAndNoFair();
+  TestInternalZeroSum();
+  TestUnitsAndRates();
+  TestGroupFlags();
   if (g_fail != 0) {
     std::cerr << g_fail << " checks failed\n";
     return 1;

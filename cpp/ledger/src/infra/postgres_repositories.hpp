@@ -180,21 +180,14 @@ class PostgresAgentPositionRepository final : public app::AgentPositionRepositor
                   int64_t updated_at_ms,
                   const cex::common::Decimal& realized_delta =
                       cex::common::Decimal{0, 0}) override;
-  // ADR-087 (CALC-CE-AGENT-PNL): внешние суммы ноги, книга внутренней биржи агента.
-  void ApplyExternalFill(const std::string& agent_id,
-                         const std::string& asset,
-                         const std::string& venue,
-                         const cex::common::Decimal& in_flight_delta,
-                         const cex::common::Decimal& realized_delta,
-                         const app::ExternalFillDelta& ext,
-                         int64_t updated_at_ms) override;
+  // ADR-087 (CALC-CE-AGENT-PNL): книга агента по справедливой цене.
   void SaveBooks(const std::vector<app::AgentPnlBookRow>& books) override;
   bool LoadBooks(std::vector<app::AgentPnlBookRow>& out) override;
   void ResetPnl(const std::vector<std::string>& agent_ids) override;
 
  private:
-  // Один раз на процесс: таблица ce_agent_pnl_book и колонки ce_agent_position (защитный блок миграции — см.
-  // docs/07-data/ce-agent-pnl-book.md). Ложь ⇒ работаем без новых колонок, прежнее поведение.
+  // Один раз на процесс: таблица ce_agent_pnl_book (защитный блок миграции модели A → C′ — см.
+  // docs/07-data/ce-agent-pnl-book.md). Ложь ⇒ книги недоступны, учёт заработка приостановлен.
   bool EnsurePnlSchema();
 
   std::shared_ptr<LedgerPgPool> pool_;

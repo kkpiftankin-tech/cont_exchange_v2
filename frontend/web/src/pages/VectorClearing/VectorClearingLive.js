@@ -476,14 +476,14 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   // unrealized (U — MTM открытого остатка, болтается с маркой) приглушённым: «R / U».
   const pnlColor = (x) => Number(x) > 1e-9 ? '#5fd08a' : Number(x) < -1e-9 ? '#e06060' : '#9fb2c2';
   // Заработок агента на внешних биржах (R / U): числа пришли готовыми из ledger (ADR-087 п. 10) — тот же расчёт и то же хранилище, что у
-  // вкладки «PnL». Здесь только отображение. Нет данных (нет цены оценки) — прочерк.
+  // вкладки «PnL». Здесь только отображение. R известен без цены оценки, U — только с ней: неизвестное — прочерк.
   const tradeCell = (a) => {
     const r = a.realized_usdt, u = a.unrealized_usdt;
     const rOk = r != null && Number.isFinite(Number(r));
     const uOk = u != null && Number.isFinite(Number(u));
     if (!rOk) return null;
     return (
-      <span title="Внешние биржи, USDT, без комиссий; считает ledger. R — реализованный (зафиксирован сделками), U — нереализованный (остаток, которому не нашлось встречной позиции на внутренней бирже, по текущей цене оценки). Внутренняя биржа и итого — на вкладке «PnL». Клик по агенту — график во времени">
+      <span title="Внешние биржи, USDT, без комиссий; считает ledger. R — реализованный (закрытая хеджем часть позиции: качество исполнения и дрейф справедливой цены), U — нереализованный (ещё не захеджированный остаток по текущей справедливой цене). Внутренняя биржа и итого — на вкладке «PnL». Клик по агенту — график во времени">
         <span style={{ color: pnlColor(r), fontWeight: 600 }}>{sgn(r)}</span>
         {uOk && <span style={{ color: pnlColor(u), opacity: 0.6, fontSize: '0.85em' }}> / {sgn(u)}</span>}
       </span>
@@ -601,7 +601,7 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const sumKey = (arr, key) => arr.reduce((acc, a) => acc + (okNum(a[key]) ? Number(a[key]) : 0), 0);
   const extOf = (kind) => {
     const g = pnlTotals && pnlTotals[kind] && pnlTotals[kind].external;
-    return g && g.has_data ? g : null;
+    return g && (g.has_data || g.u_has_data) ? g : null;
   };
   const tPnl = extOf('translator'), aPnl = extOf('arbitrageur'), allPnl = extOf('all');
   // Подпись «(N)»: число агентов в итоге ledger и сколько из них без данных (нет цены оценки — в сумму они не входят); нет итога — число строк.
@@ -618,6 +618,9 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
   const pnlNum = (v) => (
     <b style={{ color: v > 1e-9 ? '#5fd08a' : v < -1e-9 ? '#e06060' : '#9fb2c2' }}>{sgn(v)}</b>
   );
+  // R и U в итогах известны независимо (R — без цены оценки, U — с ней): неизвестное — прочерк, не ноль.
+  const pnlR = (g) => (g && g.has_data ? pnlNum(g.r) : dash);
+  const pnlU = (g) => (g && g.u_has_data ? pnlNum(g.u) : dash);
   // Двухъярусная шапка: слева — внутренняя биржа CE (позиция агента в клиринге), справа — внешние биржи (хедж и результат).
   const head = (
     <thead>
@@ -685,14 +688,14 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
           <ul>
             <li>
               <b>R — реализованный заработок</b>: уже зафиксирован сделками, сам по себе не меняется, пока нет новых сделок.
-              У переводчика это накопленная по каждой сделке разница между ценой исполнения и справедливой ценой клиринга: продажа дороже
-              справедливой цены — плюс, покупка дешевле — плюс. У связки внешние сделки редки (рыночный хедж её ног выключен): её результат —
-              на внутренней бирже, на вкладке «PnL».
+              Это результат закрытой хеджем части позиции: качество исполнения (продал дороже справедливой цены — плюс, купил дешевле — плюс)
+              и дрейф справедливой цены с момента, когда позиция возникла на внутренней бирже. У связки внешние сделки редки (рыночный хедж её
+              ног выключен): её результат — на внутренней бирже, на вкладке «PnL».
             </li>
             <li>
-              <b>U — нереализованный результат</b>: оценка по текущей цене только того внешнего объёма, которому не нашлось встречной позиции на
-              внутренней бирже. Хедж закрывает внутреннюю позицию, поэтому у переводчика U здесь обычно близок к нулю, а открытый риск виден в
-              внутренней группе на вкладке «PnL».
+              <b>U — нереализованный результат</b>: ещё не захеджированный остаток позиции, оценённый по текущей справедливой цене пары
+              (изменение справедливой цены с момента появления позиции). Хедж переводит эту часть в R. На внутренней бирже нереализованного
+              нет: всё реализуется в такте клиринга (вкладка «PnL»).
             </li>
             <li><b>R + U</b> — сумма по внешним биржам. График по клику на агента показывает оба ряда во времени.</li>
           </ul>
@@ -717,10 +720,10 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
             <span className="vc-tt-title">Общий заработок на внешних биржах (из ledger, USDT, без комиссий):</span>
             {pnlTotals ? (
               <>
-                <span>Переводчики ({kindCount('translator', tRows.length)}): R {tPnl ? pnlNum(tPnl.r) : dash} / U {tPnl ? pnlNum(tPnl.u) : dash}</span>
-                <span>Арбитражёры ({kindCount('arbitrageur', aRows.length)}): R {aPnl ? pnlNum(aPnl.r) : dash} / U {aPnl ? pnlNum(aPnl.u) : dash}</span>
+                <span>Переводчики ({kindCount('translator', tRows.length)}): R {pnlR(tPnl)} / U {pnlU(tPnl)}</span>
+                <span>Арбитражёры ({kindCount('arbitrageur', aRows.length)}): R {pnlR(aPnl)} / U {pnlU(aPnl)}</span>
                 <span className="vc-tt-all" data-testid="total-earnings" title="Сумма заработка на внешних биржах по всем агентам, посчитана в ledger: R — реализованный, U — нереализованный. Базис и открытая позиция арбитражёров сюда не входят. Внутренняя биржа и итого — на вкладке «PnL».">
-                  Вместе: R {allPnl ? pnlNum(allPnl.r) : dash} / U {allPnl ? pnlNum(allPnl.u) : dash} · итого R+U {allPnl ? pnlNum(allPnl.r_plus_u) : dash}
+                  Вместе: R {pnlR(allPnl)} / U {pnlU(allPnl)} · итого R+U {allPnl && allPnl.has_data && allPnl.u_has_data && allPnl.r_plus_u != null ? pnlNum(allPnl.r_plus_u) : dash}
                 </span>
               </>
             ) : (

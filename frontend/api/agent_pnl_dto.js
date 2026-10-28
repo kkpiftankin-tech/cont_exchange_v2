@@ -2,7 +2,8 @@
 // ADR-087 (CALC-CE-AGENT-PNL): ответ ledger GetAgentPnl → JSON для вкладки «PnL».
 // Это ТОЛЬКО пересылка: переименование полей и приведение типов proto (Decimal {units, scale} → число для отображения,
 // int64-строки → числа). Арифметики над R и U здесь нет и быть не должно — R, U, R+U, итоги по группам и строка «все агенты»
-// уже посчитаны в ledger (деньги — Decimal, CLAUDE.md §1). Нет данных (has_data=false) отдаётся null, а не нулём.
+// уже посчитаны в ledger (деньги — Decimal, CLAUDE.md §1). Нет данных отдаётся null, а не нулём: R известен при has_data, U — при
+// u_has_data (R цены оценки не требует, U — требует), R+U — только когда известны оба.
 
 const num = (v) => {
   if (v === null || v === undefined || v === '') return null;
@@ -20,8 +21,15 @@ function decOrNull(d) {
 }
 
 function groupDto(g) {
-  if (!g || !g.has_data) return { has_data: false, r: null, u: null, r_plus_u: null };
-  return { has_data: true, r: decOrNull(g.r), u: decOrNull(g.u), r_plus_u: decOrNull(g.r_plus_u) };
+  const hasR = !!(g && g.has_data);
+  const hasU = !!(g && g.u_has_data);
+  return {
+    has_data: hasR,
+    u_has_data: hasU,
+    r: hasR ? decOrNull(g.r) : null,
+    u: hasU ? decOrNull(g.u) : null,
+    r_plus_u: hasR && hasU ? decOrNull(g.r_plus_u) : null,
+  };
 }
 
 const KIND_ORDER = { translator: 0, arbitrageur: 1 };
@@ -84,16 +92,16 @@ function buildAgentPnlDto(resp, now) {
 
 // Поля строки панели «Живые позиции» и ряда для графика из записи агента ledger (результат buildAgentPnlDto). Один источник R и U для
 // панели, графика и вкладки «PnL» (ADR-087 п. 10): здесь только переименование — realized_usdt/unrealized_usdt/pnl_usdt это ВНЕШНЯЯ
-// группа (колонка «Внешняя биржа»), внутренняя и итоговая группы отдаются рядом. Нет записи или нет данных — null, не ноль.
+// группа (колонка «Внешняя биржа»), внутренняя и итоговая группы отдаются рядом. Нет записи или нет данных — null, не ноль;
+// R и U известны независимо (R без цены оценки, U — только с ней).
 function rowPnlFields(a) {
   const none = { realized_usdt: null, unrealized_usdt: null, pnl_usdt: null, pnl_internal: null, pnl_total: null, pnl_since_ms: null };
   if (!a) return none;
   const ext = a.external || {};
-  const has = !!ext.has_data;
   return {
-    realized_usdt: has ? ext.r : null,
-    unrealized_usdt: has ? ext.u : null,
-    pnl_usdt: has ? ext.r_plus_u : null,
+    realized_usdt: ext.has_data ? ext.r : null,
+    unrealized_usdt: ext.u_has_data ? ext.u : null,
+    pnl_usdt: ext.has_data && ext.u_has_data ? ext.r_plus_u : null,
     pnl_internal: a.internal || null,
     pnl_total: a.total || null,
     pnl_since_ms: a.since_ms == null ? null : a.since_ms,

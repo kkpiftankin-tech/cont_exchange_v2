@@ -2,7 +2,7 @@
 
 ## Status
 
-**Proposed** (ADR-087, 2026-10-28). Метод добавляется в `contracts/proto/fob/ledger/v1/ledger.proto` аддитивно; до принятия ADR-087 статус не повышается.
+**Accepted** (ADR-087, модель C′, 2026-10-28). Метод добавлен в `contracts/proto/fob/ledger/v1/ledger.proto` аддитивно. Смысл поля `PnlGroup.has_data` изменён в той же ветке, пока метод был только на dev: раньше «R и U известны», теперь «R известен», а известность U отдельно в новом поле `u_has_data = 5` (отдельный ADR не нужен, зафиксировано в ADR-087).
 
 ## Purpose
 
@@ -10,7 +10,7 @@
 
 - **frontend-api / BFF** — вкладка «PnL» (`/hedge-pnl-live`): таблица «Заработок агентов». BFF пересылает ответ в JSON и арифметики над R и U не делает ([REST](../rest/agent-pnl.md)).
 
-Read-only, additive к `LedgerService` — **не breaking**: новый RPC и новые сообщения (номера полей с 1), существующие сообщения и номера не тронуты. Порядок выкладки: сначала ledger, затем BFF; старый ledger на этот метод ответит `UNIMPLEMENTED`, BFF обязан обработать.
+Read-only, additive к `LedgerService` — **не breaking**: новый RPC и новые сообщения (номера полей с 1), существующие сообщения и номера не тронуты. Порядок выкладки: сначала миграция БД, затем ledger, затем BFF (с пересборкой образа: копия proto запечена в образ BFF, иначе `u_has_data` отбрасывается при разборе и U пропадает у всех), затем web — BFF и web подряд. Старый ledger на этот метод ответит `UNIMPLEMENTED`, BFF обязан обработать. Новый BFF со старым ledger показывает R без U (`u_has_data=false`), неверных чисел нет; откат одного ledger безопасен.
 
 ## Transport
 
@@ -38,10 +38,11 @@ rpc GetAgentPnl(GetAgentPnlRequest) returns (GetAgentPnlResponse);
 
 ```proto
 message PnlGroup {
-  bool has_data = 1;                 // false ⇒ r, u, r_plus_u НЕ заданы (нет цены — это не ноль)
+  bool has_data = 1;                 // false ⇒ r НЕ задан (нет данных — это не ноль)
   fob.common.v1.Decimal r = 2;       // USDT
-  fob.common.v1.Decimal u = 3;       // USDT
-  fob.common.v1.Decimal r_plus_u = 4; // USDT, r + u
+  fob.common.v1.Decimal u = 3;       // USDT; задан при u_has_data
+  fob.common.v1.Decimal r_plus_u = 4; // USDT, r + u; задан при has_data и u_has_data
+  bool u_has_data = 5;               // false ⇒ u и r_plus_u НЕ заданы (остаток есть, текущей справедливой цены пока нет)
 }
 message AgentPnl {
   string agent_id = 1;               // "T_BTC_binance" | "A_BTC_binancekraken"
@@ -57,17 +58,17 @@ message AgentPnl {
   int64 since_ms = 11;               // начало накопления, unix ms; 0 ⇒ не начато
 }
 message AgentPnlTotals {
-  PnlGroup internal = 1;             // сумма по агентам, у которых в этой группе есть данные
+  PnlGroup internal = 1;             // R — сумма по агентам с известным R, U — по агентам с известным U
   PnlGroup external = 2;
-  PnlGroup total = 3;
+  PnlGroup total = 3;                // r_plus_u задан только при incomplete_agents = 0
   uint32 agent_count = 4;            // сколько агентов в ответе
-  uint32 incomplete_agents = 5;      // у скольких хотя бы в одной группе has_data = false
+  uint32 incomplete_agents = 5;      // у скольких R или U неизвестны
 }
 message KindPnlTotals {
   string agent_kind = 1;             // "translator" | "arbitrageur"
-  PnlGroup internal = 2;             // суммы по агентам этого вида, у которых в группе есть данные
+  PnlGroup internal = 2;             // R — сумма по агентам вида с известным R, U — с известным U
   PnlGroup external = 3;
-  PnlGroup total = 4;
+  PnlGroup total = 4;                // r_plus_u задан только при incomplete_agents = 0
   uint32 agent_count = 5;
   uint32 incomplete_agents = 6;
 }
@@ -87,12 +88,12 @@ message GetAgentPnlResponse {
 
 Примечания к контракту:
 
-- **Единицы.** Все r, u, r_plus_u — USDT, `Decimal` (деньги — [.claude/rules/data.md](../../../.claude/rules/data.md)), масштаб до 8 знаков. Пересчёт из валюты котировки в USDT делает ledger (курс $\rho=P_b/p$ на момент выдачи).
-- **`has_data`.** Нулевое число и «нет данных» различаются. `internal.has_data=false` — у агента нет цены оценки (ни одной дельты с ценой с момента запуска) либо учёт приостановлен (книги не загружены из PostgreSQL при старте, см. ADR-087 п. 9). `external.has_data=true` с нулями — цена известна, внешних исполнений не было (у связки так и должно быть по ADR-083). `total.has_data` истинно только если истинно в обеих группах: частичных сумм нет.
+- **Единицы.** Все r, u, r_plus_u — USDT, `Decimal` (деньги — [.claude/rules/data.md](../../../.claude/rules/data.md)), масштаб до 8 знаков. Пересчёт из валюты котировки в USDT делает ledger (курс $\rho=P_b/F_0$ на момент выдачи; для пар к USDT $\rho=1$).
+- **`has_data` и `u_has_data`.** Нулевое число и «нет данных» различаются, R и U известны независимо. `has_data=false` — R неизвестен: учёт приостановлен (книги не загружены из PostgreSQL при старте, ADR-087 п. 8) либо у переводчика пары не к USDT пока нет курса валюты котировки (цена базы и цена пары приходят с первой дельтой после перезапуска). `u_has_data=false` при `has_data=true` — R известен (книга сохранена в PostgreSQL, перезапуск его не стёр), а U нет: остаток позиции есть, текущей справедливой цены пока нет. Остатка нет — U равен нулю и известен без цены. `r_plus_u` задан только при обоих признаках. `total` в агенте: `has_data` истинно, если R известен в обеих группах, `u_has_data` — если U известен в обеих; у внутренней группы `u` всегда 0 (на внутренней бирже всё реализуется в такте клиринга).
 - **Итоги по видам `by_kind`.** Те же суммы, но отдельно для переводчиков и арбитражёров (по записи на вид, у которого есть агенты). Нужны панели «Живые позиции»: её строки «переводчики», «арбитражёры» и «вместе» берутся отсюда и из `totals`, браузер и BFF их не складывают.
-- **Итоги `totals`.** Суммы только по агентам, у которых в группе есть данные; `incomplete_agents` показывает неполноту. Итоги считаются по возвращённым агентам (при фильтре `agent_ids` — по выбранным).
-- **`enabled=false`.** Ledger запущен с `CE_AGENT_PNL_ENABLED=0`: список агентов пуст, `totals` нулевые, `has_data=false`.
-- **Идемпотентность.** RPC read-only, идемпотентен по конструкции — без `idempotency_key` (как `GetAgentPositions`). Данные берутся из памяти ledger под `mu_`; PostgreSQL на каждый вызов не читается. Сверка книги с позицией на чтении выполняется на копии и состояние не меняет.
+- **Итоги `totals`.** R суммируется по агентам с известным R, U — по агентам с известным U; `incomplete_agents` — сколько агентов с неизвестной частью. Пока есть неполные агенты, `r_plus_u` итогов не отдаётся (слагаемые из разных выборок). Итоги считаются по возвращённым агентам (при фильтре `agent_ids` — по выбранным).
+- **`enabled=false`.** Ledger запущен с `CE_AGENT_PNL_ENABLED=0`: список агентов пуст, `totals` нулевые, `has_data=false` и `u_has_data=false`.
+- **Идемпотентность.** RPC read-only, идемпотентен по конструкции — без `idempotency_key` (как `GetAgentPositions`). Данные берутся из памяти ledger под `mu_`; PostgreSQL на каждый вызов не читается. Вызов состояние книг не меняет.
 - **Что не входит.** Комиссии не вычитаются (как в панели «Живые позиции»); история не отдаётся (график остаётся на `ce_agent_pnl_history`).
 
 ## Used In Features

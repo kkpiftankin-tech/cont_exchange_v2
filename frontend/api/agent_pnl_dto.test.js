@@ -8,8 +8,8 @@ function check(name, cond) {
 
 // Decimal как его отдаёт proto-loader: units — строка (longs: String), scale — число.
 const D = (units, scale) => ({ units: String(units), scale });
-const grp = (r, u) => ({ has_data: true, r: D(r, 2), u: D(u, 2), r_plus_u: D(r + u, 2) });
-const NO = { has_data: false, r: null, u: null, r_plus_u: null };
+const grp = (r, u) => ({ has_data: true, u_has_data: true, r: D(r, 2), u: D(u, 2), r_plus_u: D(r + u, 2) });
+const NO = { has_data: false, u_has_data: false, r: null, u: null, r_plus_u: null };
 
 check('Decimal → число: 6000 с масштабом 2 = 60', decOrNull(D(6000, 2)) === 60);
 check('Decimal отрицательный', decOrNull(D(-2000, 2)) === -20);
@@ -17,10 +17,18 @@ check('нет значения → null', decOrNull(null) === null && decOrNull(
 check('нечисловые units → null', decOrNull({ units: 'abc', scale: 2 }) === null);
 
 check('группа без данных → null, не ноль', JSON.stringify(groupDto(NO)) === JSON.stringify(NO));
-check('нулевое значение при has_data — это ноль, не null', groupDto({ has_data: true, r: D(0, 2), u: D(0, 2), r_plus_u: D(0, 2) }).r === 0);
-check('has_data=true передаёт r, u, r_plus_u без пересчёта', (() => {
-  const g = groupDto({ has_data: true, r: D(6000, 2), u: D(4000, 2), r_plus_u: D(777, 2) });
+check('нулевое значение при has_data — это ноль, не null', groupDto({ has_data: true, u_has_data: true, r: D(0, 2), u: D(0, 2), r_plus_u: D(0, 2) }).r === 0);
+check('has_data и u_has_data передают r, u, r_plus_u без пересчёта', (() => {
+  const g = groupDto({ has_data: true, u_has_data: true, r: D(6000, 2), u: D(4000, 2), r_plus_u: D(777, 2) });
   return g.r === 60 && g.u === 40 && g.r_plus_u === 7.77;  // r_plus_u берётся ровно из ответа ledger, не r + u
+})());
+check('R известен, U — нет: r отдаётся, u и r_plus_u — null (не ноль)', (() => {
+  const g = groupDto({ has_data: true, u_has_data: false, r: D(6000, 2), u: D(0, 2), r_plus_u: D(6000, 2) });
+  return g.has_data && !g.u_has_data && g.r === 60 && g.u === null && g.r_plus_u === null;
+})());
+check('U известен, R — нет: u отдаётся, r и r_plus_u — null', (() => {
+  const g = groupDto({ has_data: false, u_has_data: true, r: D(0, 2), u: D(500, 2), r_plus_u: D(500, 2) });
+  return !g.has_data && g.u_has_data && g.r === null && g.u === 5 && g.r_plus_u === null;
 })());
 
 const resp = {
@@ -77,6 +85,8 @@ check('строка панели: внутренняя и итоговая гр�
 check('строка панели: начало накопления', f.pnl_since_ms === 1792420000000);
 const nd = rowPnlFields(dk.agents.find((a) => a.agent_id === 'T_ETH_okx'));
 check('нет данных во внешней группе ⇒ null, не ноль', nd.realized_usdt === null && nd.unrealized_usdt === null && nd.pnl_usdt === null);
+const partial = rowPnlFields({ external: groupDto({ has_data: true, u_has_data: false, r: D(4000, 2), u: D(0, 2), r_plus_u: D(4000, 2) }), internal: null, total: null, since_ms: null });
+check('строка панели: R известен, U — нет ⇒ R есть, U и R+U — null', partial.realized_usdt === 40 && partial.unrealized_usdt === null && partial.pnl_usdt === null);
 const none = rowPnlFields(undefined);
 check('агента нет в ответе ledger ⇒ все поля null', none.realized_usdt === null && none.pnl_usdt === null && none.pnl_internal === null);
 

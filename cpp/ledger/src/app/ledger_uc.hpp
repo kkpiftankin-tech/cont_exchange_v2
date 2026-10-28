@@ -18,7 +18,7 @@
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/uuid.hpp"   // boot_id_ (ADR-084)
-#include "app/agent_pnl_book.hpp"   // ADR-087: книга внутренней биржи и внешние суммы агента
+#include "app/agent_pnl_book.hpp"   // ADR-087: книга агента по справедливой цене (модель C′)
 #include "app/persistence_ports.hpp"
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
@@ -540,32 +540,58 @@ class LedgerUseCases {
     long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
     int band_fail_streak{0};         // заявок подряд, завершённых без единого исполнения (растит паузу, сбрасывается любым исполнением)
     cex::common::Decimal transfer_moved{0, 0};  // ADR-084: Σ сдвигов позиции переводом (приход +X, уход −X), тыс. USDT; монитор W·c: (W·c)_n + moved_n = 0
-    // ADR-087 (CALC-CE-AGENT-PNL): внешние суммы ноги (переводчик — несопоставленный с книгой объём, связка — все хедж-исполнения),
-    // отметка realized_vs_fair на момент внедрения учёта и число исполнений с запуска ledger.
-    ExternalSums ext;
-    cex::common::Decimal rvf_base{0, 0};
+    // ADR-087 (CALC-CE-AGENT-PNL): число хедж-исполнений ноги с запуска ledger.
     std::uint32_t ext_fills{0};
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
-  // ADR-087: книга внутренней биржи — по одной на агента (у связки обе ноги в одной книге). Под mu_.
+  // ADR-087 (модель C′): книга агента по справедливой цене — по одной на агента (у связки обе ноги в одной книге). Под mu_.
   struct AgentBook {
-    InternalBook book;
+    FairBook book;
     std::string kind;            // "translator" | "arbitrageur"
+    std::string quote;           // валюта котировки значений книги ("" — не известна до первой сделки после рестарта)
     std::string last_batch_id;   // последний учтённый такт (повторная доставка не удваивает книгу)
     long long since_ms{0};       // начало накопления
   };
   std::map<std::string, AgentBook> agent_books_;
+  // Справедливая цена актива в USDT (F_0 пары, до сдвига якоря) по последнему такту, где её прислал переводчик этого актива.
+  // Нужна связке: у неё собственной F_0 нет, а её сделки и хеджи оцениваются по справедливой цене пары. Под mu_.
+  struct FairUsdt {
+    cex::common::Decimal price{0, 0};
+    long long ms{0};
+  };
+  std::map<std::string, FairUsdt> fair_usdt_by_asset_;
+  // Справедливая цена пары в валюте котировки ("актив|котировка") по последней дельте ЛЮБОГО переводчика этой пары: F_0 общая для пары, поэтому
+  // метка U и цена хеджа переводчика не устаревают вместе с его собственным потоком (GTC-хедж исполняется спустя минуты, пока поток в мёртвой зоне).
+  std::map<std::string, FairUsdt> pair_fair_;
+  // Свежесть справедливой цены: CE_AGENT_PNL_FAIR_MAX_AGE_MS (деф. 30000, ≤ 0 — без ограничения). Протухшая цена не используется для оценки
+  // сделок и остатка связки: сумма выгод перестала бы быть нулевой, а U показывал бы остаток по давней цене.
+  static bool FairFresh(long long fair_ms, long long now_ms);
+  cex::common::Decimal pair_fair_locked(const std::string& asset, const std::string& quote, long long now_ms) const;  // Диагностика нулевой суммы внутренней биржи: за такт Σ (F − p)·dL по всем сделкам обязана быть нулём (у сделки покупатель и
+  // продавец дают противоположные величины). Нарушения считаются, в журнал пишутся не каждое. Под mu_.
+  std::uint64_t int_zero_sum_violations_{0};
   // Учёт заработка готов, когда книги загружены из репозитория (или репозитория нет). Пока нет — книги не обновляются и не пишутся
   // (иначе пересев по текущей позиции перезаписал бы сохранённые), GetAgentPnl отдаёт «нет данных»; повторная загрузка раз в
   // CE_AGENT_PNL_RETRY_MS (деф. 30 с). Под mu_.
   bool pnl_ready_{true};
   long long pnl_retry_ms_{0};
   void retry_pnl_load_locked(long long ts_ms);
-  // Вход сделки внутренней биржи по дельте клиринга (ApplyPositionDelta); помечает книгу изменённой.
+  void load_books_locked(const std::vector<AgentPnlBookRow>& rows);  // заменить книги состоянием из репозитория
+  // Сумма и оборот выгоды внутренней биржи за такт в USDT (диагностика нулевой суммы).
+  struct TactEdge {
+    cex::common::Decimal sum{0, 0};
+    cex::common::Decimal gross{0, 0};
+    std::uint32_t skipped{0};   // ноги, не вошедшие в книгу (нет цен): сумма выгод за такт тогда неполная
+    std::uint32_t no_fair{0};   // ноги без справедливой цены (F_0 := цена сделки, выгода 0)
+  };
+  // Вход сделки внутренней биржи по дельте клиринга (ApplyPositionDelta); помечает книгу изменённой. tact_fair — F_0 активов этого
+  // такта в USDT (из дельт переводчиков), tact_edge — накопитель диагностики.
   void book_on_delta_locked(const AgentDelta& ad, const AgentPositionState& st, const cex::common::Decimal& c_total_before,
-                            const std::string& batch_id, long long ts_ms, std::set<std::string>& seen_this_call,
-                            std::set<std::string>& dirty);
+                            const std::string& batch_id, long long ts_ms, const std::map<std::string, cex::common::Decimal>& tact_fair,
+                            std::set<std::string>& seen_this_call, std::set<std::string>& dirty, TactEdge& tact_edge);
+  // F_0 актива в USDT для оценки сделок и хеджей связки: из того же такта, иначе последняя известная; 0 — не известна.
+  cex::common::Decimal link_fair_usdt_locked(const std::string& asset, const std::map<std::string, cex::common::Decimal>* tact_fair,
+                                             long long now_ms) const;
   // Записать изменённые книги одним пакетом (если подключён репозиторий).
   void save_dirty_books_locked(const std::set<std::string>& dirty);
   // ADR-082 (шаг 2): агенты, у которых потолок по ленте оставил остаток над порогом. Проверка пробоя вызывается только по дельтам

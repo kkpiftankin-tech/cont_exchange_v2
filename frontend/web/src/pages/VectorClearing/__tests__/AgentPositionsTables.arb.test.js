@@ -54,7 +54,7 @@ test('под таблицей арбитражёров простыми слов
 });
 
 // Итоги заработка считает ledger (GetAgentPnl) и приходят в пропе pnlTotals; панель их только показывает (ADR-087 п. 10).
-const grp = (r, u, total) => ({ has_data: true, r, u, r_plus_u: total === undefined ? r + u : total });
+const grp = (r, u, total) => ({ has_data: true, u_has_data: true, r, u, r_plus_u: total === undefined ? r + u : total });
 const totals = (over = {}) => ({
   translator: { external: grp(3.2, 1.1), internal: grp(0, 0), total: grp(3.2, 1.1) },
   arbitrageur: { external: grp(10, -4), internal: grp(0, 0), total: grp(10, -4) },
@@ -96,7 +96,7 @@ test('итоги недоступны (ledger не ответил) — «нет 
 });
 
 test('нет данных у вида агентов — прочерк в его итоге, остальные виды показаны', () => {
-  const noArb = totals({ arbitrageur: { external: { has_data: false, r: null, u: null, r_plus_u: null } } });
+  const noArb = totals({ arbitrageur: { external: { has_data: false, u_has_data: false, r: null, u: null, r_plus_u: null } } });
   const { container } = render(<AgentPositionsTables agentRows={[translator, arbitrageur()]} pnlTotals={noArb} title="t" />);
   const t = container.querySelector('[data-testid="trade-totals"]').textContent;
   expect(t).toMatch(/Переводчики \(1\): R \+3\.2000/);

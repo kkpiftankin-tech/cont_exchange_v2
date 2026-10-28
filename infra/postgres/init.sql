@@ -1233,42 +1233,61 @@ CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
     ON ce_agent_position (agent_kind, updated_at DESC);
 
 -- ---------------------------------------------------------------------------
--- ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): заработок агентов CE по биржам.
--- Owner: ledger (writer и reader). ce_agent_pnl_book — книга внутренней биржи агента (одна строка на агента,
+-- ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): заработок агентов CE по биржам (модель C′).
+-- Owner: ledger (writer и reader). ce_agent_pnl_book — книга агента по справедливой цене (одна строка на агента,
 -- абсолютное состояние, обновляется пакетом раз в такт); истории нет, строки удаляет сброс позиций.
--- Колонки ext_* ce_agent_position — суммы внешних хедж-исполнений ноги (переводчик — несопоставленный с книгой
--- объём, связка — все исполнения); rvf_base — значение realized_vs_fair на момент внедрения учёта.
+--   qty/avg_fair — открытый остаток и средняя справедливая стоимость его входа; edge — R внутренней биржи;
+--   ext_realized — R внешних бирж; quote — валюта котировки значений (для перевода в USDT).
 -- ledger при старте выполняет тот же блок сам (один раз на процесс); вручную на живой БД — до выкладки ledger.
--- Страж — отсутствие rvf_base (он добавляется в том же ALTER последним), поэтому UPDATE выполняется ровно один раз.
+-- Таблица модели A (avg_price/realized) переименовывается и очищается один раз: страж — наличие колонки avg_price.
+-- Колонки ext_*/rvf_base таблицы ce_agent_position (модель A) не используются; на живых томах остаются как есть.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ce_agent_pnl_book (
     agent_id      TEXT PRIMARY KEY,
     agent_kind    TEXT NOT NULL CHECK (agent_kind IN ('translator', 'arbitrageur')),
     qty           NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- L: остаток, штуки базового актива (плюс — длинная позиция)
-    avg_price     NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (avg_price >= 0),  -- p̄: средняя цена входа, валюта котировки
-    realized      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R_int, валюта котировки, нарастает
+    avg_fair      NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (avg_fair >= 0),  -- F_in: средняя справедливая стоимость входа
+    edge          NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R внутренней биржи: Σ (F − p)·dL, валюта котировки, нарастает
+    ext_realized  NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R внешних бирж: дрейф при закрытии + качество исполнения, нарастает
+    quote         TEXT NOT NULL DEFAULT '',            -- валюта котировки значений ('' — не известна)
     last_batch_id TEXT,                                -- последний учтённый такт (повторная доставка не удваивает книгу)
     since_ms      BIGINT NOT NULL CHECK (since_ms > 0),  -- начало накопления, unix ms
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ce_agent_pnl_book_flat_chk CHECK (qty <> 0 OR avg_price = 0)
+    CONSTRAINT ce_agent_pnl_book_flat_chk CHECK (qty <> 0 OR avg_fair = 0)
 ) WITH (fillfactor = 70);
 
-DO $$
-BEGIN
-    PERFORM set_config('lock_timeout', '5s', true);  -- ALTER берёт ACCESS EXCLUSIVE: лучше упасть, чем заморозить ledger
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema = current_schema()
-                     AND table_name = 'ce_agent_position' AND column_name = 'rvf_base') THEN
-        ALTER TABLE ce_agent_position
-            ADD COLUMN IF NOT EXISTS ext_buy_base      NUMERIC(38, 18) NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS ext_sell_base     NUMERIC(38, 18) NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS ext_buy_notional  NUMERIC(38, 18) NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS ext_sell_notional NUMERIC(38, 18) NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS ext_fair_signed   NUMERIC(38, 18) NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS rvf_base          NUMERIC(38, 18) NOT NULL DEFAULT 0;
-        UPDATE ce_agent_position SET rvf_base = realized_vs_fair;  -- живая БД: текущее значение; свежий том: таблица пуста
-    END IF;
-END
+do $$
+declare
+  has_avg_price boolean;
+begin
+  perform set_config('lock_timeout', '5s', true);
+  select exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass
+                  and attname = 'avg_price' and not attisdropped) into has_avg_price;
+  if has_avg_price then
+    -- блокировка и перепроверка стража: параллельный прогон (psql и ledger) мог уже выполнить переход
+    lock table ce_agent_pnl_book in access exclusive mode;
+    select exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass
+                    and attname = 'avg_price' and not attisdropped) into has_avg_price;
+  end if;
+  if has_avg_price then
+    alter table ce_agent_pnl_book rename column avg_price to avg_fair;
+    delete from ce_agent_pnl_book;  -- значения модели A в C′ не пересчитываются: книги заводятся заново
+  end if;
+  if exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'realized' and not attisdropped)
+     and not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'edge' and not attisdropped) then
+    alter table ce_agent_pnl_book rename column realized to edge;
+  end if;
+  if exists (select 1 from pg_constraint where conrelid = 'ce_agent_pnl_book'::regclass and conname = 'ce_agent_pnl_book_avg_price_check') then
+    alter table ce_agent_pnl_book rename constraint ce_agent_pnl_book_avg_price_check to ce_agent_pnl_book_avg_fair_check;
+  end if;
+  -- ADD COLUMN IF NOT EXISTS берёт ACCESS EXCLUSIVE даже когда колонка есть: на каждом старте не выполняем
+  if not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'ext_realized' and not attisdropped) then
+    alter table ce_agent_pnl_book add column ext_realized numeric(38,18) not null default 0;
+  end if;
+  if not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'quote' and not attisdropped) then
+    alter table ce_agent_pnl_book add column quote text not null default '';
+  end if;
+end
 $$;
 
 -- ---------------------------------------------------------------------------

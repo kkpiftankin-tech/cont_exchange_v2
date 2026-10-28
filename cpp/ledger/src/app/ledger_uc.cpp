@@ -1292,6 +1292,46 @@ void LedgerUseCases::ApplyPositionDelta(
 
   std::set<AgentPositionKey> touched_keys;   // ADR-082: агенты, обработанные в этом такте (перепроверка остатков их не повторяет)
   std::set<std::string> book_seen, book_dirty;   // ADR-087: агенты, чья книга внутренней биржи уже учла этот такт / изменилась
+  // ADR-087 (модель C′): справедливая цена актива в USDT для связок — F_0 переводчиков ЭТОГО такта (одна на пару, до сдвига якоря).
+  // Собираем до основного цикла: дельта связки может прийти раньше дельт переводчиков, а сделки одного такта оцениваются одной F_0.
+  std::map<std::string, Decimal> tact_fair;
+  TactEdge tact_edge;
+  if (cex::common::Env::get_bool("CE_AGENT_PNL_ENABLED", true)) {
+    const std::string pnl_numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+    // Повторная доставка старого такта (после рестарта или очистки pos_delta_applied_) не должна подменять свежую справедливую цену давней.
+    const auto put_fair = [ts_ms](std::map<std::string, FairUsdt>& m, const std::string& key, const Decimal& price) {
+      auto it = m.find(key);
+      if (it == m.end() || ts_ms >= it->second.ms) m[key] = FairUsdt{price, ts_ms};
+    };
+    const auto is_translator_delta = [this](const AgentDelta& ad) {
+      if (ad.agent_id.empty() || PnlSign(ad.fair_price) <= 0) return false;
+      std::string kind = ad.agent_kind;
+      if (kind.empty()) {
+        const auto pit = agent_positions_.find(AgentPositionKey{ad.agent_id, ad.asset, ad.venue});
+        if (pit != agent_positions_.end()) kind = pit->second.agent_kind;
+      }
+      return kind == "translator";
+    };
+    // Проход 1: пары к нумерарию (F_0 уже в USDT) и общая карта F_0 пар в валюте котировки (метка U и цена хеджа переводчика).
+    for (const auto& ad : agent_deltas) {
+      if (!is_translator_delta(ad)) continue;
+      const bool nominal = ad.quote.empty() || ad.quote == pnl_numeraire;
+      put_fair(pair_fair_, ad.asset + "|" + (nominal ? pnl_numeraire : ad.quote), ad.fair_price);
+      if (nominal) tact_fair[ad.asset] = ad.fair_price;
+    }
+    // Проход 2: кросс-пары — F_0 в USDT = F_0 пары × справедливая USDT-цена валюты котировки этого же такта; нет её — через цену узла
+    // валюты котировки P(base)/цена пары (она несёт сдвиг узла, но лучше, чем ничего).
+    for (const auto& ad : agent_deltas) {
+      if (!is_translator_delta(ad) || ad.quote.empty() || ad.quote == pnl_numeraire || tact_fair.count(ad.asset)) continue;
+      const auto q = tact_fair.find(ad.quote);
+      if (q != tact_fair.end()) {
+        tact_fair[ad.asset] = Decimal::mul(ad.fair_price, q->second);
+      } else if (PnlSign(ad.price_used) > 0 && PnlSign(ad.base_price) > 0) {
+        tact_fair[ad.asset] = Decimal::div(Decimal::mul(ad.fair_price, ad.base_price), ad.price_used, kPnlFairScale);
+      }
+    }
+    for (const auto& [asset, f] : tact_fair) put_fair(fair_usdt_by_asset_, asset, f);
+  }
   for (const auto& ad : agent_deltas) {
     if (ad.agent_id.empty()) continue;  // defensive: вызывающая сторона уже фильтрует
     const AgentPositionKey key{ad.agent_id, ad.asset, ad.venue};
@@ -1337,7 +1377,7 @@ void LedgerUseCases::ApplyPositionDelta(
     }
 
     // ADR-087 (CALC-CE-AGENT-PNL): сделка внутренней биржи по цене узла — вход в книгу агента.
-    book_on_delta_locked(ad, st, c_total_before, batch_id, ts_ms, book_seen, book_dirty);
+    book_on_delta_locked(ad, st, c_total_before, batch_id, ts_ms, tact_fair, book_seen, book_dirty, tact_edge);
 
     AgentDeltaRecord rec;
     rec.agent_id = ad.agent_id;
@@ -1354,6 +1394,18 @@ void LedgerUseCases::ApplyPositionDelta(
     detect_and_emit_band_breach_locked(key, st, batch_id, ts_ms);
   }
   save_dirty_books_locked(book_dirty);  // ADR-087: одним пакетом на такт, под тем же mu_ (иначе устаревший снимок воскресит сброшенные книги)
+  // Внутренняя биржа бесплатна и замкнута: у сделки есть покупатель и продавец по одной цене, а справедливая цена пары общая, поэтому
+  // Σ (F − p)·dL за такт равна нулю. Отклонение — признак ошибки данных (дельта без цены, нет F_0 у части агентов, дом в такте).
+  if (PnlSign(tact_edge.gross) > 0 || tact_edge.skipped > 0) {
+    const Decimal tol = Decimal::max(Decimal{1, 3}, Decimal::div(tact_edge.gross, Decimal{1000, 0}, kPnlDivScale));  // 0,001 USDT или 0,1 % оборота
+    const bool violated = Decimal::cmp(PnlAbs(tact_edge.sum), tol) > 0 || tact_edge.skipped > 0;
+    if (violated && (int_zero_sum_violations_++ % 50) == 0) {
+      cex::common::log_json("WARN", "ADR-087 нулевая сумма выгоды внутренней биржи за такт нарушена или неполна",
+                            {{"batch_id", batch_id}, {"sum_usdt", tact_edge.sum.to_string()}, {"gross_usdt", tact_edge.gross.to_string()},
+                             {"skipped_legs", std::to_string(tact_edge.skipped)}, {"legs_without_fair", std::to_string(tact_edge.no_fair)},
+                             {"violations", std::to_string(int_zero_sum_violations_)}});
+    }
+  }
 
   // ADR-084: после того как все дельты такта применены (обе ноги связки уже обновлены), проверить перевод ВСЕХ связок, а не только затронутых
   // этим тактом: matching не шлёт запись при нулевом потоке, а позиция над порогом (накоплена до включения флага, подтянута из PG после
@@ -1428,8 +1480,8 @@ fob::ledger::v1::GetAgentPositionDeltasResponse LedgerUseCases::GetAgentPosition
 
 void LedgerUseCases::LoadAgentPositionsFromRepo() {
   if (!agent_position_repo_) return;
-  // ADR-087: книги внутренней биржи переживают рестарт. Читаем их ПЕРВЫМИ: LoadBooks гарантирует схему (EnsurePnlSchema), поэтому
-  // GetPositions ниже читает уже колонки внешних сумм. false — прочитать не удалось: «книг нет» утверждать нельзя.
+  // ADR-087: книги агентов переживают рестарт. false — прочитать не удалось (схема не готова, сбой PostgreSQL): «книг нет»
+  // утверждать нельзя, иначе пересев по текущей позиции перезапишет сохранённые.
   std::vector<AgentPnlBookRow> book_rows;
   const bool books_ok = agent_position_repo_->LoadBooks(book_rows);
   const auto rows = agent_position_repo_->GetPositions({}, {}, {});
@@ -1437,15 +1489,7 @@ void LedgerUseCases::LoadAgentPositionsFromRepo() {
   agent_positions_.clear();
   pnl_ready_ = books_ok;
   if (books_ok) {
-    agent_books_.clear();
-    for (const auto& b : book_rows) {
-      AgentBook ab;
-      ab.book = InternalBook{b.qty, b.avg_price, b.realized};
-      ab.kind = b.agent_kind;
-      ab.last_batch_id = b.last_batch_id;
-      ab.since_ms = b.since_ms;
-      agent_books_[b.agent_id] = std::move(ab);
-    }
+    load_books_locked(book_rows);
   } else {
     cex::common::log_json("WARN", "ADR-087 книги заработка агентов не загружены: учёт приостановлен, повтор по таймеру");
   }
@@ -1455,10 +1499,6 @@ void LedgerUseCases::LoadAgentPositionsFromRepo() {
     st.position = row.position;
     st.in_flight = row.in_flight;
     st.realized_vs_fair = row.realized_vs_fair;  // ADR-072 §C: заработок переживает рестарт
-    if (books_ok) {  // внешние суммы и отметка осмысленны только вместе с загруженными книгами
-      st.ext = ExternalSums{row.ext_buy_base, row.ext_sell_base, row.ext_buy_notional, row.ext_sell_notional, row.ext_fair_signed};
-      st.rvf_base = row.rvf_base;  // ADR-087
-    }
     st.last_batch_id = row.last_batch_id;
     st.updated_at_ms = row.updated_at_ms;
     agent_positions_[AgentPositionKey{row.agent_id, row.asset, row.venue}] = std::move(st);
@@ -1539,17 +1579,15 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
     st.position = Decimal::zero();
     st.in_flight = Decimal::zero();
     st.realized_vs_fair = Decimal::zero();  // сброс = чистый старт наблюдения: обнуляем и накопленный заработок
-    st.ext = ExternalSums{};                // ADR-087: внешние суммы, отметка и счётчик начинаются заново вместе с realized_vs_fair
-    st.rvf_base = Decimal::zero();
-    st.ext_fills = 0;
+    st.ext_fills = 0;                       // ADR-087: счётчик исполнений начинается заново вместе с realized_vs_fair
     st.transfer_moved = Decimal::zero();    // ADR-084: поправка монитора W·c относится к позиции, которой больше нет
     st.updated_at_ms = ts_ms;
     cap_pending_.erase(key);  // ADR-082: отметка остатка после потолка по ленте — только у сброшенного агента
     ++cleared;
   }
   band_hedges_.clear();  // in_flight guard — с нуля, чтобы новые пробои эмитились
-  // ADR-087: книги внутренней биржи сбрасываемых агентов (пусто = все) удаляются; PG — безусловно (строки книги и внешние суммы),
-  // а не только при ненулевой позиции, как выше, иначе осталась бы книга сброшенного агента.
+  // ADR-087: книги сбрасываемых агентов (пусто = все) удаляются; PG — безусловно, а не только при ненулевой позиции, как выше,
+  // иначе осталась бы книга сброшенного агента. Новая книга заводится первой дельтой клиринга.
   if (want.empty()) agent_books_.clear();
   else for (const auto& id : want) agent_books_.erase(id);
   if (agent_position_repo_) agent_position_repo_->ResetPnl(std::vector<std::string>(want.begin(), want.end()));
@@ -1566,17 +1604,47 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
 // привязка к состоянию ledger. Все вызовы — под mu_ (суффикс _locked).
 // ============================================================================
 
-// Сделка внутренней биржи: дельта клиринга по цене узла входит в книгу агента. Переводчик σ=+1, связка σ=−1 (обе ноги
-// в одну книгу). Нумерарные связки (перенос USDT) цены не имеют — книга не ведётся. Книга переводчика при создании
-// засевается его текущей позицией по цене оценки: U=0 в момент старта, начальное сальдо по рынку.
-void LedgerUseCases::book_on_delta_locked(const AgentDelta& ad, const AgentPositionState& st,
-                                          const Decimal& c_total_before, const std::string& batch_id, long long ts_ms,
-                                          std::set<std::string>& seen_this_call, std::set<std::string>& dirty) {
+// F_0 актива в USDT для оценки сделок и хеджей связки: у связки собственной справедливой цены нет, берём F_0 переводчиков того же
+// актива — из этого же такта (tact_fair), иначе из последнего известного. 0 — не известна.
+Decimal LedgerUseCases::link_fair_usdt_locked(const std::string& asset, const std::map<std::string, Decimal>* tact_fair,
+                                              long long now_ms) const {
+  if (tact_fair) {
+    const auto it = tact_fair->find(asset);
+    if (it != tact_fair->end() && PnlSign(it->second) > 0) return it->second;
+  }
+  const auto it = fair_usdt_by_asset_.find(asset);
+  return (it != fair_usdt_by_asset_.end() && FairFresh(it->second.ms, now_ms)) ? it->second.price : Decimal::zero();
+}
+
+bool LedgerUseCases::FairFresh(long long fair_ms, long long now_ms) {
+  const long long limit = cex::common::Env::get_int("CE_AGENT_PNL_FAIR_MAX_AGE_MS", 30000);
+  return limit <= 0 || (fair_ms > 0 && now_ms - fair_ms <= limit);
+}
+
+// Справедливая цена пары в валюте котировки по последней дельте любого переводчика пары; 0 — не известна или протухла.
+Decimal LedgerUseCases::pair_fair_locked(const std::string& asset, const std::string& quote, long long now_ms) const {
+  if (quote.empty()) return Decimal::zero();
+  const auto it = pair_fair_.find(asset + "|" + quote);
+  return (it != pair_fair_.end() && FairFresh(it->second.ms, now_ms)) ? it->second.price : Decimal::zero();
+}
+
+// Сделка внутренней биржи: дельта клиринга по цене узла входит в книгу агента по справедливой цене F_0 такта. Переводчик σ=+1, связка
+// σ=−1 (обе ноги в одну книгу). Выгода (F_0 − p)·dL реализуется сразу (R внутренней биржи), позиция входит в книгу по F_0.
+// Нумерарные связки (перенос USDT) цены не имеют — книга не ведётся. Книга переводчика при создании засевается его текущей позицией по F_0:
+// U=0 в момент старта. Нет F_0 (matching не прислал) — F_0 := цена сделки, выгода 0; отклонение суммы поймает диагностика такта.
+void LedgerUseCases::book_on_delta_locked(const AgentDelta& ad, const AgentPositionState& st, const Decimal& c_total_before,
+                                          const std::string& batch_id, long long ts_ms, const std::map<std::string, Decimal>& tact_fair,
+                                          std::set<std::string>& seen_this_call, std::set<std::string>& dirty, TactEdge& tact_edge) {
   if (!cex::common::Env::get_bool("CE_AGENT_PNL_ENABLED", true) || !pnl_ready_) return;
   const bool is_translator = st.agent_kind == "translator";
   const bool is_arb = st.agent_kind == "arbitrageur";
   if (!is_translator && !is_arb) return;
-  if (is_arb && ad.asset == cex::common::Env::get_string("CE_NUMERAIRE", "USDT")) return;
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  if (ad.asset == numeraire) return;  // перенос номинала цены не имеет: книга не ведётся (ни у связки, ни у переводчика номинала)
+  if (PnlSign(ad.base_price) <= 0 || PnlSign(ad.price_used) <= 0) {  // нет цен — сделку не оценить; книгу не заводим
+    ++tact_edge.skipped;
+    return;
+  }
   const bool fresh = agent_books_.find(ad.agent_id) == agent_books_.end();
   AgentBook& ab = agent_books_[ad.agent_id];
   if (fresh) {
@@ -1586,16 +1654,41 @@ void LedgerUseCases::book_on_delta_locked(const AgentDelta& ad, const AgentPosit
   // Повторная доставка того же такта (pos_delta_applied_ ограничен по размеру): книгу не удваиваем. Обе ноги связки
   // приходят в одном вызове, поэтому проверка действует только до первой записи агента в этом вызове.
   if (!seen_this_call.count(ad.agent_id) && !ab.last_batch_id.empty() && ab.last_batch_id == batch_id) return;
-  if (PnlSign(ad.base_price) > 0) {
-    const Decimal mark = (PnlSign(st.fair_price) > 0) ? st.fair_price : st.last_price;
-    if (fresh && is_translator && PnlSign(c_total_before) != 0 && PnlSign(mark) > 0)
-      ApplyBookTrade(ab.book, BookUnitsFromValue(+1, c_total_before, ad.base_price), mark);
-    if (PnlSign(ad.price_used) > 0)
-      ApplyBookTrade(ab.book, BookUnitsFromValue(is_translator ? +1 : -1, ad.delta, ad.base_price), ad.price_used);
+
+  Decimal fair = is_translator ? ad.fair_price : link_fair_usdt_locked(ad.asset, &tact_fair, ts_ms);
+  if (PnlSign(fair) <= 0) {
+    fair = ad.price_used;
+    ++tact_edge.no_fair;
+  }
+  if (fresh && is_translator && PnlSign(c_total_before) != 0)
+    ApplyFairTrade(ab.book, BookUnitsFromValue(+1, c_total_before, ad.base_price), fair);
+  const Decimal dL = BookUnitsFromValue(is_translator ? +1 : -1, ad.delta, ad.base_price);
+  ApplyInternalTrade(ab.book, dL, ad.price_used, fair);
+  ab.quote = is_translator ? (st.quote.empty() ? numeraire : st.quote) : numeraire;
+
+  if (PnlSign(dL) != 0) {  // диагностика нулевой суммы: выгода сделки в USDT (кросс-пара — по курсу P(base)/F_0)
+    const Decimal rho = QuoteRate(ab.quote == numeraire, ad.base_price, fair);
+    const Decimal e = Decimal::mul(rho, Decimal::mul(Decimal::sub(fair, ad.price_used), dL));
+    tact_edge.sum = Decimal::add(tact_edge.sum, e);
+    tact_edge.gross = Decimal::add(tact_edge.gross, PnlAbs(e));
   }
   ab.last_batch_id = batch_id;
   seen_this_call.insert(ad.agent_id);
   dirty.insert(ad.agent_id);
+}
+
+// Заменить книги состоянием из репозитория (старт и повторная загрузка).
+void LedgerUseCases::load_books_locked(const std::vector<AgentPnlBookRow>& rows) {
+  agent_books_.clear();
+  for (const auto& b : rows) {
+    AgentBook ab;
+    ab.book = FairBook{b.qty, b.avg_fair, b.edge, b.ext_realized};
+    ab.kind = b.agent_kind;
+    ab.quote = b.quote;
+    ab.last_batch_id = b.last_batch_id;
+    ab.since_ms = b.since_ms;
+    agent_books_[b.agent_id] = std::move(ab);
+  }
 }
 
 void LedgerUseCases::retry_pnl_load_locked(long long ts_ms) {
@@ -1605,22 +1698,7 @@ void LedgerUseCases::retry_pnl_load_locked(long long ts_ms) {
   pnl_retry_ms_ = ts_ms;
   std::vector<AgentPnlBookRow> book_rows;
   if (!agent_position_repo_->LoadBooks(book_rows)) return;  // схема всё ещё не готова
-  const auto rows = agent_position_repo_->GetPositions({}, {}, {});  // уже с колонками внешних сумм
-  agent_books_.clear();
-  for (const auto& b : book_rows) {
-    AgentBook ab;
-    ab.book = InternalBook{b.qty, b.avg_price, b.realized};
-    ab.kind = b.agent_kind;
-    ab.last_batch_id = b.last_batch_id;
-    ab.since_ms = b.since_ms;
-    agent_books_[b.agent_id] = std::move(ab);
-  }
-  for (const auto& row : rows) {  // позиции и realized_vs_fair в памяти актуальны, обновляем только внешние суммы и отметку
-    const auto it = agent_positions_.find(AgentPositionKey{row.agent_id, row.asset, row.venue});
-    if (it == agent_positions_.end()) continue;
-    it->second.ext = ExternalSums{row.ext_buy_base, row.ext_sell_base, row.ext_buy_notional, row.ext_sell_notional, row.ext_fair_signed};
-    it->second.rvf_base = row.rvf_base;
-  }
+  load_books_locked(book_rows);
   pnl_ready_ = true;
   cex::common::log_json("INFO", "ADR-087 книги заработка агентов загружены: учёт возобновлён");
 }
@@ -1636,8 +1714,10 @@ void LedgerUseCases::save_dirty_books_locked(const std::set<std::string>& dirty)
     r.agent_id = id;
     r.agent_kind = it->second.kind;
     r.qty = it->second.book.qty;
-    r.avg_price = it->second.book.avg_price;
-    r.realized = it->second.book.realized;
+    r.avg_fair = it->second.book.avg_fair;
+    r.edge = it->second.book.edge;
+    r.ext_realized = it->second.book.ext_realized;
+    r.quote = it->second.quote;
     r.last_batch_id = it->second.last_batch_id;
     r.since_ms = it->second.since_ms;
     rows.push_back(std::move(r));
@@ -1659,12 +1739,14 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
       std::chrono::system_clock::now().time_since_epoch()).count();
   const std::unordered_set<std::string> want(req.agent_ids().begin(), req.agent_ids().end());
 
+  // R и U известны независимо: R (реализованное) цены оценки не требует, U — требует (остаток, оценённый по текущей справедливой цене).
+  // Неизвестное не отдаётся числом: «нет данных» ≠ ноль.
   const auto put_group = [](const PnlGroup& g, fob::ledger::v1::PnlGroup* out) {
     out->set_has_data(g.has_data);
-    if (!g.has_data) return;  // нет данных ≠ ноль: числа не задаются
-    *out->mutable_r() = g.r.to_proto();
-    *out->mutable_u() = g.u.to_proto();
-    *out->mutable_r_plus_u() = g.total().to_proto();
+    out->set_u_has_data(g.u_has_data);
+    if (g.has_data) *out->mutable_r() = g.r.to_proto();
+    if (g.u_has_data) *out->mutable_u() = g.u.to_proto();
+    if (g.has_data && g.u_has_data) *out->mutable_r_plus_u() = g.total().to_proto();
   };
 
   std::lock_guard<std::mutex> lg(mu_);
@@ -1677,7 +1759,7 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
   }
 
   // Итоги: по всем агентам и по видам (панель «Живые позиции» показывает «переводчики», «арбитражёры», «вместе» — суммирует ledger,
-  // а не браузер). В итог входят только агенты, у которых в группе есть данные; incomplete показывает неполноту.
+  // а не браузер). R суммируется по агентам с известным R, U — по агентам с известным U; incomplete — агенты с неизвестной частью.
   struct PnlAcc {
     PnlGroup in, ex, all;
     std::uint32_t count{0}, incomplete{0};
@@ -1686,10 +1768,10 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
   std::map<std::string, PnlAcc> acc_kind;
   const auto accumulate = [](PnlAcc& a, const PnlGroup& in, const PnlGroup& ex, const PnlGroup& all) {
     ++a.count;
-    if (!in.has_data || !ex.has_data) ++a.incomplete;
-    if (in.has_data) a.in = AddGroups(a.in, in);
-    if (ex.has_data) a.ex = AddGroups(a.ex, ex);
-    if (all.has_data) a.all = AddGroups(a.all, all);
+    if (!all.has_data || !all.u_has_data) ++a.incomplete;
+    a.in = AddGroups(a.in, in);
+    a.ex = AddGroups(a.ex, ex);
+    a.all = AddGroups(a.all, all);
   };
   for (const auto& [agent_id, legs] : by_agent) {
     std::string kind;
@@ -1700,69 +1782,81 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
     if (!is_translator && !is_arb) continue;  // вид неизвестен — заработок не определён
 
     const auto bit = agent_books_.find(agent_id);
-    const InternalBook book = (bit == agent_books_.end()) ? InternalBook{} : bit->second.book;
+    const bool has_book = bit != agent_books_.end();
+    const FairBook book = has_book ? bit->second.book : FairBook{};
     const std::string asset = std::get<1>(legs.front()->first);
 
+    // Группы: внутренняя (R = Σ (F_0 − p)·dL, U ≡ 0 — на внутренней бирже всё реализуется в такте) и внешняя (R = дрейф закрытий и
+    // качество исполнения, U = L·(F_0 − F_in) по ещё не захеджированному остатку). Значения книги — в валюте котировки, ρ переводит в USDT.
     PnlGroup in, ex;
     std::string quote = numeraire;
     long long age_ms = -1;
     if (!ready) {
       // группы остаются без данных
-    } else if (is_arb && asset == numeraire) {
-      in.has_data = ex.has_data = true;  // перенос номинала цены не имеет: результат по построению нулевой
+    } else if (asset == numeraire) {
+      in.has_data = in.u_has_data = ex.has_data = ex.u_has_data = true;  // перенос номинала цены не имеет: результат по построению нулевой
     } else if (is_translator) {
       const AgentPositionState& L = legs.front()->second;
-      quote = L.quote.empty() ? numeraire : L.quote;
-      const Decimal mark = (PnlSign(L.fair_price) > 0) ? L.fair_price : L.last_price;
-      const bool ok = PnlSign(mark) > 0 && PnlSign(L.base_price) > 0;
-      const Decimal rho = QuoteRate(quote == numeraire, L.base_price, L.last_price);
-      if (ok) {
-        in.has_data = ex.has_data = true;
-        in.r = Decimal::mul(rho, book.realized);
-        in.u = Decimal::mul(rho, BookUnrealizedQuote(book, mark));
-        ex.r = Decimal::mul(rho, Decimal::sub(L.realized_vs_fair, L.rvf_base));
-        ex.u = Decimal::mul(rho, TranslatorExternalUnrealizedQuote(L.ext, mark));
+      quote = !L.quote.empty() ? L.quote : (has_book ? bit->second.quote : std::string());
+      // Справедливая цена пары сейчас: общая для пары (последняя дельта любого переводчика пары), иначе собственная, иначе последняя цена; 0 — не известна.
+      const Decimal pair_f = pair_fair_locked(asset, quote.empty() ? std::string() : quote, now_ms);
+      const Decimal mark = (PnlSign(pair_f) > 0) ? pair_f : ((PnlSign(L.fair_price) > 0) ? L.fair_price : L.last_price);
+      bool rho_known = false;
+      Decimal rho{1, 0};
+      if (!quote.empty()) {
+        if (quote == numeraire) {
+          rho_known = true;
+        } else if (PnlSign(L.base_price) > 0 && PnlSign(mark) > 0) {
+          rho = QuoteRate(false, L.base_price, mark);
+          rho_known = true;
+        }
+      }
+      if (rho_known) {
+        in.has_data = in.u_has_data = true;
+        ex.has_data = true;
+        in.r = Decimal::mul(rho, book.edge);
+        ex.r = Decimal::mul(rho, book.ext_realized);
+        const Decimal c_total = Decimal::add(L.position, L.in_flight);
+        if (has_book) {
+          if (PnlSign(book.qty) == 0) {
+            ex.u_has_data = true;
+          } else if (PnlSign(mark) > 0) {
+            ex.u = Decimal::mul(rho, FairUnrealizedQuote(book, mark));
+            ex.u_has_data = true;
+          }
+        } else if (PnlSign(c_total) == 0) {
+          ex.u_has_data = true;  // книги ещё нет, позиции нет — переоценивать нечего; позиция есть — книгу заведёт первая дельта
+        }
       }
       if (L.last_price_ms > 0) age_ms = std::max<long long>(0, now_ms - L.last_price_ms);
     } else {
-      // Связка: цена оценки внутренней книги — среднее последних цен ног; внешняя корзина — по ценам каждой ноги.
-      Decimal price_sum = Decimal::zero();
-      int priced = 0;
-      ExternalSums sums;
-      for (const auto* kv : legs) {
-        const AgentPositionState& s = kv->second;
-        if (PnlSign(s.last_price) > 0) { price_sum = Decimal::add(price_sum, s.last_price); ++priced; }
-        sums = AddExternalSums(sums, s.ext);
-        if (s.last_price_ms > 0) {
-          const long long a = std::max<long long>(0, now_ms - s.last_price_ms);
-          age_ms = (age_ms < 0) ? a : std::min(age_ms, a);
-        }
+      // Связка: все цены в USDT (ρ=1); справедливая цена — F_0 пары из последнего такта переводчиков того же актива.
+      const Decimal mark = link_fair_usdt_locked(asset, nullptr, now_ms);
+      in.has_data = in.u_has_data = true;
+      ex.has_data = true;
+      in.r = book.edge;
+      ex.r = book.ext_realized;
+      if (PnlSign(book.qty) == 0) {
+        ex.u_has_data = true;
+      } else if (PnlSign(mark) > 0) {
+        ex.u = FairUnrealizedQuote(book, mark);
+        ex.u_has_data = true;
       }
-      if (priced > 0) {
-        const Decimal mark = Decimal::div(price_sum, Decimal{priced, 0}, kPnlDivScale);
-        const Decimal r_ext = ArbRealizedQuote(sums);
-        Decimal basket = Decimal::zero();
-        for (const auto* kv : legs) basket = Decimal::add(basket, BasketUsdt(kv->second.ext, kv->second.base_price, Decimal{1, 0}));
-        in.has_data = ex.has_data = true;
-        in.r = book.realized;
-        in.u = BookUnrealizedQuote(book, mark);
-        ex.r = r_ext;
-        ex.u = Decimal::sub(basket, r_ext);
-      }
+      const auto fit = fair_usdt_by_asset_.find(asset);
+      if (fit != fair_usdt_by_asset_.end() && fit->second.ms > 0) age_ms = std::max<long long>(0, now_ms - fit->second.ms);
     }
 
     PnlGroup all;
     all.has_data = in.has_data && ex.has_data;
-    if (all.has_data) {
-      all.r = Decimal::add(in.r, ex.r);
-      all.u = Decimal::add(in.u, ex.u);
-    }
+    all.u_has_data = in.u_has_data && ex.u_has_data;
+    if (all.has_data) all.r = Decimal::add(in.r, ex.r);
+    if (all.u_has_data) all.u = Decimal::add(in.u, ex.u);
 
     auto* a = resp.add_agents();
     a->set_agent_id(agent_id);
     a->set_agent_kind(kind);
     a->set_asset(asset);
-    a->set_quote(quote);
+    a->set_quote(quote.empty() ? numeraire : quote);
     std::set<std::string> venues;
     std::uint32_t fills = 0;
     for (const auto* kv : legs) { venues.insert(std::get<2>(kv->first)); fills += kv->second.ext_fills; }
@@ -1772,24 +1866,30 @@ fob::ledger::v1::GetAgentPnlResponse LedgerUseCases::GetAgentPnl(const fob::ledg
     put_group(all, a->mutable_total());
     a->set_mark_age_ms(age_ms);
     a->set_ext_fills(fills);
-    a->set_since_ms(bit == agent_books_.end() ? 0 : bit->second.since_ms);
+    a->set_since_ms(has_book ? bit->second.since_ms : 0);
 
     accumulate(acc_all, in, ex, all);
     accumulate(acc_kind[kind], in, ex, all);
   }
 
+  // R итогов суммируется по агентам с известным R, U — по агентам с известным U; пока есть неполные агенты, это разные выборки и их сумма
+  // не равна сумме R+U по агентам, поэтому r_plus_u итогов тогда не отдаётся (R и U показываются отдельно).
+  const auto put_totals_group = [&put_group](const PnlGroup& g, std::uint32_t incomplete, fob::ledger::v1::PnlGroup* out) {
+    put_group(g, out);
+    if (incomplete > 0) out->clear_r_plus_u();
+  };
   auto* totals = resp.mutable_totals();
-  put_group(acc_all.in, totals->mutable_internal());
-  put_group(acc_all.ex, totals->mutable_external());
-  put_group(acc_all.all, totals->mutable_total());
+  put_totals_group(acc_all.in, acc_all.incomplete, totals->mutable_internal());
+  put_totals_group(acc_all.ex, acc_all.incomplete, totals->mutable_external());
+  put_totals_group(acc_all.all, acc_all.incomplete, totals->mutable_total());
   totals->set_agent_count(acc_all.count);
   totals->set_incomplete_agents(acc_all.incomplete);
   for (const auto& [kind_name, a] : acc_kind) {
     auto* k = resp.add_by_kind();
     k->set_agent_kind(kind_name);
-    put_group(a.in, k->mutable_internal());
-    put_group(a.ex, k->mutable_external());
-    put_group(a.all, k->mutable_total());
+    put_totals_group(a.in, a.incomplete, k->mutable_internal());
+    put_totals_group(a.ex, a.incomplete, k->mutable_external());
+    put_totals_group(a.all, a.incomplete, k->mutable_total());
     k->set_agent_count(a.count);
     k->set_incomplete_agents(a.incomplete);
   }
@@ -3035,6 +3135,7 @@ bool LedgerUseCases::apply_agent_band_report_locked(
                                               : Decimal::sub(Decimal::zero(), magnitude);
     const Decimal if_delta = sent_positive ? Decimal::sub(Decimal::zero(), magnitude)
                                            : magnitude;
+    const Decimal c_total_before_fill = Decimal::add(st.position, st.in_flight);  // ADR-087: суммарная позиция до этого исполнения
     st.in_flight = Decimal::add(st.in_flight, if_delta);   // позицию НЕ трогаем (A7)
     hedge.filled_value = Decimal::add(hedge.filled_value, filled_incr);
     // ADR-072 §C: РЕАЛЬНЫЙ заработок на внешней сделке vs fair. По модели владельца
@@ -3048,31 +3149,45 @@ bool LedgerUseCases::apply_agent_band_report_locked(
       realized_incr = Decimal::mul(diff, incr_filled_qty);
       st.realized_vs_fair = Decimal::add(st.realized_vs_fair, realized_incr);
     }
-    // ADR-087 (CALC-CE-AGENT-PNL): исполнение закрывает остаток внутренней книги переводчика по F_0 момента исполнения
-    // (та же цена, что в realized_vs_fair выше), а количество сверх остатка — несопоставленный внешний объём. У связки
-    // внутренней опоры у исполнения нет: все исполнения идут во внешние суммы. Без цены исполнения оценить нечего.
-    ExternalFillDelta ext_delta;
+    // ADR-087 (CALC-CE-AGENT-PNL, модель C′): исполнение хеджа переводчика — сделка его книги. Качество исполнения s·(p_f − F_0) и дрейф
+    // справедливой цены с момента входа закрываемой части позиции уходят в R внешних бирж; остаток книги — U. F_0 — общая для пары (последняя
+    // дельта любого переводчика пары), иначе собственная. Хедж связки в книгу НЕ пишется: направление её рыночного хеджа (знак позиции ноги)
+    // противоположно знаку её книги (σ=−1), и закрывает ли он книгу или наращивает её, решает владелец (OQ-F18v2-31); с ADR-083 такого
+    // хеджа нет, остаётся только счётчик исполнений. Без цены исполнения оценить нечего.
     std::set<std::string> book_dirty;
     if (cex::common::Env::get_bool("CE_AGENT_PNL_ENABLED", true) && pnl_ready_ && average_price.units != 0 &&
         (st.agent_kind == "translator" || st.agent_kind == "arbitrageur")) {
       ++st.ext_fills;
-      ExternalSums add;
-      if (st.agent_kind == "translator") {
-        // Книгу здесь НЕ создаём: она заводится только дельтой клиринга (с засевом по позиции). Нет книги — исполнение целиком
-        // несопоставлено и уходит во внешние суммы.
-        const auto bit = agent_books_.find(agent_id);
-        InternalBook none;
-        InternalBook& book = (bit != agent_books_.end()) ? bit->second.book : none;
-        ApplyTranslatorHedgeFill(book, add, sent_positive, incr_filled_qty, average_price, st.fair_price);
-        if (bit != agent_books_.end()) book_dirty.insert(agent_id);
-      } else {
-        AddExternalFill(add, sent_positive, incr_filled_qty, average_price);
+      const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+      if (st.agent_kind == "translator" && asset != numeraire) {
+        const std::string book_quote = st.quote.empty() ? numeraire : st.quote;
+        const Decimal pair_f = pair_fair_locked(asset, book_quote, ts_ms);
+        const Decimal fair = (PnlSign(pair_f) > 0) ? pair_f : st.fair_price;
+        auto bit = agent_books_.find(agent_id);
+        if (bit == agent_books_.end()) {
+          // Книги нет (хедж по позиции, накопленной до учёта): переводчик засевается позицией до этого исполнения по F_0.
+          // Без F_0 или цены базы книгу завести не из чего, исполнение в R не попадёт (счётчик в журнале).
+          if (PnlSign(fair) > 0 && PnlSign(st.base_price) > 0) {
+            AgentBook ab;
+            ab.kind = st.agent_kind;
+            ab.quote = book_quote;
+            ab.since_ms = ts_ms;
+            if (PnlSign(c_total_before_fill) != 0)
+              ApplyFairTrade(ab.book, BookUnitsFromValue(+1, c_total_before_fill, st.base_price), fair);
+            bit = agent_books_.emplace(agent_id, std::move(ab)).first;
+          } else {
+            cex::common::log_json("WARN", "ADR-087 хедж-исполнение не попало в R внешних бирж: нет книги, справедливой цены или цены базы",
+                                  {{"agent_id", agent_id}, {"venue", venue}, {"filled_qty", incr_filled_qty.to_string()}});
+          }
+        }
+        if (bit != agent_books_.end()) {
+          ApplyHedgeFill(bit->second.book, sent_positive, incr_filled_qty, average_price, fair);
+          book_dirty.insert(agent_id);
+        }
       }
-      st.ext = AddExternalSums(st.ext, add);
-      ext_delta = ExternalFillDelta{add.buy_base, add.sell_base, add.buy_notional, add.sell_notional, add.fair_signed};
     }
-    if (agent_position_repo_) {  // персистим и realized-прирост (переживает рестарт) и внешние суммы ноги
-      agent_position_repo_->ApplyExternalFill(agent_id, asset, venue, if_delta, realized_incr, ext_delta, ts_ms);
+    if (agent_position_repo_) {  // персистим прирост realized_vs_fair (переживает рестарт) и сдвиг in_flight
+      agent_position_repo_->ApplyHedge(agent_id, asset, venue, Decimal::zero(), if_delta, ts_ms, realized_incr);
       save_dirty_books_locked(book_dirty);
     }
     // F-18 #6 (T-F18-804): РАСЧЁТНАЯ band-комиссия зоны на инкремент (quote):

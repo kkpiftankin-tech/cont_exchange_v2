@@ -424,11 +424,18 @@ message GetAgentPositionDeltasResponse {
 
 // ADR-087 (CALC-CE-AGENT-PNL): заработок агента CE в USDT — три группы (внутренняя биржа, внешние биржи, итого),
 // в каждой R (реализованный), U (нереализованный) и R+U. Всё посчитано в ledger; BFF и фронт арифметики не делают.
+// Модель C′: на внутренней бирже всё реализуется в такте клиринга (u = 0 всегда), нереализованное бывает только на внешних биржах.
+// R и U известны независимо. R не требует текущей справедливой цены остатка (известен сразу после перезапуска ledger); для пар не к
+// USDT ему нужен курс валюты котировки (цена базы и цена пары), пока его нет — R неизвестен. U требует текущей справедливой цены
+// остатка (остатка нет — U = 0 без цены).
+// Изменение смысла поля 1 (до появления поля 5 has_data значил «R и U известны сразу»): допустимо, пока GetAgentPnl не вышел за
+// рамки dev; отдельный ADR не нужен, зафиксировано в ADR-087.
 message PnlGroup {
-  bool has_data = 1;                              // false ⇒ r, u, r_plus_u НЕ заданы (нет цены — это не ноль)
+  bool has_data = 1;                              // false ⇒ r НЕ задан (нет данных — это не ноль)
   fob.common.v1.Decimal r = 2;                    // USDT
-  fob.common.v1.Decimal u = 3;                    // USDT
-  fob.common.v1.Decimal r_plus_u = 4;             // USDT, r + u
+  fob.common.v1.Decimal u = 3;                    // USDT; задан при u_has_data
+  fob.common.v1.Decimal r_plus_u = 4;             // USDT, r + u; задан при has_data и u_has_data
+  bool u_has_data = 5;                            // false ⇒ u и r_plus_u НЕ заданы (остаток есть, цена оценки пока не известна)
 }
 message AgentPnl {
   string agent_id = 1;                            // "T_BTC_binance" | "A_BTC_binancekraken"
@@ -444,19 +451,19 @@ message AgentPnl {
   int64 since_ms = 11;                            // начало накопления, unix ms; 0 ⇒ не начато
 }
 message AgentPnlTotals {
-  PnlGroup internal = 1;                          // суммы по агентам, у которых в группе есть данные
+  PnlGroup internal = 1;                          // R — сумма по агентам с известным R, U — сумма по агентам с известным U
   PnlGroup external = 2;
-  PnlGroup total = 3;
+  PnlGroup total = 3;                             // r_plus_u итогов задан только когда incomplete_agents = 0 (иначе слагаемые из разных выборок)
   uint32 agent_count = 4;                         // сколько агентов в ответе
-  uint32 incomplete_agents = 5;                   // у скольких хотя бы в одной группе has_data = false
+  uint32 incomplete_agents = 5;                   // у скольких R или U неизвестны (has_data = false или u_has_data = false в итоговой группе)
 }
 message KindPnlTotals {
   string agent_kind = 1;                          // "translator" | "arbitrageur"
-  PnlGroup internal = 2;                          // суммы по агентам этого вида, у которых в группе есть данные
+  PnlGroup internal = 2;                          // R — сумма по агентам вида с известным R, U — с известным U
   PnlGroup external = 3;
-  PnlGroup total = 4;
+  PnlGroup total = 4;                             // r_plus_u задан только когда incomplete_agents = 0
   uint32 agent_count = 5;                         // сколько агентов этого вида в ответе
-  uint32 incomplete_agents = 6;                   // у скольких хотя бы в одной группе has_data = false
+  uint32 incomplete_agents = 6;                   // у скольких R или U неизвестны (has_data = false или u_has_data = false в итоговой группе)
 }
 message GetAgentPnlRequest {
   fob.common.v1.EventMeta meta = 1;
