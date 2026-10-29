@@ -12,7 +12,7 @@
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **7**
 - ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **18**
+- Инженерных долгов в known-gaps.md: **19**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -33,6 +33,7 @@
 - **OQ-F18v2-17** (F-18) — переводчик тоже реагирует на фантомный сигнал, а не только арбитражёр · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-29** (F-18) — цена оценки связки и нумерарные связки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-36** (F-18) — заявки LIMIT с немедленным исполнением при выключенном резерве мейкер-заявок · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-38** (F-18) — кросс-рёбра после приведения к номиналу: барьер или предел потока до включения · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### trading-domain-specialist + matching (движок)
 
@@ -77,7 +78,6 @@
 - **OQ-F18v2-33** (F-18) — устаревание справедливой цены · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-34** (F-18) — комиссия на графике сделок: сторона, ставки по биржам, смысл taker-ставки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-35** (F-18) — комиссия на графике: текущие ставки или зафиксированные на момент заявки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-37** (F-18) — глубина α кросс-ребра в валюте котировки, а не в номинале · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 
@@ -134,3 +134,4 @@
 - Расчётная комиссия на графике сделок по парам (CR-F18-007, 2026-10-28): известные ограничения.
 - График сделок по парам, фильтр по агенту (CR-F18-010, 2026-10-28): известные ограничения.
 - Глубина кросс-ребра в единицах котируемой валюты (расследование 2026-10-29, OQ-F18v2-37).
+- Инцидент 2026-10-29: пробное включение `CE_CROSS_DEPTH_NUMERAIRE` испортило данные стенда (CR-F18-011, OQ-F18v2-38).

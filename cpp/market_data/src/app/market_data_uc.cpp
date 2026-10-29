@@ -27,6 +27,7 @@
 #include "domain/fill_depth_scale.hpp"  // ADR-082 шаг 1
 #include "domain/depth_trust_scale.hpp"  // ADR-085: уценка устаревших котировок, капитальный предел
 #include "domain/ce_input_guard.hpp"  // защита входа CE-клиринга от несогласованности
+#include "domain/cross_depth_scale.hpp"  // ADR-064 (доп. 2026-10-29): глубина кросс-пары в единицах номинала
 #include "app/ports/i_vector_segment_storage.hpp"
 #include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
@@ -866,14 +867,19 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
   const bool ce_speed_scale = cex::common::Env::get_bool("CE_SPEED_SCALE", true);
   const double batch_window_ms =
       static_cast<double>(cex::common::Env::get_int("F05A_BATCH_WINDOW_MS", 1000));
+  // ADR-064 (дополнение 2026-10-29, OQ-F18v2-37): α строится в единицах котируемой валюты пары (у ETH/BTC — BTC на ‰), а клиринг складывает потоки в
+  // номинале. Флаг включает приведение α кросс-пары к номиналу: α·P0_quote. Выключено (деф.) ⇒ множитель 1, поведение побитно прежнее.
+  const bool cross_depth_numeraire = cex::common::Env::get_bool("CE_CROSS_DEPTH_NUMERAIRE", false);
+  int cross_depth_scaled = 0;
   for (const auto& b : books) {
     const double p0_base = p0.count(b.base) ? p0.at(b.base) : 0.0;
     double reference_price = p0_base;
+    double p0_quote = 1.0;  // опорная цена котируемой валюты в номинале; для номинальной пары 1
     if (b.quote != numeraire) {
       // Кросс-пара (ADR-064 §Решение): reference_price = P0_base/P0_quote —
       // согласовано с потенциалами узлов x[a@v]; для base/numeraire P0_quote=1,
       // reference_price=P0_base (без изменений). Без P0_quote пара недостроима.
-      const double p0_quote = p0.count(b.quote) ? p0.at(b.quote) : 0.0;
+      p0_quote = p0.count(b.quote) ? p0.at(b.quote) : 0.0;
       if (p0_base <= 0.0 || p0_quote <= 0.0) { ++skipped_no_p0; continue; }
       reference_price = p0_base / p0_quote;
     }
@@ -932,13 +938,18 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
       if (s < 1e-6) s = 1e-6; else if (s > 100.0) s = 100.0;
       depth *= s;
     }
+    // Единицы глубины: у кросс-пары α в котируемой валюте, клиринг считает в номинале ⇒ α·P0_quote (константа окна). Номинальные пары — множитель 1.
+    if (const double nf = domain::CrossDepthNumeraireFactor(cross_depth_numeraire, b.quote, numeraire, p0_quote); nf != 1.0) {
+      depth *= nf;
+      ++cross_depth_scaled;
+    }
     agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, depth, a.dead_zone_pm,
                       a.dz_age_pm, a.dz_spread_pm, a.dz_commission_pm, acfg.sigma_pm,
                       // возраст снимка известен и при CE_AGE_DEAD_ZONE_K=0 (acfg его тогда не заполняет)
                       b.ts_ms > 0 ? std::max<std::int64_t>(0, window_close_ms - b.ts_ms) : 0});
     // ADR-064: max глубина копится по ПАРЕ (base|quote), а не по base. Глубины
-    // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT) —
-    // сравнение «тонкости» валидно только между площадками одной пары.
+    // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT; при CE_CROSS_DEPTH_NUMERAIRE=1 кросс-глубина приведена к номиналу
+    // выше, но сравнение между парами всё равно не нужно) — «тонкость» сравнивается только между площадками одной пары.
     const std::string pk = b.base + "|" + b.quote;
     if (depth > max_depth[pk]) max_depth[pk] = depth;
   }
@@ -949,6 +960,14 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
                            {"applied", std::to_string(age_applied)},
                            {"no_sigma", std::to_string(age_no_sigma)},
                            {"max_age_floor_pm", std::to_string(age_floor_max_pm)}});
+  if (cross_depth_numeraire) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_cross_depth_log_ms{0};
+    std::int64_t prev_cd = last_cross_depth_log_ms.load();
+    if (window_close_ms - prev_cd >= 60000 && last_cross_depth_log_ms.compare_exchange_strong(prev_cd, window_close_ms))
+      cex::common::log_json("INFO", "CE clearing: глубина кросс-пар приведена к номиналу α·P0_quote (ADR-064, доп. 2026-10-29)",
+                            {{"batch_id", batch_id}, {"scaled_quotes", std::to_string(cross_depth_scaled)}});
+  }
   if (alpha_method == 5)
     cex::common::log_json("INFO", "CE clearing: α по M5 (ADR-077)",
                           {{"batch_id", batch_id},
@@ -1055,8 +1074,9 @@ void MarketDataUseCases::BuildAndPublishCeClearingInput(
     if (trust_on || cap_on) {
       if (const auto sg = venue_sigma.find(pair_key); sg != venue_sigma.end()) sigma_pm_venue = sg->second * 1000.0;
     }
-    // Капитальный предел — внешнее ограничение тактовой глубины; только для котировок к номиналу: у кросс-пары глубина в валюте её
-    // котировки, и W_T в тыс. USDT с ней не сравнима (ADR-064). Нет σ площадки или такта ⇒ предела нет (без данных глубину не режем).
+    // Капитальный предел — внешнее ограничение тактовой глубины; только для котировок к номиналу: у кросс-пары (при CE_CROSS_DEPTH_NUMERAIRE=0)
+    // глубина в валюте её котировки, и W_T в тыс. USDT с ней не сравнима (ADR-064); при =1 глубина в номинале, но капитал кросс-переводчика
+    // отдельно не задан, поэтому предел для кросс-пар по-прежнему не применяется (ADR-064, дополнение 2026-10-29). Нет σ площадки или такта ⇒ предела нет (без данных глубину не режем).
     double cap_flow = std::numeric_limits<double>::infinity();
     if (cap_on && ag.quote == numeraire) {
       // Капитал именно этого переводчика; нет ни записи по ключу, ни запасного значения (или явный 0) ⇒ у пары предела нет и это не «нет данных».
