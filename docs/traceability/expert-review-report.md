@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **28**
+- Открытых структурированных вопросов (`OQ-*`): **34**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
-- Карточек вычислений не в статусе `implemented`: **7**
-- ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **20**
+- Карточек вычислений не в статусе `implemented`: **8**
+- ADR в статусе `proposed` (ждут решения владельца): **15**
+- Инженерных долгов в known-gaps.md: **28**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -79,6 +79,21 @@
 - **OQ-F18v2-34** (F-18) — комиссия на графике сделок: сторона, ставки по биржам, смысл taker-ставки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-35** (F-18) — комиссия на графике: текущие ставки или зафиксированные на момент заявки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
+### владелец, эксперт-трейдер
+
+- **OQ-F18v2-43** (F-18) — когда включать рабочий режим и какой предел позиции считать жёстким · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-44** (F-18) — учитывать ли комиссию хеджа в заработке агентов и списывать ли её в симулированных сделках · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+
+### эксперт-трейдер
+
+- **OQ-F18v2-40** (F-18) — скорость исполнения лимитных заявок, неблагоприятный отбор и спред по книгам · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-41** (F-18) — что делать при устойчивом потоке в одну сторону (дрейф) · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+
+### эксперт-трейдер, владелец
+
+- **OQ-F18v2-39** (F-18) — сколько мы готовы платить за удержание позиции (неприятие риска) и откуда брать волатильность · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-42** (F-18) — нужна ли отдельная лимитная зона при равных комиссиях 0,1 % · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 
 Формат — `docs/00-methodology/artifact-templates.md` "Open Questions Template"; мигрировать по касанию фичи, не разом.
@@ -92,6 +107,7 @@
 
 - **CALC-CE-AGENT-PNL** (F-18, `accepted`) — Заработок агента CE по биржам — R, U и R+U внутренней биржи, внешних бирж и итого · [docs/04-domain/calculations/CALC-CE-AGENT-PNL.md](../04-domain/calculations/CALC-CE-AGENT-PNL.md)
 - **CALC-CE-ANCHOR** (F-18, `partial`) — Общий якорь дилера a* и порог хеджа Q_i (эталонная модель IN-017) · [docs/04-domain/calculations/CALC-CE-ANCHOR.md](../04-domain/calculations/CALC-CE-ANCHOR.md)
+- **CALC-CE-HEDGE-THRESHOLD-MODEL** (F-18, `proposed`) — Пороги хеджа позиции по модели оптимального управления — тейкер, мейкер+тейкер, перевод между биржами · [docs/04-domain/calculations/CALC-CE-HEDGE-THRESHOLD-MODEL.md](../04-domain/calculations/CALC-CE-HEDGE-THRESHOLD-MODEL.md)
 - **CALC-CE-PAIR-TRADES** (F-18, `accepted`) — Сделки на внешних биржах по паре — накопленный объём базовой валюты, цены покупки и продажи и цены с расчётной комиссией · [docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md](../04-domain/calculations/CALC-CE-PAIR-TRADES.md)
 - **CALC-CE-SKEW-BAND-CALIBRATION** (F-18, `calibrated`) — Калибровка порога (band) и функции сдвига цены (skew) под максимум заработка переводчика · [docs/04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md](../04-domain/calculations/CALC-CE-SKEW-BAND-CALIBRATION.md)
 - **CALC-CE-SYSTEM-PNL** (F-18, `partial`) — P&L системы CE (MTM реальных остатков) и инварианты · [docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md](../04-domain/calculations/CALC-CE-SYSTEM-PNL.md)
@@ -113,6 +129,8 @@
 - **ADR-079** (F-18) — Диагностика решения CE-клиринга — снимок последнего такта из matching, показ на вкладке «Граф» с объяснением «почему потока нет» · [docs/03-architecture/adr/ADR-079-ce-clearing-decision-diagnostics.md](../03-architecture/adr/ADR-079-ce-clearing-decision-diagnostics.md)
 - **ADR-081** (F-18) — Ширина полосы хеджа CE — ручная установка и автоматический режим по волатильности · [docs/03-architecture/adr/ADR-081-ce-band-width-manual-and-volatility-modes.md](../03-architecture/adr/ADR-081-ce-band-width-manual-and-volatility-modes.md)
 - **ADR-082** (F-18) — Измерение ликвидности внешних бирж и её обратная связь в глубину агента, размер заявки и порог хеджа CE · [docs/03-architecture/adr/ADR-082-venue-liquidity-measurement-and-feedback.md](../03-architecture/adr/ADR-082-venue-liquidity-measurement-and-feedback.md)
+- **ADR-088** (F-18) — Пороги хеджа позиции агентов CE по модели оптимального управления (тейкер, мейкер+тейкер, перевод) — режим «выкл./теневой/рабочий» · [docs/03-architecture/adr/ADR-088-ce-hedge-threshold-model.md](../03-architecture/adr/ADR-088-ce-hedge-threshold-model.md)
+- **ADR-089** (F-18) — Стандартная комиссия внешних бирж 0,1 % для мейкера и тейкера — только при хедже, не в клиринге · [docs/03-architecture/adr/ADR-089-ce-standard-external-fee.md](../03-architecture/adr/ADR-089-ce-standard-external-fee.md)
 
 ## Инженерные долги (docs/00-methodology/known-gaps.md)
 
@@ -136,3 +154,11 @@
 - Глубина кросс-ребра в единицах котируемой валюты (расследование 2026-10-29, OQ-F18v2-37).
 - Инцидент 2026-10-29: пробное включение `CE_CROSS_DEPTH_NUMERAIRE` испортило данные стенда (CR-F18-011, OQ-F18v2-38).
 - Динамическая ширина полосы хеджа на dev выключена, хотя в профиле стенда записана включённой (выявлено 2026-10-29).
+- Модель порогов хеджа (ADR-088, 2026-10-29): рабочий режим `on` запрещён до двух условий.
+- Волатильность для модели порогов — объединённого потока бирж, а не собственной биржи агента.
+- Оценка шума и дрейфа потока живёт в памяти ledger.
+- Тесты модели порогов закрывают не всё (ревью 2026-10-29, D5).
+- Журнал оператора: пробелы, найденные ревью аудита комиссий (2026-10-29, security-reviewer).
+- Событие `ce.agent.band.breach` не описано в `docs/06-api`.
+- Band-путь risk не проверяет остановку (kill-switch).
+- Колонка `ce_taker_fee_bps`: две трактовки (ADR-089).

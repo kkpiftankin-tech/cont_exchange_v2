@@ -574,6 +574,40 @@ nodes:
       - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
       - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
       tests: []
+    - id: CAP-F18-HEDGE-MODEL
+      title: Пороги хеджа по модели оптимального управления (тейкер, мейкер+тейкер,
+        перевод), режим off/shadow/on
+      status:
+        docs: complete
+        code: done
+        runtime: dev
+      acceptanceCriteria:
+      - AC-F18v2-34
+      - AC-F18v2-35
+      - AC-F18v2-36
+      adrs:
+      - ADR-088
+      - ADR-089
+      ucs:
+      - UC-F18-04
+      calcs:
+      - CALC-CE-HEDGE-THRESHOLD-MODEL
+      contracts:
+      - docs/06-api/grpc/ledger-agent-positions.md
+      - docs/06-api/rest/hedge-model.md
+      tables:
+      - ce_agent_band_history
+      ui: []
+      codePaths:
+      - cpp/ledger/src/domain/hedge_threshold_model.hpp
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_update_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_flow_observe_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
+      - frontend/api/hedge_model_dto.js
+      tests:
+      - cpp/ledger/tests/hedge_threshold_model_test.cpp
+      - cpp/ledger/tests/ce_hedge_model_wiring_test.cpp
+      - frontend/api/hedge_model_dto.test.js
     - id: CAP-F18-SYSTEM-PNL
       title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый
         + V переоценка)
@@ -662,20 +696,29 @@ nodes:
       since: CR-F18-002
       acceptanceCriteria:
       - AC-F18v2-30
+      - AC-F18v2-31
+      - AC-F18v2-32
       adrs:
       - ADR-087
       ucs:
       - UC-F18-04
       calcs:
       - CALC-CE-AGENT-PNL
+      - CALC-CE-PAIR-TRADES
       contracts:
       - docs/06-api/grpc/ledger-agent-pnl.md
       - docs/06-api/rest/agent-pnl.md
+      - docs/06-api/rest/agent-pnl-history.md
+      - docs/06-api/rest/pair-trades-history.md
       tables:
       - ce_agent_pnl_book
       - ce_agent_position
+      - ce_agent_pnl_history
+      - ce_pnl_totals_history
       ui:
       - UI-PNL-AGENTS
+      - UI-PNL-HISTORY
+      - UI-PNL-PAIR-TRADES
       codePaths:
       - cpp/ledger/src/app/agent_pnl_book.hpp
       - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl
@@ -684,12 +727,25 @@ nodes:
       - frontend/api/agent_pnl_dto.js
       - frontend/api/server.js#fetchAgentPnlDto
       - frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js
+      - frontend/web/src/pages/HedgePnlDashboard/PnlHistoryChart.js
+      - frontend/web/src/pages/VectorClearing/PnlLineChart.js
+      - frontend/web/src/pages/HedgePnlDashboard/PairTradesChart.js
+      - frontend/web/src/pages/HedgePnlDashboard/pairChartModel.js
+      - frontend/api/pair_trades_history.js
+      - frontend/api/server.js#loadPairTradesRows
+      - frontend/api/agent_pnl_history.js
+      - frontend/api/server.js#samplePnlHistoryOnce
       - frontend/web/src/pages/VectorClearing/VectorClearingLive.js#AgentPositionsTables
       tests:
       - cpp/ledger/tests/agent_pnl_book_test.cpp
       - cpp/ledger/tests/ce_agent_pnl_test.cpp
       - frontend/api/agent_pnl_dto.test.js
       - frontend/web/src/pages/HedgePnlDashboard/__tests__/AgentPnlTable.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/PnlHistoryChart.test.js
+      - frontend/api/agent_pnl_history.test.js
+      - frontend/api/pair_trades_history.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/PairTradesChart.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/pairChartModel.test.js
       - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
     acceptanceCriteriaIds:
     - AC-F18v2-01
@@ -723,6 +779,12 @@ nodes:
     - AC-F18v2-28
     - AC-F18v2-29
     - AC-F18v2-30
+    - AC-F18v2-31
+    - AC-F18v2-32
+    - AC-F18v2-33
+    - AC-F18v2-34
+    - AC-F18v2-35
+    - AC-F18v2-36
   - id: F-20
     type: feature
     class: normative
@@ -1221,12 +1283,13 @@ nodes:
     path: docs/04-domain/calculations/CALC-CE-AGENT-PNL.md
     filenameId: CALC-CE-AGENT-PNL
     feature: F-18
-    status: proposed
+    status: accepted
     level: L3
     code:
     - cpp/ledger/src/app/agent_pnl_book.hpp
     - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl
     - cpp/ledger/src/app/ledger_uc.cpp#ApplyPositionDelta
+    - cpp/ledger/src/app/ledger_uc.cpp#book_on_delta_locked
     - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked
     - frontend/api/agent_pnl_dto.js
     - frontend/api/server.js#fetchAgentPnlDto
@@ -1326,6 +1389,23 @@ nodes:
     tests:
     - frontend/api/ce_graph_build.test.js
     - frontend/web/src/pages/CeGraph/__tests__/CeGraphLive.smoke.test.js
+  - id: CALC-CE-HEDGE-THRESHOLD-MODEL
+    type: calc
+    class: normative
+    title: Пороги хеджа позиции по модели оптимального управления — тейкер, мейкер+тейкер,
+      перевод между биржами
+    path: docs/04-domain/calculations/CALC-CE-HEDGE-THRESHOLD-MODEL.md
+    filenameId: CALC-CE-HEDGE-THRESHOLD-MODEL
+    feature: F-18
+    status: proposed
+    level: fish
+    code:
+    - cpp/ledger/src/domain/hedge_threshold_model.hpp
+    - cpp/ledger/src/app/ledger_uc.cpp (подключение в detect_and_emit_band_breach_locked,
+      режим off/shadow/on)
+    tests:
+    - cpp/ledger/tests/hedge_threshold_model_test.cpp
+    - cpp/ledger/tests/hedge_threshold_model_golden.inc (генерируется tools/hedge-threshold-model/gen_golden.js)
   - id: CALC-CE-LINK-TRANSFER
     type: calc
     class: normative
@@ -1344,6 +1424,22 @@ nodes:
     - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
     tests:
     - cpp/ledger/tests/ce_link_transfer_test.cpp
+  - id: CALC-CE-PAIR-TRADES
+    type: calc
+    class: normative
+    title: Сделки на внешних биржах по паре — накопленный объём базовой валюты, цены
+      покупки и продажи и цены с расчётной комиссией
+    path: docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md
+    filenameId: CALC-CE-PAIR-TRADES
+    feature: F-18
+    status: accepted
+    level: L3
+    code:
+    - frontend/api/pair_trades_history.js
+    - frontend/api/server.js#loadPairTradesRows
+    tests:
+    - frontend/api/pair_trades_history.test.js
+    - frontend/web/src/pages/HedgePnlDashboard/__tests__/PairTradesChart.test.js
   - id: CALC-CE-SKEW-BAND-CALIBRATION
     type: calc
     class: normative
@@ -1388,12 +1484,14 @@ nodes:
     - cpp/market_data/src/domain/depth_trust_scale.hpp#ResolveCapitalW
     - cpp/market_data/src/domain/fill_depth_scale.hpp#ResolveFillDepthScale
     - cpp/market_data/src/domain/agent_builder.hpp#BuildQuoteAgent
+    - cpp/market_data/src/domain/cross_depth_scale.hpp#CrossDepthNumeraireFactor
     - cpp/market_data/src/app/market_data_uc.cpp (сборка котировок агентов, второй
       проход)
     tests:
     - cpp/market_data/tests/depth_trust_scale_test.cpp
     - cpp/market_data/tests/fill_depth_scale_test.cpp
     - cpp/market_data/tests/agent_builder_test.cpp
+    - cpp/market_data/tests/cross_depth_scale_test.cpp
     - cpp/market_data/tests/ce_input_guard_test.cpp
   - id: CALC-CE-TRANSLATOR-PNL
     type: calc
@@ -1408,8 +1506,8 @@ nodes:
     code:
     - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked (накопление
       realized_vs_fair и выход внутренней книги; ADR-087)
-    - cpp/ledger/src/app/agent_pnl_book.hpp#ApplyTranslatorHedgeFill (внешний U —
-      только на несопоставленном объёме)
+    - cpp/ledger/src/app/agent_pnl_book.hpp#ApplyHedgeFill (внешний R и U по справедливой
+      стоимости входа, модель C′)
     - frontend/api/server.js#fetchAgentTradeStats (источник buy/sell qty, avg_price
       — child_orders с 2026-10-22; прежде venue_fill_diagnostics)
     - frontend/api/agent_pnl_dto.js#rowPnlFields (передача полей R/U в строку панели
@@ -2049,9 +2147,23 @@ nodes:
   - id: ADR-087
     type: adr
     class: normative
-    title: Заработок агентов CE по биржам — внутренняя книга агента (R и U по средней
-      себестоимости), внешний результат и итог, расчёт в ledger
+    title: Заработок агентов CE по биржам — справедливая цена как опорная (R и U внутренней
+      биржи, внешних бирж и итого), расчёт в ledger
     path: docs/03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md
+    status: accepted
+  - id: ADR-088
+    type: adr
+    class: normative
+    title: Пороги хеджа позиции агентов CE по модели оптимального управления (тейкер,
+      мейкер+тейкер, перевод) — режим «выкл./теневой/рабочий»
+    path: docs/03-architecture/adr/ADR-088-ce-hedge-threshold-model.md
+    status: proposed
+  - id: ADR-089
+    type: adr
+    class: normative
+    title: Стандартная комиссия внешних бирж 0,1 % для мейкера и тейкера — только
+      при хедже, не в клиринге
+    path: docs/03-architecture/adr/ADR-089-ce-standard-external-fee.md
     status: proposed
   table:
   - id: postgresql:flow_orders
@@ -2103,6 +2215,13 @@ nodes:
     path: infra/postgres/init.sql
     store: postgresql
     tableName: ce_pnl_totals_history
+  - id: postgresql:ce_agent_band_history
+    type: table
+    class: normative
+    title: ce_agent_band_history
+    path: infra/postgres/init.sql
+    store: postgresql
+    tableName: ce_agent_band_history
   - id: postgresql:ce_system_pnl_baseline
     type: table
     class: normative
@@ -2845,7 +2964,15 @@ edges:
   type: feature->calc
   resolved: true
 - from: F-18
+  to: CALC-CE-HEDGE-THRESHOLD-MODEL
+  type: feature->calc
+  resolved: true
+- from: F-18
   to: CALC-CE-LINK-TRANSFER
+  type: feature->calc
+  resolved: true
+- from: F-18
+  to: CALC-CE-PAIR-TRADES
   type: feature->calc
   resolved: true
 - from: F-18

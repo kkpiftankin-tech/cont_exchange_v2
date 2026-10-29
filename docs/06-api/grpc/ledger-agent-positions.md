@@ -54,6 +54,34 @@ message AgentPosition {
   int64 updated_at_ms = 7;                     // unix ms последнего изменения
   string last_batch_id = 8;                    // последний такт, менявший позицию
   fob.common.v1.Decimal reference_price = 9;   // Э3: P_node последней дельты (USDT/актив)
+  string quote = 10;                           // котируемая валюта пары (номинал ⇒ "USDT")
+  fob.common.v1.Decimal base_price = 11;       // P(base) в USDT
+  fob.common.v1.Decimal realized_vs_fair = 12; // ADR-072 §C: заработок на внешних сделках vs F_0 (в валюте quote)
+  fob.common.v1.Decimal z_lim = 13;            // рабочий порог входа в хедж, тыс. USDT (единственный источник — ledger)
+  fob.common.v1.Decimal z_mkt = 14;            // рабочий порог рыночного сброса, тыс. USDT
+  AgentHedgeModel hedge_model = 15;            // ADR-088: пороги по модели (режимы shadow|on); в режиме off не заполняется
+}
+enum HedgeModelRegime { HEDGE_MODEL_REGIME_UNSPECIFIED = 0; HEDGE_MODEL_REGIME_NOISE = 1; HEDGE_MODEL_REGIME_MIXED = 2; HEDGE_MODEL_REGIME_DRIFT = 3; }
+message AgentHedgeModel {
+  bool computed = 1;                           // пороги посчитаны
+  HedgeModelRegime regime = 2;                 // режим по числу Пекле; только у переводчика при computed
+  fob.common.v1.Decimal b_m = 3;               // порог мейкера модели (после пола и потолка), тыс. USDT
+  fob.common.v1.Decimal b_t = 4;               // порог тейкера модели
+  fob.common.v1.Decimal sz_est = 5;            // шум потока ς_z, тыс. USDT за √мин
+  fob.common.v1.Decimal mu_est = 6;            // устойчивый поток μ̂ (сырая оценка до отсечки погрешности), ЗНАКОВЫЙ, тыс. USDT/мин
+  double peclet = 7;                           // число Пекле на пороге тейкера
+  fob.common.v1.Decimal transfer_threshold = 8;// порог перевода B, только связка
+  fob.common.v1.Decimal transfer_target = 9;   // цель перевода b, только связка
+  int64 computed_at_ms = 10;
+  bool applied = 11;                           // режим on: пороги модели применены к заявкам
+  uint32 est_minutes = 12;                     // минут накоплено для оценки ς_z, μ; 0 ⇒ ς_z по умолчанию
+  fob.common.v1.Decimal sigma_bps = 13;        // волатильность курса пары, bps за √мин
+  fob.common.v1.Decimal fee_maker_bps = 14;    // комиссия мейкера без спреда, bps
+  fob.common.v1.Decimal fee_taker_bps = 15;    // комиссия тейкера без спреда, bps
+  uint32 params_hash = 16;                     // версия набора настроек модели
+  string mode = 17;                            // "shadow" | "on"
+  string reason = 18;                          // почему не посчитано: no_sigma | sigma_samples | sigma_stale | invalid_input | budget | numeraire
+  fob.common.v1.Decimal theta_est = 19;        // оценка скорости возврата θ (диагностика), 1/мин
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;
@@ -74,6 +102,7 @@ message GetAgentPositionsResponse {
 - `in_flight` — часть позиции, отправленная наружу band-хеджем и ещё не исполненная (Э3, T-F18-304). При `CE_AGENT_BAND=0` всегда `0`; при `=1` растёт на эмиссии (`RememberExecutionIntent` для `hedge_flow_id` вида `ce|band|<agent_id>|<asset>|<venue>`) и убывает по исполнению/терминалу (`apply_agent_band_report_locked`, Э4).
 - `reference_price` — цена узла `P_node` (USDT/актив) последней дельты клиринга (`AgentDelta.price_used`). Нужна `risk.EmitAgentBandHedges` для перевода избытка полосы (в стоимости) в количество актива хедж-заявки. `0` у арбитражёров и до первой дельты (такие агенты хедж не эмитят). Не персистится — восстанавливается первой же дельтой после рестарта.
 - `updated_at_ms` (`int64`, не `google.protobuf.Timestamp`) — консистентно с остальными `int64`-таймстемпами `ledger.proto` (напр. `BatchNopSnapshot.event_time_ms`).
+- **`hedge_model` (ADR-088, additive, поле 15).** Пороги хеджа по модели оптимального управления. Не заполняется при `CE_HMODEL_MODE=off` (0 байт на проводе); в `shadow` и `on` заполняется по каждой ноге агента. Состояние в памяти ledger, **не персистится**: после рестарта `computed=false` до первого пересчёта, оценки потока копятся заново (`est_minutes`). Наличие определяется по самому сообщению и по `has_*` у Decimal-полей, а не по значению: **ноль — законное значение** (`b_m=0` при ребейте мейкера, `transfer_target=0` при чисто фиксированной плате сети). У переводчика заполнены `b_m`, `b_t`, `regime`, `peclet`, `sigma_bps`, комиссии; у связки — `transfer_threshold`, `transfer_target` (на обеих ногах одинаково). `applied=true` только в режиме `on`, когда пороги модели используются для заявок; иначе блок — наблюдение. Единицы и формулы — [CALC-CE-HEDGE-THRESHOLD-MODEL](../../04-domain/calculations/CALC-CE-HEDGE-THRESHOLD-MODEL.md). Читатели `matching` и `risk` поле игнорируют; BFF копирует proto (`frontend/api/proto`, `sync-proto.sh`) — без синхронизации поле молча теряется (признак `hmodel_supported` в ответе `/agent-positions`).
 - **Идемпотентность:** RPC read-only, идемпотентен по конструкции — без явного `idempotency_key` (тот же паттерн, что `GetNodeBalances` / `GetBalances`). Чтение — из write-through кэша `LedgerUseCases::agent_positions_` (под `mu_`), не из PG на каждый вызов; кэш синхронно перечитывается из PG при старте сервиса (`SetAgentPositionRepo` → `LoadAgentPositionsFromRepo`) — позиция агента переживает рестарт.
 - `venue = ""` для арбитражёра — явный сентинел «route-level» (позиция арбитражёра скалярна, не per-venue); конвенция ключа при `V>2` — открытый вопрос ADR-061 (см. data-doc).
 
@@ -98,5 +127,7 @@ message GetAgentPositionsResponse {
 - Kafka [`ce.position.delta`](../messaging/ce-position-delta.md) (`AgentDelta`) — источник апдейтов позиции, которую этот RPC читает.
 
 ## Related ADR
+
+- ADR-088 — пороги хеджа по модели (поле `hedge_model`); ADR-089 — стандартная комиссия (`fee_maker_bps`, `fee_taker_bps`).
 
 - ADR-061 (TODO) — модель позиции агента v2; supersedes ADR-057 (`GetNodeBalances` / `target`) и ADR-058 (committed state).

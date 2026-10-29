@@ -65,7 +65,7 @@ check('комиссия: ставок нет — комиссия неизвес
 })());
 
 // --- разбор ставок: конфигурация > env > по умолчанию; «не больше нуля» — не задано (как в ledger)
-check('ставки по умолчанию: 2 и 10 б.п., источник default', (() => { const f = resolveFeeBps(null, {}); return f.maker_bps === DEFAULT_MAKER_BPS && f.taker_bps === DEFAULT_TAKER_BPS && f.source === 'default' && DEFAULT_MAKER_BPS === 2 && DEFAULT_TAKER_BPS === 10; })());
+check('ставки по умолчанию: 10 и 10 б.п. (ADR-089), источник default', (() => { const f = resolveFeeBps(null, {}); return f.maker_bps === DEFAULT_MAKER_BPS && f.taker_bps === DEFAULT_TAKER_BPS && f.source === 'default' && DEFAULT_MAKER_BPS === 10 && DEFAULT_TAKER_BPS === 10; })());
 check('ставки: обе из конфигурации — источник config', (() => { const f = resolveFeeBps({ ce_maker_fee_bps: '3', ce_taker_fee_bps: '12.5' }, {}); return f.maker_bps === 3 && f.taker_bps === 12.5 && f.source === 'config'; })());
 check('ставки: taker не задан (−1 или 0), maker из конфигурации — источник mixed, taker по умолчанию', (() => {
   const a = resolveFeeBps({ ce_maker_fee_bps: 2, ce_taker_fee_bps: -1 }, {});
@@ -76,7 +76,7 @@ check('ставки: env подставляется вместо значени�
   const f = resolveFeeBps({ ce_maker_fee_bps: 4, ce_taker_fee_bps: -1 }, { CE_BAND_MAKER_FEE_BPS: '9', CE_BAND_REF_FEE_BPS: '15' });
   return f.maker_bps === 4 && f.taker_bps === 15 && f.source === 'mixed';
 })());
-check('ставки: нечисловой, пустой и нулевой env игнорируются', (() => { const f = resolveFeeBps(null, { CE_BAND_MAKER_FEE_BPS: '', CE_BAND_REF_FEE_BPS: 'abc' }); return f.maker_bps === 2 && f.taker_bps === 10 && f.source === 'default'; })());
+check('ставки: нечисловой, пустой и нулевой env игнорируются', (() => { const f = resolveFeeBps(null, { CE_BAND_MAKER_FEE_BPS: '', CE_BAND_REF_FEE_BPS: 'abc' }); return f.maker_bps === 10 && f.taker_bps === 10 && f.source === 'default'; })());
 check('комиссия: кросс-пара — надбавка в единицах второй валюты (BTC)', (() => {
   const d = buildPairTradesDto([{ symbol: 'ETH/BTC', t: T0, buy_qty: 2, buy_notional: 2 * 0.051, buy_fee: 2 * 0.051 * 0.0002, fills: 1 }], 1, 5, 60000, { maker_bps: 2, taker_bps: 10, source: 'default' });
   return near(d.pairs[0].points[0].buy_price_fee, 0.051 * 1.0002, 1e-12);

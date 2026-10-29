@@ -20,6 +20,7 @@
 #include "cex/common/uuid.hpp"   // boot_id_ (ADR-084)
 #include "app/agent_pnl_book.hpp"   // ADR-087: книга агента по справедливой цене (модель C′)
 #include "app/persistence_ports.hpp"
+#include "domain/hedge_threshold_model.hpp"   // ADR-088: модель порогов хеджа (первый domain-каталог ledger)
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/execution_group.pb.h"
@@ -158,6 +159,12 @@ class LedgerUseCases {
   using TapeSource = std::function<bool(const std::string& venue, const std::string& symbol, double* nu_quote_per_s,
                                         long long* samples, long long* age_ms)>;
   void SetVenueTapeSource(TapeSource source) { tape_source_ = std::move(source); }
+
+  // ADR-088: источник волатильности курса пары для модели порогов хеджа. По умолчанию (пусто) — ce_asset_volatility в PG
+  // (LoadAssetSigma). Подмена нужна тестам без БД. Сигнатура как у LoadAssetSigma: (символ пары, σ за √с, число отсчётов,
+  // возраст строки, мс) → есть ли значение.
+  using SigmaSource = std::function<bool(const std::string&, double*, long long*, long long*)>;
+  void SetHedgeSigmaSource(SigmaSource source) { sigma_source_ = std::move(source); }
 
   // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
   // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
@@ -471,6 +478,41 @@ class LedgerUseCases {
   std::mutex sigma_mu_;
   std::map<std::string, SigmaEntry> sigma_cache_;
 
+  // ADR-088: настройки модели порогов хеджа (окружение ledger, TTL 1 с) и кэш решений по округлённым входам. Всё под mu_.
+  struct HedgeModelCfg {
+    int mode{0};                          // 0 off, 1 shadow, 2 on
+    domain::hedge_model::ModelSettings s; // γ, s/2, a, κ, θ, границы режимов
+    double sz_default{2.0};               // шум потока переводчика, пока оценка не накоплена, тыс. USDT/√мин
+    double sz_link_default{2.0};          // то же для связки
+    double sz_floor{0.05};                // нижняя граница оценки шума
+    long long est_min_minutes{60};        // минут оценки до её использования
+    long long est_gap_reset_min{30};      // пропуск дольше — оценка начинается заново
+    double est_lambda{1.0 / 60.0};        // вес новой минуты в экспоненциальном среднем
+    double transfer_k_default{2.0};       // плата сети за перевод, USDT (общая; по активу — CE_HMODEL_TRANSFER_K_USDT_<АКТИВ>)
+    double transfer_pct_bps{0.0};         // процент от суммы перевода, bps
+    double basis_sigma_bps{0.7};          // волатильность базиса, bps за √мин
+    double capital_pct{10.0};             // стоимость капитала, % годовых
+    double transfer_min{0.0};             // время перевода, мин
+    double cap{1000.0};                   // верхняя граница порога, тыс. USDT (как у ручной ширины)
+    double sigma_scale{1.0};              // поправка волатильности (объединённый поток бирж завышает σ, OQ-F18v2-24)
+    double sigma_stale_ms{120000.0};
+    long long sigma_min_samples{20};
+    int max_solves_per_tact{4};           // сколько новых численных расчётов за такт (остальные ждут следующего)
+    double mu_z{2.0};                     // отсечка шума оценки дрейфа: берётся |μ̂| − mu_z·SE (0 — без отсечки)
+    long long budget_hold_ms{300000};     // при исчерпанном бюджете расчётов держим прежние пороги не дольше этого срока (иначе on откатился бы на старое правило)
+    std::map<std::string, double> half_spread_bps;   // полуспред по книге: ключ "площадка|СИМВОЛ" ("*|СИМВОЛ" — любая площадка), bps
+    std::uint32_t hash{0};                // версия набора настроек (в историю)
+  };
+  HedgeModelCfg hmodel_cfg_;
+  std::chrono::steady_clock::time_point hmodel_cfg_last_{};
+  bool hmodel_cfg_have_{false};
+  bool hmodel_mode_bad_logged_{false};
+  std::unordered_map<std::string, domain::hedge_model::TranslatorBand> hmodel_tr_cache_;
+  std::unordered_map<std::string, domain::hedge_model::LinkBand> hmodel_lk_cache_;
+  int hmodel_solves_left_{0};
+  SigmaSource sigma_source_;
+  const HedgeModelCfg& LoadHedgeModelCfgLocked();
+
   // ADR-082 (шаг 2): кэш оборота ленты ν по (venue|symbol) из venue_liquidity_stats (writer — venues), TTL 5 с.
   struct TapeEntry {
     double nu_quote_per_s = 0.0;
@@ -520,6 +562,35 @@ class LedgerUseCases {
   // и перечитывается целиком при SetAgentPositionRepo (рестарт-safe чтение).
   // Без репозитория (dev/in-memory) кэш САМ источник истины, как остальные
   // ledger-таблицы в этом режиме.
+  // ADR-088 (CALC-CE-HEDGE-THRESHOLD-MODEL): состояние модели порогов хеджа по агенту. Только память процесса, не персистится:
+  // после рестарта ledger расчёт и оценки потока начинаются заново (est_minutes = 0 ⇒ шум по умолчанию). Числа — double:
+  // пороги и оценки, не проводки; в Decimal они переводятся на границе (dec6) при применении и в ответе GetAgentPositions.
+  struct HedgeModelState {
+    std::string mode;                 // "" — модель не считалась; "shadow" | "on"
+    bool computed{false};             // пороги посчитаны (допустимые входы)
+    bool applied{false};              // режим on: пороги применены к заявке в последней проверке
+    bool maker_zone{false};
+    int regime{0};                    // 0 noise, 1 mixed, 2 drift
+    double b_m{0}, b_t{0};            // пороги модели после ограничений (пол, потолок), тыс. USDT
+    double sz_est{0}, mu_est{0}, theta_est{0}, peclet{0};
+    double sigma_bps{0}, fee_maker_bps{0}, fee_taker_bps{0};
+    bool has_transfer{false};         // связка: посчитаны порог и цель перевода
+    double transfer_big{0}, transfer_small{0};   // B и b, тыс. USDT
+    long long est_minutes{0};
+    long long computed_at_ms{0};
+    long long last_ok_ms{0};          // когда пороги последний раз посчитаны успешно (для удержания при исчерпанном бюджете)
+    std::uint32_t params_hash{0};
+    std::string reason;               // почему не посчитано
+    // Оценка шума и дрейфа потока: минутные приращения позиции от клиринга (хедж-сделки, переводы и сброс в них не входят)
+    // и их экспоненциально взвешенные моменты с экспозицией x = c + in_flight: дрейф μ = m_y + θ·m_x, шум √Var(Δc + θ·x). CALC §3.6, ADR-088.
+    long long bucket_ms{0};
+    double bucket_acc{0};             // Σ приращений позиции от клиринга в текущей минуте, тыс. USDT
+    double bucket_x{0};               // экспозиция c + in_flight на начало текущей минуты, знаковая
+    bool bucket_x_set{false};
+    long long minutes{0};             // закрытых минут в оценке
+    double mx{0}, my{0}, vxx{0}, cxy{0}, vyy{0};
+  };
+
   struct AgentPositionState {
     std::string agent_kind;
     cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
@@ -542,9 +613,14 @@ class LedgerUseCases {
     cex::common::Decimal transfer_moved{0, 0};  // ADR-084: Σ сдвигов позиции переводом (приход +X, уход −X), тыс. USDT; монитор W·c: (W·c)_n + moved_n = 0
     // ADR-087 (CALC-CE-AGENT-PNL): число хедж-исполнений ноги с запуска ledger.
     std::uint32_t ext_fills{0};
+    HedgeModelState hmodel;   // ADR-088
   };
   using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
   std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // ADR-088: оценка шума и дрейфа потока по минутным приращениям позиции от клиринга. exposure_before — c + in_flight ДО этой дельты.
+  void hmodel_flow_observe_locked(AgentPositionState& st, double delta_k, double exposure_before_k, long long ts_ms, const HedgeModelCfg& hc);
+  // ADR-088: расчёт и сохранение модельных порогов агента в st.hmodel (режимы shadow и on). Не меняет позицию и заявки.
+  void hmodel_update_locked(const AgentPositionKey& key, AgentPositionState& st, const HedgeModelCfg& hc, long long ts_ms);
   // ADR-087 (модель C′): книга агента по справедливой цене — по одной на агента (у связки обе ноги в одной книге). Под mu_.
   struct AgentBook {
     FairBook book;

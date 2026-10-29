@@ -246,6 +246,11 @@ protoContracts:
       - PnlGroup
       - AgentPnlTotals
       - KindPnlTotals
+      - AgentPosition
+      - GetAgentPositionsRequest
+      - GetAgentPositionsResponse
+      - AgentHedgeModel
+      - HedgeModelRegime
 
   execution:
     files:

@@ -379,6 +379,44 @@ message AgentPosition {
   // 0 до первого расчёта порога по агенту.
   fob.common.v1.Decimal z_lim = 13;
   fob.common.v1.Decimal z_mkt = 14;
+  // ADR-088 (CALC-CE-HEDGE-THRESHOLD-MODEL): пороги хеджа по модели оптимального управления — только чтение.
+  // Заполняется при CE_HMODEL_MODE=shadow|on; в режиме off не заполняется (на проводе 0 байт). Состояние в памяти
+  // ledger, не персистится: после рестарта computed=false до первого пересчёта. Аддитивно (поле 15, прежние поля
+  // не менялись).
+  AgentHedgeModel hedge_model = 15;
+}
+
+// Режим рынка по числу Пекле на пороге тейкера (CALC-CE-HEDGE-THRESHOLD-MODEL §3.6).
+enum HedgeModelRegime {
+  HEDGE_MODEL_REGIME_UNSPECIFIED = 0;
+  HEDGE_MODEL_REGIME_NOISE = 1;   // шум потока: решение «мейкер + тейкер»
+  HEDGE_MODEL_REGIME_MIXED = 2;   // смешанный: рыночный порог плавно сужается потоком
+  HEDGE_MODEL_REGIME_DRIFT = 3;   // устойчивый поток: рыночный порог = дрейфовая полоса, мейкер-зона схлопнута
+}
+
+// Модельные пороги хеджа агента. Единицы: пороги и оценки — тыс. USDT (оценка шума — на √мин, дрейфа — в минуту),
+// масштаб Decimal 6. Отсутствие Decimal-поля (has_*) = «не посчитано»; ноль — законное значение (ребейт мейкера
+// даёт b_m=0, чисто фиксированная плата сети даёт transfer_target=0), поэтому наличие определять по has_*, а не по >0.
+message AgentHedgeModel {
+  bool computed = 1;                          // пороги посчитаны (все входы допустимы)
+  HedgeModelRegime regime = 2;                // только у переводчика при computed
+  fob.common.v1.Decimal b_m = 3;              // порог мейкера модели (z_lim после ограничений)
+  fob.common.v1.Decimal b_t = 4;              // порог тейкера модели (z_mkt после ограничений)
+  fob.common.v1.Decimal sz_est = 5;           // шум потока ς_z (оценка или значение по умолчанию, см. est_minutes)
+  fob.common.v1.Decimal mu_est = 6;           // устойчивый поток μ, ЗНАКОВЫЙ
+  double peclet = 7;                          // число Пекле на пороге тейкера (диагностика)
+  fob.common.v1.Decimal transfer_threshold = 8;  // порог перевода B, только связка
+  fob.common.v1.Decimal transfer_target = 9;     // цель перевода b, только связка
+  int64 computed_at_ms = 10;                  // unix ms последнего расчёта
+  bool applied = 11;                          // CE_HMODEL_MODE=on: пороги модели применены к заявкам (иначе только наблюдение)
+  uint32 est_minutes = 12;                    // минут накоплено для оценки ς_z и μ; 0 ⇒ ς_z взят по умолчанию
+  fob.common.v1.Decimal sigma_bps = 13;       // волатильность курса пары ς, bps за √мин (из ce_asset_volatility)
+  fob.common.v1.Decimal fee_maker_bps = 14;   // комиссия мейкера без спреда, bps
+  fob.common.v1.Decimal fee_taker_bps = 15;   // комиссия тейкера без спреда, bps
+  uint32 params_hash = 16;                    // версия набора настроек модели (γ, κ, a, s/2, θ, K, …) — для истории
+  string mode = 17;                           // "shadow" | "on"
+  string reason = 18;                         // почему не посчитано (computed=false): sigma_stale, no_sigma, invalid_input, budget, …
+  fob.common.v1.Decimal theta_est = 19;       // оценка скорости возврата позиции θ (диагностика; в расчёте берётся настройка), 1/мин
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;

@@ -1171,7 +1171,24 @@ void LedgerUseCases::maybe_queue_link_transfer_locked(const AgentPositionKey& ke
   if (st.agent_kind != "arbitrageur") return;
   if (asset == cex::common::Env::get_string("CE_NUMERAIRE", "USDT")) return;   // перенос нумерария сметается в дом (detect_and_emit_band_breach_locked)
 
-  const double z_bar = link_transfer_threshold_locked(asset, st);
+  double z_bar = link_transfer_threshold_locked(asset, st);
+  // ADR-088: модель порогов. shadow — считает и сохраняет порог и цель перевода (B, b), перевод идёт по прежнему правилу;
+  // on — порог и цель берутся из модели (ручная ширина выше). Не посчитано — прежнее правило.
+  double model_target = -1.0;
+  {
+    const HedgeModelCfg& hc = LoadHedgeModelCfgLocked();
+    if (hc.mode != 0) {
+      hmodel_update_locked(key, st, hc, ts_ms);
+      st.hmodel.applied = false;
+      if (hc.mode == 2 && !LoadBandFeeConfig().manual && st.hmodel.computed && st.hmodel.has_transfer) {
+        z_bar = st.hmodel.transfer_big;
+        model_target = st.hmodel.transfer_small;
+        st.z_lim = dec6(z_bar);
+        st.z_mkt = st.z_lim;
+        st.hmodel.applied = true;
+      }
+    }
+  }
   const Decimal zero = Decimal::zero();
   if (Decimal::cmp(st.position, zero) <= 0) return;              // источник (отрицательная нога) сам перевод не запускает
   if (Decimal::cmp(st.position, dec6(z_bar)) <= 0) return;       // строго больше порога
@@ -1192,7 +1209,7 @@ void LedgerUseCases::maybe_queue_link_transfer_locked(const AgentPositionKey& ke
 
   double frac = env_double("CE_TRANSFER_TARGET_FRAC", 0.5);
   if (!(frac >= 0.0 && frac < 1.0)) frac = 0.5;   // при доле ≥ 1 перевод ничего не сбрасывал бы
-  const Decimal z_targ = dec6(frac * z_bar);
+  const Decimal z_targ = dec6(model_target >= 0.0 ? std::min(model_target, z_bar) : frac * z_bar);   // ADR-088: цель из модели (режим on)
   const Decimal min_x = dec6(std::max(0.0, env_double("CE_TRANSFER_MIN_K", 0.05)));
   const Decimal x_k = TransferAmountK(st.position, mirror->position, z_targ, min_x);
   if (Decimal::cmp(x_k, zero) <= 0) return;
@@ -1241,6 +1258,8 @@ void LedgerUseCases::ApplyPositionDelta(
   if (pos_delta_applied_.count(batch_id)) return;  // идемпотентно по batch_id (ОБА пути)
   pos_delta_applied_.insert(batch_id);
   ++tact_seq_;                          // ADR-084: номер такта клиринга; срок перевода считается в тактах
+  const HedgeModelCfg& hmc = LoadHedgeModelCfgLocked();   // ADR-088: настройки модели порогов (off по умолчанию)
+  hmodel_solves_left_ = hmc.max_solves_per_tact;          // бюджет новых численных расчётов на этот такт (остальное — из кэша)
   retry_pnl_load_locked(ts_ms);         // ADR-087: если книги заработка не загрузились при старте — повторная попытка по таймеру
   settle_due_transfers_locked(ts_ms);   // исполнить переводы, срок которых наступил
 
@@ -1340,6 +1359,9 @@ void LedgerUseCases::ApplyPositionDelta(
     const Decimal position_before = st.position;  // ДО применения дельты ЭТОГО такта
     const Decimal c_total_before = Decimal::add(st.position, st.in_flight);  // ADR-087: суммарная позиция до дельты (начальное сальдо книги)
     if (!ad.agent_kind.empty()) st.agent_kind = ad.agent_kind;  // не перетираем известный kind пустым
+    // ADR-088: поток клиринга — вход оценки шума и дрейфа (только дельты клиринга; хеджи и переводы двигают позицию отдельно).
+    if (hmc.mode != 0)
+      hmodel_flow_observe_locked(st, static_cast<double>(ad.delta), static_cast<double>(c_total_before), ts_ms, hmc);
     st.position = Decimal::add(st.position, ad.delta);
     // F-18 v2 Э3: запоминаем последнюю цену узла (P_node), по которой клиринг
     // делил value→qty — risk конвертирует ею избыток полосы в объём хеджа.
@@ -1544,6 +1566,35 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     p->set_quote(st.quote);                                    // котируемая пары (номинал ⇒ "USDT")
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
+    // ADR-088: модельные пороги — только когда модель считалась (shadow|on); в режиме off поле не заполняется.
+    if (!st.hmodel.mode.empty()) {
+      const HedgeModelState& hm = st.hmodel;
+      const auto safe6 = [](double x) { return dec6(std::isfinite(x) ? x : 0.0); };
+      auto* h = p->mutable_hedge_model();
+      h->set_computed(hm.computed);
+      h->set_applied(hm.applied);
+      h->set_mode(hm.mode);
+      h->set_reason(hm.reason);
+      h->set_computed_at_ms(hm.computed_at_ms);
+      h->set_est_minutes(static_cast<std::uint32_t>(std::max<long long>(0, hm.est_minutes)));
+      h->set_params_hash(hm.params_hash);
+      *h->mutable_sz_est() = safe6(hm.sz_est).to_proto();
+      *h->mutable_mu_est() = safe6(hm.mu_est).to_proto();
+      *h->mutable_theta_est() = safe6(hm.theta_est).to_proto();
+      if (hm.computed && st.agent_kind != "arbitrageur") {
+        h->set_regime(static_cast<fob::ledger::v1::HedgeModelRegime>(hm.regime + 1));
+        *h->mutable_b_m() = safe6(hm.b_m).to_proto();   // ноль — законное значение (ребейт мейкера); наличие определяет has_b_m
+        *h->mutable_b_t() = safe6(hm.b_t).to_proto();
+        h->set_peclet(std::isfinite(hm.peclet) ? hm.peclet : 0.0);
+        *h->mutable_sigma_bps() = safe6(hm.sigma_bps).to_proto();
+        *h->mutable_fee_maker_bps() = safe6(hm.fee_maker_bps).to_proto();
+        *h->mutable_fee_taker_bps() = safe6(hm.fee_taker_bps).to_proto();
+      }
+      if (hm.computed && hm.has_transfer) {
+        *h->mutable_transfer_threshold() = safe6(hm.transfer_big).to_proto();
+        *h->mutable_transfer_target() = safe6(hm.transfer_small).to_proto();   // ноль — законное значение (фиксированная плата сети)
+      }
+    }
   }
   return resp;
 }
@@ -1581,6 +1632,7 @@ fob::ledger::v1::ResetAgentPositionsResponse LedgerUseCases::ResetAgentPositions
     st.realized_vs_fair = Decimal::zero();  // сброс = чистый старт наблюдения: обнуляем и накопленный заработок
     st.ext_fills = 0;                       // ADR-087: счётчик исполнений начинается заново вместе с realized_vs_fair
     st.transfer_moved = Decimal::zero();    // ADR-084: поправка монитора W·c относится к позиции, которой больше нет
+    st.hmodel = HedgeModelState{};          // ADR-088: оценка шума и дрейфа потока и модельные пороги — с чистого листа
     st.updated_at_ms = ts_ms;
     cap_pending_.erase(key);  // ADR-082: отметка остатка после потолка по ленте — только у сброшенного агента
     ++cleared;
@@ -2405,8 +2457,10 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
     const char* v = std::getenv(n);
     return v ? std::atof(v) : def;
   };
-  const double ref_cmkt = env_d("CE_BAND_REF_FEE_BPS", 10.0);      // тейкер+½спред fallback
-  const double def_clim = env_d("CE_BAND_MAKER_FEE_BPS", 2.0);     // мейкер-комиссия fallback
+  // ADR-089: стандартная комиссия 0,1 % (10 bps) для мейкера и тейкера; величины — комиссия биржи БЕЗ спреда (спред и неблагоприятный
+  // отбор добавляет модель порогов ADR-088). Прежний комментарий «тейкер+½спред» относился к старой трактовке и неверен для строки конфигурации.
+  const double ref_cmkt = env_d("CE_BAND_REF_FEE_BPS", 10.0);      // комиссия тейкера, fallback
+  const double def_clim = env_d("CE_BAND_MAKER_FEE_BPS", 10.0);    // комиссия мейкера, fallback (было 2 до ADR-089)
   // ADR-066: k_band = 1/Γ, Γ=ρ=γσ²τ (Кривые §6.4 Z̄=clim/Γ, §6.1 ρ≈γσ²τ) — тот же
   // коэффициент, что и skew (ce_inv_skew_gamma), НЕ поле gamma (capital-cap). 1.8 —
   // плоский прокси 1/Γ при фиксир. σ,τ (D2); per-asset Γ=γσ²τ — целевой D1 (см. #7).
@@ -2535,6 +2589,308 @@ LedgerUseCases::BandFeeCfg LedgerUseCases::LoadBandFeeConfig() {
   band_cfg_have_ = true;
   return {clim_bps, cmkt_bps, k_band, gamma, q_floor, gamma_mode, sigma_ref, vol_ratio_min, vol_ratio_max,
           manual_ok, eff_manual_lim, eff_manual_mkt, arb_scale};
+}
+
+namespace {
+
+/// Округление до digits значащих цифр: входы модели порогов округляются, чтобы кэш решений попадал и результат
+/// определялся ключом (равные ключи ⇒ равный ответ).
+double RoundSig(double x, int digits) {
+  if (!std::isfinite(x) || x == 0.0) return x;
+  const double e = std::floor(std::log10(std::fabs(x)));
+  const double p = std::pow(10.0, digits - 1 - e);
+  return std::round(x * p) / p;
+}
+
+std::uint32_t Fnv1a32(const std::string& s) {
+  std::uint32_t h = 2166136261u;
+  for (const unsigned char c : s) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+/// Карта полуспредов «площадка:СИМВОЛ=bps[,…]» (CE_HMODEL_HALF_SPREAD_MAP), площадка «*» — любая. Недопустимые элементы
+/// (нет «:» или «=», не число, отрицательное, больше 1000) пропускаются. Ключ результата — «площадка|СИМВОЛ».
+std::map<std::string, double> ParseSpreadMap(const std::string& text) {
+  std::map<std::string, double> out;
+  std::size_t pos = 0;
+  while (pos <= text.size()) {
+    const std::size_t comma = text.find(',', pos);
+    const std::string item = text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    const std::size_t colon = item.find(':'), eq = item.find('=');
+    if (colon != std::string::npos && eq != std::string::npos && colon < eq) {
+      const std::string venue = item.substr(0, colon), sym = item.substr(colon + 1, eq - colon - 1);
+      char* end = nullptr;
+      const std::string num = item.substr(eq + 1);
+      const double v = std::strtod(num.c_str(), &end);
+      if (!venue.empty() && !sym.empty() && end != num.c_str() && *end == '\0' && std::isfinite(v) && v >= 0.0 && v <= 1000.0)
+        out[venue + "|" + sym] = v;
+    }
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  return out;
+}
+
+std::string FmtG(double x) {
+  char b[40];
+  std::snprintf(b, sizeof b, "%.6g", x);
+  return b;
+}
+
+}  // namespace
+
+// ADR-088: настройки модели порогов хеджа из окружения ledger (TTL 1 с). Недопустимые значения заменяются умолчаниями страницы.
+const LedgerUseCases::HedgeModelCfg& LedgerUseCases::LoadHedgeModelCfgLocked() {
+  const auto now = std::chrono::steady_clock::now();
+  if (hmodel_cfg_have_ &&
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - hmodel_cfg_last_).count() < 1000)
+    return hmodel_cfg_;
+  HedgeModelCfg c;
+  const std::string m = cex::common::Env::get_string("CE_HMODEL_MODE", "off");
+  if (m == "shadow") {
+    c.mode = 1;
+  } else if (m == "on") {
+    c.mode = 2;
+  } else {
+    c.mode = 0;
+    if (!m.empty() && m != "off" && !hmodel_mode_bad_logged_) {
+      hmodel_mode_bad_logged_ = true;
+      cex::common::log_json("WARN", "ADR-088 CE_HMODEL_MODE недопустим — модель выключена",
+                            {{"value", m}, {"allowed", "off|shadow|on"}});
+    }
+  }
+  const auto pos = [](double v, double def) { return v > 0.0 ? v : def; };
+  const auto nonneg = [](double v, double def) { return v >= 0.0 ? v : def; };
+  c.s.gamma = pos(env_double("CE_HMODEL_GAMMA", 0.0047), 0.0047);
+  c.s.half_spread_bps = nonneg(env_double("CE_HMODEL_HALF_SPREAD_BPS", 0.5), 0.5);
+  c.s.adverse_bps = nonneg(env_double("CE_HMODEL_ADVERSE_BPS", 0.5), 0.5);
+  c.s.kappa = nonneg(env_double("CE_HMODEL_KAPPA", 1.0), 1.0);
+  c.s.theta = nonneg(env_double("CE_HMODEL_THETA", 0.0), 0.0);
+  c.sz_default = pos(env_double("CE_HMODEL_SZ_DEFAULT", 2.0), 2.0);
+  c.sz_link_default = pos(env_double("CE_HMODEL_SZ_LINK_DEFAULT", 2.0), 2.0);
+  c.sz_floor = pos(env_double("CE_HMODEL_SZ_MIN", 0.05), 0.05);
+  c.est_min_minutes = std::max<long long>(1, static_cast<long long>(env_double("CE_HMODEL_EST_MIN_MINUTES", 60.0)));
+  c.est_gap_reset_min = std::max<long long>(1, static_cast<long long>(env_double("CE_HMODEL_EST_GAP_RESET_MIN", 30.0)));
+  c.est_lambda = std::min(1.0, pos(1.0 / std::max(1.0, env_double("CE_HMODEL_EST_WINDOW_MIN", 60.0)), 1.0 / 60.0));
+  c.transfer_k_default = nonneg(env_double("CE_HMODEL_TRANSFER_K_USDT", 2.0), 2.0);
+  c.transfer_pct_bps = nonneg(env_double("CE_HMODEL_TRANSFER_PCT_BPS", 0.0), 0.0);
+  c.basis_sigma_bps = pos(env_double("CE_HMODEL_BASIS_SIGMA_BPS", 0.7), 0.7);
+  c.capital_pct = nonneg(env_double("CE_HMODEL_CAPITAL_PCT", 10.0), 10.0);
+  c.transfer_min = nonneg(env_double("CE_HMODEL_TRANSFER_MIN", 0.0), 0.0);
+  c.cap = pos(env_double("CE_HMODEL_BAND_CAP", 1000.0), 1000.0);
+  c.sigma_scale = pos(env_double("CE_HMODEL_SIGMA_SCALE", 1.0), 1.0);
+  c.sigma_stale_ms = pos(env_double("CE_BAND_SIGMA_STALE_MS", 120000.0), 120000.0);
+  c.sigma_min_samples = std::max<long long>(1, static_cast<long long>(env_double("CE_BAND_SIGMA_MIN_SAMPLES", 20.0)));
+  c.max_solves_per_tact = std::max(1, static_cast<int>(env_double("CE_HMODEL_MAX_SOLVES_PER_TACT", 4.0)));
+  c.mu_z = nonneg(env_double("CE_HMODEL_MU_Z", 2.0), 2.0);
+  c.budget_hold_ms = std::max<long long>(0, static_cast<long long>(env_double("CE_HMODEL_BUDGET_HOLD_MS", 300000.0)));
+  const std::string spread_map_text = cex::common::Env::get_string("CE_HMODEL_HALF_SPREAD_MAP", "");
+  c.half_spread_bps = ParseSpreadMap(spread_map_text);
+  c.hash = Fnv1a32(FmtG(c.s.gamma) + "|" + FmtG(c.s.half_spread_bps) + "|" + FmtG(c.s.adverse_bps) + "|" + FmtG(c.s.kappa) + "|" +
+                   FmtG(c.s.theta) + "|" + FmtG(c.sz_default) + "|" + FmtG(c.sz_link_default) + "|" + FmtG(c.transfer_k_default) + "|" +
+                   FmtG(c.transfer_pct_bps) + "|" + FmtG(c.basis_sigma_bps) + "|" + FmtG(c.capital_pct) + "|" + FmtG(c.transfer_min) + "|" +
+                   FmtG(c.sigma_scale) + "|" + FmtG(c.cap) + "|" + FmtG(c.mu_z) + "|" + spread_map_text);
+  if (hmodel_tr_cache_.size() > 4096) hmodel_tr_cache_.clear();
+  if (hmodel_lk_cache_.size() > 1024) hmodel_lk_cache_.clear();
+  hmodel_cfg_ = c;
+  hmodel_cfg_last_ = now;
+  hmodel_cfg_have_ = true;
+  return hmodel_cfg_;
+}
+
+// ADR-088 (CALC §3.6): минутные приращения позиции от клиринга и их экспоненциально взвешенные моменты с экспозицией
+// x = c + in_flight. Хедж-сделки, переводы, сброс и возврат осиротевшего in_flight в приращение не входят. Из моментов
+// берём: дрейф μ = m_y + θ·m_x и шум ς_z = √Var(Δc + θ·x) при θ из настроек; наклон регрессии −β — только диагностика θ̂.
+// Минуты без дельт считаются нулевым приращением; пропуск дольше est_gap_reset_min (хост был выключен) начинает оценку заново.
+void LedgerUseCases::hmodel_flow_observe_locked(AgentPositionState& st, double delta_k, double exposure_before_k,
+                                               long long ts_ms, const HedgeModelCfg& hc) {
+  HedgeModelState& m = st.hmodel;
+  const auto close_minute = [&](double y, double x) {
+    if (m.minutes == 0) {
+      m.mx = x; m.my = y; m.vxx = 0.0; m.cxy = 0.0; m.vyy = 0.0;
+    } else {
+      // Пока окно не заполнено — обычное среднее (шаг 1/(n+1)), затем экспоненциальное: иначе первая минута, взятая за начальное
+      // среднее, к 60-й минуте сохраняла бы вес 37 % и смещала дрейф.
+      const double l = std::max(hc.est_lambda, 1.0 / static_cast<double>(m.minutes + 1));
+      const double dx = x - m.mx, dy = y - m.my;
+      m.mx += l * dx;
+      m.my += l * dy;
+      m.vxx = (1.0 - l) * (m.vxx + l * dx * dx);
+      m.cxy = (1.0 - l) * (m.cxy + l * dx * dy);
+      m.vyy = (1.0 - l) * (m.vyy + l * dy * dy);
+    }
+    ++m.minutes;
+  };
+  const long long bucket = ts_ms / 60000 * 60000;
+  if (m.bucket_ms == 0) {
+    m.bucket_ms = bucket;
+    m.bucket_acc = 0.0;
+    m.bucket_x_set = false;
+  }
+  if (bucket > m.bucket_ms) {
+    const long long gap = (bucket - m.bucket_ms) / 60000;
+    if (gap > hc.est_gap_reset_min) {
+      m.minutes = 0; m.mx = m.my = m.vxx = m.cxy = m.vyy = 0.0;
+    } else {
+      if (m.bucket_x_set) close_minute(m.bucket_acc, m.bucket_x);
+      for (long long i = 1; i < gap; ++i) close_minute(0.0, m.bucket_x_set ? m.bucket_x : exposure_before_k);
+    }
+    m.bucket_ms = bucket;
+    m.bucket_acc = 0.0;
+    m.bucket_x_set = false;
+  }
+  if (!m.bucket_x_set) {
+    m.bucket_x = exposure_before_k;
+    m.bucket_x_set = true;
+  }
+  m.bucket_acc += delta_k;
+}
+
+// ADR-088: модельные пороги агента. Вход — только параметры (волатильность пары, комиссии, оценки потока, настройки);
+// состояние агента читается лишь для оценок и ключа кэша. Ничего не отправляет и не меняет позицию.
+void LedgerUseCases::hmodel_update_locked(const AgentPositionKey& key, AgentPositionState& st, const HedgeModelCfg& hc,
+                                         long long ts_ms) {
+  namespace hm = cex::ledger::domain::hedge_model;
+  HedgeModelState& m = st.hmodel;
+  const auto& [agent_id, asset, venue] = key;
+  (void)agent_id; (void)venue;
+  m.mode = hc.mode == 2 ? "on" : "shadow";
+  const bool prev_ok = m.computed;               // прежний успешный расчёт (для удержания при исчерпанном бюджете)
+  const bool prev_has_transfer = m.has_transfer;
+  m.computed_at_ms = ts_ms;
+  m.computed = false;
+  m.has_transfer = false;
+  m.reason.clear();
+  // Бюджет расчётов за такт исчерпан: прежние пороги держим не дольше budget_hold_ms, а не откатываем агента на старое правило.
+  const auto hold_on_budget = [&]() {
+    if (prev_ok && m.last_ok_ms > 0 && ts_ms - m.last_ok_ms <= hc.budget_hold_ms) {
+      m.computed = true;
+      m.has_transfer = prev_has_transfer;
+      m.computed_at_ms = m.last_ok_ms;
+      m.reason = "budget_hold";
+    } else {
+      m.reason = "budget";
+    }
+  };
+  const bool is_link = st.agent_kind == "arbitrageur";
+
+  // Оценки потока: пока накоплено меньше минимума минут, шум берётся по умолчанию, дрейф — нулевой.
+  const bool have_est = m.minutes >= hc.est_min_minutes;
+  double mu_raw = 0.0, mu_eff = 0.0, sz = is_link ? hc.sz_link_default : hc.sz_default;
+  double theta_est = 0.0;
+  if (have_est) {
+    // Скорость возврата θ — настройка модели, а не оценка: хедж держит экспозицию у границы полосы, дисперсия x почти
+    // нулевая, наклон регрессии β неопределён, а свободный член α = m_y − β·m_x шумит на порядки (ревью B1). При фиксированном
+    // θ модель Δc = μ − θ·x + ε даёт μ = m_y + θ·m_x и остаток Var(Δc + θ·x); при θ = 0 это обычные среднее и дисперсия.
+    const double th = hc.s.theta;
+    const double mu_hat = m.my + th * m.mx;
+    const double resid = std::max(0.0, m.vyy + 2.0 * th * m.cxy + th * th * m.vxx);
+    sz = std::max(hc.sz_floor, std::sqrt(resid));
+    // Дрейф значим, только если выходит за погрешность оценки среднего: SE = ς_z/√n_eff, n_eff — число минут (не больше
+    // эффективного размера экспоненциального окна). Иначе при малом шуме число Пекле 2μb/ς² превращает погрешность оценки в
+    // «дрейф» и пороги сужаются случайно (проверка T10). В расчёт идёт mu_eff; в mu_est (ответ, история) — сырая оценка, чтобы
+    // эксперт видел, как часто настоящий дрейф гасится (SE = sz_est/√min(est_minutes, 119)).
+    const double n_eff = std::min(static_cast<double>(m.minutes), (2.0 - hc.est_lambda) / hc.est_lambda);
+    const double se = sz / std::sqrt(std::max(1.0, n_eff));
+    mu_raw = mu_hat;
+    mu_eff = std::copysign(std::max(0.0, std::fabs(mu_hat) - hc.mu_z * se), mu_hat);
+    const double beta = m.vxx > 1e-9 ? m.cxy / m.vxx : 0.0;   // только диагностика θ̂ = −β
+    theta_est = std::max(0.0, std::min(1.0, -beta));
+  }
+  m.est_minutes = m.minutes;
+  m.sz_est = sz;
+  m.mu_est = have_est ? mu_raw : 0.0;
+  m.theta_est = theta_est;
+  m.params_hash = hc.hash;
+
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  hm::ModelSettings S = hc.s;
+  S.adverse_bps = std::max(0.0, env_double(("CE_HMODEL_ADVERSE_BPS_" + asset).c_str(), S.adverse_bps));
+
+  if (is_link) {
+    if (asset == numeraire) { m.reason = "numeraire"; return; }
+    hm::LinkInputs li;
+    li.sigma_basis_bps = RoundSig(hc.basis_sigma_bps, 3);
+    li.sz = RoundSig(sz, 3);
+    li.K = RoundSig(std::max(0.0, env_double(("CE_HMODEL_TRANSFER_K_USDT_" + asset).c_str(), hc.transfer_k_default)), 3);
+    li.ctr_bps = hc.transfer_pct_bps;
+    li.capital_pct = hc.capital_pct;
+    li.transfer_min = hc.transfer_min;
+    const std::string ck = FmtG(S.gamma) + "|" + FmtG(S.theta) + "|" + FmtG(li.sigma_basis_bps) + "|" + FmtG(li.sz) + "|" +
+                           FmtG(li.K) + "|" + FmtG(li.ctr_bps) + "|" + FmtG(li.capital_pct) + "|" + FmtG(li.transfer_min) + "|" + FmtG(hc.cap);
+    hm::LinkBand band;
+    const auto hit = hmodel_lk_cache_.find(ck);
+    if (hit != hmodel_lk_cache_.end()) {
+      band = hit->second;
+    } else if (hmodel_solves_left_ > 0) {
+      --hmodel_solves_left_;
+      band = hm::ComputeLinkBand(S, li, hc.cap);
+      hmodel_lk_cache_[ck] = band;
+    } else {
+      hold_on_budget();
+      return;
+    }
+    if (!band.ok) { m.reason = "invalid_input"; return; }
+    m.last_ok_ms = ts_ms;
+    m.has_transfer = true;
+    m.transfer_big = band.B;
+    m.transfer_small = band.b;
+    m.computed = true;
+    m.regime = 0;
+    m.params_hash = Fnv1a32(FmtG(hc.hash) + "|" + ck);
+    return;
+  }
+
+  // Переводчик: волатильность курса пары — символ «актив + котируемая валюта» (кросс-пары ETHBTC, SOLBTC — свои строки).
+  const std::string symbol = asset + (st.quote.empty() ? numeraire : st.quote);
+  // Полуспред по книге агента (площадка, символ): CE_HMODEL_HALF_SPREAD_MAP; нет записи — общее значение CE_HMODEL_HALF_SPREAD_BPS.
+  if (const auto sp = hc.half_spread_bps.find(venue + "|" + symbol); sp != hc.half_spread_bps.end()) S.half_spread_bps = sp->second;
+  else if (const auto sa = hc.half_spread_bps.find("*|" + symbol); sa != hc.half_spread_bps.end()) S.half_spread_bps = sa->second;
+  double sigma_s = 0.0;
+  long long samples = 0, age_ms = -1;
+  const bool got = sigma_source_ ? sigma_source_(symbol, &sigma_s, &samples, &age_ms)
+                                 : LoadAssetSigma(symbol, &sigma_s, &samples, &age_ms);
+  if (!got || !(sigma_s > 0.0)) { m.reason = "no_sigma"; return; }
+  if (samples < hc.sigma_min_samples) { m.reason = "sigma_samples"; return; }
+  if (age_ms < 0 || static_cast<double>(age_ms) >= hc.sigma_stale_ms) { m.reason = "sigma_stale"; return; }
+  const auto cfgb = LoadBandFeeConfig();   // ставки: cmkt_bps — комиссия тейкера, clim_bps — мейкера (ADR-089: без спреда)
+  hm::TranslatorInputs in;
+  in.sigma_bps = RoundSig(hm::SigmaSecToBpsPerSqrtMin(sigma_s) * hc.sigma_scale, 3);
+  in.fee_taker_bps = RoundSig(cfgb.cmkt_bps, 3);
+  in.fee_maker_bps = RoundSig(cfgb.clim_bps, 3);
+  in.sz = RoundSig(sz, 3);
+  in.mu = RoundSig(std::fabs(mu_eff), 2);
+  const double q_floor = cfgb.q_floor;
+  const std::string ck = FmtG(S.gamma) + "|" + FmtG(S.half_spread_bps) + "|" + FmtG(S.adverse_bps) + "|" + FmtG(S.kappa) + "|" +
+                         FmtG(S.theta) + "|" + FmtG(in.sigma_bps) + "|" + FmtG(in.fee_taker_bps) + "|" + FmtG(in.fee_maker_bps) + "|" +
+                         FmtG(in.sz) + "|" + FmtG(in.mu) + "|" + FmtG(q_floor) + "|" + FmtG(hc.cap);
+  hm::TranslatorBand band;
+  const auto hit = hmodel_tr_cache_.find(ck);
+  if (hit != hmodel_tr_cache_.end()) {
+    band = hit->second;
+  } else if (hmodel_solves_left_ > 0) {
+    --hmodel_solves_left_;
+    band = hm::ComputeTranslatorBand(S, in, q_floor, hc.cap);
+    hmodel_tr_cache_[ck] = band;
+  } else {
+    hold_on_budget();
+    return;
+  }
+  m.sigma_bps = in.sigma_bps;
+  m.fee_maker_bps = in.fee_maker_bps;
+  m.fee_taker_bps = in.fee_taker_bps;
+  if (!band.ok) { m.reason = "invalid_input"; return; }
+  m.last_ok_ms = ts_ms;
+  m.computed = true;
+  m.regime = static_cast<int>(band.regime);
+  m.maker_zone = band.maker_zone;
+  m.b_m = band.z_lim;
+  m.b_t = band.z_mkt;
+  m.peclet = band.pe;
+  m.params_hash = Fnv1a32(FmtG(hc.hash) + "|" + FmtG(S.half_spread_bps) + "|" + FmtG(S.adverse_bps));
 }
 
 // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
@@ -2776,6 +3132,11 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
       reclaim_orphan_in_flight_locked(key, st, ts_ms, st.last_band_emit_ms == 0 ? "no_emission_in_process" : "stale_emission");
   }
 
+  // ADR-088: модель порогов хеджа. off — ничего не считается (поведение прежнее); shadow — модельные пороги и оценки потока
+  // считаются и сохраняются в st.hmodel, заявки идут по рабочим порогам; on — ниже пороги переводчика заменяются модельными.
+  const HedgeModelCfg& hc = LoadHedgeModelCfgLocked();
+  if (hc.mode != 0) hmodel_update_locked(key, st, hc, ts_ms);
+
   // F-18 (follow-up 1a, §«Счёт дома»/«свобода нумерария»): арбитражёр ПЕРЕНОСА
   // НУМЕРАРИЯ (A_USDT/T_USD, asset == numeraire) НЕ хеджируется рынком — хедж
   // «USDT/USDT» вырожден, рыночного риска нет. Его план-позиция — счётная невязка
@@ -2931,6 +3292,15 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
       z_mkt = std::max(z_lim, z_mkt * band_omega);
     }
   }
+  // ADR-088 (режим on): пороги переводчика — из модели (мейкер+тейкер, шум потока, дрейф). Не считается — остаётся прежнее правило.
+  // Ручная ширина (ADR-081) выше модели. У связки порог и цель перевода берутся в maybe_queue_link_transfer_locked.
+  bool hm_applied = false;
+  if (hc.mode == 2 && !is_arbitrageur && !cfg.manual && st.hmodel.computed) {
+    z_lim = st.hmodel.b_m;
+    z_mkt = st.hmodel.b_t;
+    hm_applied = true;
+  }
+  if (!is_arbitrageur) st.hmodel.applied = hm_applied;
   // ADR-081: ручная ширина полосы переопределяет расчётную целиком (комиссия, волатильность, ликвидность, ω).
   bool band_manual = false;
   if (cfg.manual) {
@@ -2946,13 +3316,21 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   st.z_mkt = Decimal{static_cast<int64_t>(std::llround(z_mkt * 1e6)), 6};
   const Decimal abs_c = Decimal::cmp(st.position, zero) >= 0 ? st.position
                                                              : Decimal::sub(zero, st.position);
+  // ADR-088 (режим on): рыночный избыток — часть неотправленного остатка c выше z_mkt (размер заявки в модели A7 всегда от c:
+  // что уже лежит в in_flight, повторно не шлём, иначе одна экспозиция хеджировалась бы дважды).
+  Decimal excess_mkt = zero;
+  if (hm_applied) {
+    const Decimal over = Decimal::sub(abs_c, st.z_mkt);
+    if (Decimal::cmp(over, zero) > 0) excess_mkt = over;
+  }
   // Модель A7: избыток эмиссии УЖЕ вычтен из c (c -= excess ниже), поэтому c — это
   // НЕОТПРАВЛЕННЫЙ остаток (in_flight из него исключён). excess = |c| − z_lim: хеджируем
   // весь остаток за band. НЕ вычитаем in_flight повторно — это было двойное вычитание
   // (наследие модели B, где c включал всё) → excess≈0 → эмитились крохи, backlog запирался
   // в in_flight и позиция росла (F-18 fix). in_flight-гард не нужен: c сам исключает in-flight.
-  const Decimal excess = Decimal::sub(abs_c, q);
-  if (Decimal::cmp(excess, zero) <= 0) {  // c в no-action зоне (весь остаток в полосе)
+  const Decimal excess_lim = Decimal::sub(abs_c, q);
+  const bool hm_taker = hm_applied && Decimal::cmp(excess_mkt, zero) > 0;   // ADR-088: рыночный барьер (|c| > z_mkt) пробит
+  if (Decimal::cmp(excess_lim, zero) <= 0 && !hm_taker) {  // c в no-action зоне (весь остаток в полосе)
     cap_pending_.erase(key);               // ADR-082: остаток после потолка ушёл или позиция вернулась в полосу
     return;
   }
@@ -2963,13 +3341,30 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // копит поток → следующий хедж крупнее (реже, но полнее). Env CE_BAND_HEDGE_COOLDOWN_MS.
   // Пауза растёт вдвое после каждой заявки, завершившейся без исполнения, до CE_BAND_HEDGE_BACKOFF_MAX_MS (деф. 30 с; 0 — без
   // роста); любое исполнение сбрасывает серию. Позиция за порогом всё это время остаётся и хеджируется следующей попыткой.
+  // ADR-088 (режим on): рыночный барьер жёсткий — пауза без роста от неисполненных лимитных заявок (иначе истёкшие мейкер-заявки
+  // в тонкой ленте растили бы паузу до 30 с, пока позиция выше барьера).
   const long long cooldown_ms = BandHedgeCooldownMs(
       cex::common::Env::get_int("CE_BAND_HEDGE_COOLDOWN_MS", 3000),
-      cex::common::Env::get_int("CE_BAND_HEDGE_BACKOFF_MAX_MS", 30000), st.band_fail_streak);
+      hm_taker ? 0 : cex::common::Env::get_int("CE_BAND_HEDGE_BACKOFF_MAX_MS", 30000), st.band_fail_streak);
   if (st.last_band_emit_ms != 0 && (ts_ms - st.last_band_emit_ms) < cooldown_ms) return;
   // Зона исполнения: |c| > Z̄mkt ⇒ агрессивный тейкер; иначе пассивный мейкер.
-  // При выключенном линке — всегда агрессив (старое поведение).
-  const bool aggressive = IsAggressiveBandZone(fee_linked, band_manual, static_cast<double>(abs_c), z_mkt);
+  // При выключенном линке — всегда агрессив (старое поведение). Модель (режим on): агрессив при |c| > z_mkt.
+  const bool aggressive = hm_applied ? hm_taker
+                                     : IsAggressiveBandZone(fee_linked, band_manual, static_cast<double>(abs_c), z_mkt);
+  // Размер заявки: прежнее правило — весь избыток над z_lim; модель в зоне агрессии шлёт рыночной заявкой только избыток над z_mkt,
+  // остаток между порогами уйдёт лимитной заявкой следующей проверкой (после паузы). Объём — Decimal; double — только пороги.
+  Decimal excess = hm_taker ? excess_mkt : excess_lim;
+  // ADR-088 (режим on, мейкер-зона): лимитные заявки в пути не копятся сверх ширины мейкер-зоны (z_mkt − z_lim). Пока прежние
+  // заявки не исполнены или не истекли, новая лимитная не ставится; позиция растёт до z_mkt, где срабатывает рыночный барьер.
+  // Так суммарная экспозиция c + in_flight ограничена сверху величиной z_mkt + (z_mkt − z_lim), а не растёт с числом заявок.
+  if (hm_applied && !hm_taker) {
+    Decimal in_flight_same = zero;
+    if (st.in_flight.units != 0 && (Decimal::cmp(st.in_flight, zero) > 0) == (Decimal::cmp(st.position, zero) >= 0))
+      in_flight_same = Decimal::cmp(st.in_flight, zero) >= 0 ? st.in_flight : Decimal::sub(zero, st.in_flight);
+    const Decimal room = Decimal::sub(Decimal::sub(st.z_mkt, st.z_lim), in_flight_same);
+    if (Decimal::cmp(room, excess) < 0) excess = room;
+    if (Decimal::cmp(excess, zero) <= 0) return;   // ждём исполнения или истечения уже стоящих лимитных заявок
+  }
 
   // ADR-082 (шаг 2, за флагом CE_ORDER_CAP_TAPE, по умолчанию выключен): заявки агентов по одной бирже и паре вместе не занимают
   // больше доли π оборота ленты за время жизни заявки: бюджет = π·ν·T_ord − уже живые заявки (|in_flight| всех агентов этой биржи
@@ -3093,7 +3488,9 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
                          {"z_lim", q.to_string()},                    // порог входа (k-USDT)
                          {"z_mkt", std::to_string(z_mkt)},            // порог агрессии (k-USDT)
                          {"zone", aggressive ? "taker" : "maker"},
-                         {"band_mode", band_manual ? "manual" : (band_dynamic ? "dynamic_gamma" : "flat")},  // ADR-081 / D1/D2
+                         {"band_mode", band_manual ? "manual" : (hm_applied ? "hmodel" : (band_dynamic ? "dynamic_gamma" : "flat"))},  // ADR-081 / D1/D2 / ADR-088
+                         {"hmodel_mode", st.hmodel.mode},             // ADR-088: "" (off) | shadow | on
+                         {"hmodel_regime", st.hmodel.computed ? std::to_string(st.hmodel.regime) : std::string("-")},   // 0 шум, 1 смешанный, 2 дрейф
                          {"sigma", std::to_string(band_sigma)},       // σ, применённая (0=плоский)
                          {"liq_on", band_liq ? "1" : "0"},            // F-18 #7: ликвидностная ось
                          {"depth", std::to_string(band_depth)},       // α_e, применённая (0=нет)

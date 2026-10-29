@@ -68,6 +68,33 @@ if (BUILD_TESTING)
   target_compile_options(ce_band_hedge_a7_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ce_band_hedge_a7_test COMMAND ce_band_hedge_a7_test)
 
+  # F-18, ADR-088: чистый домен модели порогов хеджа против эталонов страницы (golden.inc генерирует
+  # tools/hedge-threshold-model/gen_golden.js) и инварианты CALC-CE-HEDGE-THRESHOLD-MODEL.
+  add_executable(hedge_threshold_model_test
+    tests/hedge_threshold_model_test.cpp
+  )
+  target_include_directories(hedge_threshold_model_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(hedge_threshold_model_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME hedge_threshold_model_test COMMAND hedge_threshold_model_test)
+
+  # F-18, ADR-088: подключение модели в ledger — режимы off/shadow/on, пороги и размер заявки, оценка потока, связка.
+  add_executable(ce_hedge_model_wiring_test
+    tests/ce_hedge_model_wiring_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_hedge_model_wiring_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_hedge_model_wiring_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_hedge_model_wiring_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_hedge_model_wiring_test COMMAND ce_hedge_model_wiring_test)
+
   # ADR-082 шаг 2: потолок размера хедж-заявки по обороту ленты биржи (чистые функции + эмиссия с подставным источником ν).
   add_executable(ce_order_cap_test
     tests/ce_order_cap_test.cpp

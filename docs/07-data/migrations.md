@@ -15,6 +15,13 @@ related:
 
 `infra/postgres/init.sql` применяется только при создании тома. На существующем томе схему меняет сервис-владелец при старте идемпотентным DDL (`CREATE … IF NOT EXISTS`, проверка каталога перед `ALTER`, короткий `lock_timeout`). Здесь — записи об изменениях, влияющих на живые тома; новая запись добавляется при каждой миграции, затрагивающей существующую таблицу.
 
+## 2026-10-29 — ce_agent_band_history (ADR-088, CR-F18-013)
+
+- **Владелец DDL:** frontend-api (BFF), `ensureBandHistoryReady` (`CREATE TABLE IF NOT EXISTS` и индекс при первой записи); дубль в `infra/postgres/init.sql` (свежий том).
+- **Изменения:** новая таблица `ce_agent_band_history` ([документ](ce-agent-band-history.md)) — минутная история рабочих и модельных порогов хеджа, позиции и оценок потока по каждому агенту. Существующие таблицы не затрагиваются. Умолчание колонки `f05a_clearing_config.ce_maker_fee_bps` для НОВЫХ томов изменено с 2 на 10 (ADR-089); существующую строку это не меняет.
+- **Безопасность:** DDL идемпотентен; блокировок существующих таблиц нет. Запись идёт отдельным try минутного прохода BFF и не влияет на историю заработка.
+- **Откат:** `CE_HMODEL_MODE=off` (записи прекращаются) или `DROP TABLE IF EXISTS ce_agent_band_history;` — внешних ключей, представлений и триггеров нет.
+
 ## 2026-10-28 — ce_pnl_totals_history и внутренняя группа в ce_agent_pnl_history (CR-F18-005)
 
 - **Владелец DDL:** frontend-api (BFF), `ensurePnlHistoryTable` / `ensurePnlHistoryReady`; дубль в `infra/postgres/init.sql` (свежий том).

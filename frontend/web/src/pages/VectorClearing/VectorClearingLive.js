@@ -1260,7 +1260,7 @@ function VectorClearingLive() {
       setCfgSkewMaxPm(String(r.data.ce_inv_skew_max_pm ?? 8));
       setCfgSlopeMethod(String(r.data.slope_method ?? 4));
       setCfgBandK(String(r.data.ce_band_fee_k ?? 1.8));
-      setCfgMakerBps(String(r.data.ce_maker_fee_bps ?? 2));
+      setCfgMakerBps(String(r.data.ce_maker_fee_bps ?? 10));   // ADR-089: стандартная комиссия 0,1 %
       setCfgBandMode(r.data.ce_band_mode || 'fee');
       setCfgManualLim(String(r.data.ce_band_manual_q_lim ?? 5));
       setCfgManualMkt(String(r.data.ce_band_manual_q_mkt ?? 25));

@@ -28,7 +28,7 @@ function splitPair(symbol) {
 const vwap = (notional, qty) => (num(qty) > 0 ? num(notional) / num(qty) : null);
 
 // Ставки расчётной комиссии хеджа, б.п., по умолчанию — те же, что у ledger (CE_BAND_MAKER_FEE_BPS = 2, CE_BAND_REF_FEE_BPS = 10).
-const DEFAULT_MAKER_BPS = 2;
+const DEFAULT_MAKER_BPS = 10;   // ADR-089: стандартная комиссия 0,1 % для мейкера и тейкера
 const DEFAULT_TAKER_BPS = 10;
 
 // Разбор ставок: row — строка f05a_clearing_config { ce_maker_fee_bps, ce_taker_fee_bps } или null; env — { CE_BAND_MAKER_FEE_BPS, CE_BAND_REF_FEE_BPS }.

@@ -1,6 +1,6 @@
 // Self-contained node-тест: `node band_config.test.js`. ADR-081 — проверка настроек ширины полосы хеджа.
 const assert = require('assert');
-const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest } = require('./band_config');
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest } = require('./band_config');
 let failed = 0;
 const check = (n, c) => { if (c) console.log('[OK] ' + n); else { console.error('[FAIL] ' + n); failed++; } };
 
@@ -91,6 +91,24 @@ const cur = { ce_band_manual: false, ce_band_manual_q_lim: 5, ce_band_manual_q_m
     rec.changed.ce_band_manual.from === false && rec.changed.ce_band_manual.to === true && rec.changed.ce_band_manual_q_lim.from === 5 && rec.changed.ce_band_manual_q_lim.to === 10);
   check('аудит: нетронутые поля не попадают', !('ce_band_q_floor' in rec.changed));
   check('аудит: пользователь по умолчанию unknown', auditRecord({ before: cur, after: {} }).user === 'unknown');
+}
+
+// --- аудит основных настроек клиринга (комиссии хеджа ADR-089, порог от комиссии, skew)
+{
+  const base = { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_maker_fee_bps: 2, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8 };
+  const rec = configAuditRecord({ user: 'ops', before: base, after: { ...base, ce_maker_fee_bps: 10, ce_taker_fee_bps: 10 }, nowMs: 1792400000000 });
+  check('аудит настроек: кто и обе ставки до/после', rec.user === 'ops' && rec.changed.ce_maker_fee_bps.from === 2 && rec.changed.ce_maker_fee_bps.to === 10 &&
+    rec.changed.ce_taker_fee_bps.from === -1 && rec.changed.ce_taker_fee_bps.to === 10);
+  check('аудит настроек: нетронутые поля не попадают', Object.keys(rec.changed).length === 2);
+  check('аудит настроек: без изменения записи нет', configAuditRecord({ user: 'ops', before: base, after: base }) === null);
+  const silent = configAuditRecord({ user: 'ops', before: base, after: { ...base, ce_band_fee_k: 1.8 + 0, slope_method: 4, ce_inv_skew_gamma: 0 } });
+  check('аудит настроек: молчаливый сброс skew частичным POST виден', silent && silent.changed.ce_inv_skew_gamma.from === 0.02 && silent.changed.ce_inv_skew_gamma.to === 0);
+  const k = configAuditRecord({ before: base, after: { ...base, ce_band_fee_k: 1.0 } });
+  check('аудит настроек: порог от комиссии, пользователь unknown', k.user === 'unknown' && k.changed.ce_band_fee_k.from === 1.8 && k.changed.ce_band_fee_k.to === 1.0);
+  const first = configAuditRecord({ user: 'ops', before: null, after: base });
+  check('аудит настроек: первой строки не было — from = null', first.changed.ce_maker_fee_bps.from === null);
+  check('аудит настроек: имя актора ограничено 120 знаками', configAuditRecord({ user: 'x'.repeat(500), before: null, after: base }).user.length === 120);
+  check('аудит настроек: список полей совпадает с перезаписываемыми POST-маршрутом', CORE_FIELDS.length === 8 && CORE_FIELDS.includes('ce_maker_fee_bps') && CORE_FIELDS.includes('ce_band_fee_k'));
 }
 
 assert.strictEqual(failed, 0, failed + ' failed');

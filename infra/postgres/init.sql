@@ -240,6 +240,41 @@ CREATE TABLE IF NOT EXISTS ce_pnl_totals_history (
   PRIMARY KEY (scope, ts)
 );
 
+-- ce_agent_band_history: история порогов хеджа агентов CE (ADR-088, CR-F18-013): рабочие и модельные пороги, позиция, оценки шума и дрейфа
+-- потока, режим, версия настроек модели. Единственный писатель — BFF (frontend/api/server.js, тот же минутный проход, что и история заработка):
+-- переписывает поле hedge_model из ответа ledger GetAgentPositions как есть, ничего не считает. Только отображение и выгрузка эксперту:
+-- ledger/risk/matching её не читают. Хранение — BAND_HISTORY_RETENTION_DAYS (деф. 14), BFF сам убирает старше. Схему BFF также создаёт при
+-- старте (IF NOT EXISTS). Описание: docs/07-data/ce-agent-band-history.md.
+CREATE TABLE IF NOT EXISTS ce_agent_band_history (
+  agent_id           TEXT NOT NULL,
+  ts                 TIMESTAMPTZ NOT NULL,            -- начало минуты (floor), не now(): запись идемпотентна
+  kind               TEXT,
+  mode               TEXT,                            -- 'shadow' | 'on'
+  position           NUMERIC(38, 12),                 -- c, тыс. USDT, знаковая
+  in_flight          NUMERIC(38, 12),
+  z_lim              NUMERIC(38, 12),                 -- РАБОЧИЕ пороги
+  z_mkt              NUMERIC(38, 12),
+  b_m                NUMERIC(38, 12),                 -- пороги МОДЕЛИ; NULL — не посчитаны; 0 — законное значение
+  b_t                NUMERIC(38, 12),
+  regime             TEXT,                            -- 'noise' | 'mixed' | 'drift'
+  computed           BOOLEAN NOT NULL DEFAULT FALSE,
+  applied            BOOLEAN NOT NULL DEFAULT FALSE,
+  reason             TEXT,
+  sz_est             DOUBLE PRECISION,                -- диагностика модели (не деньги): шум потока, тыс. USDT за корень минуты
+  mu_est             DOUBLE PRECISION,
+  theta_est          DOUBLE PRECISION,
+  peclet             DOUBLE PRECISION,
+  sigma_bps          DOUBLE PRECISION,
+  fee_maker_bps      DOUBLE PRECISION,
+  fee_taker_bps      DOUBLE PRECISION,
+  transfer_threshold NUMERIC(38, 12),
+  transfer_target    NUMERIC(38, 12),
+  est_minutes        INTEGER NOT NULL DEFAULT 0,      -- 0 => sz_est по умолчанию, а не оценка
+  params_hash        BIGINT,
+  PRIMARY KEY (agent_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
+
 -- ce_system_pnl_baseline / ce_system_pnl_history: прибыль системы CE по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083).
 -- Единственный писатель — BFF (frontend/api/server.js, тот же семплер раз в минуту). База (остатки и цены) задаётся при первом замере и
 -- при сбросе статистики сделок. Только отображение: ledger и matching таблиц не читают. Описание: docs/07-data/ce-system-pnl.md.
@@ -1088,7 +1123,7 @@ CREATE TABLE IF NOT EXISTS f05a_clearing_config (
     -- Мейкер-комиссия clim (bps) для ПАССИВНОЙ зоны трёхзонного правила (Кривые §6.4):
     -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
     -- (пассив → агрессив-тейкер), cmkt = ce_taker_fee_bps. clim < cmkt (мейкер дешевле).
-    ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 2,
+    ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 10,   -- ADR-089: стандартная комиссия 0,1 % (было 2)
     -- Фаза 2 (наведение порядка): ключевые ручки порога band — здесь, в одном месте
     -- (ledger читает из PG, env — fallback). ADR-066 D1 (vol-масштаб Γ=γσ²τ).
     ce_band_q_floor       NUMERIC(38,18) NOT NULL DEFAULT 5,       -- пол порога (k-USDT)
@@ -1143,7 +1178,7 @@ ALTER TABLE f05a_clearing_config
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10; -- клэмп vol-масштаба (макс)
 ALTER TABLE f05a_clearing_config
-    ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 2;
+    ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 10;   -- ADR-089 (существующую строку не меняет)
 -- ADR-081: ручная ширина полосы хеджа (тыс. USDT). ce_band_manual=true ⇒ Z̄lim/Z̄mkt берутся отсюда и не зависят от
 -- комиссии, волатильности, ликвидности и веса ноги; иначе ширина считается как раньше (ce_band_gamma_mode — по σ).
 ALTER TABLE f05a_clearing_config

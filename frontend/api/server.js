@@ -10,12 +10,13 @@ const { bucketMsForHours, buildPairTradesDto, buildKnownPairs, parseAgent, lruSe
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
+const { buildHedgeModelDto, bandSamples, minuteBucketMs, historyCsv, CSV_COLUMNS: BAND_CSV_COLUMNS, BAND_HISTORY_DDL, BAND_HISTORY_INDEX } = require("./hedge_model_dto");  // пороги хеджа по модели (ADR-088): выдача и история
 const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
 const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
-const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
 const { buildLiquidityStatsView } = require("./venue_liquidity_view");  // ADR-082: ν и f бирж по парам
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
@@ -101,6 +102,8 @@ function getPgPool() {
   return pgPool;
 }
 
+let ledgerKnowsHedgeModel = null;   // ADR-088: копия proto знает поле AgentPosition.hedge_model (null — клиент ещё не создан)
+
 // Initialize gRPC client
 function initLedgerClient() {
   if (ledgerClient) return ledgerClient;
@@ -115,6 +118,12 @@ function initLedgerClient() {
       includeDirs: [PROTO_DIR]
     });
     
+    // ADR-088: канарейка копии proto. Если frontend/api/proto старее ledger, поле hedge_model молча теряется при разборе и в JSON
+    // неотличимо от режима off; признак виден в ответе /agent-positions (hmodel_supported).
+    try {
+      const t = packageDefinition['fob.ledger.v1.AgentPosition'];
+      ledgerKnowsHedgeModel = !!(t && t.type && Array.isArray(t.type.field) && t.type.field.some((f) => f.name === 'hedge_model'));
+    } catch (_) { ledgerKnowsHedgeModel = null; }
     const proto = grpc.loadPackageDefinition(packageDefinition);
     const ledgerProto = proto.fob.ledger.v1;
     
@@ -183,6 +192,12 @@ function initLedgerClient() {
       includeDirs: [PROTO_DIR]
     });
     
+    // ADR-088: канарейка копии proto. Если frontend/api/proto старее ledger, поле hedge_model молча теряется при разборе и в JSON
+    // неотличимо от режима off; признак виден в ответе /agent-positions (hmodel_supported).
+    try {
+      const t = packageDefinition['fob.ledger.v1.AgentPosition'];
+      ledgerKnowsHedgeModel = !!(t && t.type && Array.isArray(t.type.field) && t.type.field.some((f) => f.name === 'hedge_model'));
+    } catch (_) { ledgerKnowsHedgeModel = null; }
     const proto = grpc.loadPackageDefinition(packageDefinition);
     const ledgerProto = proto.fob.ledger.v1;
     
@@ -7200,6 +7215,46 @@ async function runSystemPnlSample() {
   } finally { sysPnlBusy = false; }
 }
 
+// ── История порогов хеджа (ADR-088): рабочие и модельные пороги, оценки потока, режим. Пишет тот же минутный проход, что и историю заработка,
+// из тех же строк панели (loadLiveAgentRows); BFF — единственный писатель. Одна строка на агента и минуту (идемпотентно), хранение
+// BAND_HISTORY_RETENTION_DAYS (деф. 14), часовая очистка. Режим off (нет блока hmodel у агентов) — записей нет. Сбой не влияет на историю заработка. ──
+const BAND_HISTORY_RETENTION_DAYS = Math.max(1, parseInt(process.env.BAND_HISTORY_RETENTION_DAYS || "14", 10) || 14);
+let bandTableInit = null;
+let bandLastPruneMs = 0;
+function ensureBandHistoryReady(pool) {
+  if (!bandTableInit) bandTableInit = (async () => {
+    await pool.query(BAND_HISTORY_DDL);
+    await pool.query(BAND_HISTORY_INDEX);
+  })().catch((e) => { bandTableInit = null; throw e; });
+  return bandTableInit;
+}
+async function writeBandHistory(pool, agentRows, nowMs) {
+  try {
+    const samples = bandSamples((agentRows || []).filter((a) => !a.stale && !a.inactive), minuteBucketMs(nowMs));
+    if (!samples.length) return;
+    await ensureBandHistoryReady(pool);
+    const col = (k) => samples.map((x) => x[k]);
+    await pool.query(
+      `INSERT INTO ce_agent_band_history (agent_id, ts, kind, mode, position, in_flight, z_lim, z_mkt, b_m, b_t, regime, computed, applied, reason,
+                                          sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target,
+                                          est_minutes, params_hash)
+       SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[],
+                            $9::numeric[], $10::numeric[], $11::text[], $12::boolean[], $13::boolean[], $14::text[], $15::float8[], $16::float8[],
+                            $17::float8[], $18::float8[], $19::float8[], $20::float8[], $21::float8[], $22::numeric[], $23::numeric[], $24::int[], $25::bigint[])
+       ON CONFLICT (agent_id, ts) DO NOTHING`,
+      [col("agent_id"), samples.map((x) => new Date(x.ts_ms).toISOString()), col("kind"), col("mode"), col("position"), col("in_flight"),
+       col("z_lim"), col("z_mkt"), col("b_m"), col("b_t"), col("regime"), samples.map((x) => x.computed === true), samples.map((x) => x.applied === true),
+       col("reason"), col("sz_est"), col("mu_est"), col("theta_est"), col("peclet"), col("sigma_bps"), col("fee_maker_bps"), col("fee_taker_bps"),
+       col("transfer_threshold"), col("transfer_target"), samples.map((x) => x.est_minutes || 0), col("params_hash")]);
+    if (nowMs - bandLastPruneMs > 3600 * 1000) {
+      bandLastPruneMs = nowMs;
+      await pool.query("DELETE FROM ce_agent_band_history WHERE ts < now() - make_interval(days => $1)", [BAND_HISTORY_RETENTION_DAYS]);
+    }
+  } catch (e) {
+    console.error("[band-history] write failed:", e.message || e);
+  }
+}
+
 async function samplePnlHistoryOnce() {
   if (pnlSamplerBusy) return;   // предыдущий проход ещё идёт — пропускаем такт
   const pool = getPgPool();
@@ -7210,6 +7265,7 @@ async function samplePnlHistoryOnce() {
     await ensurePnlHistoryReady(pool);   // PG мог быть недоступен при старте BFF
     const { agentRows, pnlTotals } = await loadLiveAgentRows();
     const nowMs = Date.now();
+    await writeBandHistory(pool, agentRows, nowMs);   // ADR-088: история порогов хеджа (свой try, на историю заработка не влияет)
     drained = drainTacts(surplusAcc);   // выгода за интервал с прошлой записи (по тактам клиринга)
     surplusInflight = drained;          // до записи и обновления итогов панель добавляет эту часть сама
     const samples = pnlSamples(agentRows.filter((a) => !a.stale && !a.inactive), nowMs, drained);
@@ -7393,6 +7449,10 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
       // c_j — неотправленный остаток (A7); c_total — истинное обязательство (c+in_flight):
       c_position: cPos, c_total: cTotal, in_flight: inFlight, c_delta: cDel,
       pair_price: price,
+      // Рабочие пороги хеджа из ledger (ADR-066/081/088; тыс. USDT) и модельные пороги рядом (ADR-088; null — режим off или нет данных)
+      z_lim: pos && Number.isFinite(Number(pos.z_lim)) ? Number(pos.z_lim) : null,
+      z_mkt: pos && Number.isFinite(Number(pos.z_mkt)) ? Number(pos.z_mkt) : null,
+      hmodel: pos ? pos.hmodel || null : null,
       arb,  // #1/#2 маршрут+ноги арбитражёра по площадкам (null у переводчика)
       // Заявки агента (последняя band-хедж-заявка, venue_fill_diagnostics): сколько
       // отправлено на биржу (target_qty) и сколько исполнилось по симуляции (filled_qty).
@@ -7475,6 +7535,15 @@ function buildAgentRows(agentPositions, agentDeltas, hedgeMap, tradeStats, venue
       venue: '',           // две площадки — показаны в ногах (arb.src/dst), не в заголовке
       hasDelta,
       pair_price: price,
+      // Пороги связки: порог перевода и цель берутся с той же ноги, что и модельный блок (приёмник, затем источник)
+      ...(() => {
+        const leg = (dstPos && dstPos.hmodel) ? dstPos : (srcPos && srcPos.hmodel ? srcPos : (dstPos || srcPos));
+        return {
+          z_lim: leg && Number.isFinite(Number(leg.z_lim)) ? Number(leg.z_lim) : null,
+          z_mkt: leg && Number.isFinite(Number(leg.z_mkt)) ? Number(leg.z_mkt) : null,
+          hmodel: leg ? leg.hmodel || null : null,
+        };
+      })(),
       arb: {
         src: srcV, dst: dstV, unit: asset,
         leg_src: sL.after, leg_dst: dL.after,      // стало (реальные ноги src/dst)
@@ -7549,6 +7618,7 @@ async function fetchAgentPositions() {
       realized_vs_fair: decToNum(p.realized_vs_fair),  // ADR-072 §C: заработок vs F_0 (quote)
       z_lim: decToNum(p.z_lim),  // единый источник порога из ledger (per-currency, k-USDT) — не пересчитываем
       z_mkt: decToNum(p.z_mkt),
+      hmodel: buildHedgeModelDto(p.hedge_model, Date.now()),  // ADR-088: модельные пороги и оценки потока (null — режим off или копия proto без поля)
       position: decToNum(p.position),
       in_flight: decToNum(p.in_flight),
       updated_at_ms: Number(p.updated_at_ms) || 0,  // unix ms последнего изменения (свежесть стадии «Позиции»)
@@ -8287,7 +8357,7 @@ async function handleVectorClearing(req, res, pathname, query) {
       try {
         const r = await pool.query(
           "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at FROM f05a_clearing_config WHERE id=1");
-        const core = r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8, ce_maker_fee_bps: 2 };
+        const core = r.rows[0] || { batch_window_ms: 1000, stale_level_ms: 60000, ce_taker_fee_bps: -1, ce_inv_skew_gamma: 0.02, ce_inv_skew_max_pm: 8, slope_method: 4, ce_band_fee_k: 1.8, ce_maker_fee_bps: DEFAULT_MAKER_BPS };
         const band = await readBandConfig(pool);   // ADR-081: режимы ширины полосы (колонок может не быть на старом томе)
         return writeJson(res, 200, { ...core, ...band, ce_band_mode: bandMode(band) });
       } catch (e) {
@@ -8325,18 +8395,30 @@ async function handleVectorClearing(req, res, pathname, query) {
       if (!Number.isFinite(bandK)) bandK = 1.8;
       bandK = Math.max(0, Math.min(100, bandK));
       let makerBps = Number(body.ce_maker_fee_bps);
-      if (!Number.isFinite(makerBps)) makerBps = 2;
+      if (!Number.isFinite(makerBps)) makerBps = DEFAULT_MAKER_BPS;   // ADR-089: стандарт 10 bps
       makerBps = Math.max(0, Math.min(1000, makerBps));
       // ADR-081: ручная ширина полосы / режим по волатильности. Проверяем ДО записи (невалидное не применяется наполовину);
       // поля, которых нет в теле, не меняются — старый клиент не затирает новые настройки.
-      const bandBefore = await readBandConfig(pool);
-      const bandParsed = parseBandConfig(body, bandBefore);
-      if (!bandParsed.ok) return writeJson(res, 400, { error: bandParsed.code, message: bandParsed.message });
-      // Основные настройки, поля полосы и аудит — ОДНОЙ транзакцией: сбой любого шага откатывает всё, а изменение полосы
-      // без записи аудита не применяется (аудит оператора обязателен, CLAUDE.md §1.7).
+      // Основные настройки, поля полосы и аудит — ОДНОЙ транзакцией: сбой любого шага откатывает всё, а изменение
+      // без записи аудита не применяется (аудит оператора обязателен, CLAUDE.md §1.7). Два параллельных POST упорядочены
+      // консультативной блокировкой: прежние значения («из» в журнале) читаются уже после неё, поэтому цепочка записей не рвётся.
       const client = await pool.connect();
+      let rollbackFailed = false;
       try {
         await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('f05a_clearing_config_post'))");
+        // Читаем через пул (другое соединение): предыдущий POST уже зафиксирован и виден, а отсутствие колонки на старом томе
+        // не отравляет транзакцию (readBandConfig терпит её намеренно).
+        const bandBefore = await readBandConfig(pool);
+        const bandParsed = parseBandConfig(body, bandBefore);
+        if (!bandParsed.ok) {
+          await client.query("ROLLBACK");
+          return writeJson(res, 400, { error: bandParsed.code, message: bandParsed.message });
+        }
+        const cfgBefore = (await client.query(
+          "SELECT batch_window_ms::float8 AS batch_window_ms, stale_level_ms::float8 AS stale_level_ms, ce_taker_fee_bps::float8 AS ce_taker_fee_bps,"
+          + " ce_maker_fee_bps::float8 AS ce_maker_fee_bps, ce_inv_skew_gamma::float8 AS ce_inv_skew_gamma, ce_inv_skew_max_pm::float8 AS ce_inv_skew_max_pm,"
+          + " slope_method::float8 AS slope_method, ce_band_fee_k::float8 AS ce_band_fee_k FROM f05a_clearing_config WHERE id=1")).rows[0] || null;
         await client.query(
           "INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, ce_taker_fee_bps, ce_inv_skew_gamma, ce_inv_skew_max_pm, slope_method, ce_band_fee_k, ce_maker_fee_bps, updated_at)"
           + " VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8,now()) ON CONFLICT (id) DO UPDATE SET"
@@ -8345,6 +8427,17 @@ async function handleVectorClearing(req, res, pathname, query) {
           + " ce_inv_skew_max_pm=EXCLUDED.ce_inv_skew_max_pm, slope_method=EXCLUDED.slope_method,"
           + " ce_band_fee_k=EXCLUDED.ce_band_fee_k, ce_maker_fee_bps=EXCLUDED.ce_maker_fee_bps, updated_at=now()",
           [win, stale, fee, skewGamma, skewMaxPm, slopeMethod, bandK, makerBps]);
+        const fwdAddr = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+        const clientAddr = String(req.headers["x-real-ip"] || fwdAddr || (req.socket && req.socket.remoteAddress) || "").slice(0, 120);
+        const userAgent = String(req.headers["user-agent"] || "").slice(0, 300);
+        const auditInsert = (rec, action) => client.query(
+          "INSERT INTO operator_audit_log (actor, action, remote_addr, user_agent, details) VALUES ($1,$2,$3,$4,$5::jsonb)",
+          [String(rec.user).slice(0, 120), action, clientAddr, userAgent, JSON.stringify(rec)]);
+        const auditLogLines = [];   // дубль в лог — только после COMMIT (откатанное изменение в логе не остаётся)
+        const cfgRec = configAuditRecord({ user: req.headers["x-user-id"], before: cfgBefore,
+          after: { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_maker_fee_bps: makerBps,
+                   ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK } });
+        if (cfgRec) { await auditInsert(cfgRec, "ce_clearing_config_change"); auditLogLines.push(cfgRec); }
         const bandCols = Object.keys(bandParsed.values);
         if (bandCols.some((c) => !BAND_FIELDS.includes(c))) throw new Error("band column not in whitelist");   // имена в SQL — только из списка
         if (bandCols.length > 0) {
@@ -8353,23 +8446,20 @@ async function handleVectorClearing(req, res, pathname, query) {
             bandCols.map((c) => bandParsed.values[c]));
           // Аудит оператора (ADR-081): кто, откуда, прежний и новый режим, изменившиеся поля. Хранится в PG (переживает
           // пересоздание контейнера) и дублируется в лог. X-User-Id клиент выставляет сам — пока это не доказательство личности.
-          const fwd = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
           const rec = auditRecord({ user: req.headers["x-user-id"], before: bandBefore, after: bandParsed.values });
-          await client.query(
-            "INSERT INTO operator_audit_log (actor, action, remote_addr, user_agent, details) VALUES ($1,$2,$3,$4,$5::jsonb)",
-            [rec.user, "ce_band_width_change", String(req.headers["x-real-ip"] || fwd || (req.socket && req.socket.remoteAddress) || ""),
-              String(req.headers["user-agent"] || "").slice(0, 300), JSON.stringify(rec)]);
-          console.log(JSON.stringify(rec));
+          await auditInsert(rec, "ce_band_width_change");
+          auditLogLines.push(rec);
         }
         await client.query("COMMIT");
+        for (const rec of auditLogLines) console.log(JSON.stringify(rec));
         const bandAfter = { ...bandBefore, ...bandParsed.values };
         return writeJson(res, 200, { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK, ce_maker_fee_bps: makerBps, ...bandAfter, ce_band_mode: bandMode(bandAfter), applied: true });
       } catch (e) {
-        try { await client.query("ROLLBACK"); } catch (_) { /* соединение уже закрыто */ }
+        try { await client.query("ROLLBACK"); } catch (_) { rollbackFailed = true; /* соединение уже закрыто */ }
         console.error("vector-clearing/config POST:", e && e.message);   // детали только в лог
         return writeJson(res, 502, { error: "pg_error", message: "настройки не сохранены" });
       } finally {
-        client.release();
+        client.release(rollbackFailed);   // соединение с неснятой транзакцией в пул не возвращаем
       }
     }
     return writeJson(res, 405, { error: "method_not_allowed" });
@@ -8482,7 +8572,7 @@ async function handleVectorClearing(req, res, pathname, query) {
   }
   if (pathname === "/api/vector-clearing/agent-positions") {
     const { agentRows, newest, pnlTotals } = await loadLiveAgentRows();
-    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, generatedAt: new Date().toISOString() });
+    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, hmodel_supported: ledgerKnowsHedgeModel, generatedAt: new Date().toISOString() });
   }
   // История заработка агента во времени (график по клику на агента): R, U и R+U, записанные семплером раз в минуту.
   // Прибыль системы по реальным остаткам: текущие значения (торговый результат, переоценка запасов, по валютам) и ряд за окно.
@@ -8575,6 +8665,39 @@ async function handleVectorClearing(req, res, pathname, query) {
           WHERE agent_id = $1 AND ts > now() - make_interval(hours => $2)
           ORDER BY ts`, [agentId, hours]);
       return writeJson(res, 200, { ...buildPnlHistoryDto(agentId, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+    } catch (e) {
+      return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
+    }
+  }
+  // История порогов хеджа (ADR-088): рабочие и модельные пороги, оценки потока и режим, записанные раз в минуту. agent_id — необязателен
+  // (без него все агенты), hours — окно (до срока хранения), format=csv — выгрузка для эксперта, limit — не более 50 000 строк.
+  if (pathname === "/api/vector-clearing/hedge-model-history") {
+    const agentId = String((query && query.agent_id) || "").slice(0, 120);
+    const hours = Math.max(1, Math.min(BAND_HISTORY_RETENTION_DAYS * 24, parseInt(query && query.hours, 10) || 24));
+    const limit = Math.max(1, Math.min(50000, parseInt(query && query.limit, 10) || 20000));
+    const asCsv = String((query && query.format) || "") === "csv";
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    try {
+      await ensureBandHistoryReady(pool);
+      const r = await pool.query(
+        `SELECT ts, agent_id, kind, mode, position::float8 AS position, in_flight::float8 AS in_flight, z_lim::float8 AS z_lim, z_mkt::float8 AS z_mkt,
+                b_m::float8 AS b_m, b_t::float8 AS b_t, regime, computed, applied, reason, sz_est, mu_est, theta_est, peclet, sigma_bps,
+                fee_maker_bps, fee_taker_bps, transfer_threshold::float8 AS transfer_threshold, transfer_target::float8 AS transfer_target,
+                est_minutes, params_hash::text AS params_hash
+           FROM ce_agent_band_history
+          WHERE ts > now() - make_interval(hours => $1) AND ($2 = '' OR agent_id = $2)
+          ORDER BY ts DESC, agent_id DESC LIMIT $3`, [hours, agentId, limit + 1]);
+      // Берём самые свежие строки: при переполнении лимита старые отбрасываются, а не свежие, и ответ помечается усечённым.
+      const truncated = r.rows.length > limit;
+      const rows = r.rows.slice(0, limit).reverse();
+      if (asCsv) {
+        res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
+                             "Content-Disposition": 'attachment; filename="hedge-model-history.csv"',
+                             "X-Truncated": truncated ? "1" : "0" });
+        return res.end(historyCsv(rows));
+      }
+      return writeJson(res, 200, { window_hours: hours, agent_id: agentId || null, columns: BAND_CSV_COLUMNS, rows, count: rows.length, limit, truncated, generatedAt: new Date().toISOString() });
     } catch (e) {
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
@@ -9841,6 +9964,7 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/agent-positions"
         || pathname === "/api/vector-clearing/agent-pnl"
         || pathname === "/api/vector-clearing/agent-pnl-history"
+        || pathname === "/api/vector-clearing/hedge-model-history"
         || pathname === "/api/vector-clearing/pnl-history"
         || pathname === "/api/vector-clearing/pair-trades-history"
         || pathname === "/api/vector-clearing/system-pnl"

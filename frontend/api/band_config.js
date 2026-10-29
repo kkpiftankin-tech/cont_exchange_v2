@@ -108,6 +108,32 @@ function auditRecord({ user, before, after, nowMs }) {
   };
 }
 
+// Основные поля строки настроек клиринга, которые маршрут POST /api/vector-clearing/config перезаписывает значениями из тела
+// либо умолчаниями. Комиссии хеджа (ADR-089) и ce_band_fee_k определяют пороги хеджа, поэтому любое их изменение — действие оператора,
+// попадающее в журнал (раньше в журнал шли только поля полосы).
+const CORE_FIELDS = ['batch_window_ms', 'stale_level_ms', 'ce_taker_fee_bps', 'ce_maker_fee_bps', 'ce_inv_skew_gamma', 'ce_inv_skew_max_pm',
+  'slope_method', 'ce_band_fee_k'];
+
+// before — прежняя строка (поля CORE_FIELDS числами) или null, after — новые значения. Нет изменения — null (записывать нечего).
+function configAuditRecord({ user, before, after, nowMs }) {
+  const changed = {};
+  for (const f of CORE_FIELDS) {
+    const to = after && after[f] !== undefined ? Number(after[f]) : NaN;
+    if (!Number.isFinite(to)) continue;
+    const raw = before ? before[f] : undefined;
+    const from = raw === undefined || raw === null ? null : Number(raw);
+    if (from !== to) changed[f] = { from, to };
+  }
+  if (Object.keys(changed).length === 0) return null;
+  return {
+    ts: new Date(nowMs === undefined ? Date.now() : nowMs).toISOString(),
+    level: 'INFO',
+    msg: 'F-18 изменены настройки клиринга (комиссии хеджа ADR-089, порог от комиссии, skew, способ наклона)',
+    user: String(user || 'unknown').slice(0, 120),
+    changed,
+  };
+}
+
 // Защита от подделки запроса из браузера (CSRF) на операторском маршруте: нужен Content-Type: application/json
 // (кросс-сайтовая форма и «простой» fetch его выставить не могут без preflight), а если есть Origin — его хост должен
 // совпадать с хостом запроса (nginx передаёт Host как есть) или входить в OPERATOR_ALLOWED_ORIGINS (имена хостов через запятую).
@@ -131,4 +157,4 @@ function checkOperatorRequest(headers, allowedHosts = []) {
   return { ok: true };
 }
 
-module.exports = { parseBandConfig, bandMode, normalizeBandRow, auditRecord, checkOperatorRequest, BAND_FIELDS, MIN_Q, MAX_Q };
+module.exports = { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS, MIN_Q, MAX_Q };

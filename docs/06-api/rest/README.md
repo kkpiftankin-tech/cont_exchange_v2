@@ -17,6 +17,11 @@ owner: core-team
 
 Per-method gRPC — в [../grpc/](../grpc/), per-topic Kafka — в [../messaging/](../messaging/).
 
+## Реализованные документы BFF (frontend-api)
+
+- [hedge-model.md](hedge-model.md) — модельные пороги хеджа в строках агентов и история порогов с выгрузкой CSV (ADR-088).
+- [agent-pnl-history.md](agent-pnl-history.md), [agent-pnl.md](agent-pnl.md), [pair-trades-history.md](pair-trades-history.md), [system-pnl.md](system-pnl.md), [vector-clearing-config.md](vector-clearing-config.md) — остальные маршруты экрана «Клиринг» и вкладки «PnL».
+
 ## Запланированные эндпоинты
 
 См. сервис-секвенции, где упоминаются REST-вызовы:
