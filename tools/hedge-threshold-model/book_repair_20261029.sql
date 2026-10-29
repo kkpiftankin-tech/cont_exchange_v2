@@ -1,4 +1,4 @@
--- ОДНОРАЗОВО (инцидент 2026-10-29 12:10 UTC, см. docs/00-methodology/known-gaps.md). НЕ применялся: ждёт разрешения владельца стенда.
+-- ОДНОРАЗОВО (инцидент 2026-10-29 12:10 UTC, см. docs/00-methodology/known-gaps.md). ПРИМЕНЁН 2026-10-29 14:26-14:27 UTC по разрешению владельца стенда.
 -- Порядок: остановить ledger (docker stop infra-ledger-1) -> выполнить этот файл, дописав в конец COMMIT; (без COMMIT транзакция откатится) ->
 --   поднять ledger (docker compose -f docker-compose.dev.yml up -d --no-build --no-deps --force-recreate ledger).
 -- Копия таблицы до правки: ce_agent_pnl_book_bak_20261029. Откат: UPDATE ... FROM копии по agent_id.
