@@ -152,6 +152,22 @@ void TestGroupFlags() {
 
 }  // namespace
 
+// Регрессия (2026-10-29): книга BTC-агента после рестарта (qty и F_in из NUMERIC(38,18)) при обороте выше ≈17 тыс. USDT давала
+// отрицательную F_in: Decimal::div домножал числитель на 10^20 и переполнял __int128 (SaveBooks падал на CHECK avg_fair >= 0).
+void TestLargeNotionalKeepsAvgFairPositive() {
+  const auto load = [](int64_t units, int scale) { return Decimal{units, scale}; };
+  for (const bool short_side : {false, true}) {
+    FairBook b;
+    b.qty = load(short_side ? -254580500000000000LL : 254580500000000000LL, 18);   // ±0,2545805 BTC (масштаб 18, как из PG)
+    b.avg_fair = load(8007888203121129LL * 1000LL, 14);                           // 80 078,88203121129
+    const Decimal dL = D(short_side ? -0.12393 : 0.12393, 13);
+    ApplyFairTrade(b, dL, D(81730.9, 3));
+    Check(PnlSign(b.avg_fair) > 0, "оборот >17 тыс. USDT: средняя справедливая стоимость входа остаётся положительной");
+    // (0,2545805·80 078,88 + 0,12393·81 730,9) / 0,3785105 = 80 619,78
+    Near(b.avg_fair, 80619.78, 0.5, "оборот >17 тыс. USDT: средневзвешенная F_in верна");
+  }
+}
+
 int main() {
   TestOwnerExample();
   TestAveragingAndPartialClose();
@@ -160,6 +176,7 @@ int main() {
   TestInternalZeroSum();
   TestUnitsAndRates();
   TestGroupFlags();
+  TestLargeNotionalKeepsAvgFairPositive();
   if (g_fail != 0) {
     std::cerr << g_fail << " checks failed\n";
     return 1;
