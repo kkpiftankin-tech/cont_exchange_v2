@@ -1,6 +1,8 @@
 #include "infra/postgres_repositories.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -139,10 +141,11 @@ void insert_entry(pqxx::work& tx,
 
 // F-18 v2 (T-F18-204, ADR-061 §7): self-healing CREATE TABLE IF NOT EXISTS,
 // matching infra/postgres/init.sql (docs/07-data/ce-agent-position.md).
-// Mirrors the ensure_*_table() pattern used by the rest of this file — cheap
-// no-op after the first call, and keeps the repo usable even if init.sql's
-// one-shot bootstrap missed it (ADR-061 §7 "миграция ручная").
-void ensure_agent_position_table(pqxx::work& tx) {
+// Keeps the repo usable even if init.sql's one-shot bootstrap missed it
+// (ADR-061 §7 "миграция ручная").
+// Сам DDL: вызывается ровно один раз на процесс (ensure_agent_position_table ниже) либо из EnsurePnlSchema, где он уже
+// стоит в одной транзакции с миграцией книг. ALTER берёт ACCESS EXCLUSIVE на ce_agent_position даже когда колонка есть.
+void ensure_agent_position_table_ddl(pqxx::work& tx) {
   tx.exec(R"sql(
     create table if not exists ce_agent_position (
       agent_id      text not null,
@@ -162,6 +165,51 @@ void ensure_agent_position_table(pqxx::work& tx) {
   // Миграция существующих томов (колонка могла отсутствовать).
   tx.exec("alter table ce_agent_position add column if not exists "
           "realized_vs_fair numeric(38,18) not null default 0");
+}
+
+// Схема ce_agent_position готова в этом процессе. Раньше DDL выполнялся при КАЖДОМ ApplyDelta/ApplyHedge/GetPositions (три оператора
+// вместо одного, из них ALTER с ACCESS EXCLUSIVE) под общим замком ledger — 2026-10-29 ledger упёрся в ≈ 210 коммитов/с PG и
+// разбирал отчёты 2/с при 7/с на входе (docs/00-methodology/known-gaps.md, инцидент 16:23 UTC).
+std::atomic<bool> g_agent_position_table_ready{false};
+std::atomic<long long> g_agent_position_table_fail_ms{0};
+std::mutex g_agent_position_table_mu;
+
+// Один раз на процесс, в своей короткой транзакции. lock_timeout: лучше отказаться, чем заморозить ledger на очереди за долгим
+// запросом к таблице (вызов идёт под mu_ ledger). Сбой DDL НЕ теряет запись позиции: самовосстановление нужно только для свежего тома,
+// а если таблица есть, сама запись пройдёт; если нет — упадёт со своей ошибкой в вызывающем catch. После сбоя повтор не чаще раза в 30 с,
+// флаг «готово» ставится только после успешного commit.
+void ensure_agent_position_table(pqxx::connection& conn) {
+  if (g_agent_position_table_ready.load(std::memory_order_acquire)) return;
+  std::lock_guard<std::mutex> lk(g_agent_position_table_mu);   // вторая нить не выполняет тот же DDL параллельно
+  if (g_agent_position_table_ready.load(std::memory_order_acquire)) return;
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  const long long failed_at = g_agent_position_table_fail_ms.load();
+  if (failed_at != 0 && now_ms - failed_at < 30000) return;
+  try {
+    pqxx::work tx(conn);
+    tx.exec("SET LOCAL lock_timeout = '5s'");   // первым оператором: ALTER ниже берёт ACCESS EXCLUSIVE
+    ensure_agent_position_table_ddl(tx);
+    tx.commit();
+    g_agent_position_table_ready.store(true, std::memory_order_release);
+    g_agent_position_table_fail_ms.store(0);
+  } catch (const std::exception& e) {
+    g_agent_position_table_fail_ms.store(now_ms);
+    cex::common::log_json("WARN", "ce_agent_position: самовосстановление схемы не удалось (запись позиции продолжается, повтор через 30 с)",
+                          {{"error", e.what()}});
+  }
+}
+
+// Таблицу или колонку убрали при работающем ledger (DROP, восстановление из старого дампа): сбросить флаг, чтобы следующий вызов
+// выполнил самовосстановление, как было до защёлки «один раз на процесс».
+void forget_agent_position_table_if_missing(const std::exception& e) {
+  const auto* sql = dynamic_cast<const pqxx::sql_error*>(&e);
+  if (sql == nullptr) return;
+  const std::string state = sql->sqlstate();
+  if (state == "42P01" || state == "42703") {   // undefined_table, undefined_column
+    g_agent_position_table_ready.store(false, std::memory_order_release);
+    g_agent_position_table_fail_ms.store(0);
+  }
 }
 
 // ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): таблица книги агента по справедливой цене (модель C′).
@@ -922,8 +970,8 @@ app::AgentPositionRow PostgresAgentPositionRepository::ApplyDelta(
   }
   try {
     auto c = pool_->Acquire();
+    ensure_agent_position_table(*c);
     pqxx::work tx(*c);
-    ensure_agent_position_table(tx);
 
     // ADR-061 §7: c ← c + delta (f_j), guarded by batch_id (at-least-once
     // Kafka redelivery of the same batch must NOT double-apply — CLAUDE.md
@@ -969,6 +1017,7 @@ app::AgentPositionRow PostgresAgentPositionRepository::ApplyDelta(
       out.updated_at_ms = row["updated_at_ms"].as<int64_t>();
     }
   } catch (const std::exception& e) {
+    forget_agent_position_table_if_missing(e);
     cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyDelta failed",
                           {{"agent_id", agent_id},
                            {"asset", asset},
@@ -992,8 +1041,8 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
   if (!pool_) return out;
   try {
     auto c = pool_->Acquire();
+    ensure_agent_position_table(*c);
     pqxx::work tx(*c);
-    ensure_agent_position_table(tx);
     // Whole-table read + client-side filter: the CE-agent set is tiny (tens
     // of agent/asset/venue rows, not per-user data), so this avoids brittle
     // pqxx array-parameter binding for what is effectively an optional
@@ -1024,6 +1073,7 @@ std::vector<app::AgentPositionRow> PostgresAgentPositionRepository::GetPositions
       out.push_back(std::move(r));
     }
   } catch (const std::exception& e) {
+    forget_agent_position_table_if_missing(e);
     cex::common::log_json("ERROR", "PostgresAgentPositionRepository::GetPositions failed",
                           {{"error", e.what()}});
   }
@@ -1049,8 +1099,8 @@ void PostgresAgentPositionRepository::ApplyHedge(
   if (!pool_) return;  // persistence disabled — кэш ledger_uc авторитетен
   try {
     auto c = pool_->Acquire();
+    ensure_agent_position_table(*c);
     pqxx::work tx(*c);
-    ensure_agent_position_table(tx);
     tx.exec_params(
         R"sql(
           UPDATE ce_agent_position SET
@@ -1064,6 +1114,7 @@ void PostgresAgentPositionRepository::ApplyHedge(
         in_flight_delta.to_string(), updated_at_ms, realized_delta.to_string());
     tx.commit();
   } catch (const std::exception& e) {
+    forget_agent_position_table_if_missing(e);
     cex::common::log_json("ERROR", "PostgresAgentPositionRepository::ApplyHedge failed",
                           {{"error", e.what()}, {"agent_id", agent_id}});
   }
@@ -1090,7 +1141,7 @@ bool PostgresAgentPositionRepository::EnsurePnlSchema() {
     auto c = pool_->Acquire();
     pqxx::work tx(*c);
     tx.exec("SET LOCAL lock_timeout = '5s'");  // первым оператором: ALTER ниже берёт ACCESS EXCLUSIVE; лучше упасть, чем заморозить ledger
-    ensure_agent_position_table(tx);  // таблица обязана существовать до ALTER
+    ensure_agent_position_table_ddl(tx);  // таблица обязана существовать до ALTER
     tx.exec(kPnlSchemaSql);
     tx.commit();
     schema_ready_.store(true);
