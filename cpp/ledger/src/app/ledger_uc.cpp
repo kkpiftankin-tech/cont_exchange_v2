@@ -2699,12 +2699,19 @@ bool LedgerUseCases::WriteHedgeFuseTripToPg(const std::string& agent, double exp
     pqxx::work tx(poll_conn());
     const pqxx::result upd = tx.exec("UPDATE f05a_clearing_config SET ce_hmodel_mode='shadow', updated_at=now() WHERE id=1 AND ce_hmodel_mode='on'");
     // Аудит только при реальном переходе on → shadow: если оператор уже поставил off/shadow, ложной записи «on → shadow» быть не должно.
-    if (upd.affected_rows() > 0)
+    if (upd.affected_rows() > 0) {
+      // Все параметры — std::string: преобразование double/long long средствами libpqxx на dev-образе не линкуется
+      // (неопределённая ссылка pqxx::conversion_overrun), поэтому числа форматируем сами, а тип задаём приведением в SQL.
+      char eb[48], lb[48];
+      std::snprintf(eb, sizeof eb, "%.6f", exposure_k);
+      std::snprintf(lb, sizeof lb, "%.6f", limit_k);
+      const std::string actor = "ledger:auto-fuse", action = "ce_hmodel_fuse_trip";
       tx.exec_params(
           "INSERT INTO operator_audit_log (actor, action, details) VALUES ($1, $2, "
           "jsonb_build_object('trigger','auto_fuse','agent_id',$3::text,'exposure_k',$4::double precision,"
           "'limit_k',$5::double precision,'over_ms',$6::bigint,'from','on','to','shadow'))",
-          "ledger:auto-fuse", "ce_hmodel_fuse_trip", agent, exposure_k, limit_k, over_ms);
+          actor, action, agent, std::string(eb), std::string(lb), std::to_string(over_ms));
+    }
     tx.commit();
     return true;
   } catch (const std::exception& e) {
