@@ -26,7 +26,9 @@ related:
 | `z_lim`, `z_mkt` | число или `null` | рабочие пороги хеджа, тыс. USDT (по ним идут заявки; в режиме `on` — модельные). `null` — ledger не прислал. У связки — с той же ноги, что и `hmodel` (приёмник, затем источник) |
 | `hmodel` | объект или `null` | модельный блок; `null` — режим `off` или копия proto в BFF не знает поле (см. `hmodel_supported`) |
 
-`hmodel`: `{ mode, computed, applied, reason, regime, b_m, b_t, sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target, est_minutes, params_hash, computed_at_ms, age_ms }`.
+`hmodel`: `{ mode, mode_ceiling, computed, applied, reason, regime, b_m, b_t, b_m_raw, b_t_raw, transfer_threshold_raw, transfer_target_raw, sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target, est_minutes, params_hash, computed_at_ms, age_ms }`.
+
+**Эффективные и сырые пороги (поправка о сглаживании, ADR-088).** `b_m`, `b_t`, `transfer_threshold`, `transfer_target` — ЭФФЕКТИВНЫЕ пороги: экспоненциальное среднее сырых расчётов (постоянная времени 15 мин, `CE_HMODEL_SMOOTH_TAU_MS`) не выше потолка `CE_HMODEL_BAND_CAP`; именно они идут в заявки в режиме `on`. `b_m_raw`, `b_t_raw` (переводчик) и `transfer_threshold_raw`, `transfer_target_raw` (связка) — сырой расчёт этого такта; `null` при `computed=false` и у «чужого» вида агента, `0` — законное значение. `mode` — ЭФФЕКТИВНЫЙ режим (меньший из потолка окружения, переключателя PG `ce_hmodel_mode` и предохранителя), `mode_ceiling` — потолок окружения ledger (`off`/`shadow`/`on`; `null`, если ledger не прислал). При `reason = budget_hold` пороги удержаны прежними (`computed = true`).
 
 **Потребитель на экране «Клиринг».** Блок «Пороги хеджа: действующие и по модели» (`frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js`, AC-F18v2-37) читает из строки `z_lim`, `z_mkt`, `c_total`, `agent_kind` и `hmodel.{mode, computed, applied, reason, regime, b_m, b_t, transfer_threshold, transfer_target, sz_est, est_minutes}`. Браузер ничего не считает: ноль показывается нулём (цель перевода 0), `null` — прочерком; без `hmodel` ни у одной строки показана одна строка-пояснение (режим `off`).
 
@@ -54,7 +56,7 @@ related:
 
 ### Ответ (json)
 
-`{ window_hours, agent_id, columns, rows[], count, limit, truncated, generatedAt }`. Колонки: `ts, agent_id, kind, mode, position, in_flight, z_lim, z_mkt, b_m, b_t, regime, computed, applied, reason, sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target, est_minutes, params_hash`. Единицы и смысл — `docs/07-data/ce-agent-band-history.md`.
+`{ window_hours, agent_id, columns, rows[], count, limit, truncated, generatedAt }`. Колонки: `ts, agent_id, kind, mode, position, in_flight, z_lim, z_mkt, b_m, b_t, regime, computed, applied, reason, sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target, est_minutes, params_hash, b_m_raw, b_t_raw, transfer_threshold_raw, transfer_target_raw` (29 колонок; прежние 25 стоят на своих местах, сырые пороги дописаны в конец — позиционные разборы выгрузок не ломаются; в строках до миграции сырые пороги пусты). Единицы и смысл — `docs/07-data/ce-agent-band-history.md`.
 
 ### Ошибки
 

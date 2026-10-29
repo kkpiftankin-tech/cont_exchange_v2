@@ -55,12 +55,12 @@ capabilities:
   - id: CAP-F18-HEDGE-MODEL
     title: Пороги хеджа по модели оптимального управления (тейкер, мейкер+тейкер, перевод), режим off/shadow/on
     status: {docs: complete, code: done, runtime: dev}  # на dev включается только теневой режим; рабочий режим не включён (ADR-088, условия включения)
-    acceptanceCriteria: [AC-F18v2-34, AC-F18v2-35, AC-F18v2-36, AC-F18v2-37]
+    acceptanceCriteria: [AC-F18v2-34, AC-F18v2-35, AC-F18v2-36, AC-F18v2-37, AC-F18v2-38, AC-F18v2-39, AC-F18v2-40]
     adrs: [ADR-088, ADR-089]   # ADR-066 и ADR-081 затронуты частично (supersedes_rule в ADR-088), обратные ссылки появятся при принятии
     ucs: [UC-F18-04]
     calcs: [CALC-CE-HEDGE-THRESHOLD-MODEL]
     contracts: [docs/06-api/grpc/ledger-agent-positions.md, docs/06-api/rest/hedge-model.md]
-    tables: [ce_agent_band_history]
+    tables: [ce_agent_band_history, f05a_clearing_config, operator_audit_log]
     ui: []  # экран «Клиринг», блок «Пороги хеджа: действующие и по модели» (HedgeModelThresholds.js, AC-F18v2-37); элемента в ui-map пока нет — пилот ui-map ограничен тремя элементами (решение владельца 2026-10-27)
     codePaths:
       - cpp/ledger/src/domain/hedge_threshold_model.hpp
@@ -68,11 +68,15 @@ capabilities:
       - cpp/ledger/src/app/ledger_uc.cpp#hmodel_flow_observe_locked
       - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
       - frontend/api/hedge_model_dto.js
+      - frontend/api/band_config.js
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_fuse_sweep_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#ReadHedgeModePgModeLocked
       - frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js
     tests:
       - cpp/ledger/tests/hedge_threshold_model_test.cpp
       - cpp/ledger/tests/ce_hedge_model_wiring_test.cpp
       - frontend/api/hedge_model_dto.test.js
+      - frontend/api/band_config.test.js
       - frontend/web/src/pages/VectorClearing/__tests__/HedgeModelThresholds.test.js
 
   - id: CAP-F18-SYSTEM-PNL
@@ -285,6 +289,9 @@ acceptanceCriteria:
   - "AC-F18v2-35 (ADR-088, CR-F18-013): в режиме on пороги переводчика заменяются модельными (ручная ширина ADR-081 главнее): рыночная заявка шлётся на избыток над z_mkt модели (а не над z_lim), лимитная — на избыток над z_lim, лимитные заявки в пути не копятся сверх ширины мейкер-зоны z_mkt − z_lim, пауза между рыночными заявками не растёт от неисполненных лимитных; порог и цель перевода связки берутся из модели. Минутная история порогов (ce_agent_band_history) и выгрузка CSV доступны через /api/vector-clearing/hedge-model-history."
   - "AC-F18v2-36 (ADR-089, CR-F18-012): стандартная комиссия биржи 0,1 % (10 bps) для мейкера и тейкера — значение по умолчанию в ledger, BFF, экране «Клиринг» и схеме; комиссия учитывается только при хедже (пороги хеджа и расчётная комиссия хеджа) и не входит в клиринг (CE_COMMISSION_IN_POLKA=0): сумма |потоков| клиринга и вход matching до и после неизменны."
   - "AC-F18v2-37 (ADR-088, CR-F18-013): на экране «Клиринг» под таблицами «Позиции агентов» показан блок «Пороги хеджа: действующие и по модели»: для каждого агента рядом действующие Z̄lim/Z̄mkt (ledger) и пороги модели b_м/b_т (переводчик) или B/b (связка), режим потока, шум потока, число минут оценки и состояние («считается, не применяется» в теневом режиме, причина, если не посчитано). Все числа приходят из ledger через BFF, браузер ничего не считает; ноль показывается нулём, неизвестное — прочерком; без модельных данных (режим off) показана одна строка-пояснение."
+  - "AC-F18v2-38 (ADR-088 п. 9, CR-F18-014): эффективные пороги модели (b_м, b_т; B, b связки) — экспоненциальное среднее сырых расчётов с постоянной времени 15 минут (CE_HMODEL_SMOOTH_TAU_MS), не выше потолка CE_HMODEL_BAND_CAP и не ниже пола q_пол, с сохранением b_м ≤ b_т; сырой расчёт отдаётся отдельно (b_m_raw, b_t_raw, transfer_*_raw) и пишется в историю и CSV; при временном сбое входов (нет свежей волатильности, исчерпан бюджет) прежние пороги удерживаются до 5 минут (reason <причина>_hold), затем откат на правило."
+  - "AC-F18v2-39 (ADR-088 условие 1, CR-F18-014): эффективный режим модели = меньший из потолка окружения CE_HMODEL_MODE и f05a_clearing_config.ce_hmodel_mode (не задан или не прочитан — shadow), а при сработавшем предохранителе — shadow; запись on в PG рабочий режим при потолке ниже не включает; смена режима оператором идёт через POST /api/vector-clearing/config в одной транзакции со строкой operator_audit_log (ce_hmodel_mode_change), прежнее значение читается под блокировкой строки; включение on в течение 30 минут после срабатывания предохранителя требует подтверждения; актор с зарезервированным префиксом помечается unverified:; при эффективном off блок hedge_model не отдаётся."
+  - "AC-F18v2-40 (ADR-088 условие 2, CR-F18-014): автопредохранитель режима on раз за такт обходит всех агентов, которых ведёт модель: нетто-экспозиция |c+in_flight| выше max(CE_HMODEL_FUSE_POS_K, 1,5·(2b_т − b_м)) подряд дольше CE_HMODEL_FUSE_HOLD_MS ⇒ эффективный режим shadow, в PG пишется shadow и строка ce_hmodel_fuse_trip (только при реальном переходе on → shadow); отсчёт сбрасывается ниже 0,9 предела и при разрыве наблюдения, идёт и в shadow; при неудаче записи режим остаётся shadow, повтор не чаще раза в 30 секунд."
 
 # UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
 uxScreens:

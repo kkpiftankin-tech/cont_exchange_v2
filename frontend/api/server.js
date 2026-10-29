@@ -10,13 +10,13 @@ const { bucketMsForHours, buildPairTradesDto, buildKnownPairs, parseAgent, lruSe
 const { pnlSamples, buildPnlHistoryDto, totalsSamples, buildTotalsHistoryDto, downsample: downsamplePoints } = require("./agent_pnl_history");  // график заработка агента и итогов во времени
 const { assetUsdMids, computeSystemPnl, decideBaseline, ledgerRestarted } = require("./system_pnl");  // прибыль системы по реальным остаткам (CALC-CE-SYSTEM-PNL)
 const { buildAgentPnlDto, rowPnlFields, pnlTotalsDto } = require("./agent_pnl_dto");  // заработок агентов по биржам (ADR-087): пересылка ответа ledger GetAgentPnl без арифметики
-const { buildHedgeModelDto, bandSamples, minuteBucketMs, historyCsv, CSV_COLUMNS: BAND_CSV_COLUMNS, BAND_HISTORY_DDL, BAND_HISTORY_INDEX } = require("./hedge_model_dto");  // пороги хеджа по модели (ADR-088): выдача и история
+const { buildHedgeModelDto, bandSamples, minuteBucketMs, historyCsv, CSV_COLUMNS: BAND_CSV_COLUMNS, BAND_HISTORY_DDL, BAND_HISTORY_INDEX, BAND_HISTORY_RAW_COLUMNS } = require("./hedge_model_dto");  // пороги хеджа по модели (ADR-088): выдача и история
 const { createAccumulator, accumulate: accumulateTact, drain: drainTacts, restore: restoreTacts } = require("./ce_surplus_accum");  // выгода участников в клиринге по тактам (ADR-083)
 const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: единая формула VWAP по стакану
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
 const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
-const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, hmodelModeAuditRecord, HMODEL_FIELD, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
 const { buildLiquidityStatsView } = require("./venue_liquidity_view");  // ADR-082: ν и f бирж по парам
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
@@ -7218,6 +7218,8 @@ async function runSystemPnlSample() {
 // ── История порогов хеджа (ADR-088): рабочие и модельные пороги, оценки потока, режим. Пишет тот же минутный проход, что и историю заработка,
 // из тех же строк панели (loadLiveAgentRows); BFF — единственный писатель. Одна строка на агента и минуту (идемпотентно), хранение
 // BAND_HISTORY_RETENTION_DAYS (деф. 14), часовая очистка. Режим off (нет блока hmodel у агентов) — записей нет. Сбой не влияет на историю заработка. ──
+// Пауза после срабатывания автопредохранителя ledger, в течение которой on принимается только с явным подтверждением (ADR-088, условие 2).
+const HMODEL_FUSE_COOLDOWN_MIN = Math.max(1, parseInt(process.env.HMODEL_FUSE_COOLDOWN_MIN || "30", 10) || 30);
 const BAND_HISTORY_RETENTION_DAYS = Math.max(1, parseInt(process.env.BAND_HISTORY_RETENTION_DAYS || "14", 10) || 14);
 let bandTableInit = null;
 let bandLastPruneMs = 0;
@@ -7225,6 +7227,25 @@ function ensureBandHistoryReady(pool) {
   if (!bandTableInit) bandTableInit = (async () => {
     await pool.query(BAND_HISTORY_DDL);
     await pool.query(BAND_HISTORY_INDEX);
+    // Таблица, созданная до поправки о сглаживании, получает колонки сырых порогов: каталог проверяем заранее, ALTER — одним оператором в
+    // транзакции с коротким SET LOCAL lock_timeout (образец ensurePnlHistoryTable); при таймауте повтор со следующего прохода сэмплера.
+    const have = new Set((await pool.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'ce_agent_band_history'")).rows.map((r) => r.column_name));
+    const need = BAND_HISTORY_RAW_COLUMNS.filter(([c]) => !have.has(c));
+    if (need.length) {
+      const c = await pool.connect();
+      let broken = false;
+      try {
+        await c.query("BEGIN");
+        await c.query("SET LOCAL lock_timeout = '3s'");
+        await c.query(`ALTER TABLE ce_agent_band_history ${need.map(([col, typ]) => `ADD COLUMN IF NOT EXISTS ${col} ${typ}`).join(", ")}`);
+        await c.query("COMMIT");
+      } catch (e) {
+        broken = true;
+        try { await c.query("ROLLBACK"); broken = false; } catch (_) { /* соединение оборвано: в пул не возвращаем */ }
+        throw e;
+      } finally { c.release(broken); }
+    }
   })().catch((e) => { bandTableInit = null; throw e; });
   return bandTableInit;
 }
@@ -7235,17 +7256,19 @@ async function writeBandHistory(pool, agentRows, nowMs) {
     await ensureBandHistoryReady(pool);
     const col = (k) => samples.map((x) => x[k]);
     await pool.query(
-      `INSERT INTO ce_agent_band_history (agent_id, ts, kind, mode, position, in_flight, z_lim, z_mkt, b_m, b_t, regime, computed, applied, reason,
+      `INSERT INTO ce_agent_band_history (agent_id, ts, kind, mode, position, in_flight, z_lim, z_mkt, b_m, b_t, b_m_raw, b_t_raw, regime, computed, applied, reason,
                                           sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target,
-                                          est_minutes, params_hash)
+                                          transfer_threshold_raw, transfer_target_raw, est_minutes, params_hash)
        SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[],
-                            $9::numeric[], $10::numeric[], $11::text[], $12::boolean[], $13::boolean[], $14::text[], $15::float8[], $16::float8[],
-                            $17::float8[], $18::float8[], $19::float8[], $20::float8[], $21::float8[], $22::numeric[], $23::numeric[], $24::int[], $25::bigint[])
+                            $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::text[], $14::boolean[], $15::boolean[], $16::text[],
+                            $17::float8[], $18::float8[], $19::float8[], $20::float8[], $21::float8[], $22::float8[], $23::float8[], $24::numeric[],
+                            $25::numeric[], $26::numeric[], $27::numeric[], $28::int[], $29::bigint[])
        ON CONFLICT (agent_id, ts) DO NOTHING`,
       [col("agent_id"), samples.map((x) => new Date(x.ts_ms).toISOString()), col("kind"), col("mode"), col("position"), col("in_flight"),
-       col("z_lim"), col("z_mkt"), col("b_m"), col("b_t"), col("regime"), samples.map((x) => x.computed === true), samples.map((x) => x.applied === true),
-       col("reason"), col("sz_est"), col("mu_est"), col("theta_est"), col("peclet"), col("sigma_bps"), col("fee_maker_bps"), col("fee_taker_bps"),
-       col("transfer_threshold"), col("transfer_target"), samples.map((x) => x.est_minutes || 0), col("params_hash")]);
+       col("z_lim"), col("z_mkt"), col("b_m"), col("b_t"), col("b_m_raw"), col("b_t_raw"), col("regime"), samples.map((x) => x.computed === true),
+       samples.map((x) => x.applied === true), col("reason"), col("sz_est"), col("mu_est"), col("theta_est"), col("peclet"), col("sigma_bps"),
+       col("fee_maker_bps"), col("fee_taker_bps"), col("transfer_threshold"), col("transfer_target"), col("transfer_threshold_raw"),
+       col("transfer_target_raw"), samples.map((x) => x.est_minutes || 0), col("params_hash")]);
     if (nowMs - bandLastPruneMs > 3600 * 1000) {
       bandLastPruneMs = nowMs;
       await pool.query("DELETE FROM ce_agent_band_history WHERE ts < now() - make_interval(days => $1)", [BAND_HISTORY_RETENTION_DAYS]);
@@ -8343,6 +8366,10 @@ async function readBandConfig(pool) {
     const r2 = await pool.query("SELECT ce_band_arb_scale FROM f05a_clearing_config WHERE id=1");
     Object.assign(out, normalizeBandRow(r2.rows[0]));
   } catch (_) { /* колонки нет — множитель не возвращается, ledger считает 1 */ }
+  try {   // режим модели порогов (ADR-088, условие 1) отдельным запросом: на томе без колонки её просто нет в ответе
+    const r3 = await pool.query("SELECT ce_hmodel_mode FROM f05a_clearing_config WHERE id=1");
+    Object.assign(out, normalizeBandRow(r3.rows[0]));
+  } catch (_) { /* колонки нет — ledger считает shadow */ }
   return out;
 }
 
@@ -8438,8 +8465,34 @@ async function handleVectorClearing(req, res, pathname, query) {
           after: { batch_window_ms: win, stale_level_ms: stale, ce_taker_fee_bps: fee, ce_maker_fee_bps: makerBps,
                    ce_inv_skew_gamma: skewGamma, ce_inv_skew_max_pm: skewMaxPm, slope_method: slopeMethod, ce_band_fee_k: bandK } });
         if (cfgRec) { await auditInsert(cfgRec, "ce_clearing_config_change"); auditLogLines.push(cfgRec); }
-        const bandCols = Object.keys(bandParsed.values);
+        const bandCols = Object.keys(bandParsed.values).filter((c) => c !== HMODEL_FIELD);   // режим модели порогов — отдельное действие со своим аудитом
         if (bandCols.some((c) => !BAND_FIELDS.includes(c))) throw new Error("band column not in whitelist");   // имена в SQL — только из списка
+        const hmodelTo = bandParsed.values[HMODEL_FIELD];   // 'off' | 'shadow' | 'on' | undefined (не прислан — не меняется)
+        if (hmodelTo !== undefined) {
+          // ADR-088, условие 1: режим модели порогов. Эффективный режим в ledger = меньший из потолка окружения и этого значения,
+          // поэтому запись on здесь сама рабочий режим не включает, пока окружение ledger не разрешает on.
+          // Прежнее значение читаем уже под блокировкой строки (после апсерта строка занята этой транзакцией): ledger-предохранитель делает
+          // UPDATE той же строки, и без блокировки on→shadow между чтением и записью дал бы запись без аудита.
+          const curMode = (await client.query("SELECT ce_hmodel_mode FROM f05a_clearing_config WHERE id=1 FOR UPDATE")).rows[0];
+          const hmodelBefore = curMode ? curMode.ce_hmodel_mode : null;
+          const confirmed = body.ce_hmodel_confirm_after_fuse === true || body.ce_hmodel_confirm_after_fuse === "true";
+          if (hmodelTo === "on" && hmodelBefore !== "on" && !confirmed) {
+            // Пауза после срабатывания предохранителя: повторное включение on сразу после on→shadow сводило бы защиту на нет.
+            const trip = await client.query(
+              "SELECT ts FROM operator_audit_log WHERE action='ce_hmodel_fuse_trip' AND ts > now() - make_interval(mins => $1) ORDER BY ts DESC LIMIT 1", [HMODEL_FUSE_COOLDOWN_MIN]);
+            if (trip.rowCount > 0) {
+              await client.query("ROLLBACK");
+              return writeJson(res, 409, { error: "hmodel_fuse_cooldown", last_trip_at: trip.rows[0].ts,
+                message: `автопредохранитель сработал менее ${HMODEL_FUSE_COOLDOWN_MIN} мин назад; чтобы включить on сейчас, пришлите ce_hmodel_confirm_after_fuse: true` });
+            }
+          }
+          const hrec = hmodelModeAuditRecord({ user: req.headers["x-user-id"], before: hmodelBefore, after: hmodelTo, confirmedAfterFuse: confirmed && hmodelTo === "on" });
+          if (hrec) {   // изменение есть: пишем значение и аудит одной транзакцией; без изменения строку не трогаем (иначе лишняя версия конфигурации)
+            await client.query("UPDATE f05a_clearing_config SET ce_hmodel_mode=$1, updated_at=now() WHERE id=1", [hmodelTo]);
+            await auditInsert(hrec, "ce_hmodel_mode_change");
+            auditLogLines.push(hrec);
+          }
+        }
         if (bandCols.length > 0) {
           await client.query(
             "UPDATE f05a_clearing_config SET " + bandCols.map((c, i) => c + "=$" + (i + 1)).join(", ") + ", updated_at=now() WHERE id=1",
@@ -8682,9 +8735,10 @@ async function handleVectorClearing(req, res, pathname, query) {
       await ensureBandHistoryReady(pool);
       const r = await pool.query(
         `SELECT ts, agent_id, kind, mode, position::float8 AS position, in_flight::float8 AS in_flight, z_lim::float8 AS z_lim, z_mkt::float8 AS z_mkt,
-                b_m::float8 AS b_m, b_t::float8 AS b_t, regime, computed, applied, reason, sz_est, mu_est, theta_est, peclet, sigma_bps,
-                fee_maker_bps, fee_taker_bps, transfer_threshold::float8 AS transfer_threshold, transfer_target::float8 AS transfer_target,
-                est_minutes, params_hash::text AS params_hash
+                b_m::float8 AS b_m, b_t::float8 AS b_t, b_m_raw::float8 AS b_m_raw, b_t_raw::float8 AS b_t_raw, regime, computed, applied, reason,
+                sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold::float8 AS transfer_threshold,
+                transfer_target::float8 AS transfer_target, transfer_threshold_raw::float8 AS transfer_threshold_raw,
+                transfer_target_raw::float8 AS transfer_target_raw, est_minutes, params_hash::text AS params_hash
            FROM ce_agent_band_history
           WHERE ts > now() - make_interval(hours => $1) AND ($2 = '' OR agent_id = $2)
           ORDER BY ts DESC, agent_id DESC LIMIT $3`, [hours, agentId, limit + 1]);

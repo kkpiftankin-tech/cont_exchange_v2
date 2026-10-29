@@ -41,6 +41,18 @@ inline double SigmaSecToBpsPerSqrtMin(double sigma_per_sqrt_sec) {
   return sigma_per_sqrt_sec * 1e4 * std::sqrt(60.0);
 }
 
+// Экспоненциальное сглаживание порога по времени (ADR-088, поправка о сглаживании): новое значение = прежнее + α·(сырое − прежнее),
+// α = 1 − exp(−dt/τ). Шаг не зависит от частоты вызовов (несколько вызовов за один такт с dt = 0 не меняют значение).
+// τ ≤ 0 — сглаживание выключено (сырое значение). Недопустимое сырое значение прежнее не портит (возвращается прежнее).
+// Порядок b_м ≤ b_т сохраняется: оба порога сглаживаются с одним α, а среднее взвешенное упорядоченных пар упорядочено.
+inline double EwSmooth(double prev, double raw, double dt_ms, double tau_ms) {
+  if (!std::isfinite(raw)) return prev;
+  if (!(tau_ms > 0.0)) return raw;
+  if (!(dt_ms > 0.0)) return prev;
+  const double alpha = 1.0 - std::exp(-dt_ms / tau_ms);
+  return prev + alpha * (raw - prev);
+}
+
 // Стоимость капитала: % годовых → USDT/мин на 1 тыс. USDT.
 inline double CapitalCostPerMin(double percent_per_year) {
   return 1000.0 * percent_per_year / 100.0 / kMinutesPerYear;

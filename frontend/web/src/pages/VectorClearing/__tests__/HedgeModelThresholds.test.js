@@ -11,7 +11,8 @@ jest.mock('../../../components/NavBar', () => () => null);
 // ADR-088: действующие пороги хеджа и пороги модели рядом; браузер только показывает числа ledger.
 const hm = (over = {}) => ({
   mode: 'shadow', computed: true, applied: false, reason: null, regime: 'noise',
-  b_m: 18.9, b_t: 23.2, sz_est: 8.4, est_minutes: 62, transfer_threshold: null, transfer_target: null, ...over,
+  b_m: 18.9, b_t: 23.2, b_m_raw: 15.1, b_t_raw: 30.4, sz_est: 8.4, est_minutes: 62, transfer_threshold: null, transfer_target: null,
+  transfer_threshold_raw: null, transfer_target_raw: null, mode_ceiling: 'shadow', ...over,
 });
 const translator = (over = {}) => ({
   agent_id: 'T_BTC_binance', agent_kind: 'translator', base: 'BTC', quote: 'USDT', venue: 'binance',
@@ -20,7 +21,8 @@ const translator = (over = {}) => ({
 const arbitrageur = (over = {}) => ({
   agent_id: 'A_BTC_binanceokx', agent_kind: 'arbitrageur', base: 'BTC', quote: 'USDT', venue: '',
   c_total: 0.2, z_lim: 4.5, z_mkt: 4.5,
-  hmodel: hm({ regime: null, b_m: null, b_t: null, transfer_threshold: 41.6, transfer_target: 0 }), ...over,
+  hmodel: hm({ regime: null, b_m: null, b_t: null, b_m_raw: null, b_t_raw: null, transfer_threshold: 41.6, transfer_target: 0,
+               transfer_threshold_raw: 44.2, transfer_target_raw: 0 }), ...over,
 });
 
 const text = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : null);
@@ -33,6 +35,21 @@ test('переводчик: действующие 18 / 18 и модельные
   expect(text(row.querySelector('[data-testid="hm-model"]'))).toBe('18,9 / 23,2');
   expect(text(row.querySelector('[data-testid="hm-state"]'))).toBe('считается, не применяется');
   expect(text(container.querySelector('[data-testid="hmodel-explain"]'))).toMatch(/на заявки не влияют/);
+});
+
+test('сырой расчёт показан отдельным столбцом: переводчик — b_м / b_т, связка — B / b; нули не теряются', () => {
+  const { container } = render(<HedgeModelThresholds translators={[translator()]} arbitrageurs={[arbitrageur()]} />);
+  expect(text(container.querySelector('[data-testid="hm-row-T_BTC_binance"] [data-testid="hm-raw"]'))).toBe('15,1 / 30,4');
+  expect(text(container.querySelector('[data-testid="hm-row-A_BTC_binanceokx"] [data-testid="hm-raw"]'))).toBe('44,2 / 0');
+  expect(container.querySelector('[data-testid="hm-raw-head"]')).not.toBeNull();
+});
+
+test('потолок окружения показан рядом с эффективным режимом; без него подписи нет', () => {
+  const on = render(<HedgeModelThresholds translators={[translator({ hmodel: hm({ mode_ceiling: 'on' }) })]} arbitrageurs={[]} />);
+  expect(text(on.container.querySelector('[data-testid="hm-mode"]'))).toBe('теневой');
+  expect(text(on.container.querySelector('[data-testid="hm-ceiling"]'))).toMatch(/потолок окружения: on/);
+  const none = render(<HedgeModelThresholds translators={[translator({ hmodel: hm({ mode_ceiling: null }) })]} arbitrageurs={[]} />);
+  expect(none.container.querySelector('[data-testid="hm-ceiling"]')).toBeNull();
 });
 
 test('арбитражёр: связка B / b в своём столбце, модельных мейкер/тейкер нет — прочерк, а не ноль', () => {

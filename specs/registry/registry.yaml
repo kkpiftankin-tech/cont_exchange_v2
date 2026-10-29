@@ -585,6 +585,10 @@ nodes:
       - AC-F18v2-34
       - AC-F18v2-35
       - AC-F18v2-36
+      - AC-F18v2-37
+      - AC-F18v2-38
+      - AC-F18v2-39
+      - AC-F18v2-40
       adrs:
       - ADR-088
       - ADR-089
@@ -597,6 +601,8 @@ nodes:
       - docs/06-api/rest/hedge-model.md
       tables:
       - ce_agent_band_history
+      - f05a_clearing_config
+      - operator_audit_log
       ui: []
       codePaths:
       - cpp/ledger/src/domain/hedge_threshold_model.hpp
@@ -604,10 +610,16 @@ nodes:
       - cpp/ledger/src/app/ledger_uc.cpp#hmodel_flow_observe_locked
       - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
       - frontend/api/hedge_model_dto.js
+      - frontend/api/band_config.js
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_fuse_sweep_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#ReadHedgeModePgModeLocked
+      - frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js
       tests:
       - cpp/ledger/tests/hedge_threshold_model_test.cpp
       - cpp/ledger/tests/ce_hedge_model_wiring_test.cpp
       - frontend/api/hedge_model_dto.test.js
+      - frontend/api/band_config.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/HedgeModelThresholds.test.js
     - id: CAP-F18-SYSTEM-PNL
       title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый
         + V переоценка)
@@ -785,6 +797,10 @@ nodes:
     - AC-F18v2-34
     - AC-F18v2-35
     - AC-F18v2-36
+    - AC-F18v2-37
+    - AC-F18v2-38
+    - AC-F18v2-39
+    - AC-F18v2-40
   - id: F-20
     type: feature
     class: normative

@@ -38,11 +38,13 @@ CREATE TABLE IF NOT EXISTS ce_agent_band_history (
   kind TEXT, mode TEXT,                                       -- 'translator' | 'arbitrageur'; 'shadow' | 'on'
   position NUMERIC(38,12), in_flight NUMERIC(38,12),          -- c и in-flight, тыс. USDT, знаковые
   z_lim NUMERIC(38,12), z_mkt NUMERIC(38,12),                 -- РАБОЧИЕ пороги (по ним идут заявки)
-  b_m NUMERIC(38,12), b_t NUMERIC(38,12),                     -- пороги МОДЕЛИ; NULL — не посчитаны; 0 — законное значение
+  b_m NUMERIC(38,12), b_t NUMERIC(38,12),                     -- ЭФФЕКТИВНЫЕ пороги МОДЕЛИ (сглаженные, с потолком); NULL — не посчитаны; 0 — законное значение
+  b_m_raw NUMERIC(38,12), b_t_raw NUMERIC(38,12),             -- сырой расчёт того же такта до сглаживания (ADR-088, поправка о сглаживании)
   regime TEXT, computed BOOLEAN NOT NULL DEFAULT FALSE, applied BOOLEAN NOT NULL DEFAULT FALSE, reason TEXT,
   sz_est DOUBLE PRECISION, mu_est DOUBLE PRECISION, theta_est DOUBLE PRECISION, peclet DOUBLE PRECISION,
   sigma_bps DOUBLE PRECISION, fee_maker_bps DOUBLE PRECISION, fee_taker_bps DOUBLE PRECISION,
-  transfer_threshold NUMERIC(38,12), transfer_target NUMERIC(38,12),   -- связка: B и b
+  transfer_threshold NUMERIC(38,12), transfer_target NUMERIC(38,12),   -- связка: B и b (эффективные)
+  transfer_threshold_raw NUMERIC(38,12), transfer_target_raw NUMERIC(38,12),   -- связка: сырые B и b
   est_minutes INTEGER NOT NULL DEFAULT 0, params_hash BIGINT,
   PRIMARY KEY (agent_id, ts));
 CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
@@ -52,14 +54,16 @@ CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
 | --- | --- | --- |
 | `position`, `in_flight` | неотправленный остаток $c$ и отправленное в заявки | тыс. USDT |
 | `z_lim`, `z_mkt` | рабочие пороги (правило проекта или, в режиме `on`, модель) | тыс. USDT |
-| `b_m`, `b_t` | пороги модели после пола и потолка | тыс. USDT |
+| `b_m`, `b_t` | ЭФФЕКТИВНЫЕ пороги модели: сглаженные по времени (τ = 15 мин), после пола и потолка; именно они идут в заявки в режиме `on` | тыс. USDT |
+| `b_m_raw`, `b_t_raw` | сырой расчёт этого такта до сглаживания; `NULL` — не посчитан или строка записана до поправки (NULL ≠ 0) | тыс. USDT |
 | `regime` | `noise` / `mixed` / `drift` по числу Пекле | — |
 | `applied` | режим `on`: пороги модели использованы для заявок | — |
 | `sz_est`, `mu_est`, `theta_est` | шум потока, дрейф (знаковый, сырая оценка до отсечки погрешности $2\,\mathrm{SE}$; в расчёт идёт отсечённая — видна по `peclet` и `regime`), скорость возврата (диагностика) | тыс. USDT/√мин; тыс. USDT/мин; 1/мин |
 | `peclet` | число Пекле на пороге тейкера | — |
 | `sigma_bps` | волатильность курса пары | bps за √мин |
 | `fee_maker_bps`, `fee_taker_bps` | комиссии (ADR-089, без спреда) | bps |
-| `transfer_threshold`, `transfer_target` | порог и цель перевода связки | тыс. USDT |
+| `transfer_threshold`, `transfer_target` | эффективные порог и цель перевода связки | тыс. USDT |
+| `transfer_threshold_raw`, `transfer_target_raw` | их сырой расчёт до сглаживания | тыс. USDT |
 | `est_minutes` | минут накоплено для оценки; **0 ⇒ `sz_est` — значение по умолчанию, а не оценка** | мин |
 | `params_hash` | версия набора настроек модели (γ, κ, a, s/2, θ, K, …) | — |
 
@@ -72,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
 
 ## Миграция
 
-Новых действий на существующем томе не нужно: таблицу создаёт BFF (`CREATE TABLE IF NOT EXISTS`). Откат — `CE_HMODEL_MODE=off` (записи прекращаются) или `DROP TABLE IF EXISTS ce_agent_band_history;` (внешних ключей, представлений и триггеров нет, старые версии таблицу не знают).
+Таблицу создаёт BFF (`CREATE TABLE IF NOT EXISTS`); колонки сырых порогов (поправка о сглаживании) на уже существующей таблице BFF добавляет при первой записи после старта: каталог проверяется заранее, `ALTER TABLE … ADD COLUMN` одним оператором в транзакции с `SET LOCAL lock_timeout = '3s'`, при таймауте повтор на следующем минутном проходе (`ensureBandHistoryReady`); дубль в `infra/postgres/init.sql`. Откат колонок — `ALTER TABLE ce_agent_band_history DROP COLUMN IF EXISTS b_m_raw, DROP COLUMN IF EXISTS b_t_raw, DROP COLUMN IF EXISTS transfer_threshold_raw, DROP COLUMN IF EXISTS transfer_target_raw;` (после возврата прежнего образа BFF; новый BFF добавит их заново при старте). Откат таблицы — `CE_HMODEL_MODE=off` (записи прекращаются) или `DROP TABLE IF EXISTS ce_agent_band_history;` (внешних ключей, представлений и триггеров нет, старые версии таблицу не знают).
 
 ## Нагрузка и хранение
 

@@ -380,7 +380,8 @@ message AgentPosition {
   fob.common.v1.Decimal z_lim = 13;
   fob.common.v1.Decimal z_mkt = 14;
   // ADR-088 (CALC-CE-HEDGE-THRESHOLD-MODEL): пороги хеджа по модели оптимального управления — только чтение.
-  // Заполняется при CE_HMODEL_MODE=shadow|on; в режиме off не заполняется (на проводе 0 байт). Состояние в памяти
+  // Заполняется при ЭФФЕКТИВНОМ режиме shadow|on (min потолка окружения CE_HMODEL_MODE, переключателя PG ce_hmodel_mode и
+  // предохранителя); при эффективном off не заполняется (на проводе 0 байт). Состояние в памяти
   // ledger, не персистится: после рестарта computed=false до первого пересчёта. Аддитивно (поле 15, прежние поля
   // не менялись).
   AgentHedgeModel hedge_model = 15;
@@ -408,7 +409,7 @@ message AgentHedgeModel {
   fob.common.v1.Decimal transfer_threshold = 8;  // порог перевода B, только связка
   fob.common.v1.Decimal transfer_target = 9;     // цель перевода b, только связка
   int64 computed_at_ms = 10;                  // unix ms последнего расчёта
-  bool applied = 11;                          // CE_HMODEL_MODE=on: пороги модели применены к заявкам (иначе только наблюдение)
+  bool applied = 11;                          // эффективный режим on: пороги модели применены к заявкам (иначе только наблюдение)
   uint32 est_minutes = 12;                    // минут накоплено для оценки ς_z и μ; 0 ⇒ ς_z взят по умолчанию
   fob.common.v1.Decimal sigma_bps = 13;       // волатильность курса пары ς, bps за √мин (из ce_asset_volatility)
   fob.common.v1.Decimal fee_maker_bps = 14;   // комиссия мейкера без спреда, bps
@@ -417,6 +418,12 @@ message AgentHedgeModel {
   string mode = 17;                           // "shadow" | "on"
   string reason = 18;                         // почему не посчитано (computed=false): sigma_stale, no_sigma, invalid_input, budget, …
   fob.common.v1.Decimal theta_est = 19;       // оценка скорости возврата позиции θ (диагностика; в расчёте берётся настройка), 1/мин
+  // ADR-088, поправка о сглаживании: b_m/b_t/transfer_* выше — ЭФФЕКТИВНЫЕ (сглаженные, с потолком); ниже сырой расчёт этого такта.
+  fob.common.v1.Decimal b_m_raw = 20;         // сырой порог мейкера до сглаживания, тыс. USDT (только переводчик при computed)
+  fob.common.v1.Decimal b_t_raw = 21;         // сырой порог тейкера до сглаживания
+  fob.common.v1.Decimal transfer_threshold_raw = 22;  // сырой B связки
+  fob.common.v1.Decimal transfer_target_raw = 23;     // сырая цель b связки
+  string mode_ceiling = 24;                   // потолок окружения CE_HMODEL_MODE: "off" | "shadow" | "on" (mode — эффективный: min(потолок, PG, предохранитель))
 }
 message GetAgentPositionsRequest {
   fob.common.v1.EventMeta meta = 1;

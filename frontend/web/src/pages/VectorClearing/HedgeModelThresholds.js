@@ -11,7 +11,10 @@ const REASON_RU = {
   sigma_stale: 'волатильность устарела',
   invalid_input: 'некорректные входные данные',
   budget: 'лимит расчётов за такт',
-  budget_hold: 'удержан прежний расчёт',
+  budget_hold: 'удержан прежний расчёт (лимит расчётов)',
+  no_sigma_hold: 'удержан прежний расчёт (нет волатильности)',
+  sigma_samples_hold: 'удержан прежний расчёт (мало замеров волатильности)',
+  sigma_stale_hold: 'удержан прежний расчёт (волатильность устарела)',
   numeraire: 'номинал: модели нет',
 };
 
@@ -43,6 +46,7 @@ export default function HedgeModelThresholds({ translators, arbitrageurs }) {
     );
   }
   const mode = (withModel[0].hmodel && withModel[0].hmodel.mode) || null;
+  const ceiling = (withModel[0].hmodel && withModel[0].hmodel.mode_ceiling) || null;
   const shadow = mode !== 'on';
 
   const row = (a) => {
@@ -60,18 +64,27 @@ export default function HedgeModelThresholds({ translators, arbitrageurs }) {
         <td data-testid="hm-rule">{pair(a.z_lim, a.z_mkt)}</td>
         <td data-testid="hm-model">{isT && h ? pair(h.b_m, h.b_t) : dash}</td>
         <td data-testid="hm-transfer">{!isT && h ? pair(h.transfer_threshold, h.transfer_target) : dash}</td>
+        <td data-testid="hm-raw" style={{ opacity: 0.7 }}>
+          {h && isT ? pair(h.b_m_raw, h.b_t_raw) : h ? pair(h.transfer_threshold_raw, h.transfer_target_raw) : dash}
+        </td>
         <td>{h && isNum(h.sz_est) ? Number(h.sz_est).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : dash}</td>
         <td>{h && isNum(h.est_minutes) ? h.est_minutes : dash}</td>
         <td data-testid="hm-state" style={{ color: st.color }}>{st.text}</td>
       </tr>
     );
   };
-  const groupHead = (text) => <tr className="vc-group-head"><td colSpan={9}>{text}</td></tr>;
+  const groupHead = (text) => <tr className="vc-group-head"><td colSpan={10}>{text}</td></tr>;
 
   return (
     <div className="vc-hmodel" data-testid="hmodel-block">
       <div className="vc-sub-head" style={{ marginTop: 14 }}>
         Пороги хеджа: действующие и по модели (ADR-088) — режим <b data-testid="hm-mode">{mode === 'on' ? 'рабочий' : 'теневой'}</b>
+        {ceiling && (
+          <span data-testid="hm-ceiling" style={{ fontWeight: 400, opacity: 0.8 }}
+            title="Эффективный режим = меньший из потолка окружения ledger (CE_HMODEL_MODE) и переключателя в Postgres (ce_hmodel_mode; не задан — теневой). Рабочий режим требует согласия обоих">
+            {' '}(потолок окружения: {ceiling})
+          </span>
+        )}
       </div>
       <table className="vc-sub-table">
         <thead>
@@ -82,6 +95,7 @@ export default function HedgeModelThresholds({ translators, arbitrageurs }) {
             <th title="Действующее правило ledger (комиссия, волатильность, ручная ширина; ADR-066/081), тыс. USDT по модулю позиции: порог мейкер-хеджа Z̄lim / порог тейкер-сброса Z̄mkt">действует<div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>мейкер / тейкер</div></th>
             <th title="Пороги модели (переводчик), тыс. USDT: b_м — вход мейкером, b_т — рыночный сброс. В теневом режиме на заявки не влияют">модель<div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>b_м / b_т</div></th>
             <th title="Пороги модели для связки арбитражёра, тыс. USDT: B — запуск физического перевода, b — цель после перевода">перевод<div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>B / b</div></th>
+            <th data-testid="hm-raw-head" title="Сырой расчёт модели этого такта до сглаживания (переводчик: b_м / b_т; связка: B / b). Эффективные пороги в столбцах «модель» и «перевод» — сглаженные по времени, именно они идут в заявки в рабочем режиме">сырое<div style={{ fontWeight: 400, fontSize: '0.85em', opacity: 0.85 }}>до сглаживания</div></th>
             <th title="шум потока позиции, тыс. USDT за √мин (оценка по окну)">шум потока</th>
             <th title="сколько минут накоплено в оценке потока; 0 — взят шум по умолчанию, не оценка">оценка, мин</th>
             <th>состояние</th>
@@ -103,8 +117,9 @@ export default function HedgeModelThresholds({ translators, arbitrageurs }) {
         ) : (
           <><b>Рабочий режим.</b> Хеджи идут по порогам модели.</>
         )}
-        {' '}Все числа — тыс. USDT; «шум потока» — оценка по минутным приращениям позиции; пока оценка копится (менее часа после
-        перезапуска ledger), модель пороги не выдаёт. Расчёт — ledger, браузер только показывает. CSV истории:{' '}
+        {' '}Все числа — тыс. USDT. Пороги модели <b>сглажены по времени</b> (≈15 минут) и ограничены потолком, чтобы скачок волатильности или шума
+        потока не двигал позицию резко; «сырое» — расчёт этого такта до сглаживания. «Шум потока» — оценка по минутным приращениям позиции;
+        пока оценка копится (менее часа после перезапуска ledger), берётся шум по умолчанию. Расчёт — ledger, браузер только показывает. CSV истории:{' '}
         <code>/api/vector-clearing/hedge-model-history</code>.
       </div>
     </div>

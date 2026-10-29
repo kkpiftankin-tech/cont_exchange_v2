@@ -1,5 +1,5 @@
 // Self-contained node-тест: `node hedge_model_dto.test.js` (у frontend/api нет jest).
-const { decOrNull, buildHedgeModelDto, bandSamples, minuteBucketMs, historyCsv, CSV_COLUMNS, BAND_HISTORY_DDL } = require('./hedge_model_dto');
+const { decOrNull, buildHedgeModelDto, bandSamples, minuteBucketMs, historyCsv, CSV_COLUMNS, BAND_HISTORY_DDL, BAND_HISTORY_RAW_COLUMNS } = require('./hedge_model_dto');
 
 let failed = 0;
 function check(name, cond) {
@@ -66,6 +66,27 @@ check('CSV: заголовок из колонок', lines[0] === CSV_COLUMNS.jo
 check('CSV: время ISO, ноль сохранён, запятая в тексте экранирована', lines[1].startsWith('2023-11-14T22:14:00.000Z,T_BTC_binance') && lines[1].includes(',0,') && lines[1].includes('"a,b"'));
 check('CSV: пустое значение — пустая ячейка', lines[1].split(',')[5] === '');
 check('CSV: перевод строки \\r в тексте экранируется кавычками', historyCsv([{ agent_id: 'x', reason: 'a\rb' }]).includes('"a\rb"'));
+
+// --- сглаживание (ADR-088): эффективные и сырые пороги, потолок окружения
+const sm = buildHedgeModelDto({
+  computed: true, mode: 'shadow', regime: 'HEDGE_MODEL_REGIME_NOISE', b_m: dec('15971000'), b_t: dec('19540000'), b_m_raw: dec('9100000'), b_t_raw: dec('9720000'),
+  transfer_threshold: dec('41557000'), transfer_target: dec('0'), transfer_threshold_raw: dec('41557000'), transfer_target_raw: dec('0'), mode_ceiling: 'on',
+}, 0);
+check('сглаживание: эффективный порог и сырой отдельно', sm.b_t === 19.54 && sm.b_t_raw === 9.72 && sm.b_m_raw === 9.1);
+check('сглаживание: сырая цель перевода 0 остаётся нулём', sm.transfer_target_raw === 0 && sm.transfer_threshold_raw === 41.557);
+check('потолок окружения виден отдельно от эффективного режима', sm.mode_ceiling === 'on' && sm.mode === 'shadow');
+const noRaw = buildHedgeModelDto({ computed: true, mode: 'shadow', regime: 'HEDGE_MODEL_REGIME_NOISE', b_m: dec('1000000'), b_t: dec('2000000') }, 0);
+check('нет сырых полей (старый ledger): null, не 0', noRaw.b_m_raw === null && noRaw.b_t_raw === null && noRaw.mode_ceiling === null);
+const notComputed = buildHedgeModelDto({ computed: false, mode: 'shadow', reason: 'no_sigma', b_m_raw: dec('9100000'), mode_ceiling: 'shadow' }, 0);
+check('не посчитано: сырые пороги скрыты, потолок виден', notComputed.b_m_raw === null && notComputed.mode_ceiling === 'shadow');
+const smSample = bandSamples([{ agent_id: 'T_BTC_binance', agent_kind: 'translator', c_position: 1, in_flight: 0, z_lim: 18, z_mkt: 18, hmodel: sm }], 60000)[0];
+check('история: сырые пороги идут в строку', smSample.b_t_raw === 9.72 && smSample.b_m_raw === 9.1 && smSample.transfer_threshold_raw === 41.557);
+check('CSV: прежние 25 колонок на прежних местах, сырые пороги — в конце (обратная совместимость позиционных разборов)',
+  CSV_COLUMNS.length === 29 && CSV_COLUMNS[0] === 'ts' && CSV_COLUMNS[24] === 'params_hash' && CSV_COLUMNS.slice(25).join() === 'b_m_raw,b_t_raw,transfer_threshold_raw,transfer_target_raw');
+check('CSV: колонки сырых порогов есть', ['b_m_raw', 'b_t_raw', 'transfer_threshold_raw', 'transfer_target_raw'].every((c) => CSV_COLUMNS.includes(c)));
+check('DDL: сырые пороги в CREATE и в списке колонок для существующей таблицы',
+  BAND_HISTORY_DDL.includes('b_t_raw') && BAND_HISTORY_RAW_COLUMNS.length === 4
+  && BAND_HISTORY_RAW_COLUMNS.every(([c, t]) => BAND_HISTORY_DDL.includes(c) && t === 'NUMERIC(38, 12)'));
 
 // --- DDL
 check('DDL: ключ (агент, минута) и числовые типы денег', BAND_HISTORY_DDL.includes('PRIMARY KEY (agent_id, ts)') && BAND_HISTORY_DDL.includes('NUMERIC(38, 12)'));

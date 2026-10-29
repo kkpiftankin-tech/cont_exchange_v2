@@ -9,15 +9,30 @@
 //   T6  оценка шума и дрейфа потока накапливается по минутам (est_minutes ≥ 60), шум меньше значения по умолчанию;
 //   T7  сброс позиций очищает состояние модели;
 //   T8  связка (арбитражёр) в shadow: порог и цель перевода посчитаны, порогов переводчика нет;
-//   T9  полуспред по книге (карта CE_HMODEL_HALF_SPREAD_MAP): мейкер не дешевле тейкера — мейкер-зоны нет.
+//   T9  полуспред по книге (карта CE_HMODEL_HALF_SPREAD_MAP): мейкер не дешевле тейкера — мейкер-зоны нет;
+//   T13 сглаживание порогов: скачок сырого значения гасится, сырое значение отдаётся отдельно, порядок b_м ≤ b_т;
+//   T14 τ = 0: эффективные пороги равны сырым;
+//   T15 эффективный режим = меньший из потолка окружения и значения PG (не задан ⇒ shadow);
+//   T16 автопредохранитель: экспозиция выше предела дольше срока ⇒ shadow, запись в PG и аудит один раз; снятие защёлки по PG;
+//   T17 предохранитель выключен при пределе 0;
+//   T18 запись предохранителя в PG не удалась ⇒ режим остаётся shadow, запись повторяется;
+//   T19 эффективный режим off «на лету» (PG) ⇒ блок hedge_model не отдаётся даже без новых дельт;
+//   T20 предел предохранителя учитывает худшую позицию по самой модели (легальное состояние политики не гасит режим);
+//   T21 гистерезис предохранителя: «пила» вокруг предела не сбрасывает отсчёт, глубокий провал сбрасывает;
+//   T22 разрыв наблюдения (простой ledger) начинает отсчёт заново;
+//   T23 отсчёт предохранителя идёт и в shadow: переключение shadow → on его не обнуляет;
+//   T24 временный сбой волатильности: пороги удерживаются (reason *_hold), по истечении срока — откат на правило;
+//   T25 пол q_floor соблюдается и после сглаживания; откат времени сглаживание не обнуляет (T13).
 //
 // Pure unit (без PG): источник волатильности подменён SetHedgeSigmaSource, ставки и пол порога — через env (LoadBandFeeConfig
 // без PG берёт env). Kafka-producer нужен лишь затем, чтобы detect_and_emit не вышел на раннем return.
 // ============================================================================
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "app/ledger_uc.hpp"
 #include "cex/common/kafka.hpp"
@@ -70,6 +85,28 @@ bool sigma_ok(const std::string& sym, double* s, long long* n, long long* age) {
 
 bool sigma_none(const std::string&, double*, long long*, long long*) { return false; }
 
+// Волатильность, меняемая по ходу теста (T13/T14).
+double g_sigma_bps = 4.8;
+bool sigma_var(const std::string& sym, double* s, long long* n, long long* age) {
+  if (sym != "BTCUSDT") return false;
+  *s = g_sigma_bps / (1e4 * std::sqrt(60.0));
+  *n = 100;
+  *age = 100;
+  return true;
+}
+
+// Волатильность, пропадающая по ходу теста (T24).
+bool g_sigma_up = true;
+bool sigma_toggle(const std::string& sym, double* s, long long* n, long long* age) {
+  if (!g_sigma_up) return false;
+  return sigma_ok(sym, s, n, age);
+}
+
+// Режим из PG: рабочий включён (для тестов режима on) / подменяемое значение (T15–T18).
+int pg_on() { return 2; }
+int g_pg = -1;
+int pg_var() { return g_pg; }
+
 void set_mode(const char* mode) {
   if (mode == nullptr) unsetenv("CE_HMODEL_MODE");
   else setenv("CE_HMODEL_MODE", mode, 1);
@@ -86,6 +123,7 @@ int main() {
   setenv("CE_AGENT_BAND_Q_MIN", "2", 1);
   setenv("CE_NUMERAIRE", "USDT", 1);
   setenv("CE_BAND_HEDGE_COOLDOWN_MS", "3000", 1);
+  setenv("CE_HMODEL_SMOOTH_TAU_MS", "0", 1);   // прежние тесты проверяют сырой расчёт; сглаживание — T13 и далее
   cex::common::KafkaProducer prod(cex::common::KafkaConfig{"localhost:9092", "ce-hmodel-test"});
   const std::string kAgent = "T_BTC_binance";
 
@@ -133,6 +171,7 @@ int main() {
     set_mode("on");
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeModePgSource(pg_on);
     uc.SetHedgeSigmaSource(sigma_ok);
     uc.ApplyPositionDelta("b1", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
     const auto resp = uc.GetAgentPositions({});
@@ -149,6 +188,7 @@ int main() {
     set_mode("on");
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeModePgSource(pg_on);
     uc.SetHedgeSigmaSource(sigma_ok);
     // Позиция 18 лежит в мейкер-зоне (15,971 … 20,215): лимитная заявка на избыток над z_lim = 2,029.
     uc.ApplyPositionDelta("b1", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 18.0)});
@@ -181,6 +221,7 @@ int main() {
     set_mode("on");
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeModePgSource(pg_on);
     uc.SetHedgeSigmaSource(sigma_none);
     uc.ApplyPositionDelta("b1", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
     const auto resp = uc.GetAgentPositions({});
@@ -316,6 +357,7 @@ int main() {
     setenv("CE_HMODEL_MAX_SOLVES_PER_TACT", "1", 1);
     LedgerUseCases uc(LedgerUseCases::InitOptions{});
     uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeModePgSource(pg_on);
     uc.SetHedgeSigmaSource(sigma_ok);
     const std::string a1 = "T_BTC_binance", a2 = "T_BTC_okx";
     long long ts = 600000;
@@ -343,6 +385,390 @@ int main() {
     }
     check(held, "T12: исчерпание бюджета наблюдалось");
     unsetenv("CE_HMODEL_MAX_SOLVES_PER_TACT");
+  }
+
+
+  // --- T13: сглаживание. σ растёт в 3 раза ⇒ сырой порог тейкера падает почти вдвое, эффективный за минуту сдвигается мало ---
+  {
+    setenv("CE_HMODEL_SMOOTH_TAU_MS", "900000", 1);
+    set_mode("shadow");
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_var);
+    g_sigma_bps = 4.8;
+    uc.ApplyPositionDelta("s0", 1000000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+    const auto resp_p0 = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+    const auto* p0 = find_pos(resp_p0, kAgent);
+    const double bt0 = dec(p0->hedge_model().b_t());
+    check(near(bt0, 20.215, 0.01) && near(dec(p0->hedge_model().b_t_raw()), bt0, 1e-9),
+          "T13: первое значение берётся сырым (20,215), сырое = эффективное");
+    g_sigma_bps = 14.4;
+    uc.ApplyPositionDelta("s1", 1060000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    const auto resp_p1 = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+    const auto* p1 = find_pos(resp_p1, kAgent);
+    const double raw1 = dec(p1->hedge_model().b_t_raw()), eff1 = dec(p1->hedge_model().b_t());
+    const double alpha1 = 1.0 - std::exp(-60000.0 / 900000.0);
+    check(raw1 < 0.6 * bt0, "T13: сырой порог тейкера при утроенной σ упал более чем на 40 %");
+    check(near(eff1, bt0 + alpha1 * (raw1 - bt0), 0.01) && eff1 > raw1 && eff1 < bt0,
+          "T13: эффективный порог за минуту сдвинулся на α = 1 − e^(−1/15) разницы");
+    check(dec(p1->hedge_model().b_m()) <= eff1 + 1e-9 && dec(p1->hedge_model().b_m_raw()) <= raw1 + 1e-9,
+          "T13: порядок b_м ≤ b_т сохранён в эффективных и сырых порогах");
+    uc.ApplyPositionDelta("s1b", 1060000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(near(dec(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().b_t()), eff1, 1e-9),
+          "T13: второй вызов в тот же момент (dt = 0) порог не меняет");
+    uc.ApplyPositionDelta("s2", 1060000 + 1200000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    const auto resp_p2 = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+    const auto* p2 = find_pos(resp_p2, kAgent);
+    const double eff2 = dec(p2->hedge_model().b_t()), raw2 = dec(p2->hedge_model().b_t_raw());
+    check(std::fabs(eff2 - raw2) <= 0.3 * std::fabs(eff1 - raw2), "T13: через 20 минут эффективный порог прошёл не менее 70 % пути к сырому");
+    uc.ApplyPositionDelta("s3", 1060000 + 1200000 - 10000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(near(dec(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().b_t()), eff2, 1e-9),
+          "T13: небольшой откат времени (dt < 0) сглаженный порог не меняет и не обнуляет");
+    g_sigma_bps = 4.8;
+  }
+
+  // --- T14: τ = 0 — сглаживания нет ---
+  {
+    setenv("CE_HMODEL_SMOOTH_TAU_MS", "0", 1);
+    set_mode("shadow");
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_var);
+    g_sigma_bps = 4.8;
+    uc.ApplyPositionDelta("u0", 1000000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+    g_sigma_bps = 14.4;
+    uc.ApplyPositionDelta("u1", 1060000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    const auto resp_p = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+    const auto* p = find_pos(resp_p, kAgent);
+    check(near(dec(p->hedge_model().b_t()), dec(p->hedge_model().b_t_raw()), 1e-9), "T14: τ = 0 — эффективный порог равен сырому");
+    g_sigma_bps = 4.8;
+  }
+
+  // --- T15: эффективный режим = min(потолок окружения, PG); PG не задан ⇒ shadow ---
+  {
+    struct Case { const char* env; int pg; const char* want; const char* ceiling; };
+    const Case cases[] = {
+        {"on", -1, "shadow", "on"},  {"on", 1, "shadow", "on"}, {"on", 2, "on", "on"}, {"shadow", 2, "shadow", "shadow"},
+        {"on", 0, "", "on"},         {"off", 2, "", "off"},
+    };
+    for (const auto& c : cases) {
+      set_mode(c.env);
+      g_pg = c.pg;
+      LedgerUseCases uc(LedgerUseCases::InitOptions{});
+      uc.SetBandBreachProducer(&prod);
+      uc.SetHedgeSigmaSource(sigma_ok);
+      uc.SetHedgeModePgSource(pg_var);
+      uc.ApplyPositionDelta("m0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+      const auto resp_p = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+      const auto* p = find_pos(resp_p, kAgent);
+      const std::string label = std::string("T15 env=") + c.env + " pg=" + std::to_string(c.pg);
+      if (std::string(c.want).empty()) {
+        check(p != nullptr && !p->has_hedge_model(), label + ": модель выключена");
+      } else {
+        check(p != nullptr && p->has_hedge_model() && p->hedge_model().mode() == c.want && p->hedge_model().mode_ceiling() == c.ceiling,
+              label + ": эффективный режим " + c.want + ", потолок " + c.ceiling);
+      }
+    }
+  }
+
+  // --- T16: автопредохранитель ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);   // только абсолютный предел 20 (динамическая часть — T20)
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    std::string sink_agent;
+    double sink_exposure = 0.0, sink_limit = 0.0;
+    long long sink_over = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string& a, double e, double l, long long o) {
+      ++sink_calls; sink_agent = a; sink_exposure = e; sink_limit = l; sink_over = o;
+      return true;
+    });
+    uc.ApplyPositionDelta("f0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    check(sink_calls == 0, "T16: сразу после превышения предохранитель не срабатывает (срок 5 с не прошёл)");
+    uc.ApplyPositionDelta("f1", 7000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1 && sink_agent == kAgent && sink_exposure > 20.0 && near(sink_limit, 20.0, 1e-9) && sink_over >= 5000,
+          "T16: через 6 с превышения предохранитель сработал один раз (агент, экспозиция, предел 20, срок ≥ 5 с)");
+    {
+      const auto resp_t = uc.GetAgentPositions({});
+      const auto* pt = find_pos(resp_t, kAgent);
+      check(pt != nullptr && pt->hedge_model().mode() == "shadow" && !pt->hedge_model().applied(),
+            "T16: сразу после тика срабатывания ответ уже в shadow и пороги модели не применены");
+    }
+    uc.ApplyPositionDelta("f2", 8000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    const auto resp_p = uc.GetAgentPositions({});   // ответ живёт, пока жив указатель
+    const auto* p = find_pos(resp_p, kAgent);
+    check(p != nullptr && p->hedge_model().mode() == "shadow" && p->hedge_model().mode_ceiling() == "on" && !p->hedge_model().applied(),
+          "T16: после срабатывания режим shadow, пороги модели не применены (потолок окружения on)");
+    uc.ApplyPositionDelta("f3", 9000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1, "T16: повторного срабатывания и повторной записи нет");
+    g_pg = 1;                       // запись предохранителя дошла до PG: там shadow
+    uc.InvalidateHedgeModelCfg();
+    uc.ApplyPositionDelta("f4", 10000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", -15.0)});   // экспозиция падает ниже 0,9 предела — отсчёт сброшен
+    check(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().mode() == "shadow", "T16: PG = shadow — режим shadow, защёлка снята");
+    g_pg = 2;                       // оператор включил on заново
+    uc.InvalidateHedgeModelCfg();
+    uc.ApplyPositionDelta("f5", 11000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().mode() == "on", "T16: оператор вернул on в PG — режим on");
+  }
+
+  // --- T17: предел 0 — предохранитель выключен ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "0", 1);
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return true; });
+    uc.ApplyPositionDelta("g0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc.ApplyPositionDelta("g1", 700000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 0 && find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().mode() == "on",
+          "T17: при пределе 0 предохранитель не срабатывает, режим on");
+  }
+
+  // --- T18: запись предохранителя в PG не удалась ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);
+    setenv("CE_HMODEL_FUSE_RETRY_MS", "0", 1);   // повтор без отсрочки (по умолчанию 30 с)
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return sink_calls >= 2; });   // первая запись неудачна
+    uc.ApplyPositionDelta("h0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc.ApplyPositionDelta("h1", 7000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1, "T18: срабатывание, первая запись в PG неудачна");
+    uc.ApplyPositionDelta("h2", 8000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().mode() == "shadow", "T18: пока запись не удалась, режим остаётся shadow (PG ещё говорит on)");
+    check(sink_calls == 2, "T18: запись повторена со следующей проверки и удалась");
+    setenv("CE_HMODEL_FUSE_RETRY_MS", "30000", 1);   // с отсрочкой: повтор не чаще раза в 30 с
+    int sink2 = 0;
+    LedgerUseCases uc2(LedgerUseCases::InitOptions{});
+    uc2.SetBandBreachProducer(&prod);
+    uc2.SetHedgeSigmaSource(sigma_ok);
+    uc2.SetHedgeModePgSource(pg_var);
+    uc2.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink2; return false; });
+    uc2.ApplyPositionDelta("h20", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc2.ApplyPositionDelta("h21", 7000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    uc2.ApplyPositionDelta("h22", 8000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    uc2.ApplyPositionDelta("h23", 9000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink2 == 1, "T18: при неудачной записи повтор не чаще заданной отсрочки (за секунды — одна попытка)");
+    g_pg = 0;                       // оператор сам поставил off: писать срабатывание в PG больше не нужно
+    uc2.InvalidateHedgeModelCfg();
+    uc2.ApplyPositionDelta("h24", 10000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink2 == 1, "T18: PG уже не on — повторная запись отменена");
+    unsetenv("CE_HMODEL_FUSE_POS_K");
+    unsetenv("CE_HMODEL_FUSE_HOLD_MS");
+    unsetenv("CE_HMODEL_FUSE_MULT");
+    unsetenv("CE_HMODEL_FUSE_RETRY_MS");
+  }
+
+  // --- T19: эффективный режим off «на лету» ---
+  {
+    set_mode("shadow");
+    g_pg = 1;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.ApplyPositionDelta("o0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+    {
+      const auto r = uc.GetAgentPositions({});
+      check(find_pos(r, kAgent)->has_hedge_model(), "T19: shadow — блок отдаётся");
+    }
+    g_pg = 0;
+    uc.InvalidateHedgeModelCfg();
+    {
+      const auto r = uc.GetAgentPositions({});
+      check(!find_pos(r, kAgent)->has_hedge_model(), "T19: PG = off — блок не отдаётся и без новых дельт (нет замороженного блока)");
+    }
+    g_pg = 1;
+    uc.InvalidateHedgeModelCfg();
+    {
+      const auto r = uc.GetAgentPositions({});
+      check(find_pos(r, kAgent)->has_hedge_model(), "T19: PG снова shadow — блок возвращается");
+    }
+  }
+
+  // --- T20: предел предохранителя учитывает худшую позицию по самой модели ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    unsetenv("CE_HMODEL_FUSE_MULT");   // по умолчанию 1,5
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double l, long long) { ++sink_calls; (void)l; return true; });
+    uc.ApplyPositionDelta("d0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc.ApplyPositionDelta("d1", 700000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 0 && find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().mode() == "on",
+          "T20: экспозиция 30 выше абсолютного предела 20, но ниже предела модели 1,5·(2·b_т − b_м) ≈ 36,6 — режим on держится");
+    uc.ApplyPositionDelta("d2", 710000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 10.0)});
+    uc.ApplyPositionDelta("d3", 716000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1, "T20: экспозиция выше предела модели дольше срока — предохранитель сработал");
+  }
+
+  // --- T21: гистерезис («пила» не сбрасывает отсчёт, провал ниже 0,9 предела сбрасывает) ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return true; });
+    const auto step = [&](const char* id, long long ts, double d) {
+      uc.ApplyPositionDelta(id, ts, {}, {mk_delta(kAgent, "translator", "BTC", "binance", d)});
+    };
+    step("y0", 1000, 21.0);    // 21 > 20: отсчёт с 1000
+    step("y1", 2000, -2.0);    // 19 (≥ 18): отсчёт не сброшен
+    step("y2", 3000, 2.0);     // 21
+    step("y3", 4000, -4.0);    // 17 < 18: отсчёт сброшен
+    step("y4", 5000, 4.0);     // 21: отсчёт с 5000
+    step("y5", 9000, 0.1);     // прошло 4 с < 5 с
+    check(sink_calls == 0, "T21: провал ниже 0,9 предела сбросил отсчёт (без сброса сработало бы по времени с 1000)");
+    step("y6", 10500, 0.1);    // прошло 5,5 с
+    check(sink_calls == 1, "T21: после нового непрерывного превышения предохранитель сработал");
+  }
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return true; });
+    const auto step = [&](const char* id, long long ts, double d) {
+      uc.ApplyPositionDelta(id, ts, {}, {mk_delta(kAgent, "translator", "BTC", "binance", d)});
+    };
+    step("w0", 1000, 21.0);
+    step("w1", 2000, -2.0);    // 19: в «пиле» выше 0,9·20
+    step("w2", 3000, 2.0);
+    step("w3", 4000, -2.0);
+    step("w4", 6500, 2.0);
+    check(sink_calls == 1, "T21: «пила» 19/21 выше 0,9 предела отсчёт не сбрасывает — предохранитель сработал по времени с 1000");
+  }
+
+  // --- T22: разрыв наблюдения (простой ledger) начинает отсчёт заново ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);
+    set_mode("on");
+    g_pg = 2;
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return true; });
+    uc.ApplyPositionDelta("q0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc.ApplyPositionDelta("q1", 121000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});   // 2 минуты тишины
+    uc.ApplyPositionDelta("q2", 124000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 0, "T22: после разрыва наблюдения отсчёт начат заново (ложного срабатывания по старому отсчёту нет)");
+    uc.ApplyPositionDelta("q3", 127000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1, "T22: непрерывное превышение после разрыва сработало");
+  }
+
+  // --- T23: отсчёт идёт и в shadow; переключение shadow → on его не обнуляет ---
+  {
+    setenv("CE_HMODEL_FUSE_POS_K", "20", 1);
+    setenv("CE_HMODEL_FUSE_HOLD_MS", "5000", 1);
+    setenv("CE_HMODEL_FUSE_MULT", "0", 1);
+    set_mode("on");
+    g_pg = 1;   // PG = shadow
+    int sink_calls = 0;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.SetHedgeFuseSink([&](const std::string&, double, double, long long) { ++sink_calls; return true; });
+    uc.ApplyPositionDelta("n0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 30.0)});
+    uc.ApplyPositionDelta("n1", 7000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 0, "T23: в shadow предохранитель не срабатывает");
+    g_pg = 2;
+    uc.InvalidateHedgeModelCfg();
+    uc.ApplyPositionDelta("n2", 8000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    check(sink_calls == 1, "T23: переключение shadow → on не обнуляет отсчёт — при прежнем превышении срабатывает сразу (цикл переключений предохранитель не глушит)");
+  }
+
+  // --- T24: временный сбой волатильности — пороги удерживаются ---
+  {
+    unsetenv("CE_HMODEL_FUSE_POS_K");
+    unsetenv("CE_HMODEL_FUSE_HOLD_MS");
+    unsetenv("CE_HMODEL_FUSE_MULT");
+    set_mode("shadow");
+    g_pg = 1;
+    g_sigma_up = true;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_toggle);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.ApplyPositionDelta("v0", 1000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+    const double bt0 = dec(find_pos(uc.GetAgentPositions({}), kAgent)->hedge_model().b_t());
+    g_sigma_up = false;
+    uc.ApplyPositionDelta("v1", 61000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    {
+      const auto r = uc.GetAgentPositions({});
+      const auto* p = find_pos(r, kAgent);
+      check(p->hedge_model().computed() && p->hedge_model().reason() == "no_sigma_hold" && near(dec(p->hedge_model().b_t()), bt0, 1e-9),
+            "T24: минуту без волатильности пороги удержаны прежними (reason no_sigma_hold, computed)");
+    }
+    uc.ApplyPositionDelta("v2", 401000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    {
+      const auto r = uc.GetAgentPositions({});
+      const auto* p = find_pos(r, kAgent);
+      check(!p->hedge_model().computed() && p->hedge_model().reason() == "no_sigma", "T24: по истечении срока удержания (5 мин) модель не посчитана — откат на правило");
+    }
+    g_sigma_up = true;
+  }
+
+  // --- T25: пол q_floor соблюдается и после сглаживания ---
+  {
+    setenv("CE_HMODEL_SMOOTH_TAU_MS", "900000", 1);
+    setenv("CE_AGENT_BAND_Q_MIN", "2", 1);
+    set_mode("shadow");
+    g_pg = 1;
+    LedgerUseCases uc(LedgerUseCases::InitOptions{});
+    uc.SetBandBreachProducer(&prod);
+    uc.SetHedgeSigmaSource(sigma_ok);
+    uc.SetHedgeModePgSource(pg_var);
+    uc.ApplyPositionDelta("z0", 1000000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 1.0)});
+    setenv("CE_AGENT_BAND_Q_MIN", "25", 1);   // оператор поднял пол
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));   // кэш ставок ledger живёт 1 с
+    uc.ApplyPositionDelta("z1", 1060000, {}, {mk_delta(kAgent, "translator", "BTC", "binance", 0.1)});
+    const auto r = uc.GetAgentPositions({});
+    const auto* p = find_pos(r, kAgent);
+    check(dec(p->hedge_model().b_m()) >= 25.0 - 1e-6 && dec(p->hedge_model().b_t()) >= dec(p->hedge_model().b_m()) - 1e-9,
+          "T25: пол 25 действует сразу, а не после затухания сглаживания; порядок b_м ≤ b_т сохранён");
+    setenv("CE_AGENT_BAND_Q_MIN", "2", 1);
+    setenv("CE_HMODEL_SMOOTH_TAU_MS", "0", 1);
   }
 
   std::cout << (g_fail == 0 ? "ALL PASS\n" : "FAILURES: " + std::to_string(g_fail) + "\n");

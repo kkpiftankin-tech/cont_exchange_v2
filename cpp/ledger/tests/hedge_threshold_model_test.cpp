@@ -260,9 +260,39 @@ void test_link_band() {
   const hm::TrCost nc = hm::TrCostAt(nan, 10.0, tp);
   check(!std::isfinite(nc.J) || nc.J > 1e300, "затраты цикла перевода при NaN-цели: пустой цикл, без падения (J не конечна)");
 }
+
+// Сглаживание порога по времени (ADR-088, поправка о сглаживании).
+void test_ew_smooth() {
+  const double tau = 900000.0;   // 15 мин
+  check(abs_near(hm::EwSmooth(10.0, 40.0, 60000.0, 0.0), 40.0, 1e-12), "сглаживание: τ = 0 — сырое значение");
+  check(abs_near(hm::EwSmooth(10.0, 40.0, 0.0, tau), 10.0, 1e-12), "сглаживание: dt = 0 — прежнее значение (несколько вызовов за такт не двигают порог)");
+  check(abs_near(hm::EwSmooth(10.0, 40.0, -5.0, tau), 10.0, 1e-12), "сглаживание: отрицательный dt — прежнее значение");
+  check(abs_near(hm::EwSmooth(10.0, 40.0, tau, tau), 10.0 + (1.0 - std::exp(-1.0)) * 30.0, 1e-9), "сглаживание: за время τ проходит 63,2 % разницы");
+  check(abs_near(hm::EwSmooth(10.0, 40.0, 1e9, tau), 40.0, 1e-6), "сглаживание: за очень долгое время — сырое значение");
+  check(abs_near(hm::EwSmooth(10.0, std::nan(""), 60000.0, tau), 10.0, 1e-12), "сглаживание: NaN сырого значения прежнее не портит");
+  check(abs_near(hm::EwSmooth(10.0, std::numeric_limits<double>::infinity(), 60000.0, tau), 10.0, 1e-12), "сглаживание: бесконечность сырого значения прежнее не портит");
+  // Скачок 12,6 → 43,7 за минуту (наблюдался на стенде): сглаженное значение за минуту сдвигается меньше чем на 7 % разницы.
+  const double s1 = hm::EwSmooth(12.6, 43.7, 60000.0, tau);
+  check(s1 > 12.6 && s1 < 12.6 + 0.07 * (43.7 - 12.6), "сглаживание: скачок порога за минуту гасится (сдвиг < 7 % разницы)");
+  // Полугрупповое свойство: n малых шагов к одному и тому же сырому значению равны одному большому шагу (результат не зависит от частоты вызовов).
+  double stepped = 10.0;
+  for (int i = 0; i < 90; ++i) stepped = hm::EwSmooth(stepped, 40.0, 10000.0, tau);
+  check(abs_near(stepped, hm::EwSmooth(10.0, 40.0, 900000.0, tau), 1e-9), "сглаживание: 90 шагов по 10 с равны одному шагу в 15 минут");
+  // Порядок b_м ≤ b_т сохраняется при одинаковом α.
+  double bm = 15.0, bt = 20.0;
+  bool ordered = true;
+  for (int i = 0; i < 200; ++i) {
+    const double rm = i % 7 == 0 ? 3.0 : 40.0, rt = rm + 5.0;
+    bm = hm::EwSmooth(bm, rm, 30000.0, tau);
+    bt = hm::EwSmooth(bt, rt, 30000.0, tau);
+    ordered = ordered && bm <= bt + 1e-12;
+  }
+  check(ordered, "сглаживание: порядок b_м ≤ b_т сохраняется");
+}
 }  // namespace
 
 int main() {
+  test_ew_smooth();
   test_units_and_calibration();
   test_golden_maker_taker();
   test_golden_transfer();

@@ -166,6 +166,22 @@ class LedgerUseCases {
   using SigmaSource = std::function<bool(const std::string&, double*, long long*, long long*)>;
   void SetHedgeSigmaSource(SigmaSource source) { sigma_source_ = std::move(source); }
 
+  // ADR-088 (условие 1): режим модели порогов в Postgres. Источник возвращает 0 (off), 1 (shadow), 2 (on) или −1 (не задан / не прочитан).
+  // По умолчанию (пусто) — f05a_clearing_config.ce_hmodel_mode; подмена нужна тестам без БД. Эффективный режим = меньший из «потолка
+  // окружения» CE_HMODEL_MODE и значения из PG; −1 считается shadow, поэтому on требует согласия и окружения, и PG.
+  using HedgeModePgSource = std::function<int()>;
+  void SetHedgeModePgSource(HedgeModePgSource source) { hmodel_pg_source_ = std::move(source); }
+  // ADR-088 (условие 2): приёмник срабатывания автопредохранителя. Вызывается один раз при срабатывании: (агент, экспозиция |c|+in_flight,
+  // предел, длительность превышения, мс) → удалось ли записать shadow в PG и строку в журнал оператора. По умолчанию (пусто) пишет сам ledger.
+  using HedgeFuseSink = std::function<bool(const std::string& agent, double exposure_k, double limit_k, long long over_ms)>;
+  void SetHedgeFuseSink(HedgeFuseSink sink) { hmodel_fuse_sink_ = std::move(sink); }
+  // Сбросить кэш настроек модели (тесты меняют окружение и источники внутри одного объекта).
+  void InvalidateHedgeModelCfg() {
+    std::lock_guard<std::mutex> lk(mu_);
+    hmodel_cfg_have_ = false;
+    hmodel_pg_have_ = false;
+  }
+
   // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
   // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
   // CE_TRANSFER_FEE_BPS_<АКТИВ> (число от 0 до 1000; не задано / пусто / не число / NaN / inf / отрицательно / больше 1000 ⇒ по умолчанию 2,5 б.п. (0,25 ‰ — прежний тариф перевоза
@@ -480,7 +496,13 @@ class LedgerUseCases {
 
   // ADR-088: настройки модели порогов хеджа (окружение ledger, TTL 1 с) и кэш решений по округлённым входам. Всё под mu_.
   struct HedgeModelCfg {
-    int mode{0};                          // 0 off, 1 shadow, 2 on
+    int mode{0};                          // ЭФФЕКТИВНЫЙ режим: 0 off, 1 shadow, 2 on = min(потолок окружения, значение PG, предохранитель)
+    int mode_ceiling{0};                  // потолок окружения CE_HMODEL_MODE (0/1/2)
+    double smooth_tau_ms{900000.0};       // постоянная времени сглаживания порогов, мс (0 — без сглаживания); CE_HMODEL_SMOOTH_TAU_MS
+    double smooth_gap_ms{3600000.0};      // пропуск расчёта дольше — сглаживание начинается с сырого значения (4 τ, не меньше 30 мин)
+    double fuse_pos_k{54.0};              // автопредохранитель: нижний предел экспозиции |c+in_flight|, тыс. USDT (0 — выключен); CE_HMODEL_FUSE_POS_K
+    double fuse_mult{1.5};                // предел агента = max(fuse_pos_k, fuse_mult·(худшая позиция по самой модели)); 0 — только fuse_pos_k; CE_HMODEL_FUSE_MULT
+    long long fuse_hold_ms{600000};       // сколько превышение должно держаться подряд до срабатывания; CE_HMODEL_FUSE_HOLD_MS
     domain::hedge_model::ModelSettings s; // γ, s/2, a, κ, θ, границы режимов
     double sz_default{2.0};               // шум потока переводчика, пока оценка не накоплена, тыс. USDT/√мин
     double sz_link_default{2.0};          // то же для связки
@@ -507,6 +529,22 @@ class LedgerUseCases {
   std::chrono::steady_clock::time_point hmodel_cfg_last_{};
   bool hmodel_cfg_have_{false};
   bool hmodel_mode_bad_logged_{false};
+  HedgeModePgSource hmodel_pg_source_;
+  HedgeFuseSink hmodel_fuse_sink_;
+  int hmodel_pg_mode_{-1};                                        // последнее прочитанное значение режима из PG (−1 — не задан / ошибка)
+  std::chrono::steady_clock::time_point hmodel_pg_last_{};
+  bool hmodel_pg_have_{false};
+  bool hmodel_fuse_latched_{false};                               // предохранитель сработал: режим принудительно shadow, пока PG не перестанет говорить on
+  bool hmodel_fuse_write_pending_{false};                         // запись shadow в PG не удалась — повторять
+  bool hmodel_pg_unset_logged_{false};
+  bool hmodel_pg_armed_logged_{false};                            // предупреждение «PG = on при потолке окружения ниже» выдано
+  std::chrono::steady_clock::time_point hmodel_fuse_try_last_{};  // последняя попытка записи срабатывания в PG (повтор не чаще fuse_retry)
+  std::string hmodel_fuse_agent_;                                 // кто сработал
+  double hmodel_fuse_exposure_k_{0.0};
+  double hmodel_fuse_limit_k_{0.0};
+  long long hmodel_fuse_over_ms_{0};
+  int ReadHedgeModePgModeLocked();                                // 0/1/2/−1; TTL 5 с
+  bool WriteHedgeFuseTripToPg(const std::string& agent, double exposure_k, double limit_k, long long over_ms);
   std::unordered_map<std::string, domain::hedge_model::TranslatorBand> hmodel_tr_cache_;
   std::unordered_map<std::string, domain::hedge_model::LinkBand> hmodel_lk_cache_;
   int hmodel_solves_left_{0};
@@ -571,7 +609,14 @@ class LedgerUseCases {
     bool applied{false};              // режим on: пороги применены к заявке в последней проверке
     bool maker_zone{false};
     int regime{0};                    // 0 noise, 1 mixed, 2 drift
-    double b_m{0}, b_t{0};            // пороги модели после ограничений (пол, потолок), тыс. USDT
+    double b_m{0}, b_t{0};            // ЭФФЕКТИВНЫЕ пороги модели: после ограничений (пол, потолок) и сглаживания; именно они идут в заявки (on), тыс. USDT
+    double b_m_raw{0}, b_t_raw{0};    // сырой расчёт этого такта (до сглаживания), тыс. USDT — для эксперта и истории
+    double transfer_big_raw{0}, transfer_small_raw{0};   // сырые B и b связки (до сглаживания)
+    bool sm_valid{false};             // сглаженные значения инициализированы
+    long long sm_ms{0};               // момент последнего шага сглаживания
+    long long fuse_over_since_ms{0};  // с какого момента экспозиция выше предела предохранителя подряд (0 — не выше)
+    long long fuse_last_ms{0};        // когда предохранитель в последний раз наблюдал агента (разрыв наблюдения сбрасывает отсчёт)
+    bool eligible{false};             // пороги модели могли бы вести этого агента (посчитаны, ручной ширины нет): предохранитель следит за ним и в shadow
     double sz_est{0}, mu_est{0}, theta_est{0}, peclet{0};
     double sigma_bps{0}, fee_maker_bps{0}, fee_taker_bps{0};
     bool has_transfer{false};         // связка: посчитаны порог и цель перевода
@@ -621,6 +666,9 @@ class LedgerUseCases {
   void hmodel_flow_observe_locked(AgentPositionState& st, double delta_k, double exposure_before_k, long long ts_ms, const HedgeModelCfg& hc);
   // ADR-088: расчёт и сохранение модельных порогов агента в st.hmodel (режимы shadow и on). Не меняет позицию и заявки.
   void hmodel_update_locked(const AgentPositionKey& key, AgentPositionState& st, const HedgeModelCfg& hc, long long ts_ms);
+  // ADR-088, условие 2: автопредохранитель режима on. Раз за такт обходит ВСЕХ агентов, которых ведёт модель (не только получивших дельту):
+  // экспозиция |c+in_flight| выше предела агента подряд дольше срока ⇒ shadow, запись в PG и аудит.
+  void hmodel_fuse_sweep_locked(const HedgeModelCfg& hc, long long ts_ms);
   // ADR-087 (модель C′): книга агента по справедливой цене — по одной на агента (у связки обе ноги в одной книге). Под mu_.
   struct AgentBook {
     FairBook book;

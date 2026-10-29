@@ -12,6 +12,11 @@ const BAND_FIELDS = [
   'ce_band_arb_scale',        // множитель порога выхода арбитражёров (ADR-081)
 ];
 
+// ADR-088, условие 1: режим модели порогов хеджа в PG. Эффективный режим в ledger = меньший из потолка окружения (CE_HMODEL_MODE) и этого
+// значения; пустое значение ledger считает shadow. Поле отдельное от полей ширины полосы: свой аудит (ce_hmodel_mode_change).
+const HMODEL_MODES = ['off', 'shadow', 'on'];
+const HMODEL_FIELD = 'ce_hmodel_mode';
+
 const isAbsent = (v) => v === undefined || v === null || v === '';
 const toBool = (v) => {
   if (v === true || v === 'true' || v === 1 || v === '1') return true;
@@ -56,6 +61,12 @@ function parseBandConfig(body, current = {}) {
     if (err) return err;
   }
 
+  if (!isAbsent(b[HMODEL_FIELD])) {
+    const m = String(b[HMODEL_FIELD]).trim().toLowerCase();
+    if (!HMODEL_MODES.includes(m)) return bad(`${HMODEL_FIELD}: ожидается off, shadow или on`);
+    values[HMODEL_FIELD] = m;
+  }
+
   // Сочетания проверяем по итоговым значениям (присланные поверх текущих).
   const fin = (f) => (f in values ? values[f] : current[f]);
   const lim = Number(fin('ce_band_manual_q_lim')), mkt = Number(fin('ce_band_manual_q_mkt'));
@@ -89,7 +100,33 @@ function normalizeBandRow(row) {
     if (row[f] === undefined || row[f] === null) continue;
     out[f] = (f === 'ce_band_manual' || f === 'ce_band_gamma_mode') ? row[f] === true : Number(row[f]);
   }
+  // Режим модели порогов: строка или null («не задан» — ledger считает shadow). Колонки может не быть на старом томе — тогда поля нет.
+  if (row[HMODEL_FIELD] !== undefined) out[HMODEL_FIELD] = row[HMODEL_FIELD] === null ? null : String(row[HMODEL_FIELD]);
   return out;
+}
+
+// Актор из заголовка X-User-Id клиент задаёт сам. Зарезервированные префиксы автоматики («ledger:», «system:», «bff:»…) помечаются «unverified:»,
+// чтобы запись оператора нельзя было выдать за действие предохранителя ledger (actor 'ledger:auto-fuse'). Это не авторизация, а защита от подмены в журнале.
+const RESERVED_ACTOR = /^\s*(ledger|system|bff|auto|matching|market_data|venues|risk)\s*:/i;
+function sanitizeActor(user) {
+  const u = String(user || 'unknown').slice(0, 120);
+  return RESERVED_ACTOR.test(u) ? ('unverified:' + u).slice(0, 120) : u;
+}
+
+// Запись аудита смены режима модели порогов (прежнее → новое). Нет изменения — null (записывать нечего).
+// confirmedAfterFuse — оператор включил on, подтвердив, что пауза после срабатывания предохранителя не нужна.
+function hmodelModeAuditRecord({ user, before, after, nowMs, confirmedAfterFuse }) {
+  const from = before === undefined || before === null ? null : String(before);
+  const to = after === undefined || after === null ? null : String(after);
+  if (to === null || from === to) return null;
+  return {
+    ts: new Date(nowMs === undefined ? Date.now() : nowMs).toISOString(),
+    level: 'INFO',
+    msg: 'F-18 изменён режим модели порогов хеджа (ADR-088)',
+    user: sanitizeActor(user),
+    changed: { [HMODEL_FIELD]: { from, to } },
+    ...(confirmedAfterFuse ? { confirmed_after_fuse: true } : {}),
+  };
 }
 
 // Запись аудита: кто, что было, что стало (только изменившиеся поля). Пишется BFF в лог одной строкой JSON.
@@ -102,7 +139,7 @@ function auditRecord({ user, before, after, nowMs }) {
     ts: new Date(nowMs === undefined ? Date.now() : nowMs).toISOString(),
     level: 'INFO',
     msg: 'F-18 изменена ширина полосы хеджа (ADR-081)',
-    user: user || 'unknown',
+    user: sanitizeActor(user),
     mode_before: bandMode(before), mode_after: bandMode({ ...(before || {}), ...(after || {}) }),
     changed,
   };
@@ -129,7 +166,7 @@ function configAuditRecord({ user, before, after, nowMs }) {
     ts: new Date(nowMs === undefined ? Date.now() : nowMs).toISOString(),
     level: 'INFO',
     msg: 'F-18 изменены настройки клиринга (комиссии хеджа ADR-089, порог от комиссии, skew, способ наклона)',
-    user: String(user || 'unknown').slice(0, 120),
+    user: sanitizeActor(user),
     changed,
   };
 }
@@ -157,4 +194,4 @@ function checkOperatorRequest(headers, allowedHosts = []) {
   return { ok: true };
 }
 
-module.exports = { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS, MIN_Q, MAX_Q };
+module.exports = { parseBandConfig, bandMode, normalizeBandRow, auditRecord, sanitizeActor, hmodelModeAuditRecord, HMODEL_FIELD, HMODEL_MODES, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS, MIN_Q, MAX_Q };

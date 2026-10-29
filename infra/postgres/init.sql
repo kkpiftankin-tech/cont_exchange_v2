@@ -254,8 +254,10 @@ CREATE TABLE IF NOT EXISTS ce_agent_band_history (
   in_flight          NUMERIC(38, 12),
   z_lim              NUMERIC(38, 12),                 -- РАБОЧИЕ пороги
   z_mkt              NUMERIC(38, 12),
-  b_m                NUMERIC(38, 12),                 -- пороги МОДЕЛИ; NULL — не посчитаны; 0 — законное значение
+  b_m                NUMERIC(38, 12),                 -- ЭФФЕКТИВНЫЕ пороги МОДЕЛИ (сглаженные, с потолком); NULL — не посчитаны; 0 — законное значение
   b_t                NUMERIC(38, 12),
+  b_m_raw            NUMERIC(38, 12),                 -- сырой расчёт того же такта до сглаживания (поправка о сглаживании ADR-088)
+  b_t_raw            NUMERIC(38, 12),
   regime             TEXT,                            -- 'noise' | 'mixed' | 'drift'
   computed           BOOLEAN NOT NULL DEFAULT FALSE,
   applied            BOOLEAN NOT NULL DEFAULT FALSE,
@@ -269,11 +271,18 @@ CREATE TABLE IF NOT EXISTS ce_agent_band_history (
   fee_taker_bps      DOUBLE PRECISION,
   transfer_threshold NUMERIC(38, 12),
   transfer_target    NUMERIC(38, 12),
+  transfer_threshold_raw NUMERIC(38, 12),             -- сырые B и b связки до сглаживания
+  transfer_target_raw    NUMERIC(38, 12),
   est_minutes        INTEGER NOT NULL DEFAULT 0,      -- 0 => sz_est по умолчанию, а не оценка
   params_hash        BIGINT,
   PRIMARY KEY (agent_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
+-- Таблица, созданная до поправки о сглаживании (ADR-088), получает колонки сырых порогов (BFF делает то же при старте).
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS b_m_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS b_t_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS transfer_threshold_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS transfer_target_raw NUMERIC(38, 12);
 
 -- ce_system_pnl_baseline / ce_system_pnl_history: прибыль системы CE по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083).
 -- Единственный писатель — BFF (frontend/api/server.js, тот же семплер раз в минуту). База (остатки и цены) задаётся при первом замере и
@@ -1191,8 +1200,14 @@ ALTER TABLE f05a_clearing_config
 ALTER TABLE f05a_clearing_config
     ADD COLUMN IF NOT EXISTS ce_band_arb_scale NUMERIC(38,18) NOT NULL DEFAULT 1;
 
+-- ADR-088 (условие 1): режим модели порогов хеджа. NULL — не задан: ledger считает shadow. off | shadow | on. Эффективный режим в ledger =
+-- меньший из потолка окружения CE_HMODEL_MODE и этого значения, поэтому рабочий режим включается только согласием и окружения, и PG.
+-- Пишут: BFF (оператор, строка аудита ce_hmodel_mode_change) и ledger (автопредохранитель, только on → shadow, строка ce_hmodel_fuse_trip).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_hmodel_mode TEXT CONSTRAINT f05a_clearing_config_hmodel_mode CHECK (ce_hmodel_mode IN ('off', 'shadow', 'on'));
+
 -- ADR-081: журнал операторских действий (аудит, CLAUDE.md §1.7). Пишет BFF в одной транзакции с изменением настроек;
--- запись неизменяема по соглашению (только INSERT). actor — заголовок X-User-Id (клиент выставляет сам, не доказательство личности).
+-- запись неизменяема по соглашению (только INSERT). Пишут BFF (оператор) и ledger (автопредохранитель ADR-088, actor 'ledger:auto-fuse'). actor — заголовок X-User-Id (клиент выставляет сам, не доказательство личности).
 CREATE TABLE IF NOT EXISTS operator_audit_log (
     id          BIGSERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT now(),

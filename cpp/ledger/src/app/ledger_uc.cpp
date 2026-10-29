@@ -1180,7 +1180,8 @@ void LedgerUseCases::maybe_queue_link_transfer_locked(const AgentPositionKey& ke
     if (hc.mode != 0) {
       hmodel_update_locked(key, st, hc, ts_ms);
       st.hmodel.applied = false;
-      if (hc.mode == 2 && !LoadBandFeeConfig().manual && st.hmodel.computed && st.hmodel.has_transfer) {
+      st.hmodel.eligible = !LoadBandFeeConfig().manual && st.hmodel.computed && st.hmodel.has_transfer;   // ведёт ли модель связку (предохранитель следит за ней)
+      if (hc.mode == 2 && !hmodel_fuse_latched_ && st.hmodel.eligible) {
         z_bar = st.hmodel.transfer_big;
         model_target = st.hmodel.transfer_small;
         st.z_lim = dec6(z_bar);
@@ -1454,6 +1455,9 @@ void LedgerUseCases::ApplyPositionDelta(
     }
   }
 
+  // ADR-088, условие 2: автопредохранитель режима on — обход всех агентов, которых ведёт модель (включая тех, у кого в этом такте нет дельт).
+  hmodel_fuse_sweep_locked(LoadHedgeModelCfgLocked(), ts_ms);
+
   // Снимаем снапшот такта, только если он реально затронул позиции агентов —
   // пустые такты (agent_deltas.empty() или все agent_id пусты) не раздувают
   // ring историю. idempotency по batch_id гарантирована guard'ом выше на
@@ -1546,6 +1550,9 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
   const std::unordered_set<std::string> want_venues(req.venues().begin(), req.venues().end());
 
   std::lock_guard<std::mutex> lg(mu_);
+  // ADR-088: режим может стать off «на лету» (переключатель в PG), а состояние агентов от прошлых расчётов остаётся в памяти; блок отдаём
+  // только при эффективном режиме не off, а mode и applied — по текущему эффективному режиму (а не по последнему расчёту агента).
+  const HedgeModelCfg& hcg = LoadHedgeModelCfgLocked();
   for (const auto& [key, st] : agent_positions_) {
     const auto& [agent_id, asset, venue] = key;
     if (!want_agents.empty() && !want_agents.count(agent_id)) continue;
@@ -1567,17 +1574,18 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
     p->set_updated_at_ms(st.updated_at_ms);
     p->set_last_batch_id(st.last_batch_id);
     // ADR-088: модельные пороги — только когда модель считалась (shadow|on); в режиме off поле не заполняется.
-    if (!st.hmodel.mode.empty()) {
+    if (hcg.mode != 0 && !st.hmodel.mode.empty()) {
       const HedgeModelState& hm = st.hmodel;
       const auto safe6 = [](double x) { return dec6(std::isfinite(x) ? x : 0.0); };
       auto* h = p->mutable_hedge_model();
       h->set_computed(hm.computed);
-      h->set_applied(hm.applied);
-      h->set_mode(hm.mode);
+      h->set_applied(hm.applied && hcg.mode == 2);
+      h->set_mode(hcg.mode == 2 ? "on" : "shadow");
       h->set_reason(hm.reason);
       h->set_computed_at_ms(hm.computed_at_ms);
       h->set_est_minutes(static_cast<std::uint32_t>(std::max<long long>(0, hm.est_minutes)));
       h->set_params_hash(hm.params_hash);
+      h->set_mode_ceiling(hcg.mode_ceiling == 2 ? "on" : (hcg.mode_ceiling == 1 ? "shadow" : "off"));
       *h->mutable_sz_est() = safe6(hm.sz_est).to_proto();
       *h->mutable_mu_est() = safe6(hm.mu_est).to_proto();
       *h->mutable_theta_est() = safe6(hm.theta_est).to_proto();
@@ -1585,6 +1593,8 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
         h->set_regime(static_cast<fob::ledger::v1::HedgeModelRegime>(hm.regime + 1));
         *h->mutable_b_m() = safe6(hm.b_m).to_proto();   // ноль — законное значение (ребейт мейкера); наличие определяет has_b_m
         *h->mutable_b_t() = safe6(hm.b_t).to_proto();
+        *h->mutable_b_m_raw() = safe6(hm.b_m_raw).to_proto();   // сырой расчёт этого такта; b_m/b_t выше — после сглаживания (ADR-088)
+        *h->mutable_b_t_raw() = safe6(hm.b_t_raw).to_proto();
         h->set_peclet(std::isfinite(hm.peclet) ? hm.peclet : 0.0);
         *h->mutable_sigma_bps() = safe6(hm.sigma_bps).to_proto();
         *h->mutable_fee_maker_bps() = safe6(hm.fee_maker_bps).to_proto();
@@ -1593,6 +1603,8 @@ fob::ledger::v1::GetAgentPositionsResponse LedgerUseCases::GetAgentPositions(
       if (hm.computed && hm.has_transfer) {
         *h->mutable_transfer_threshold() = safe6(hm.transfer_big).to_proto();
         *h->mutable_transfer_target() = safe6(hm.transfer_small).to_proto();   // ноль — законное значение (фиксированная плата сети)
+        *h->mutable_transfer_threshold_raw() = safe6(hm.transfer_big_raw).to_proto();
+        *h->mutable_transfer_target_raw() = safe6(hm.transfer_small_raw).to_proto();
       }
     }
   }
@@ -2642,6 +2654,112 @@ std::string FmtG(double x) {
 
 }  // namespace
 
+// ADR-088, условие 1: режим модели из f05a_clearing_config.ce_hmodel_mode ('off' | 'shadow' | 'on'; NULL — не задан). TTL 5 с.
+// −1 при любой ошибке чтения, отсутствии колонки на старом томе, NULL и недопустимом значении (вызывающий трактует как shadow).
+// Вызывается под mu_; poll_conn_mu_ берётся внутри (порядок mu_ → poll_conn_mu_ тот же, что у остальных загрузчиков).
+int LedgerUseCases::ReadHedgeModePgModeLocked() {
+  if (hmodel_pg_source_) return hmodel_pg_source_();
+  const auto now = std::chrono::steady_clock::now();
+  if (hmodel_pg_have_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - hmodel_pg_last_).count() < 5000)
+    return hmodel_pg_mode_;
+  int v = -1;
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (!postgres_dsn_.empty()) {
+    std::lock_guard<std::mutex> pk(poll_conn_mu_);
+    try {
+      pqxx::work tx(poll_conn());
+      const pqxx::result r = tx.exec("SELECT ce_hmodel_mode FROM f05a_clearing_config WHERE id=1");
+      tx.commit();
+      if (!r.empty() && !r[0][0].is_null()) {
+        const std::string t = r[0][0].as<std::string>();
+        if (t == "off") v = 0;
+        else if (t == "shadow") v = 1;
+        else if (t == "on") v = 2;
+      }
+    } catch (const std::exception&) {
+      poll_conn_.reset();   // нет колонки / обрыв — fail-safe: shadow
+      v = -1;
+    }
+  }
+#endif
+  hmodel_pg_mode_ = v;
+  hmodel_pg_last_ = now;
+  hmodel_pg_have_ = true;
+  return v;
+}
+
+// ADR-088, условие 2: записать срабатывание автопредохранителя — режим shadow в PG и строка в журнал оператора, одной транзакцией.
+// Меняет ТОЛЬКО ce_hmodel_mode и только вниз (on → shadow). actor «ledger:auto-fuse» отличает автоматическое действие от оператора.
+bool LedgerUseCases::WriteHedgeFuseTripToPg(const std::string& agent, double exposure_k, double limit_k, long long over_ms) {
+  if (hmodel_fuse_sink_) return hmodel_fuse_sink_(agent, exposure_k, limit_k, over_ms);
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  if (postgres_dsn_.empty()) return false;
+  std::lock_guard<std::mutex> pk(poll_conn_mu_);
+  try {
+    pqxx::work tx(poll_conn());
+    const pqxx::result upd = tx.exec("UPDATE f05a_clearing_config SET ce_hmodel_mode='shadow', updated_at=now() WHERE id=1 AND ce_hmodel_mode='on'");
+    // Аудит только при реальном переходе on → shadow: если оператор уже поставил off/shadow, ложной записи «on → shadow» быть не должно.
+    if (upd.affected_rows() > 0)
+      tx.exec_params(
+          "INSERT INTO operator_audit_log (actor, action, details) VALUES ($1, $2, "
+          "jsonb_build_object('trigger','auto_fuse','agent_id',$3::text,'exposure_k',$4::double precision,"
+          "'limit_k',$5::double precision,'over_ms',$6::bigint,'from','on','to','shadow'))",
+          "ledger:auto-fuse", "ce_hmodel_fuse_trip", agent, exposure_k, limit_k, over_ms);
+    tx.commit();
+    return true;
+  } catch (const std::exception& e) {
+    poll_conn_.reset();
+    cex::common::log_json("ERROR", "ADR-088 автопредохранитель: запись shadow в PG не удалась", {{"error", e.what()}});
+    return false;
+  }
+#else
+  (void)agent; (void)exposure_k; (void)limit_k; (void)over_ms;
+  return false;
+#endif
+}
+
+// ADR-088, условие 2: автопредохранитель режима on. Раз за такт обходит ВСЕХ агентов, которых ведёт (или вела бы) модель, — не только получивших
+// дельту: хедж-исполнение снижает c+in_flight мимо дельт, а позиция без дельт не должна оставаться незамеченной. Предел агента —
+// max(fuse_pos_k, fuse_mult·худшая позиция по самой модели): модель сама допускает до z_mkt+(z_mkt−z_lim) (переводчик) или B (связка), и
+// легальное состояние политики не должно гасить режим. Отсчёт идёт и в shadow (переключение shadow→on не обнуляет его), срабатывает только в on.
+// Гистерезис: отсчёт сбрасывается ниже 0,9 предела; разрыв наблюдения (простой ledger) начинает отсчёт заново. Экспозиция — нетто |c+in_flight|.
+void LedgerUseCases::hmodel_fuse_sweep_locked(const HedgeModelCfg& hc, long long ts_ms) {
+  if (hc.mode == 0) return;
+  const bool armed = hc.mode == 2 && !hmodel_fuse_latched_;
+  const long long gap_ms = std::max<long long>(30000, hc.fuse_hold_ms / 4);
+  for (auto& [key, st] : agent_positions_) {
+    HedgeModelState& m = st.hmodel;
+    if (!(hc.fuse_pos_k > 0.0) || !m.eligible) { m.fuse_over_since_ms = 0; m.fuse_last_ms = 0; continue; }
+    if (m.fuse_last_ms > 0 && ts_ms - m.fuse_last_ms > gap_ms) m.fuse_over_since_ms = 0;
+    m.fuse_last_ms = ts_ms;
+    const double exposure = std::fabs(static_cast<double>(st.position) + static_cast<double>(st.in_flight));
+    const double model_max = st.agent_kind == "arbitrageur" ? m.transfer_big : (2.0 * m.b_t - m.b_m);
+    const double limit = std::max(hc.fuse_pos_k, hc.fuse_mult * model_max);
+    if (!std::isfinite(exposure) || !std::isfinite(limit)) { m.fuse_over_since_ms = 0; continue; }
+    if (exposure > limit) {
+      if (m.fuse_over_since_ms == 0) m.fuse_over_since_ms = ts_ms;
+    } else if (exposure < 0.9 * limit) {
+      m.fuse_over_since_ms = 0;
+    }
+    if (!armed || m.fuse_over_since_ms == 0) continue;
+    const long long over_ms = ts_ms - m.fuse_over_since_ms;
+    if (over_ms < hc.fuse_hold_ms) continue;
+    hmodel_fuse_latched_ = true;
+    hmodel_fuse_agent_ = std::get<0>(key);
+    hmodel_fuse_exposure_k_ = exposure;
+    hmodel_fuse_limit_k_ = limit;
+    hmodel_fuse_over_ms_ = over_ms;
+    cex::common::log_json("ERROR", "ADR-088 автопредохранитель сработал: режим on → shadow",
+                          {{"agent_id", hmodel_fuse_agent_}, {"exposure_k", std::to_string(exposure)},
+                           {"limit_k", std::to_string(limit)}, {"over_ms", std::to_string(over_ms)}});
+    hmodel_fuse_try_last_ = std::chrono::steady_clock::now();
+    hmodel_fuse_write_pending_ = !WriteHedgeFuseTripToPg(hmodel_fuse_agent_, exposure, limit, over_ms);
+    hmodel_pg_have_ = false;
+    hmodel_cfg_have_ = false;   // следующая проверка уже в shadow
+    return;                      // одного срабатывания достаточно: режим один на весь ledger
+  }
+}
+
 // ADR-088: настройки модели порогов хеджа из окружения ledger (TTL 1 с). Недопустимые значения заменяются умолчаниями страницы.
 const LedgerUseCases::HedgeModelCfg& LedgerUseCases::LoadHedgeModelCfgLocked() {
   const auto now = std::chrono::steady_clock::now();
@@ -2651,15 +2769,55 @@ const LedgerUseCases::HedgeModelCfg& LedgerUseCases::LoadHedgeModelCfgLocked() {
   HedgeModelCfg c;
   const std::string m = cex::common::Env::get_string("CE_HMODEL_MODE", "off");
   if (m == "shadow") {
-    c.mode = 1;
+    c.mode_ceiling = 1;
   } else if (m == "on") {
-    c.mode = 2;
+    c.mode_ceiling = 2;
   } else {
-    c.mode = 0;
+    c.mode_ceiling = 0;
     if (!m.empty() && m != "off" && !hmodel_mode_bad_logged_) {
       hmodel_mode_bad_logged_ = true;
       cex::common::log_json("WARN", "ADR-088 CE_HMODEL_MODE недопустим — модель выключена",
                             {{"value", m}, {"allowed", "off|shadow|on"}});
+    }
+  }
+  // ADR-088, условие 1: эффективный режим = меньший из потолка окружения и значения в f05a_clearing_config.ce_hmodel_mode.
+  // Значение PG не задано или не прочитано (−1) считается shadow: рабочий режим включается только согласием окружения И PG.
+  // Условие 2: сработавший автопредохранитель принудительно держит shadow, пока PG не перестанет говорить on.
+  c.mode = c.mode_ceiling;
+  if (c.mode_ceiling > 0) {
+    const int pg = ReadHedgeModePgModeLocked();
+    c.mode = std::min(c.mode_ceiling, pg < 0 ? 1 : pg);
+    if (c.mode_ceiling == 2 && pg < 0 && !hmodel_pg_unset_logged_) {
+      hmodel_pg_unset_logged_ = true;
+      cex::common::log_json("WARN", "ADR-088 ce_hmodel_mode не задан в PG — рабочий режим не включён, модель в shadow",
+                            {{"ceiling", "on"}, {"effective", "shadow"}});
+    }
+    if (pg == 2 && c.mode_ceiling < 2 && !hmodel_pg_armed_logged_) {
+      hmodel_pg_armed_logged_ = true;   // on в PG бессрочно: при подъёме потолка окружения он включится сразу — оператор должен это знать
+      cex::common::log_json("WARN", "ADR-088 в PG режим on, потолок окружения ниже — рабочий режим включится при подъёме потолка",
+                            {{"pg_mode", "on"}, {"ceiling", c.mode_ceiling == 1 ? "shadow" : "off"}});
+    }
+    if (pg != 2) hmodel_pg_armed_logged_ = false;
+    if (hmodel_fuse_latched_) {
+      if (hmodel_fuse_write_pending_ && (pg == 0 || pg == 1)) hmodel_fuse_write_pending_ = false;   // PG уже не on — писать нечего
+      if (hmodel_fuse_write_pending_) {
+        // Повтор записи не чаще CE_HMODEL_FUSE_RETRY_MS (деф. 30 с): запись идёт под mu_ и при недоступном PG иначе била бы каждую секунду.
+        const auto tnow = std::chrono::steady_clock::now();
+        const long long retry_ms = std::max<long long>(0, static_cast<long long>(env_double("CE_HMODEL_FUSE_RETRY_MS", 30000.0)));
+        if (retry_ms == 0 || std::chrono::duration_cast<std::chrono::milliseconds>(tnow - hmodel_fuse_try_last_).count() >= retry_ms) {
+          hmodel_fuse_try_last_ = tnow;
+          if (WriteHedgeFuseTripToPg(hmodel_fuse_agent_, hmodel_fuse_exposure_k_, hmodel_fuse_limit_k_, hmodel_fuse_over_ms_)) {
+            hmodel_fuse_write_pending_ = false;
+            hmodel_pg_have_ = false;             // перечитать режим из PG: теперь там shadow
+          }
+        }
+      }
+      if (!hmodel_fuse_write_pending_ && (pg == 0 || pg == 1)) {
+        hmodel_fuse_latched_ = false;            // PG уже не on (запись предохранителя или решение оператора) — защёлка снята
+        cex::common::log_json("INFO", "ADR-088 автопредохранитель: защёлка снята, PG не в рабочем режиме", {{"pg_mode", std::to_string(pg)}});
+      } else {
+        c.mode = std::min(c.mode, 1);
+      }
     }
   }
   const auto pos = [](double v, double def) { return v > 0.0 ? v : def; };
@@ -2687,12 +2845,17 @@ const LedgerUseCases::HedgeModelCfg& LedgerUseCases::LoadHedgeModelCfgLocked() {
   c.max_solves_per_tact = std::max(1, static_cast<int>(env_double("CE_HMODEL_MAX_SOLVES_PER_TACT", 4.0)));
   c.mu_z = nonneg(env_double("CE_HMODEL_MU_Z", 2.0), 2.0);
   c.budget_hold_ms = std::max<long long>(0, static_cast<long long>(env_double("CE_HMODEL_BUDGET_HOLD_MS", 300000.0)));
+  c.smooth_tau_ms = nonneg(env_double("CE_HMODEL_SMOOTH_TAU_MS", 900000.0), 900000.0);
+  c.smooth_gap_ms = std::max(1800000.0, 4.0 * c.smooth_tau_ms);
+  c.fuse_pos_k = nonneg(env_double("CE_HMODEL_FUSE_POS_K", 54.0), 54.0);
+  c.fuse_mult = nonneg(env_double("CE_HMODEL_FUSE_MULT", 1.5), 1.5);
+  c.fuse_hold_ms = std::max<long long>(0, static_cast<long long>(env_double("CE_HMODEL_FUSE_HOLD_MS", 600000.0)));
   const std::string spread_map_text = cex::common::Env::get_string("CE_HMODEL_HALF_SPREAD_MAP", "");
   c.half_spread_bps = ParseSpreadMap(spread_map_text);
   c.hash = Fnv1a32(FmtG(c.s.gamma) + "|" + FmtG(c.s.half_spread_bps) + "|" + FmtG(c.s.adverse_bps) + "|" + FmtG(c.s.kappa) + "|" +
                    FmtG(c.s.theta) + "|" + FmtG(c.sz_default) + "|" + FmtG(c.sz_link_default) + "|" + FmtG(c.transfer_k_default) + "|" +
                    FmtG(c.transfer_pct_bps) + "|" + FmtG(c.basis_sigma_bps) + "|" + FmtG(c.capital_pct) + "|" + FmtG(c.transfer_min) + "|" +
-                   FmtG(c.sigma_scale) + "|" + FmtG(c.cap) + "|" + FmtG(c.mu_z) + "|" + spread_map_text);
+                   FmtG(c.sigma_scale) + "|" + FmtG(c.cap) + "|" + FmtG(c.mu_z) + "|" + FmtG(c.smooth_tau_ms) + "|" + spread_map_text);
   if (hmodel_tr_cache_.size() > 4096) hmodel_tr_cache_.clear();
   if (hmodel_lk_cache_.size() > 1024) hmodel_lk_cache_.clear();
   hmodel_cfg_ = c;
@@ -2765,17 +2928,33 @@ void LedgerUseCases::hmodel_update_locked(const AgentPositionKey& key, AgentPosi
   m.has_transfer = false;
   m.reason.clear();
   // Бюджет расчётов за такт исчерпан: прежние пороги держим не дольше budget_hold_ms, а не откатываем агента на старое правило.
-  const auto hold_on_budget = [&]() {
+  // Тот же приём для временного сбоя входов (нет свежей волатильности): иначе при on агент мгновенно откатывался бы на правило проекта
+  // (ступень порога, например 36 → 18, и рыночная заявка сразу) и обратно при возврате данных. reason = «<причина>_hold», computed = true.
+  const auto hold_last = [&](const char* why) {
     if (prev_ok && m.last_ok_ms > 0 && ts_ms - m.last_ok_ms <= hc.budget_hold_ms) {
       m.computed = true;
       m.has_transfer = prev_has_transfer;
       m.computed_at_ms = m.last_ok_ms;
-      m.reason = "budget_hold";
+      m.reason = std::string(why) + "_hold";
     } else {
-      m.reason = "budget";
+      m.reason = why;
     }
   };
+  const auto hold_on_budget = [&]() { hold_last("budget"); };
   const bool is_link = st.agent_kind == "arbitrageur";
+
+  // Сглаживание (ADR-088, поправка о сглаживании): эффективные пороги = экспоненциальное среднее сырых расчётов с постоянной
+  // времени τ; первое значение и значение после долгого пропуска берутся сырыми. Шаг считается по времени между расчётами,
+  // поэтому несколько вызовов за один такт (dt = 0) значение не меняют. Возвращает true, если это инициализация.
+  const auto smooth_begin = [&]() {
+    const double dt = m.sm_valid ? static_cast<double>(ts_ms - m.sm_ms) : 0.0;
+    const bool init = !m.sm_valid || std::fabs(dt) > hc.smooth_gap_ms;   // небольшой откат времени (dt < 0) значение не меняет и не обнуляет
+    return std::make_pair(init, init ? 0.0 : dt);
+  };
+  const auto smooth_end = [&](bool init) {
+    if (init || ts_ms > m.sm_ms) m.sm_ms = ts_ms;
+    m.sm_valid = true;
+  };
 
   // Оценки потока: пока накоплено меньше минимума минут, шум берётся по умолчанию, дрейф — нулевой.
   const bool have_est = m.minutes >= hc.est_min_minutes;
@@ -2836,8 +3015,21 @@ void LedgerUseCases::hmodel_update_locked(const AgentPositionKey& key, AgentPosi
     if (!band.ok) { m.reason = "invalid_input"; return; }
     m.last_ok_ms = ts_ms;
     m.has_transfer = true;
-    m.transfer_big = band.B;
-    m.transfer_small = band.b;
+    m.transfer_big_raw = band.B;
+    m.transfer_small_raw = band.b;
+    {
+      const auto [init, dt] = smooth_begin();
+      if (init) {
+        m.transfer_big = band.B;
+        m.transfer_small = band.b;
+      } else {
+        m.transfer_big = hm::EwSmooth(m.transfer_big, band.B, dt, hc.smooth_tau_ms);
+        m.transfer_small = hm::EwSmooth(m.transfer_small, band.b, dt, hc.smooth_tau_ms);
+      }
+      m.transfer_big = std::min(m.transfer_big, hc.cap);
+      m.transfer_small = std::min(m.transfer_small, m.transfer_big);
+      smooth_end(init);
+    }
     m.computed = true;
     m.regime = 0;
     m.params_hash = Fnv1a32(FmtG(hc.hash) + "|" + ck);
@@ -2853,9 +3045,9 @@ void LedgerUseCases::hmodel_update_locked(const AgentPositionKey& key, AgentPosi
   long long samples = 0, age_ms = -1;
   const bool got = sigma_source_ ? sigma_source_(symbol, &sigma_s, &samples, &age_ms)
                                  : LoadAssetSigma(symbol, &sigma_s, &samples, &age_ms);
-  if (!got || !(sigma_s > 0.0)) { m.reason = "no_sigma"; return; }
-  if (samples < hc.sigma_min_samples) { m.reason = "sigma_samples"; return; }
-  if (age_ms < 0 || static_cast<double>(age_ms) >= hc.sigma_stale_ms) { m.reason = "sigma_stale"; return; }
+  if (!got || !(sigma_s > 0.0)) { hold_last("no_sigma"); return; }
+  if (samples < hc.sigma_min_samples) { hold_last("sigma_samples"); return; }
+  if (age_ms < 0 || static_cast<double>(age_ms) >= hc.sigma_stale_ms) { hold_last("sigma_stale"); return; }
   const auto cfgb = LoadBandFeeConfig();   // ставки: cmkt_bps — комиссия тейкера, clim_bps — мейкера (ADR-089: без спреда)
   hm::TranslatorInputs in;
   in.sigma_bps = RoundSig(hm::SigmaSecToBpsPerSqrtMin(sigma_s) * hc.sigma_scale, 3);
@@ -2887,8 +3079,22 @@ void LedgerUseCases::hmodel_update_locked(const AgentPositionKey& key, AgentPosi
   m.computed = true;
   m.regime = static_cast<int>(band.regime);
   m.maker_zone = band.maker_zone;
-  m.b_m = band.z_lim;
-  m.b_t = band.z_mkt;
+  m.b_m_raw = band.z_lim;
+  m.b_t_raw = band.z_mkt;
+  {
+    const auto [init, dt] = smooth_begin();
+    if (init) {
+      m.b_m = band.z_lim;
+      m.b_t = band.z_mkt;
+    } else {
+      m.b_m = hm::EwSmooth(m.b_m, band.z_lim, dt, hc.smooth_tau_ms);
+      m.b_t = hm::EwSmooth(m.b_t, band.z_mkt, dt, hc.smooth_tau_ms);
+    }
+    // Пол, потолок и порядок b_м ≤ b_т — инварианты результата, не только сырого расчёта: пол q_floor мог вырасти между расчётами.
+    m.b_m = std::min(std::max(m.b_m, q_floor), hc.cap);
+    m.b_t = std::min(std::max(m.b_t, m.b_m), hc.cap);
+    smooth_end(init);
+  }
   m.peclet = band.pe;
   m.params_hash = Fnv1a32(FmtG(hc.hash) + "|" + FmtG(S.half_spread_bps) + "|" + FmtG(S.adverse_bps));
 }
@@ -3295,7 +3501,8 @@ void LedgerUseCases::detect_and_emit_band_breach_locked(
   // ADR-088 (режим on): пороги переводчика — из модели (мейкер+тейкер, шум потока, дрейф). Не считается — остаётся прежнее правило.
   // Ручная ширина (ADR-081) выше модели. У связки порог и цель перевода берутся в maybe_queue_link_transfer_locked.
   bool hm_applied = false;
-  if (hc.mode == 2 && !is_arbitrageur && !cfg.manual && st.hmodel.computed) {
+  if (!is_arbitrageur) st.hmodel.eligible = !cfg.manual && st.hmodel.computed;   // ведёт ли модель переводчика (предохранитель следит за ним и в shadow)
+  if (hc.mode == 2 && !hmodel_fuse_latched_ && !is_arbitrageur && !cfg.manual && st.hmodel.computed) {
     z_lim = st.hmodel.b_m;
     z_mkt = st.hmodel.b_t;
     hm_applied = true;

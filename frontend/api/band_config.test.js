@@ -1,6 +1,6 @@
 // Self-contained node-тест: `node band_config.test.js`. ADR-081 — проверка настроек ширины полосы хеджа.
 const assert = require('assert');
-const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, configAuditRecord, CORE_FIELDS, checkOperatorRequest } = require('./band_config');
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, sanitizeActor, hmodelModeAuditRecord, HMODEL_FIELD, BAND_FIELDS, configAuditRecord, CORE_FIELDS, checkOperatorRequest } = require('./band_config');
 let failed = 0;
 const check = (n, c) => { if (c) console.log('[OK] ' + n); else { console.error('[FAIL] ' + n); failed++; } };
 
@@ -109,6 +109,39 @@ const cur = { ce_band_manual: false, ce_band_manual_q_lim: 5, ce_band_manual_q_m
   check('аудит настроек: первой строки не было — from = null', first.changed.ce_maker_fee_bps.from === null);
   check('аудит настроек: имя актора ограничено 120 знаками', configAuditRecord({ user: 'x'.repeat(500), before: null, after: base }).user.length === 120);
   check('аудит настроек: список полей совпадает с перезаписываемыми POST-маршрутом', CORE_FIELDS.length === 8 && CORE_FIELDS.includes('ce_maker_fee_bps') && CORE_FIELDS.includes('ce_band_fee_k'));
+}
+
+// --- ADR-088, условие 1: режим модели порогов в PG
+{
+  check('режим модели: on принимается', parseBandConfig({ ce_hmodel_mode: 'on' }, {}).values.ce_hmodel_mode === 'on');
+  check('режим модели: регистр и пробелы нормализуются', parseBandConfig({ ce_hmodel_mode: ' Shadow ' }, {}).values.ce_hmodel_mode === 'shadow');
+  check('режим модели: off принимается', parseBandConfig({ ce_hmodel_mode: 'off' }, {}).values.ce_hmodel_mode === 'off');
+  check('режим модели: недопустимое значение отклоняется', !parseBandConfig({ ce_hmodel_mode: 'auto' }, {}).ok && !parseBandConfig({ ce_hmodel_mode: 'true' }, {}).ok);
+  check('режим модели: не прислан — поля в значениях нет (не меняется)', !('ce_hmodel_mode' in parseBandConfig({ ce_band_arb_scale: 2 }, {}).values));
+  check('режим модели: пустая строка = не прислан', !('ce_hmodel_mode' in parseBandConfig({ ce_hmodel_mode: '' }, {}).values));
+  check('режим модели: не входит в список полей ширины полосы (свой аудит и своя запись)', !BAND_FIELDS.includes(HMODEL_FIELD));
+  check('режим модели: строка из PG сохраняется строкой, NULL — null, нет колонки — поля нет',
+    normalizeBandRow({ ce_hmodel_mode: 'on' }).ce_hmodel_mode === 'on' && normalizeBandRow({ ce_hmodel_mode: null }).ce_hmodel_mode === null
+    && !('ce_hmodel_mode' in normalizeBandRow({ ce_band_manual: false })));
+  const a = hmodelModeAuditRecord({ user: 'ops', before: 'shadow', after: 'on', nowMs: 0 });
+  check('аудит режима: прежнее → новое и актор', a.user === 'ops' && a.changed.ce_hmodel_mode.from === 'shadow' && a.changed.ce_hmodel_mode.to === 'on');
+  check('аудит режима: не было значения — from = null', hmodelModeAuditRecord({ user: 'ops', before: null, after: 'shadow' }).changed.ce_hmodel_mode.from === null);
+  check('аудит режима: без изменения записи нет', hmodelModeAuditRecord({ user: 'ops', before: 'on', after: 'on' }) === null);
+  check('аудит режима: не прислан — записи нет', hmodelModeAuditRecord({ user: 'ops', before: 'on', after: undefined }) === null);
+  check('актор: зарезервированные префиксы автоматики помечаются unverified:',
+    sanitizeActor('ledger:auto-fuse') === 'unverified:ledger:auto-fuse' && sanitizeActor(' System : x') === 'unverified: System : x' && sanitizeActor('BFF:ops').startsWith('unverified:'));
+  check('актор: обычные имена и пустое значение не меняются', sanitizeActor('alex') === 'alex' && sanitizeActor('') === 'unknown' && sanitizeActor(undefined) === 'unknown'
+    && sanitizeActor('ledgerx') === 'ledgerx' && sanitizeActor('a@b.c') === 'a@b.c');
+  check('актор: помеченное значение не длиннее 120 знаков', sanitizeActor('ledger:' + 'x'.repeat(500)).length === 120);
+  check('аудит режима: подмена актора ledger:auto-fuse помечена во всех трёх журналах',
+    hmodelModeAuditRecord({ user: 'ledger:auto-fuse', before: 'on', after: 'shadow' }).user.startsWith('unverified:')
+    && auditRecord({ user: 'ledger:auto-fuse', before: {}, after: { ce_band_arb_scale: 2 } }).user.startsWith('unverified:')
+    && configAuditRecord({ user: 'ledger:auto-fuse', before: null, after: { ce_band_fee_k: 1 } }).user.startsWith('unverified:'));
+  check('аудит режима: подтверждение после предохранителя фиксируется в записи',
+    hmodelModeAuditRecord({ user: 'ops', before: 'shadow', after: 'on', confirmedAfterFuse: true }).confirmed_after_fuse === true
+    && !('confirmed_after_fuse' in hmodelModeAuditRecord({ user: 'ops', before: 'shadow', after: 'on' })));
+  check('аудит режима: актор по умолчанию unknown, длина ограничена', hmodelModeAuditRecord({ before: null, after: 'on' }).user === 'unknown'
+    && hmodelModeAuditRecord({ user: 'x'.repeat(500), before: null, after: 'on' }).user.length === 120);
 }
 
 assert.strictEqual(failed, 0, failed + ' failed');
