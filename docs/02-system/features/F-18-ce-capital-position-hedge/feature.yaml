@@ -55,23 +55,25 @@ capabilities:
   - id: CAP-F18-HEDGE-MODEL
     title: Пороги хеджа по модели оптимального управления (тейкер, мейкер+тейкер, перевод), режим off/shadow/on
     status: {docs: complete, code: done, runtime: dev}  # на dev включается только теневой режим; рабочий режим не включён (ADR-088, условия включения)
-    acceptanceCriteria: [AC-F18v2-34, AC-F18v2-35, AC-F18v2-36]
+    acceptanceCriteria: [AC-F18v2-34, AC-F18v2-35, AC-F18v2-36, AC-F18v2-37]
     adrs: [ADR-088, ADR-089]   # ADR-066 и ADR-081 затронуты частично (supersedes_rule в ADR-088), обратные ссылки появятся при принятии
     ucs: [UC-F18-04]
     calcs: [CALC-CE-HEDGE-THRESHOLD-MODEL]
     contracts: [docs/06-api/grpc/ledger-agent-positions.md, docs/06-api/rest/hedge-model.md]
     tables: [ce_agent_band_history]
-    ui: []  # отображение модельных порогов на экране «Клиринг» — отдельным изменением; данные доступны через /api/vector-clearing/agent-positions
+    ui: []  # экран «Клиринг», блок «Пороги хеджа: действующие и по модели» (HedgeModelThresholds.js, AC-F18v2-37); элемента в ui-map пока нет — пилот ui-map ограничен тремя элементами (решение владельца 2026-10-27)
     codePaths:
       - cpp/ledger/src/domain/hedge_threshold_model.hpp
       - cpp/ledger/src/app/ledger_uc.cpp#hmodel_update_locked
       - cpp/ledger/src/app/ledger_uc.cpp#hmodel_flow_observe_locked
       - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
       - frontend/api/hedge_model_dto.js
+      - frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js
     tests:
       - cpp/ledger/tests/hedge_threshold_model_test.cpp
       - cpp/ledger/tests/ce_hedge_model_wiring_test.cpp
       - frontend/api/hedge_model_dto.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/HedgeModelThresholds.test.js
 
   - id: CAP-F18-SYSTEM-PNL
     title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый + V переоценка)
@@ -282,6 +284,7 @@ acceptanceCriteria:
   - "AC-F18v2-34 (ADR-088, CR-F18-013): режим CE_HMODEL_MODE=off не меняет поведение (рабочие пороги, эмиссия и ответ GetAgentPositions прежние, поле hedge_model не заполняется; кроме запасной комиссии мейкера ledger 2→10 bps при отсутствии строки конфигурации и переменной, ADR-089); shadow считает модельные пороги и оценки потока по каждому агенту и отдаёт их в hedge_model, но заявки идут по рабочим порогам; порт модели совпадает с ядром страницы incoming-docs/2026-10-29-porogi-hedzha5 на 29 эталонных случаях (tools/hedge-threshold-model/golden.json) с точностью 1e-6."
   - "AC-F18v2-35 (ADR-088, CR-F18-013): в режиме on пороги переводчика заменяются модельными (ручная ширина ADR-081 главнее): рыночная заявка шлётся на избыток над z_mkt модели (а не над z_lim), лимитная — на избыток над z_lim, лимитные заявки в пути не копятся сверх ширины мейкер-зоны z_mkt − z_lim, пауза между рыночными заявками не растёт от неисполненных лимитных; порог и цель перевода связки берутся из модели. Минутная история порогов (ce_agent_band_history) и выгрузка CSV доступны через /api/vector-clearing/hedge-model-history."
   - "AC-F18v2-36 (ADR-089, CR-F18-012): стандартная комиссия биржи 0,1 % (10 bps) для мейкера и тейкера — значение по умолчанию в ledger, BFF, экране «Клиринг» и схеме; комиссия учитывается только при хедже (пороги хеджа и расчётная комиссия хеджа) и не входит в клиринг (CE_COMMISSION_IN_POLKA=0): сумма |потоков| клиринга и вход matching до и после неизменны."
+  - "AC-F18v2-37 (ADR-088, CR-F18-013): на экране «Клиринг» под таблицами «Позиции агентов» показан блок «Пороги хеджа: действующие и по модели»: для каждого агента рядом действующие Z̄lim/Z̄mkt (ledger) и пороги модели b_м/b_т (переводчик) или B/b (связка), режим потока, шум потока, число минут оценки и состояние («считается, не применяется» в теневом режиме, причина, если не посчитано). Все числа приходят из ledger через BFF, браузер ничего не считает; ноль показывается нулём, неизвестное — прочерком; без модельных данных (режим off) показана одна строка-пояснение."
 
 # UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
 uxScreens:

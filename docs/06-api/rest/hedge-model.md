@@ -28,6 +28,8 @@ related:
 
 `hmodel`: `{ mode, computed, applied, reason, regime, b_m, b_t, sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold, transfer_target, est_minutes, params_hash, computed_at_ms, age_ms }`.
 
+**Потребитель на экране «Клиринг».** Блок «Пороги хеджа: действующие и по модели» (`frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js`, AC-F18v2-37) читает из строки `z_lim`, `z_mkt`, `c_total`, `agent_kind` и `hmodel.{mode, computed, applied, reason, regime, b_m, b_t, transfer_threshold, transfer_target, sz_est, est_minutes}`. Браузер ничего не считает: ноль показывается нулём (цель перевода 0), `null` — прочерком; без `hmodel` ни у одной строки показана одна строка-пояснение (режим `off`).
+
 - `mode` — `shadow` или `on`; `applied=true` только в `on`.
 - `computed=false` — модель не посчитана, `reason` называет причину (`no_sigma`, `sigma_samples`, `sigma_stale`, `invalid_input`, `budget`, `numeraire`); `b_m`, `b_t`, `regime`, `peclet`, `sigma_bps`, комиссии и пороги перевода при этом `null`.
 - `regime` — `noise` | `mixed` | `drift` (только у переводчика); неизвестное значение → `null`.

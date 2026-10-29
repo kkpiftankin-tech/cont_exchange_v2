@@ -6,6 +6,7 @@ import axios from 'axios';
 import { isAuthenticated } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import { groupTranslators, groupArbitrageurs, isIdleAgent, mergeStableRows } from './agentRowsLayout';
+import HedgeModelThresholds from './HedgeModelThresholds';
 import AgentPnlChart from './AgentPnlChart';
 import SystemPnlBlock from './SystemPnlBlock';
 import './VectorClearingLive.css';
@@ -740,6 +741,13 @@ export function AgentPositionsTables({ agentRows, title, onSelectAgent, selected
               </span>
             )}
           </div>
+        )}
+
+        {haveStats && (
+          <HedgeModelThresholds
+            translators={tGroups.flatMap((g) => g.rows)}
+            arbitrageurs={aGroups.flatMap((g) => g.rows)}
+          />
         )}
 
         <div className="vc-note vc-note-tight">
