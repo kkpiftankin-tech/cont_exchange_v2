@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **27**
+- Открытых структурированных вопросов (`OQ-*`): **28**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **7**
 - ADR в статусе `proposed` (ждут решения владельца): **13**
-- Инженерных долгов в known-gaps.md: **17**
+- Инженерных долгов в known-gaps.md: **18**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -77,6 +77,7 @@
 - **OQ-F18v2-33** (F-18) — устаревание справедливой цены · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-34** (F-18) — комиссия на графике сделок: сторона, ставки по биржам, смысл taker-ставки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-35** (F-18) — комиссия на графике: текущие ставки или зафиксированные на момент заявки · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-37** (F-18) — глубина α кросс-ребра в валюте котировки, а не в номинале · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ## Старые списки вопросов без OQ-ID/статуса (нужна структуризация)
 
@@ -132,3 +133,4 @@
 - График «Заработок во времени» (CR-F18-005, 2026-10-28): известные ограничения.
 - Расчётная комиссия на графике сделок по парам (CR-F18-007, 2026-10-28): известные ограничения.
 - График сделок по парам, фильтр по агенту (CR-F18-010, 2026-10-28): известные ограничения.
+- Глубина кросс-ребра в единицах котируемой валюты (расследование 2026-10-29, OQ-F18v2-37).
