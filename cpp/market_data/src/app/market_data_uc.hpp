@@ -4,6 +4,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -30,6 +31,7 @@
 #include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 persister)
 #include "app/compute_market_data.hpp"
 #include "update_order_book_uc.hpp"
+#include "infra/async_sink.hpp"  // CR-F18-016: запись истории кривых вне потока потребителя
 #include "infra/market_data_stream_hub.hpp"
 #include "infra/postgres/pg_market_data_config.hpp"
 
@@ -197,6 +199,10 @@ class MarketDataUseCases {
   IExecutionVenueStorage* execution_storage_{nullptr};
   domain::ILiquidityCurveStorage* memory_curve_storage_{nullptr};
   infra::clickhouse::ClickHouseLiquidityCurveStorage* ch_curve_storage_{nullptr};
+  // CR-F18-016: историю кривых в ClickHouse пишет отдельный поток (ограниченная очередь, вытесняется старейшее);
+  // пусто ⇒ запись синхронно в потоке потребителя (MARKET_DATA_CH_ASYNC=0 или нет хранилища).
+  std::unique_ptr<infra::AsyncSink<fob::venue::v1::VenueLiquidityCurve>> curve_sink_;
+  std::int64_t last_empty_window_warn_ms_{-60000};  ///< троттлинг предупреждения «окно пропущено» (поток окна)
 
   // F-05 ports
   domain::ISnapshotStorage*        snapshot_storage_{nullptr};

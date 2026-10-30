@@ -194,6 +194,18 @@ if (BUILD_TESTING)
     target_compile_options(market_data_ce_input_guard_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME market_data_ce_input_guard_test COMMAND market_data_ce_input_guard_test)
 
+    # CR-F18-016: очередь записи истории кривых вне потока потребителя (infra/async_sink.hpp, header-only, только std).
+    add_executable(market_data_async_sink_test
+            tests/async_sink_test.cpp
+    )
+    target_include_directories(market_data_async_sink_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(market_data_async_sink_test PRIVATE Threads::Threads)
+    target_compile_options(market_data_async_sink_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_async_sink_test COMMAND market_data_async_sink_test)
+
     # ADR-064 (дополнение 2026-10-29, OQ-F18v2-37): приведение глубины кросс-пары к номиналу (domain/cross_depth_scale.hpp, header-only);
     # тест строит агента через agent_builder на одном рынке в USDT и в BTC ⇒ линкует cex_common (Decimal).
     add_executable(market_data_cross_depth_scale_test

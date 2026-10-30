@@ -92,6 +92,26 @@ MarketDataUseCases::MarketDataUseCases(
   clearing_cfg_pg_conn_ = cex::common::Env::get_string(
       "POSTGRES_CONN",
       "host=postgres port=5432 dbname=exchange user=exchange password=exchange");
+
+  // CR-F18-016 (инцидент 2026-10-29): синхронный INSERT ≈ 84 КБ на кривую выполнялся в потоке потребителя, общем для всех
+  // топиков. При перегрузе хоста и ClickHouse потребитель отставал от потока кривых, кривые приходили старше порога
+  // свежести, окно клиринга пустело и ce.clearing.input не публиковался, пока очередь не съедена (≈ 85 минут).
+  // Теперь история пишется отдельным потоком; MARKET_DATA_CH_ASYNC=0 возвращает синхронную запись.
+  if (ch_curve_storage_ != nullptr && cex::common::Env::get_bool("MARKET_DATA_CH_ASYNC", true)) {
+    const std::size_t capacity = static_cast<std::size_t>(
+        std::max(1, cex::common::Env::get_int("MARKET_DATA_CH_QUEUE_MAX", 600)));  // ≈ 3–4 мин потока: BFF читает кривые за последние 5 мин
+    curve_sink_ = std::make_unique<infra::AsyncSink<fob::venue::v1::VenueLiquidityCurve>>(
+        capacity,
+        [this](const fob::venue::v1::VenueLiquidityCurve& curve) { ch_curve_storage_->Save(curve); },
+        [capacity](std::uint64_t dropped_total, std::size_t depth) {
+          cex::common::log_json("WARN",
+                                "ClickHouse: очередь записи кривых переполнена, самые старые кривые не попали в историю",
+                                {{"service", "market_data"},
+                                 {"dropped_total", std::to_string(dropped_total)},
+                                 {"depth", std::to_string(depth)},
+                                 {"capacity", std::to_string(capacity)}});
+        });
+  }
 }
 
 std::string MarketDataUseCases::key(const std::string& venue, const std::string& symbol) {
@@ -269,7 +289,11 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
 
   // Save to ClickHouse for historical analytics
   if (ch_curve_storage_ != nullptr) {
-    ch_curve_storage_->Save(curve);
+    if (curve_sink_) {
+      curve_sink_->Push(curve);  // копия в очередь; запись — в потоке-писателе, поток потребителя не ждёт ClickHouse
+    } else {
+      ch_curve_storage_->Save(curve);
+    }
   } else {
     cex::common::log_json("WARN", "ClickHouse curve storage is not configured",
                           {{"venue", curve.venue_id()}, {"symbol", curve.instrument().symbol()}});
@@ -636,6 +660,8 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
   double stale_lo_s = 10.0, stale_hi_s = 180.0;
   int stale_adaptive = 0;
   double stale_limit_min_s = 0.0;
+  std::int64_t age_min_ms = std::numeric_limits<std::int64_t>::max();  // CR-F18-016: возраст кривых окна для диагностики пропуска
+  std::int64_t age_max_ms = std::numeric_limits<std::int64_t>::min();
   if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
     stale_sigma = VenueSigmaSnapshot(cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20));
     const char* lo_env = std::getenv("CE_STALE_MIN_S");
@@ -645,6 +671,8 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
   }
   for (const auto& bc : fresh) {
     const std::int64_t age = window_close_ms - bc.event_ts_ms;
+    age_min_ms = std::min(age_min_ms, age);
+    age_max_ms = std::max(age_max_ms, age);
     std::int64_t stale_limit_ms = vector_stale_ms_;
     if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
       // σ собственной площадки кривой: ключ "venue|BTCUSDT" (символ "BTC/USDT" без '/')
@@ -705,7 +733,26 @@ void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
       vector_two_sided_
           ? TwoSidedSegmentsFromCurves(fresh_curves, vectorize_cfg_.decimal_scale)
           : domain::Vectorize(levels, vectorize_cfg_);
-  if (vr.segments.empty()) return;
+  if (vr.segments.empty()) {
+    // Окно без сегментов раньше пропускалось молча: при отставании потребителя все кривые старше порога, и ce.clearing.input
+    // не публиковался десятки минут без единой строки в журнале (инцидент 2026-10-29, CR-F18-016). Пишем причину раз в минуту.
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now_ms - last_empty_window_warn_ms_ >= 60000) {
+      last_empty_window_warn_ms_ = now_ms;
+      cex::common::log_json("WARN", "F-05A окно пропущено: нет свежих кривых для сегментов",
+                            {{"service", "market_data"},
+                             {"stage", "vector_window"},
+                             {"venues_pairs", std::to_string(fresh.size())},
+                             {"stale_dropped", std::to_string(stale_dropped)},
+                             {"fresh_curves", std::to_string(fresh_curves.size())},
+                             {"age_min_ms", std::to_string(age_min_ms)},
+                             {"age_max_ms", std::to_string(age_max_ms)},
+                             {"stale_cap_ms", std::to_string(vector_stale_ms_)},
+                             {"stale_limit_min_s", std::to_string(stale_limit_min_s)}});
+    }
+    return;
+  }
 
   const std::string batch_id = "w|" + std::to_string(window_close_ms);
   if (vectorized_publisher_ != nullptr) {
