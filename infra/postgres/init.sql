@@ -322,7 +322,7 @@ CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
   filled_qty        NUMERIC(38, 18) NOT NULL DEFAULT 0,
   avg_price         NUMERIC(38, 18),
   status            TEXT NOT NULL,                 -- NEW | PARTIALLY_FILLED | FILLED | REJECTED
-  reason            TEXT NOT NULL,                 -- код причины (no_limit_price | no_trades_in_window | none_cross_limit | partial_window_volume | filled | ...)
+  reason            TEXT NOT NULL,                 -- код причины (no_limit_price | no_trades_in_window | none_cross_limit | partial_window_volume | partial_book_depth | none_book_depth | filled | ...)
   window_trades     INTEGER NOT NULL DEFAULT 0,    -- сколько публичных сделок было в окне
   considered_trades JSONB,                         -- [{price, qty, ts_ms, crosses}] — те самые публичные исполнения
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()

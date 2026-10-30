@@ -1966,6 +1966,8 @@ void CexWsRestAdapter::sync_state_from_lob_locked(SymbolBookState* state) {
   state->sequence = state->lob.LastUpdateId();
   state->bids = state->lob.bids();
   state->asks = state->lob.asks();
+  ++state->book_generation;               // CR-F18-017: учёт взятого рыночными sim-заявками объёма относится к прежнему стакану
+  state->book_updated_at = now_fn_();
 }
 
 void CexWsRestAdapter::push_pending_diff_locked(
@@ -2438,6 +2440,59 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
   return true;
 }
 
+// CR-F18-017 / ADR-060 (поправка): рыночная sim-заявка исполняется проходом по видимой стороне стакана — BUY берёт asks от лучшей
+// цены вверх, SELL берёт bids вниз; цена исполнения — VWAP пройденных уровней (Decimal). Объём, взятый с уровня, хранится до
+// обновления стакана символа, поэтому два хеджа подряд не расходуют один уровень. Граница допуска по цене — double (только
+// решение «брать уровень или нет»); объём, цена и оборот — Decimal.
+bool CexWsRestAdapter::MatchMarketAgainstBookLocked(SymbolBookState* state, const bool is_sell,
+                                                    const cex::common::Decimal& target,
+                                                    const SteadyClock::time_point now,
+                                                    cex::common::Decimal* filled,
+                                                    cex::common::Decimal* notional,
+                                                    int64_t* book_age_ms) {
+  using cex::common::Decimal;
+  if (state == nullptr || filled == nullptr || notional == nullptr) return false;
+  const auto& side = is_sell ? state->bids : state->asks;
+  if (side.empty() || state->book_generation == 0) return false;   // стакана ещё не было
+  // Стакан сброшен или не собран (пересечённый/отфильтрованный снимок оставляет прежние bids/asks, а lob сбрасывает) — как и
+  // остальной адаптер (snapshot_from_state_locked), считаем непригодным: исполнять по устаревшим уровням нельзя.
+  if (state->needs_reinit || state->is_empty_book || !state->lob.IsInitialized()) return false;
+  const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - state->book_updated_at).count();
+  if (book_age_ms != nullptr) *book_age_ms = static_cast<int64_t>(age_ms);
+  if (age_ms > static_cast<long long>(cfg_.sim_market_book_max_age_ms)) return false;   // стакан устарел ⇒ путь по ленте
+  const double best_d = static_cast<double>(side.front().price);
+  if (!(best_d > 0.0)) return false;
+
+  // Учёт взятого объёма действителен для одного поколения стакана (см. SymbolBookState::book_taken_generation).
+  if (state->book_taken_generation != state->book_generation || state->bid_taken.size() != state->bids.size() ||
+      state->ask_taken.size() != state->asks.size()) {
+    state->bid_taken.assign(state->bids.size(), Decimal{0, cfg_.market_qty_scale});
+    state->ask_taken.assign(state->asks.size(), Decimal{0, cfg_.market_qty_scale});
+    state->book_taken_generation = state->book_generation;
+  }
+  auto& taken = is_sell ? state->bid_taken : state->ask_taken;
+
+  const Decimal zero_q{0, cfg_.market_qty_scale};
+  Decimal want = target;
+  for (std::size_t i = 0; i < side.size(); ++i) {
+    if (Decimal::cmp(want, zero_q) <= 0) break;
+    const auto& level = side[i];
+    if (level.price.units <= 0 || Decimal::cmp(level.qty, zero_q) <= 0) continue;
+    // Отклонение уровня от лучшей цены, б.п.: BUY — выше, SELL — ниже. Дальше предела заявка не идёт (далёкие тонкие уровни).
+    const double level_d = static_cast<double>(level.price);
+    const double slip_bps = (is_sell ? (best_d - level_d) : (level_d - best_d)) / best_d * 1e4;
+    if (slip_bps > cfg_.sim_market_book_max_slip_bps) break;
+    const Decimal avail = Decimal::sub(level.qty, taken[i]);
+    if (Decimal::cmp(avail, zero_q) <= 0) continue;
+    const Decimal take = Decimal::cmp(avail, want) <= 0 ? avail : want;
+    *filled = Decimal::add(*filled, take);
+    *notional = Decimal::add(*notional, Decimal::mul(take, level.price));
+    taken[i] = Decimal::add(taken[i], take);
+    want = Decimal::sub(want, take);
+  }
+  return true;
+}
+
 void CexWsRestAdapter::ApplyRealTradeFillLocked(
     const fob::execution::v1::ExecutionIntent& intent,
     domain::VenueOrderResult* out,
@@ -2522,7 +2577,15 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
     return tr.exchange_ms > 0 && tr.exchange_ms >= emit_ms + fwd_delay_ms;
   };
 
-  if (have_book && (limit.units != 0 || marketable) && target.units > 0) {
+  // CR-F18-017 / ADR-060 (поправка): рыночная заявка — проходом по стакану (CE_SIM_MARKET_BOOK_FILL). Стакан пуст или старше
+  // порога ⇒ book_used=false и заявка идёт прежним путём по ленте. Лента при book_used не потребляется.
+  bool book_used = false;
+  int64_t book_age_ms = -1;   // возраст стакана при исполнении, мс (-1 — путь по стакану не пробовали); в журнал
+  if (marketable && cfg_.sim_market_book_fill && have_book && target.units > 0) {
+    book_used = MatchMarketAgainstBookLocked(&it->second, is_sell, target, now, &filled, &notional, &book_age_ms);
+  }
+
+  if (!book_used && have_book && (limit.units != 0 || marketable) && target.units > 0) {
     const auto window = effective_trade_window_locked(it->second);
     while (!it->second.recent_trades.empty() &&
            (now - it->second.recent_trades.front().ts) > window) {
@@ -2710,6 +2773,8 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
                          {"avg_price", DecimalText(out->average_price)},
                          {"status", std::to_string(static_cast<int>(out->status))},
                          {"trades_in_window", std::to_string(window_trades)},
+                         {"fill_source", book_used ? "book" : "tape"},
+                         {"book_age_ms", std::to_string(book_age_ms)},
                          {"source_file",
                           "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
 
@@ -2717,7 +2782,8 @@ void CexWsRestAdapter::ApplyRealTradeFillLocked(
   if (diag_sink_ != nullptr) {
     const bool filled_any = Decimal::cmp(filled, zero_q) > 0;
     const bool fully = filled_any && Decimal::cmp(out->remaining_qty, zero_q) <= 0;
-    if (filled_any) diag_reason = fully ? "filled" : "partial_window_volume";
+    if (book_used) diag_reason = filled_any ? (fully ? "filled" : "partial_book_depth") : "none_book_depth";
+    else if (filled_any) diag_reason = fully ? "filled" : "partial_window_volume";
     else if (diag_reason.empty()) diag_reason = "none_cross_limit";
     const char* status_txt =
         out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED ? "FILLED"

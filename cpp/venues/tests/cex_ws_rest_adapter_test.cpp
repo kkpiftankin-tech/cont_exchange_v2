@@ -2748,10 +2748,142 @@ bool TestSubscribeRateLimitAcrossRapidCalls() {
   return true;
 }
 
+// CR-F18-017 / ADR-060 (поправка): рыночная sim-заявка исполняется проходом по стакану.
+// Книга теста (шкалы: цена 2, объём 3): asks 100.20×1.300, 100.30×2.600, 100.40×0.800; bids 100.10×1.500, 100.00×2.000, 99.90×1.250.
+// Лента — одна сделка 0.100 по 100.20: по ленте рыночная заявка исполнилась бы на 0.100, по стакану — на всю видимую глубину.
+class CaptureDiagSink final : public cex::venues::app::FillDiagnosticsSink {
+ public:
+  void WriteFillDiagnostic(const cex::venues::app::FillDiagnostic& diag) override { items.push_back(diag); }
+  std::vector<cex::venues::app::FillDiagnostic> items;
+};
+
+fob::execution::v1::ExecutionIntent MarketIntent(const std::string& id, const bool sell, const int64_t qty_units) {
+  auto intent = BuyLimitIntent();
+  intent.set_intent_id(id);
+  intent.set_side(sell ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+  intent.set_strategy(fob::execution::v1::EXEC_STRATEGY_MARKET);
+  intent.set_tif(fob::common::v1::TIF_IOC);
+  intent.mutable_target_qty()->set_units(qty_units);
+  return intent;
+}
+
+struct BookFillHarness {
+  explicit BookFillHarness(const bool book_fill, const double max_slip_bps = 100.0) {
+    clock.AdvanceMs(1000000);   // нулевой момент steady_clock адаптер трактует как «ещё не читали»
+    auto* rest = new FakeRestClient();
+    auto* ws = new FakeWsSession();
+    rest->get_response = DepthSnapshotJson();
+    rest->route_trades_response = true;
+    rest->trades_response = R"([{"id":1,"price":"100.20","qty":"0.100","time":1700000000000}])";
+    CexWsRestAdapterConfig cfg;
+    cfg.ws_url = "wss://stream.binance.com:9443/ws";
+    cfg.rest_base_url = "https://api.binance.com";
+    cfg.simulate_orders = true;
+    cfg.sim_match_real_trades = true;
+    cfg.sim_market_book_fill = book_fill;
+    cfg.sim_market_book_max_slip_bps = max_slip_bps;
+    cfg.rest_requests_per_sec = 1000.0;
+    cfg.rest_burst = 1000.0;
+    cfg.market_price_scale = 2;
+    cfg.market_qty_scale = 3;
+    adapter = std::make_unique<CexWsRestAdapter>(cfg, std::unique_ptr<ICexRestClient>(rest),
+                                                 std::unique_ptr<ICexWsSession>(ws), [this] { return clock.now; });
+    adapter->SetFillDiagnosticsSink(&sink);
+  }
+  bool Start() { return adapter->Connect() && adapter->RequestSnapshot(BtcReq()).has_value(); }
+  const std::string& LastReason() const { return sink.items.back().reason; }
+
+  FakeClock clock;
+  CaptureDiagSink sink;
+  std::unique_ptr<CexWsRestAdapter> adapter;
+};
+
+bool TestMarketOrderWalksBookOnThinTape() {
+  BookFillHarness h(true);
+  if (!Check(h.Start(), "connect and first snapshot must succeed")) return false;
+
+  // BUY 3.000: 1.300×100.20 + 1.700×100.30 = 300.77 ⇒ VWAP 100.2567 → 100.26 (шкала цены 2). Лента дала бы 0.100.
+  const auto r1 = h.adapter->SendOrder(MarketIntent("mkt-1", false, 3000));
+  if (!Check(r1.accepted && r1.filled_qty.units == 3000 &&
+                 r1.status == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED,
+             "market BUY must be filled in full from the ask side of the book")) return false;
+  if (!Check(r1.average_price.units == 10026 && r1.average_price.scale == 2, "BUY VWAP over two ask levels = 100.26")) return false;
+  if (!Check(h.LastReason() == "filled", "book fill in full must be reported as 'filled'")) return false;
+
+  // Второй BUY 2.000 видит остаток: уровень 1 съеден, на втором 0.900, на третьем 0.800 ⇒ 1.700 по VWAP 100.35, остаток отменён.
+  const auto r2 = h.adapter->SendOrder(MarketIntent("mkt-2", false, 2000));
+  if (!Check(r2.filled_qty.units == 1700 && r2.remaining_qty.units == 300 &&
+                 r2.status == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED,
+             "second order must not re-spend taken levels: 1.700 filled, rest cancelled (IOC)")) return false;
+  if (!Check(r2.average_price.units == 10035, "second BUY VWAP = (0.9×100.30 + 0.8×100.40)/1.7 → 100.35")) return false;
+  if (!Check(h.LastReason() == "partial_book_depth", "partial book fill must be reported as 'partial_book_depth'")) return false;
+
+  // Новый снимок стакана обнуляет учёт взятого объёма.
+  h.clock.AdvanceMs(1000);
+  if (!Check(h.adapter->RequestSnapshot(BtcReq()).has_value(), "refresh snapshot must succeed")) return false;
+  const auto r3 = h.adapter->SendOrder(MarketIntent("mkt-3", false, 1000));
+  if (!Check(r3.filled_qty.units == 1000 && r3.average_price.units == 10020, "after a book refresh the best ask is available again")) {
+    return false;
+  }
+
+  // SELL идёт по bids вниз: 1.500×100.10 + 2.000×100.00 + 0.500×99.90 = 400.10 ⇒ 100.025 → 100.03.
+  const auto r4 = h.adapter->SendOrder(MarketIntent("mkt-4", true, 4000));
+  if (!Check(r4.filled_qty.units == 4000 && r4.average_price.units == 10003, "market SELL must walk the bid side: VWAP 100.03")) return false;
+  return true;
+}
+
+bool TestMarketOrderWithoutFlagStaysOnTape() {
+  BookFillHarness h(false);
+  if (!Check(h.Start(), "connect and first snapshot must succeed")) return false;
+  const auto r = h.adapter->SendOrder(MarketIntent("mkt-off", false, 3000));
+  if (!Check(r.filled_qty.units == 100 && r.status == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED,
+             "flag off: market order is matched against the tape only (0.100)")) return false;
+  if (!Check(h.LastReason() == "partial_window_volume", "flag off: reason stays on the tape vocabulary")) return false;
+  return true;
+}
+
+bool TestMarketBookFillRespectsSlipCapAndDepth() {
+  // Предел отклонения 12 б.п.: уровень 100.30 (+9.98) берётся, 100.40 (+19.96) — нет ⇒ из 5.000 исполнено 3.900.
+  {
+    BookFillHarness h(true, 12.0);
+    if (!Check(h.Start(), "start (slip cap)")) return false;
+    const auto r = h.adapter->SendOrder(MarketIntent("mkt-cap", false, 5000));
+    if (!Check(r.filled_qty.units == 3900 && h.LastReason() == "partial_book_depth",
+               "slip cap must stop the walk before the 19.96 bps level")) return false;
+  }
+  // Вся видимая глубина asks (4.700) съедена одним ордером; следующий не находит ни одного уровня.
+  {
+    BookFillHarness h(true);
+    if (!Check(h.Start(), "start (depth exhausted)")) return false;
+    const auto all = h.adapter->SendOrder(MarketIntent("mkt-all", false, 10000));
+    if (!Check(all.filled_qty.units == 4700, "an oversized order takes the whole visible ask side (4.700)")) return false;
+    const auto none = h.adapter->SendOrder(MarketIntent("mkt-none", false, 1000));
+    if (!Check(none.filled_qty.units == 0 && none.status == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED &&
+                   h.LastReason() == "none_book_depth",
+               "nothing left in the book: EXPIRED with 'none_book_depth'")) return false;
+  }
+  return true;
+}
+
+bool TestMarketBookFillFallsBackToTapeOnStaleBook() {
+  BookFillHarness h(true);
+  if (!Check(h.Start(), "start (stale book)")) return false;
+  h.clock.AdvanceMs(20000);   // стакан старше CE_SIM_BOOK_MAX_AGE_MS (15 с по умолчанию) и не обновлялся
+  const auto r = h.adapter->SendOrder(MarketIntent("mkt-stale", false, 3000));
+  if (!Check(r.filled_qty.units < 3000, "a stale book must not fill the order from depth")) return false;
+  if (!Check(h.LastReason() != "partial_book_depth" && h.LastReason() != "none_book_depth" && h.LastReason() != "filled",
+             "stale book: the tape path reports its own reason")) return false;
+  return true;
+}
+
 }  // namespace
 
 int main() {
   bool ok = true;
+  ok = TestMarketOrderWalksBookOnThinTape() && ok;
+  ok = TestMarketOrderWithoutFlagStaysOnTape() && ok;
+  ok = TestMarketBookFillRespectsSlipCapAndDepth() && ok;
+  ok = TestMarketBookFillFallsBackToTapeOnStaleBook() && ok;
   ok = TestSubscribeBuildsDepthAndTradeStreams() && ok;
   ok = TestSubscribeIncludesTickerAndStatusAndSkipsPoolState() && ok;
   ok = TestRequestSnapshotAndRateLimit() && ok;

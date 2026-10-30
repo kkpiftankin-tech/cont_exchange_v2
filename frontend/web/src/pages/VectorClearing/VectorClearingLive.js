@@ -411,13 +411,15 @@ const REASON_LABEL = {
   no_trades_in_window: 'нет публичных сделок в окне',
   none_cross_limit: 'ни одна публичная сделка не пересекла лимит',
   partial_window_volume: 'частично: объёма окна < target',
+  partial_book_depth: 'частично: глубины стакана < target',
+  none_book_depth: 'в стакане нет подходящих уровней',
   filled: 'исполнено',
   rejected: 'отклонено venue',
 };
 const reasonLabel = (r) => REASON_LABEL[r] || r || '—';
 const reasonBg = (r) => {
   if (r === 'filled') return '#e7f6e7';                 // зелёный — исполнено
-  if (r === 'partial_window_volume') return '#fdf3d8';  // янтарь — частично
+  if (r === 'partial_window_volume' || r === 'partial_book_depth') return '#fdf3d8';  // янтарь — частично
   return '#fbe4e4';                                     // красный — не исполнено
 };
 

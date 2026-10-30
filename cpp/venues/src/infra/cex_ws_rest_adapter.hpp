@@ -70,6 +70,12 @@ struct CexWsRestAdapterConfig {
   uint32_t sim_trade_window_ms{10000};   // фолбэк-окно до измерения периода чтения
   uint32_t sim_trade_stale_periods{3};   // окно = N · фактический период чтения ленты
   uint32_t sim_trade_buf_cap{512};
+  // ADR-060 (поправка, CR-F18-017): рыночная заявка (EXEC_STRATEGY_MARKET) исполняется проходом по видимой стороне стакана
+  // (BUY — asks вверх от лучшей цены, SELL — bids вниз), а не объёмом ленты: на тонкой ленте Kraken/Coinbase заявка иначе
+  // исполняется на единицы процентов. CE_SIM_MARKET_BOOK_FILL; выключено ⇒ прежнее исполнение по ленте.
+  bool sim_market_book_fill{false};
+  uint32_t sim_market_book_max_age_ms{10000};   // стакан старше — прежний путь по ленте (CE_SIM_BOOK_MAX_AGE_MS)
+  double sim_market_book_max_slip_bps{100.0};   // уровни хуже лучшей цены сильнее — не берутся (CE_SIM_BOOK_MAX_SLIP_BPS)
   // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
   // v=filled/Δt. k в цена·с/лот; 0 ⇒ импакт выключен (регрессия).
   double sim_price_impact_k{0.0};            // множитель на физический k=τ/ρ (спец §3)
@@ -276,6 +282,15 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
     uint64_t sequence{0};
     std::vector<domain::VenueBookLevel> bids;
     std::vector<domain::VenueBookLevel> asks;
+    // CR-F18-017: поколение и время последнего обновления bids/asks (ставятся в sync_state_from_lob_locked; last_market_event для
+    // этого не годится — его двигают тикер и сделки). Рыночные sim-заявки берут объём уровней: bid_taken/ask_taken (параллельно
+    // bids/asks по индексу) действительны, пока book_taken_generation == book_generation, иначе обнуляются — два хеджа не
+    // расходуют один уровень дважды.
+    uint64_t book_generation{0};
+    SteadyClock::time_point book_updated_at{};
+    uint64_t book_taken_generation{0};
+    std::vector<cex::common::Decimal> bid_taken;
+    std::vector<cex::common::Decimal> ask_taken;
     CexLocalLobAssembler lob;
     bool needs_reinit{false};
     bool is_empty_book{false};
@@ -411,6 +426,12 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   void ApplyRealTradeFillLocked(const fob::execution::v1::ExecutionIntent& intent,
                                 domain::VenueOrderResult* out,
                                 SteadyClock::time_point now);
+  // CR-F18-017: рыночная заявка проходом по стакану. false — стакан непригоден (пуст или старше sim_market_book_max_age_ms):
+  // вызывающий идёт прежним путём по ленте. true — *filled и *notional (qty·price) заполнены, учёт взятого объёма обновлён.
+  // *book_age_ms (необязателен) — возраст стакана на момент заявки, если стакан был (для журнала).
+  bool MatchMarketAgainstBookLocked(SymbolBookState* state, bool is_sell, const cex::common::Decimal& target,
+                                    SteadyClock::time_point now, cex::common::Decimal* filled,
+                                    cex::common::Decimal* notional, int64_t* book_age_ms);
 
   // F-18 #5/ADR-067 (T-F18-803): доматчивание резидентных (GTC) мейкер-лимитов
   // символа venue_symbol против НОВЫХ (ещё не потреблённых) сделок его ленты.

@@ -8,7 +8,7 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **37**
+- Открытых структурированных вопросов (`OQ-*`): **41**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **8**
 - ADR в статусе `proposed` (ждут решения владельца): **15**
@@ -84,12 +84,19 @@
 - **OQ-F18v2-43** (F-18) — когда включать рабочий режим и какой предел позиции считать жёстким · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-44** (F-18) — учитывать ли комиссию хеджа в заработке агентов и списывать ли её в симулированных сделках · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-47** (F-18) — чем ограничивать лимитную зону хеджа, когда комиссии мейкера и тейкера равны · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-49** (F-18) — судьба временного влияния `CE_PRICE_IMPACT_K` при исполнении по стакану · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-50** (F-18) — включать ли полуспред и ожидаемое проскальзывание в порог полосы хеджа · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+
+### инженер с утверждением владельца
+
+- **OQ-F18v2-51** (F-18) — возраст снимка стакана и forward-only для пути по стакану · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### эксперт-трейдер
 
 - **OQ-F18v2-40** (F-18) — скорость исполнения лимитных заявок, неблагоприятный отбор и спред по книгам · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-41** (F-18) — что делать при устойчивом потоке в одну сторону (дрейф) · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-46** (F-18) — априор шума потока при старте оценки и сжатие к нему · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-48** (F-18) — глубина рыночных хеджей в симуляторе: возобновление, снижение на скрытую и мигающую ликвидность, доля участия · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### эксперт-трейдер, владелец
 

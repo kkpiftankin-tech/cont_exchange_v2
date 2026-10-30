@@ -870,6 +870,13 @@ VenuesLoop::VenuesLoop(const std::string& brokers,
       // плоский k=CE_PRICE_IMPACT_K. τ — время восстановления стакана (сек).
       cfg->sim_price_impact_k = env_double("CE_PRICE_IMPACT_K", 0.0);
       cfg->sim_impact_tau_sec = env_double("CE_IMPACT_TAU_SEC", 5.0);
+      // CR-F18-017 / ADR-060 (поправка): рыночный хедж исполняется проходом по стакану, а не объёмом ленты (на тонкой ленте
+      // Kraken/Coinbase — единицы процентов). Деф. выключено; стакан старше CE_SIM_BOOK_MAX_AGE_MS — прежний путь по ленте;
+      // уровни хуже лучшей цены более чем на CE_SIM_BOOK_MAX_SLIP_BPS не берутся.
+      cfg->sim_market_book_fill = env_bool("CE_SIM_MARKET_BOOK_FILL", false);
+      cfg->sim_market_book_max_age_ms = static_cast<uint32_t>(
+          std::max(1, cex::common::Env::get_int("CE_SIM_BOOK_MAX_AGE_MS", 10000)));
+      cfg->sim_market_book_max_slip_bps = std::max(0.0, env_double("CE_SIM_BOOK_MAX_SLIP_BPS", 100.0));
       cfg->circuit_breaker_enabled = env_bool(
           "CIRCUIT_BREAKER_ENABLED", cfg->circuit_breaker_enabled);
       cfg->circuit_breaker_errors = static_cast<uint32_t>(
