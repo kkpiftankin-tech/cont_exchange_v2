@@ -1,6 +1,6 @@
 .manual-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   --manual-panel: rgba(9, 24, 30, 0.88);
   --manual-panel-strong: rgba(11, 34, 40, 0.95);
   --manual-border: rgba(102, 224, 190, 0.28);

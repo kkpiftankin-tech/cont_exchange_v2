@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/env.hpp"  // ADR-053: F05A_SAFE_SHARE (θ)
 #include "cex/common/log.hpp"
 #include "cex/common/proto.hpp"
 #include "cex/common/time.hpp"
@@ -66,6 +68,146 @@ double DecimalAsDouble(const cex::common::Decimal& value) {
 
 double ProtoDecimalAsDouble(const fob::common::v1::Decimal& value) {
   return static_cast<double>(cex::common::Decimal::from_proto(value));
+}
+
+// ADR-053: proto-Decimal из double (для q_bid/q_ask/mid safe-translator).
+fob::common::v1::Decimal MakeDecimal(double val, std::int32_t scale) {
+  const double f = std::pow(10.0, static_cast<double>(scale));
+  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(val * f)), scale}
+      .to_proto();
+}
+
+// §6.2 «Кривые котирования внутренних маркет-мейкеров CE»: линейный наклон α_ext
+// снимается из ОДНОЙ сырой стороны стакана ЧЕТЫРЬМЯ способами. Обозначения (ADR-053):
+// по кумулятивным уровням k — D_k=Σ p·q (notional, quote), δ_k=10⁴·|ln(VWAP_k/mid)|
+// (bps). α — в quote за bps. Проверено на числовом примере §6.2 (см. unit-тест).
+//   M1 касательная:   α = D_1/δ_1                       (точна у mid, оптимистична дальше)
+//   M2 МНК на полосе:  наклон OLS D=a+α·δ (со свободным членом), интерсепт отбрасываем
+//   M3 подгонка выгоде: α = D_n² / (2·Σ_k δ_k·ΔD_k)     (равенство площадей/денег)
+//   M4 минорант (деф): α = min_k D_k/δ_k                (§6.3-safe: целиком под лестницей)
+// AlphasFromCumulative определён на уровне namespace (после анон-блока) — объявлен
+// в заголовке, доступен юнит-тесту; здесь только используется.
+
+// §6.2: снять кумулятивную кривую (δ,D) из одной сырой стороны стакана и посчитать
+// 4 способа. δ_k=10⁴·|ln(VWAP_k/mid)| (bps), D_k=кумул. notional. depth=Σ q.
+SideAlphas RawSideAllMethods(
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& prices,
+    const google::protobuf::RepeatedPtrField<fob::common::v1::Decimal>& qtys,
+    double mid, bool is_bid, std::size_t max_levels = 0) {
+  const int n = std::min(prices.size(), qtys.size());
+  std::vector<std::pair<double, double>> lv;
+  lv.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const double p = ProtoDecimalAsDouble(prices.Get(i));
+    const double q = ProtoDecimalAsDouble(qtys.Get(i));
+    if (std::isfinite(p) && std::isfinite(q) && p > 0.0 && q > 0.0) lv.emplace_back(p, q);
+  }
+  std::sort(lv.begin(), lv.end(), [is_bid](const std::pair<double, double>& a,
+                                           const std::pair<double, double>& b) {
+    return is_bid ? (a.first > b.first) : (a.first < b.first);
+  });
+  // ADR-070 (on-demand): ограничить число уровней стороны ПОСЛЕ сортировки (лучшие первыми).
+  if (max_levels > 0 && lv.size() > max_levels) lv.resize(max_levels);
+  std::vector<double> delta, D;
+  delta.reserve(lv.size()); D.reserve(lv.size());
+  double cum_q = 0.0, cum_n = 0.0;
+  for (const auto& [p, q] : lv) {
+    cum_q += q;
+    cum_n += p * q;
+    if (!(mid > 0.0) || !(cum_q > 0.0)) continue;
+    const double vwap = cum_n / cum_q;
+    if (!(vwap > 0.0)) continue;
+    const double delta_bps = 10000.0 * std::fabs(std::log(vwap / mid));
+    if (delta_bps <= 1e-9) continue;  // уровень ровно у mid — δ→0, в кривую не берём
+    delta.push_back(delta_bps);
+    D.push_back(cum_n);
+  }
+  SideAlphas out = AlphasFromCumulative(delta, D);
+  out.depth = cum_q;
+  return out;
+}
+
+// mid снимка: mid_price, иначе (best_bid+best_ask)/2. Общий для SetSafeTranslator и
+// ComputeSlopeMethods (один источник).
+double SnapshotMidForSlopes(const fob::venue::v1::VenueSnapshot& snapshot) {
+  const double rb = ProtoDecimalAsDouble(snapshot.best_bid());
+  const double ra = ProtoDecimalAsDouble(snapshot.best_ask());
+  return (snapshot.has_mid_price() && ProtoDecimalAsDouble(snapshot.mid_price()) > 0.0)
+             ? ProtoDecimalAsDouble(snapshot.mid_price())
+             : ((rb > 0.0 && ra > 0.0) ? 0.5 * (rb + ra) : 0.0);
+}
+
+// ADR-053: посчитать safe-translator ИЗ СЫРОГО стакана и записать в кривую.
+// Конвейер «стакан → кривая → клиринг»: наклон/anchor кладём в кривую, клиринг
+// (market_data → matching) берёт их отсюда, НЕ трогая сырой стакан.
+void SetSafeTranslator(const fob::venue::v1::VenueSnapshot& snapshot,
+                       fob::venue::v1::VenueLiquidityCurve* curve) {
+  if (snapshot.bid_prices_size() == 0 || snapshot.ask_prices_size() == 0) return;
+  const double mid = SnapshotMidForSlopes(snapshot);
+  if (!(mid > 0.0)) return;
+  double theta = 0.60;
+  try {
+    const auto ts = cex::common::Env::try_get_string("F05A_SAFE_SHARE");
+    if (ts && !ts->empty()) theta = std::stod(*ts);
+  } catch (...) { theta = 0.60; }
+  if (!(theta > 0.0) || !(theta <= 1.0)) theta = 0.60;
+
+  // §6.2: снимаем наклон ОБЕИХ сторон всеми 4 способами; combined = min(bid,ask)
+  // (консервативная «тончайшая сторона» — сохраняет прежнюю семантику α_ext=min).
+  const SideAlphas B = RawSideAllMethods(snapshot.bid_prices(), snapshot.bid_quantities(), mid, true);
+  const SideAlphas A = RawSideAllMethods(snapshot.ask_prices(), snapshot.ask_quantities(), mid, false);
+  const double qb = B.depth, qa = A.depth;
+  if (!(qb > 0.0) || !(qa > 0.0)) return;
+  auto comb = [](double b, double a) { return std::min(b, a); };
+  const double m1 = comb(B.tangent, A.tangent);
+  const double m2 = comb(B.lsq, A.lsq);
+  const double m3 = comb(B.profit, A.profit);
+  const double m4 = comb(B.minorant, A.minorant);
+
+  // Выбранный для клиринга способ (runtime, f05a_clearing_config.slope_method / env).
+  int sel = GetClearingSlopeMethod();
+  double alpha_ext = m4;  // дефолт — минорант (§6.3-safe)
+  switch (sel) {
+    case 1: alpha_ext = m1; break;
+    case 2: alpha_ext = m2; break;
+    case 3: alpha_ext = m3; break;
+    default: alpha_ext = m4; sel = 4; break;
+  }
+  // Ограничитель §6.2 (6.2): α_T = θ·α_ext (капитальный предел W_T/(γσ²τ) — future hook,
+  // как ψ_age/ψ_conf). β_T = mid²/(10⁴·α_T) → VectorFlowSegment → matching QP P=diag(m).
+  double alpha_t = 0.0, m = 1e-12, beta_t = 0.0;
+  if (std::isfinite(alpha_ext) && alpha_ext > 0.0) {
+    alpha_t = theta * alpha_ext;
+    m = mid / (10000.0 * alpha_t);
+    beta_t = (mid * mid) / (10000.0 * alpha_t);
+  }
+
+  auto* st = curve->mutable_safe_translator();
+  *st->mutable_mid() = MakeDecimal(mid, 8);
+  st->set_anchor_log(std::log(mid));
+  st->set_slope(m);                                       // выбранный способ, после θ
+  st->set_alpha_ext(std::isfinite(alpha_ext) ? alpha_ext : 0.0);
+  st->set_alpha_t(alpha_t);
+  st->set_beta_t(beta_t);
+  st->set_theta(theta);
+  *st->mutable_q_bid() = MakeDecimal(qb, 8);
+  *st->mutable_q_ask() = MakeDecimal(qa, 8);
+  st->set_model("safe_vwap_raw");
+  st->set_selected_method(static_cast<fob::common::v1::SlopeMethodKind>(sel));
+  // Диагностика всех 4 способов для отображения. β_t здесь — СЫРОЙ (θ=1), чтобы
+  // кривая способа была сравнима с VWAP; клиринговый β_t (поле 6) уже с θ.
+  auto add_method = [&](int kind, double ab, double aa, double cmb) {
+    auto* e = st->add_slope_methods();
+    e->set_method(static_cast<fob::common::v1::SlopeMethodKind>(kind));
+    e->set_alpha_ext_bid(std::isfinite(ab) ? ab : 0.0);
+    e->set_alpha_ext_ask(std::isfinite(aa) ? aa : 0.0);
+    e->set_alpha_ext(std::isfinite(cmb) ? cmb : 0.0);
+    e->set_beta_t((std::isfinite(cmb) && cmb > 0.0) ? (mid * mid) / (10000.0 * cmb) : 0.0);
+  };
+  add_method(1, B.tangent, A.tangent, m1);
+  add_method(2, B.lsq, A.lsq, m2);
+  add_method(3, B.profit, A.profit, m3);
+  add_method(4, B.minorant, A.minorant, m4);
 }
 
 double CurveQMax(const domain::DepthSideCurves& curves) {
@@ -580,6 +722,104 @@ const char* SideText(const fob::common::v1::Side side) {
 
 }  // namespace
 
+// §6.2: runtime-выбор способа наклона для клиринга. Атомик, чтобы venues_loop
+// (PG-поллинг f05a_clearing_config.slope_method) мог менять его без рестарта, а
+// SetSafeTranslator — читать на каждом снапшоте. Начальное значение — env
+// F05A_SLOPE_METHOD (tangent|lsq_band|profit_area|minorant), дефолт 4 (минорант).
+namespace {
+std::atomic<int>& SlopeMethodCell() {
+  static std::atomic<int> cell{[] {
+    const auto s = cex::common::Env::try_get_string("F05A_SLOPE_METHOD");
+    if (s) {
+      if (*s == "tangent") return 1;
+      if (*s == "lsq_band") return 2;
+      if (*s == "profit_area") return 3;
+      if (*s == "minorant") return 4;
+    }
+    return 4;  // §6.3-safe дефолт
+  }()};
+  return cell;
+}
+}  // namespace
+
+void SetClearingSlopeMethod(int method) {
+  if (method >= 1 && method <= 4) SlopeMethodCell().store(method, std::memory_order_relaxed);
+}
+int GetClearingSlopeMethod() { return SlopeMethodCell().load(std::memory_order_relaxed); }
+
+// §6.2: чистое ядро 4 способов на кумулятивной кривой (δ,D). delta[k]=δ_k (bps,>0,
+// возр.), cum_notional[k]=D_k (quote, возр.), D_{-1}=0. Отделено от снятия из
+// стакана, чтобы юнит-тест кормил ровно пример §6.2 (100/80.26/60.98/83.33).
+SideAlphas AlphasFromCumulative(const std::vector<double>& delta,
+                                const std::vector<double>& cum_notional) {
+  SideAlphas out;
+  const std::size_t n = std::min(delta.size(), cum_notional.size());
+  if (n == 0) return out;
+  double prev_D = 0.0, D_n = 0.0, m3_denom = 0.0;  // Σ δ_k·ΔD_k (M3)
+  int cnt = 0;
+  double S_d = 0.0, S_D = 0.0, S_dd = 0.0, S_dD = 0.0;  // МНК (M2)
+  bool m1_set = false;
+  for (std::size_t k = 0; k < n; ++k) {
+    const double d = delta[k], Dk = cum_notional[k];
+    if (!(d > 0.0) || !std::isfinite(Dk)) { prev_D = Dk; continue; }
+    const double a = Dk / d;                           // D_k/δ_k
+    if (!m1_set) { out.tangent = a; m1_set = true; }   // M1: первый уровень
+    if (std::isfinite(a) && a > 0.0 && a < out.minorant) out.minorant = a;  // M4
+    ++cnt; S_d += d; S_D += Dk; S_dd += d * d; S_dD += d * Dk;
+    m3_denom += d * (Dk - prev_D);                     // M3: δ_k·ΔD_k
+    prev_D = Dk; D_n = Dk;
+  }
+  // M2 — наклон обычной OLS со свободным членом: [nΣδD−ΣδΣD]/[nΣδ²−(Σδ)²].
+  if (cnt >= 2) {
+    const double den = static_cast<double>(cnt) * S_dd - S_d * S_d;
+    bool ok = false;
+    if (std::fabs(den) > 1e-12) {
+      const double slope = (static_cast<double>(cnt) * S_dD - S_d * S_D) / den;
+      if (std::isfinite(slope) && slope > 0.0) { out.lsq = slope; ok = true; }
+    }
+    // Вырожденная полоса (все δ_k практически совпадают, напр. грубый tick — см.
+    // "CE cross-pair tick collapse") ⇒ den≈0. Фолбэк на минорант, чтобы M2 не остался
+    // +inf и не дал near-zero clearing slope (code-review, money-path).
+    if (!ok && m1_set) out.lsq = out.minorant;
+  } else if (m1_set) {
+    out.lsq = out.tangent;  // один уровень — МНК вырождается в касательную
+  }
+  // M3 — равенство площадей: линейная ∫δ dD = D_n²/(2α) = реальная Σ δ_k·ΔD_k.
+  if (m3_denom > 1e-12 && D_n > 0.0) out.profit = (D_n * D_n) / (2.0 * m3_denom);
+  return out;
+}
+
+// ADR-070 (дополнение): те же 4 способа §6.2 по ПРОИЗВОЛЬНОМУ (глубокому) снимку, по запросу.
+// Логика идентична SetSafeTranslator: α по каждой стороне, combined = min(bid, ask),
+// β_raw = mid²/(10⁴·α) (θ=1 — кривая способа сравнима с VWAP).
+std::optional<SlopeMethodsResult> ComputeSlopeMethods(
+    const fob::venue::v1::VenueSnapshot& snapshot, std::size_t max_levels_per_side) {
+  if (snapshot.bid_prices_size() == 0 || snapshot.ask_prices_size() == 0) return std::nullopt;
+  const double mid = SnapshotMidForSlopes(snapshot);
+  if (!(mid > 0.0)) return std::nullopt;
+  const SideAlphas B = RawSideAllMethods(snapshot.bid_prices(), snapshot.bid_quantities(), mid,
+                                         true, max_levels_per_side);
+  const SideAlphas A = RawSideAllMethods(snapshot.ask_prices(), snapshot.ask_quantities(), mid,
+                                         false, max_levels_per_side);
+  if (!(B.depth > 0.0) || !(A.depth > 0.0)) return std::nullopt;
+  SlopeMethodsResult out;
+  out.mid = mid;
+  out.depth_bid = B.depth;
+  out.depth_ask = A.depth;
+  const double ab[4] = {B.tangent, B.lsq, B.profit, B.minorant};
+  const double aa[4] = {A.tangent, A.lsq, A.profit, A.minorant};
+  for (int i = 0; i < 4; ++i) {
+    SlopeMethodsResult::Method& m = out.methods[static_cast<std::size_t>(i)];
+    m.kind = i + 1;
+    m.alpha_bid = std::isfinite(ab[i]) ? ab[i] : 0.0;
+    m.alpha_ask = std::isfinite(aa[i]) ? aa[i] : 0.0;
+    const double cmb = std::min(ab[i], aa[i]);
+    m.alpha_ext = std::isfinite(cmb) ? cmb : 0.0;
+    m.beta_raw = (std::isfinite(cmb) && cmb > 0.0) ? (mid * mid) / (10000.0 * cmb) : 0.0;
+  }
+  return out;
+}
+
 LiquidityCurveProducer::LiquidityCurveProducer(
     IMessagePublisher* publisher,
     LiquidityCurveProducerConfig config)
@@ -689,9 +929,15 @@ bool LiquidityCurveProducer::Publish(
       degrade_reason = "stale";
     }
 
+    // РАСЦЕПЛЕНИЕ (F-11 diag 2026-10-01): деградацию КРИВОЙ (чтение публичного стакана)
+    // гонят ТОЛЬКО ошибки ПУБЛИКАЦИИ кривой, НЕ провалы ХЕДЖА. Раньше здесь суммировались
+    // consecutive_execution_errors, из-за чего REJECTED/EXPIRED CEX-хеджи навсегда выключали
+    // кривую пары (FILLED приходят только на DEX-путь ⇒ счётчик не сбрасывался): 21 стакан→7
+    // кривых. Чтение стакана не зависит от исполнения хеджа. consecutive_execution_errors
+    // по-прежнему трекается (ObserveExecution) для venue_health/observability, но кривую не
+    // глушит. Логируем его отдельным тегом, чтобы здоровье хеджа оставалось видимым.
     const uint32_t operational_errors =
-        degradation_state.consecutive_publish_errors +
-        degradation_state.consecutive_execution_errors;
+        degradation_state.consecutive_publish_errors;
     if (operational_errors >= config_.degradation.max_consecutive_errors_off) {
       cex::common::log_json("WARN", "Venue curve builder degraded to OFF",
                             {{"service", "venues"},
@@ -703,6 +949,8 @@ bool LiquidityCurveProducer::Publish(
                              {"requested_level", LevelToString(requested_level)},
                              {"reason", "too_many_errors"},
                              {"errors", std::to_string(operational_errors)},
+                             {"execution_errors",
+                              std::to_string(degradation_state.consecutive_execution_errors)},
                              {"max_consecutive_errors_off",
                               std::to_string(config_.degradation.max_consecutive_errors_off)},
                              {"source_file", "cpp/venues/src/app/liquidity_curve_producer.cpp"}});
@@ -1163,6 +1411,9 @@ bool LiquidityCurveProducer::Publish(
 
   *curve.mutable_bid_curve() = ToProtoCurve(bid_curve);
   *curve.mutable_ask_curve() = ToProtoCurve(ask_curve);
+  // ADR-053: safe-translator из СЫРОГО стакана этого снапшота — кладём в кривую,
+  // клиринг берёт наклон/anchor отсюда (конвейер стакан→кривая→клиринг).
+  SetSafeTranslator(snapshot, &curve);
 
   curve.set_epsilon1(selected_quality.epsilon1);
   curve.set_epsilon2(selected_quality.epsilon2);
@@ -1217,6 +1468,7 @@ bool LiquidityCurveProducer::Publish(
       std::to_string(config_.l3_impact.execution_blend_weight);
   (*tags)["amm_path"] = using_direct_amm ? "direct" : "virtual_lob";
   (*tags)["amm_direct_enabled"] = BoolTag(config_.amm_direct.enabled);
+  for (const auto& [tag_key, tag_value] : options.extra_tags) (*tags)[tag_key] = tag_value;
   (*tags)["amm_pool_fee_rate"] = std::to_string(amm_pool_fee_rate_applied);
   (*tags)["amm_gas_cost_quote"] = std::to_string(amm_gas_cost_quote_applied);
   (*tags)["amm_execution_overhead_bps"] = std::to_string(amm_execution_overhead_bps_applied);

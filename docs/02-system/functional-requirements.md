@@ -87,7 +87,7 @@ Acceptance: F-04 ([UC-F04-01](use-cases/UC-F04-01-run-batch-clearing/use-case.md
 
 При том же входе (та же история, та же `solver_config.version`) результаты клиринга идентичны для целей replay/audit.
 
-Acceptance: F-15 ([UC-F15-01](use-cases/UC-F15-01-replay-historical-batch/use-case.md)).
+Acceptance: F-15 ([UC-F15-07](use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md)).
 
 ## FR-MD. Market data
 
@@ -101,7 +101,7 @@ Acceptance: F-05 ([UC-F05-01](use-cases/UC-F05-01-stream-market-data/use-case.md
 
 CES интегрируется с CEX/DEX/AMM, нормализует их LOB в FOB-форму и использует как reference price + потенциально как источник ликвидности.
 
-Acceptance: F-11 ([UC-F11-01](use-cases/UC-F11-01-ingest-external-marketdata/use-case.md)).
+Acceptance: F-11 ([UC-F11-06](use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md)).
 
 ## FR-RISK. Управление риском
 
@@ -206,7 +206,7 @@ Acceptance: F-01.
 
 ## FR-F05A. Vectorized External Liquidity (F-09 clearing)
 
-Источник: IN-014. Feature — [F-05A](features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md).
+Источник: IN-014. Feature — [F-05A](features/F-05A-vectorized-external-liquidity/README.md).
 Правила — [business-rules.md §F-05A](../04-domain/business-rules.md#f-05a--vectorized-external-liquidity).
 
 - **FR-F05A-001.** Получать внешние order levels (CEX/DEX/AMM): `venue_id`, `source_order_id`, `pair`, `side`, `price`, `quantity`, `remaining_quantity`, `timestamp`, fees/buffers.

@@ -39,6 +39,14 @@ void MarketDataKafkaConsumer::loop() {
       cex::common::Env::get_string("MARKET_DATA_TRACE_EACH_MESSAGE", "0") == "1";
   auto last_progress_log = std::chrono::steady_clock::now();
 
+  // CR-F18-016: диагностика отставания потребителя за период между строками «consumer loop alive» — возраст кривой при
+  // приёме и время занятости по группам топиков (инцидент 2026-10-29: потребитель отстал от потока, окна клиринга стояли
+  // 85 минут, причина читалась только по косвенным признакам). Всё в одном потоке — обработчик вызывается из poll_once.
+  std::int64_t curve_age_last_ms = 0;
+  std::int64_t curve_age_max_ms = 0;
+  std::int64_t curves_in_period = 0;
+  std::int64_t busy_us[3] = {0, 0, 0};  // 0 — кривые, 1 — снимки, 2 — остальные топики
+
   while (running_.load()) {
     cex::common::KafkaConsumer consumer({
         .brokers = brokers_,
@@ -68,8 +76,17 @@ void MarketDataKafkaConsumer::loop() {
 
     while (running_.load()) {
       bool ok = consumer.poll_once(
-          500, [this, trace_each_message](const std::string& topic, const std::string& key, const std::string& payload) {
+          500, [this, trace_each_message, &curve_age_last_ms, &curve_age_max_ms, &curves_in_period, &busy_us](
+                   const std::string& topic, const std::string& key, const std::string& payload) {
             (void)key;
+            struct BusyGuard {
+              std::int64_t& acc;
+              std::chrono::steady_clock::time_point t0;
+              explicit BusyGuard(std::int64_t& a) : acc(a), t0(std::chrono::steady_clock::now()) {}
+              ~BusyGuard() {
+                acc += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+              }
+            } busy_guard(busy_us[topic == "venue.liquidity.fob" ? 0 : topic == "venue.snapshots" ? 1 : 2]);
             try {
               if (topic == "marketdata.raw") {
                 fob::marketdata::v1::MarketDataRaw evt;
@@ -154,6 +171,15 @@ void MarketDataKafkaConsumer::loop() {
                 if (!cex::common::from_bytes(payload, curve)) {
                   cex::common::log_json("ERROR", "Failed to parse VenueLiquidityCurve");
                   return;
+                }
+                if (curve.has_timestamp()) {  // без метки возраст не определён (иначе ≈ 1,7e12 мс портит максимум периода)
+                  const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::system_clock::now().time_since_epoch()).count();
+                  const std::int64_t curve_ts_ms =
+                      curve.timestamp().seconds() * 1000 + curve.timestamp().nanos() / 1000000;
+                  curve_age_last_ms = now_ms - curve_ts_ms;
+                  curve_age_max_ms = std::max(curve_age_max_ms, curve_age_last_ms);
+                  ++curves_in_period;
                 }
 
                 cex::common::log_json(trace_each_message ? "DEBUG" : "INFO",
@@ -255,7 +281,16 @@ void MarketDataKafkaConsumer::loop() {
           now - last_progress_log).count();
       if (elapsed_ms >= 5000) {
         cex::common::log_json("INFO", "MarketData consumer loop alive",
-                              {{"poll_timeout_ms", "500"}});
+                              {{"poll_timeout_ms", "500"},
+                               {"curves", std::to_string(curves_in_period)},
+                               {"curve_age_ms_last", std::to_string(curve_age_last_ms)},
+                               {"curve_age_ms_max", std::to_string(curve_age_max_ms)},
+                               {"busy_ms_curve", std::to_string(busy_us[0] / 1000)},
+                               {"busy_ms_snapshot", std::to_string(busy_us[1] / 1000)},
+                               {"busy_ms_other", std::to_string(busy_us[2] / 1000)}});
+        curves_in_period = 0;
+        curve_age_max_ms = 0;
+        busy_us[0] = busy_us[1] = busy_us[2] = 0;
         last_progress_log = now;
       }
     }

@@ -8,7 +8,7 @@ source:
 related:
   - docs/07-data/vector-flow-segments.md
   - docs/07-data/olap-schema.md
-  - docs/02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md
+  - docs/02-system/features/F-05A-vectorized-external-liquidity/README.md
   - docs/03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md
 ---
 
@@ -63,7 +63,7 @@ Surplus / EXCHANGE_PNL события ([ADR-047](../03-architecture/adr/ADR-047-
 
 ## Used In
 
-- Feature: [F-05A](../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use cases: [UC-F05A-02 Vector Clearing](../02-system/use-cases/UC-F05A-02-vector-clearing/use-case.md), [UC-F05A-03 Display](../02-system/use-cases/UC-F05A-03-display-vector-liquidity/use-case.md), [UC-F05A-05 Replay](../02-system/use-cases/UC-F05A-05-replay-vector-clearing/use-case.md)
 - Sequences: [SEQ-F05A-UC-F05A-02-services](../05-components/sequences/SEQ-F05A-UC-F05A-02-services.md), [SEQ-F05A-UC-F05A-05-services](../05-components/sequences/SEQ-F05A-UC-F05A-05-services.md)
 - ADR: [ADR-047 surplus policy](../03-architecture/adr/ADR-047-surplus-exchange-pnl-policy.md)

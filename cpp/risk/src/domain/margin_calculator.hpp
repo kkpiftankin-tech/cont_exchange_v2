@@ -21,7 +21,7 @@
 //   margin_call := free_collateral < maintenance_margin_total
 //   liquidation := free_collateral <= 0
 //
-// Финансовая дисциплина (CLAUDE.md §9): все величины — Decimal, никаких double.
+// Финансовая дисциплина (.claude/rules/data.md): все величины — Decimal, никаких double.
 // ============================================================================
 
 #include <string>

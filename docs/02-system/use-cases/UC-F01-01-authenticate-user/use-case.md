@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F01-01
+title: Аутентификация пользователя
 level: sea
+feature: F-01
+system-sequence: sequences/SEQ-UC-F01-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F01-UC-F01-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F01-01. Аутентификация пользователя
 

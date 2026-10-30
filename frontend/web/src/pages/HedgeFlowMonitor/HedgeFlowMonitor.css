@@ -1,6 +1,6 @@
 .hedge-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   --hedge-bg: #0a0514;
   --hedge-panel: rgba(20, 10, 40, 0.86);
   --hedge-panel-strong: rgba(27, 14, 50, 0.94);

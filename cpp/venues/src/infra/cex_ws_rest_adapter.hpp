@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -7,11 +8,18 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "infra/cex_local_lob_assembler.hpp"
+#include "app/execution_report_sink.hpp"
+#include "app/fill_diagnostics_sink.hpp"
+#include "domain/liquidity_stats.hpp"
+#include "domain/poll_planner.hpp"
 #include "domain/venue_adapter.hpp"
 
 namespace cex::venues::infra {
@@ -33,6 +41,18 @@ struct CexWsRestAdapterConfig {
   uint32_t heartbeat_pong_timeout_ms{15000};
   uint32_t stale_threshold_ms{15000};
   uint32_t rest_timeout_ms{5000};
+  // ADR-078: дедлайн запросов снимка (стакан, тикер, лента) в режиме планировщика; 0 — как rest_timeout_ms.
+  // Не влияет на POST ордеров и глубокий стакан быстрой полосы.
+  uint32_t rest_snapshot_timeout_ms{0};
+  // Этап 1 (EXP-2026-10-15-exchange-requests); по умолчанию выключено ⇒ поведение прежнее.
+  bool rest_reuse_connections{false};   // пул curl-handle: keep-alive и DNS-кэш
+  bool rest_ipv4_only{false};           // не ждать AAAA (на dev-хосте ≈1 с на запрос)
+  uint32_t rest_connect_timeout_ms{0};  // 0 — отдельного таймаута подключения нет
+  uint32_t rest_ticker_refresh_ms{0};   // 0 — тикер на каждом снимке; >0 — не чаще раза в N мс на пару
+  // Ожидание REST-токена вместо отказа: 0 — не ждать (запрос пропускается, как раньше); >0 —
+  // ждать не дольше N мс. Нужно строгим биржам (Kraken, 2 запроса/с): при частом опросе
+  // хвост очереди пар иначе голодает (пропускается каждый проход).
+  uint32_t rest_token_wait_ms{0};
   bool rest_ticker_volume_enabled{false};
   bool simulate_orders{false};
   std::string simulated_order_id_prefix{"SIM-CEX-"};
@@ -40,9 +60,35 @@ struct CexWsRestAdapterConfig {
   // (например "ETH/USDT,SOL/USDT"), которые simulate-путь возвращает как REJECTED
   // (status на execution.venue → matching пишет combo_compensations(pending)).
   std::string simulate_reject_symbols;
+  // Реалистичная симуляция исполнения по ленте РЕАЛЬНЫХ публичных сделок
+  // (VENUES_SIM_MATCH_REAL_TRADES). При true sim-заявка исполняется не мгновенно по
+  // limit_price, а матчится против недавних реальных сделок символа: SELL@P против
+  // сделок price>=P, BUY@P против price<=P; filled=min(target, Σ пересёкшего объёма),
+  // avg=VWAP реальных сделок; объём сделок потребляется (частичные филлы). Окно —
+  // sim_trade_window_ms. Нет пересечения ⇒ filled=0 (заявка «висит», переэмитится).
+  bool sim_match_real_trades{false};
+  uint32_t sim_trade_window_ms{10000};   // фолбэк-окно до измерения периода чтения
+  uint32_t sim_trade_stale_periods{3};   // окно = N · фактический период чтения ленты
+  uint32_t sim_trade_buf_cap{512};
+  // ADR-060 (поправка, CR-F18-017): рыночная заявка (EXEC_STRATEGY_MARKET) исполняется проходом по видимой стороне стакана
+  // (BUY — asks вверх от лучшей цены, SELL — bids вниз), а не объёмом ленты: на тонкой ленте Kraken/Coinbase заявка иначе
+  // исполняется на единицы процентов. CE_SIM_MARKET_BOOK_FILL; выключено ⇒ прежнее исполнение по ленте.
+  bool sim_market_book_fill{false};
+  uint32_t sim_market_book_max_age_ms{10000};   // стакан старше — прежний путь по ленте (CE_SIM_BOOK_MAX_AGE_MS)
+  double sim_market_book_max_slip_bps{100.0};   // уровни хуже лучшей цены сильнее — не берутся (CE_SIM_BOOK_MAX_SLIP_BPS)
+  // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
+  // v=filled/Δt. k в цена·с/лот; 0 ⇒ импакт выключен (регрессия).
+  double sim_price_impact_k{0.0};            // множитель на физический k=τ/ρ (спец §3)
+  double sim_impact_tau_sec{5.0};            // τ — время восстановления стакана (сек), для k~τ/ρ
+  double sim_price_impact_min_dt_sec{0.1};   // пол Δt (защита от деления на ~0)
+  double sim_price_impact_default_dt_sec{1.0};  // Δt для первого fill символа
 
   double rest_requests_per_sec{10.0};
   double rest_burst{10.0};
+  // ADR-070: отдельный бюджет REST быстрой полосы стакана (RequestDepthOnly), чтобы она
+  // не голодала основной цикл/ленту сделок и не трогала его circuit breaker.
+  double depth_only_requests_per_sec{5.0};
+  double depth_only_burst{10.0};
   double ws_messages_per_sec{10.0};
   double ws_burst{10.0};
   double connect_attempts_per_sec{2.0};
@@ -95,6 +141,17 @@ class ICexWsSession {
 
 class CurlCexRestClient final : public ICexRestClient {
  public:
+  struct Options {
+    bool reuse_connections{false};
+    bool ipv4_only{false};
+    uint32_t connect_timeout_ms{0};
+  };
+  CurlCexRestClient() = default;
+  explicit CurlCexRestClient(Options options) : options_(options) {}
+  ~CurlCexRestClient() override;
+  CurlCexRestClient(const CurlCexRestClient&) = delete;
+  CurlCexRestClient& operator=(const CurlCexRestClient&) = delete;
+
   bool Get(const std::string& url,
            const std::vector<std::string>& headers,
            uint32_t timeout_ms,
@@ -107,6 +164,11 @@ class CurlCexRestClient final : public ICexRestClient {
             uint32_t timeout_ms,
             std::string* response_body,
             long* http_code) override;
+
+ private:
+  Options options_;
+  std::mutex pool_mu_;
+  std::vector<void*> idle_handles_;  // CURL*; пул при reuse_connections (handle не потокобезопасен — берётся целиком)
 };
 
 // Minimal WS session placeholder for environments where WS transport
@@ -130,7 +192,7 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   explicit CexWsRestAdapter(
       CexWsRestAdapterConfig cfg,
-      std::unique_ptr<ICexRestClient> rest_client = std::make_unique<CurlCexRestClient>(),
+      std::unique_ptr<ICexRestClient> rest_client = nullptr,  // nullptr ⇒ CurlCexRestClient по cfg
       std::unique_ptr<ICexWsSession> ws_session = std::make_unique<NoopCexWsSession>(),
       ClockNowFn now_fn = [] { return SteadyClock::now(); });
 
@@ -145,10 +207,58 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   std::optional<domain::VenueRawSnapshot> RequestSnapshot(
       const domain::VenueSnapshotRequest& request) override;
 
+  std::optional<domain::VenueRawSnapshot> RequestDepthOnly(
+      const domain::VenueSnapshotRequest& request, std::size_t levels) override;
+  // Выделенный REST-клиент для RequestDepthOnly (ADR-070): глубокий запрос не стоит в
+  // очереди за общим клиентом и мьютексом основного цикла. Вызывать до старта потока
+  // быстрой полосы; единственный потребитель — этот поток.
+  // ADR-078 (этап 2а): запрос снимка под управлением планировщика. Адаптер НЕ применяет свой предохранитель и
+  // лимитер токенов (политику ведёт планировщик), не подменяет неудачу книгой из кэша и возвращает класс исхода.
+  struct FetchOutcome {
+    std::optional<domain::VenueRawSnapshot> fresh;  // только свежая книга
+    domain::FetchClass cls{domain::FetchClass::kTransient};
+    long http_code{0};
+    // 429/418 на побочном запросе (тикер, лента) при удачном стакане: планировщик обязан замедлиться и здесь.
+    bool side_rate_limited{false};
+  };
+  FetchOutcome FetchSnapshot(const domain::VenueSnapshotRequest& request);
+
+  // Опции REST-клиента из конфига адаптера (для клиента быстрой полосы).
+  CurlCexRestClient::Options RestClientOptions() const {
+    return {cfg_.rest_reuse_connections, cfg_.rest_ipv4_only, cfg_.rest_connect_timeout_ms};
+  }
+  void SetDepthRestClient(std::unique_ptr<ICexRestClient> client) {
+    depth_rest_client_ = std::move(client);
+  }
+  bool DepthOnlyUsesSharedClient() const override { return depth_rest_client_ == nullptr; }
+
   domain::VenueOrderResult SendOrder(
       const fob::execution::v1::ExecutionIntent& intent) override;
 
   bool ApplyRuntimeConfig(const domain::VenueAdapterRuntimeConfig& config) override;
+
+  // F-11/F-20 (IN-0xx fair trades scheduling): см. domain::VenueAdapter.
+  // Читает books_[canon_trade_key(venue_symbol)].last_trades_read под mu_.
+  int64_t TradesReadAgeMs(const std::string& venue_symbol) const override;
+
+  // ADR-082 (шаг 0): оборот ленты ν и коэффициент исполнения f по парам биржи (под mu_). Пары без данных пропускаются.
+  std::vector<domain::VenueLiquidityStat> LiquidityStats() const override;
+
+  // ADR-082 (шаг 1): затравка оценок ν и f сохранёнными значениями. Пары, по которым ещё нет состояния ленты, ждут первого
+  // чтения ленты (liq_seeds_); уже существующие, но нетронутые, затравливаются сразу.
+  void SeedLiquidityStats(const std::vector<domain::VenueLiquidityStat>& seeds) override;
+
+  // F-18/ADR-060: приёмник диагностики sim-fill (venue_fill_diagnostics → Clearing).
+  // Опционален (nullptr ⇒ не пишем). Устанавливается в venues main. Не владеет.
+  void SetFillDiagnosticsSink(app::FillDiagnosticsSink* sink) { diag_sink_ = sink; }
+
+  // F-18 #5/ADR-067 (T-F18-803): приёмник follow-up ExecutionReport от
+  // резидентного (GTC) мейкер-лимита, доматчиваемого между read-циклами
+  // (progress_resting_orders_locked). Опционален (nullptr ⇒ резидентные лимиты
+  // не публикуют follow-up отчёты — эквивалент выключенного резервирования).
+  // Устанавливается в VenuesLoop (владелец Kafka-продюсеров/PG-репозиториев).
+  // Не владеет.
+  void SetExecutionReportSink(app::ExecutionReportSink* sink) { report_sink_ = sink; }
 
   // Ingest external WS events from transport driver.
   bool OnWsTextMessage(const std::string& payload);
@@ -160,17 +270,76 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
                                      int64_t* out_units);
 
  private:
+  // Один реальный публичный трейд (лента time-and-sales) для матчинга sim-заявок.
+  struct TradePrint {
+    cex::common::Decimal price{0, 0};
+    cex::common::Decimal qty{0, 0};  // остаток объёма (потребляется при филлах)
+    SteadyClock::time_point ts{};    // время ЧТЕНИЯ по REST — для окна матчинга (staleness)
+    int64_t exchange_ms{0};          // биржевое время сделки (Unix ms) — для ВОЗРАСТА в UI; 0=неизв.
+  };
+
   struct SymbolBookState {
     uint64_t sequence{0};
     std::vector<domain::VenueBookLevel> bids;
     std::vector<domain::VenueBookLevel> asks;
+    // CR-F18-017: поколение и время последнего обновления bids/asks (ставятся в sync_state_from_lob_locked; last_market_event для
+    // этого не годится — его двигают тикер и сделки). Рыночные sim-заявки берут объём уровней: bid_taken/ask_taken (параллельно
+    // bids/asks по индексу) действительны, пока book_taken_generation == book_generation, иначе обнуляются — два хеджа не
+    // расходуют один уровень дважды.
+    uint64_t book_generation{0};
+    SteadyClock::time_point book_updated_at{};
+    uint64_t book_taken_generation{0};
+    std::vector<cex::common::Decimal> bid_taken;
+    std::vector<cex::common::Decimal> ask_taken;
     CexLocalLobAssembler lob;
     bool needs_reinit{false};
     bool is_empty_book{false};
     std::deque<CexLocalLobAssembler::DiffEvent> pending_depth_diffs;
     cex::common::Decimal volume_24h{0, 0};
+    cex::common::Decimal window_volume_24h{0, 0};  // ADR-077: объём для окна глубины (OKX/Kraken)
+    SteadyClock::time_point last_ticker_fetch{};   // этап 1: когда тикер читали в последний раз
+    bool ticker_fetched{false};
     bool volume_24h_authoritative{false};
     SteadyClock::time_point last_market_event{};
+    // Лента недавних реальных публичных сделок для реалистичной симуляции исполнения
+    // (price+qty+время). qty потребляется по мере матчинга sim-заявок (дефицит объёма).
+    std::deque<TradePrint> recent_trades;
+    // Ценовой контекст для диагностики (вкладка Clearing, #3): последние N публичных
+    // сделок БЕЗ прунинга по времени (только по ёмкости). Нужен, чтобы показать
+    // ближайшие по цене сделки вокруг лимита хеджа, даже когда окно матчинга пусто —
+    // видно, почему заявка не исполняется (все сделки по «другой» стороне цены).
+    std::deque<TradePrint> context_trades;
+    // Измерение ФАКТИЧЕСКОГО периода чтения ленты (rate-limited REST): интервал между
+    // вызовами parse_rest_trades для символа (EMA). Окно матчинга = N·этот период —
+    // тогда при отсутствии новых сделок матчим недавние старые за N последних чтений.
+    SteadyClock::time_point last_trades_read{};
+    double read_interval_ms{0.0};
+    // Wall-clock (Unix ms) времена REST-чтения ленты — для UI-разбора времён:
+    // когда отправлен запрос и когда пришёл ответ (задержка = resp−req).
+    int64_t last_trades_request_ms{0};
+    int64_t last_trades_response_ms{0};
+    // Момент прошлого CE-исполнения по символу — для Δt в price-impact (v=filled/Δt).
+    SteadyClock::time_point last_ce_fill_at{};
+    // Дедуп REST recent-trades: наибольший ключ (id/время*1000) уже принятой сделки.
+    int64_t last_trade_key{0};
+    // ADR-082 (шаг 0): измерение ликвидности. tape — оборот ленты (валюта котирования/с, EWMA по чтениям);
+    // fill — коэффициент исполнения f по хедж-заявкам (доля исполненного объёма, с забыванием).
+    domain::TapeRateEstimator tape;
+    domain::FillCoefficient fill;
+  };
+
+  // F-18 #5/ADR-067 (T-F18-803): резидентная (GTC) мейкер-заявка band-хеджа,
+  // живущая между read-циклами RequestSnapshot. Регистрируется в
+  // ApplyRealTradeFillLocked, когда первый tick не терминален (NEW/
+  // PARTIALLY_FILLED, не marketable, TIF_GTC); доматчивается на каждом
+  // следующем снапшоте символа в progress_resting_orders_locked до цели или
+  // дедлайна (intent.timeout_ms(), выставлен risk'ом — ADR-067 §1).
+  struct RestingBandOrder {
+    fob::execution::v1::ExecutionIntent intent;
+    std::string canon_key;                 // canon_trade_key(venue_symbol) — привязка к ленте
+    cex::common::Decimal target{0, 0};      // intent.target_qty()
+    cex::common::Decimal cumulative_filled{0, 0};  // накопленный filled (КУМУЛЯТИВНО, не delta)
+    SteadyClock::time_point deadline{};     // now(при регистрации) + intent.timeout_ms()
   };
 
   struct TokenBucket {
@@ -188,6 +357,11 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   };
 
   bool consume_rest_token_locked(SteadyClock::time_point now);
+  // Берёт REST-токен, при нехватке ждёт не дольше cfg_.rest_token_wait_ms (вызывать БЕЗ mu_).
+  bool acquire_rest_token(SteadyClock::time_point* now);
+  // Общая реализация RequestSnapshot/FetchSnapshot: outcome != nullptr — режим планировщика (см. FetchSnapshot).
+  std::optional<domain::VenueRawSnapshot> RequestSnapshotImpl(
+      const domain::VenueSnapshotRequest& request, FetchOutcome* outcome);
   bool consume_ws_token_locked(SteadyClock::time_point now);
   bool consume_connect_token_locked(SteadyClock::time_point now);
   static bool consume_token(TokenBucket* bucket, double need, SteadyClock::time_point now);
@@ -229,6 +403,15 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   bool apply_rest_ticker_volume_locked(const std::string& body,
                                        const domain::VenueSnapshotRequest& request,
                                        SteadyClock::time_point now);
+  // ADR-060: парс REST recent-trades (per-venue формат) → recent_trades символа.
+  // Дедуп по last_trade_key (id/время), чтобы повторный поллинг не дублировал сделки.
+  void parse_rest_trades_locked(const std::string& body,
+                                const std::string& venue_symbol,
+                                SteadyClock::time_point now);
+
+  // Окно устаревания сделок для символа = N · измеренный период чтения ленты (EMA).
+  // До первого измерения — фолбэк cfg_.sim_trade_window_ms.
+  std::chrono::milliseconds effective_trade_window_locked(const SymbolBookState& st) const;
 
   void sync_state_from_lob_locked(SymbolBookState* state);
   void push_pending_diff_locked(SymbolBookState* state,
@@ -237,15 +420,43 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
   bool apply_ws_depth_event_locked(const std::string& payload, SteadyClock::time_point now);
   bool apply_ws_ticker_event_locked(const std::string& payload, SteadyClock::time_point now);
   bool apply_ws_trade_event_locked(const std::string& payload, SteadyClock::time_point now);
+  // Реалистичное исполнение sim-заявки по ленте реальных сделок (mu_ удержан).
+  // Перезаписывает filled_qty/remaining_qty/average_price/status в out по факту
+  // матчинга против books_[symbol].recent_trades (VENUES_SIM_MATCH_REAL_TRADES).
+  void ApplyRealTradeFillLocked(const fob::execution::v1::ExecutionIntent& intent,
+                                domain::VenueOrderResult* out,
+                                SteadyClock::time_point now);
+  // CR-F18-017: рыночная заявка проходом по стакану. false — стакан непригоден (пуст или старше sim_market_book_max_age_ms):
+  // вызывающий идёт прежним путём по ленте. true — *filled и *notional (qty·price) заполнены, учёт взятого объёма обновлён.
+  // *book_age_ms (необязателен) — возраст стакана на момент заявки, если стакан был (для журнала).
+  bool MatchMarketAgainstBookLocked(SymbolBookState* state, bool is_sell, const cex::common::Decimal& target,
+                                    SteadyClock::time_point now, cex::common::Decimal* filled,
+                                    cex::common::Decimal* notional, int64_t* book_age_ms);
+
+  // F-18 #5/ADR-067 (T-F18-803): доматчивание резидентных (GTC) мейкер-лимитов
+  // символа venue_symbol против НОВЫХ (ещё не потреблённых) сделок его ленты.
+  // Вызывается из RequestSnapshot ПОСЛЕ parse_rest_trades_locked (mu_ удержан).
+  // СОБИРАЕТ (не публикует!) follow-up отчёты (кумулятивный filled_qty) при
+  // инкременте fill'а/терминализации в out_followups — публикация делается
+  // ВНЕ mu_ вызывающим (code-review: блокирующий Kafka/PG под mu_ застопорил бы
+  // SendOrder/RequestSnapshot всех символов адаптера). Терминальные заявки
+  // удаляются из resting_band_orders_.
+  using FollowUpReport = std::pair<fob::execution::v1::ExecutionIntent,
+                                   fob::execution::v1::ExecutionReport>;
+  void progress_resting_orders_locked(const std::string& venue_symbol,
+                                      SteadyClock::time_point now,
+                                      std::vector<FollowUpReport>* out_followups);
 
   std::vector<std::string> auth_headers() const;
   std::string rest_depth_url(const domain::VenueSnapshotRequest& request) const;
   std::string rest_ticker_url(const domain::VenueSnapshotRequest& request) const;
+  std::string rest_trades_url(const domain::VenueSnapshotRequest& request) const;
   std::string rest_order_url() const;
 
   mutable std::mutex mu_;
   CexWsRestAdapterConfig cfg_;
   std::unique_ptr<ICexRestClient> rest_client_;
+  std::unique_ptr<ICexRestClient> depth_rest_client_;  // опционально, см. SetDepthRestClient
   std::unique_ptr<ICexWsSession> ws_session_;
   ClockNowFn now_fn_;
 
@@ -265,8 +476,30 @@ class CexWsRestAdapter final : public domain::VenueAdapter {
 
   std::vector<domain::VenueSubscription> subscriptions_;
   std::unordered_map<std::string, SymbolBookState> books_;
+  app::FillDiagnosticsSink* diag_sink_{nullptr};  // ADR-060 sim-fill диагностика, не владеет
+  // F-18 #5/ADR-067: резидентные (GTC) мейкер-заявки band-хеджа, ключ = intent_id.
+  std::unordered_map<std::string, RestingBandOrder> resting_band_orders_;
+
+  // ADR-082: коэффициент исполнения f учитывается ОДИН раз на терминальный исход заявки. intent_id уже учтённых
+  // заявок хранится в ограниченной очереди: повторная доставка того же intent_id (Kafka at-least-once) вес не удваивает.
+  static constexpr std::size_t kFillCountedCap = 8192;
+  // Сколько последних сделок просит у биржи rest_trades_url (limit/count во всех профилях). Должно совпадать с URL: по нему
+  // определяется, что выдача ленты упёрлась в лимит (ADR-082, оценка оборота ν).
+  static constexpr std::size_t kTradesRequestLimit = 100;
+  std::unordered_set<std::string> fill_counted_ids_;
+  std::deque<std::string> fill_counted_order_;
+  // Отложенные затравки по каноническому ключу ленты (под mu_); снимаются при первом чтении ленты пары.
+  std::unordered_map<std::string, domain::VenueLiquidityStat> liq_seeds_;
+  void apply_liquidity_seed_locked(SymbolBookState& state, const domain::VenueLiquidityStat& seed,
+                                   SteadyClock::time_point now);
+  void record_hedge_fill_locked(const std::string& canon_key, const std::string& intent_id,
+                                const cex::common::Decimal& filled, const cex::common::Decimal& target,
+                                SteadyClock::time_point now);
+  app::ExecutionReportSink* report_sink_{nullptr};  // follow-up отчёты, не владеет
 
   TokenBucket rest_bucket_;
+  TokenBucket depth_bucket_;  // только RequestDepthOnly (ADR-070)
+  std::atomic<uint32_t> depth_only_failures_{0};  // для троттлинга лога отказов
   TokenBucket ws_bucket_;
   TokenBucket connect_bucket_;
 

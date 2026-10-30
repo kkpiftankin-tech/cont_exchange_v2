@@ -9,11 +9,10 @@ include(FetchContent)
 find_package(GTest CONFIG QUIET)
 
 if (NOT TARGET GTest::gtest)
+    # codeload tar.gz archive вместо git clone (github анонимный клон падает в Docker-build).
     FetchContent_Declare(
             googletest
-            GIT_REPOSITORY https://github.com/google/googletest.git
-            GIT_TAG release-1.12.1
-            GIT_SHALLOW TRUE
+            URL https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
     )
 
     # Отключаем установку gtest вместе с проектом

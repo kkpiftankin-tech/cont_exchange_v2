@@ -18,8 +18,13 @@ namespace {
 cex::common::Decimal Quantize(double value, std::int32_t scale) {
   if (!std::isfinite(value)) return cex::common::Decimal{0, scale};
   const double factor = std::pow(10.0, static_cast<double>(scale));
-  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(value * factor)),
-                              scale};
+  double scaled = std::round(value * factor);
+  // Защита от переполнения int64 (иначе static_cast — UB → INT64_MIN → битый
+  // Decimal::to_string, см. curve_to_levels.cpp). Сатурируем в диапазон int64.
+  constexpr double kMax = 9.22e18, kMin = -9.22e18;
+  if (scaled > kMax) scaled = kMax;
+  else if (scaled < kMin) scaled = kMin;
+  return cex::common::Decimal{static_cast<std::int64_t>(scaled), scale};
 }
 
 bool Positive(const cex::common::Decimal& d) {
@@ -97,9 +102,14 @@ VectorizeResult Vectorize(const std::vector<ExternalOrderLevel>& levels,
       seg.w[static_cast<std::size_t>(iy)] = p_eff;
     }
 
-    // d_hl = dHL-policy(P_eff); p_low=0; p_high=d_hl.
-    const double d_hl_d = cfg.dhl_fraction * p_eff;
-    seg.d_hl = Quantize(d_hl_d, cfg.decimal_scale);
+    // d_hl: ADR-051 — если задан override (реальный наклон кривой венью, |b|·q_max),
+    // берём его; иначе dHL-policy = dhl_fraction·P_eff. p_low=0; p_high=d_hl.
+    if (Positive(lvl.d_hl_override)) {
+      seg.d_hl = lvl.d_hl_override;
+    } else {
+      const double d_hl_d = cfg.dhl_fraction * p_eff;
+      seg.d_hl = Quantize(d_hl_d, cfg.decimal_scale);
+    }
     seg.p_low = cex::common::Decimal{0, cfg.decimal_scale};
     seg.p_high = seg.d_hl;
     seg.effective_price = Quantize(p_eff, cfg.decimal_scale);

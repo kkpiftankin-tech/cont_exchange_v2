@@ -130,12 +130,40 @@ void TestDeterminism() {
 
 }  // namespace
 
+// F-05A ADR-050: одна пара на ДВУХ биржах → общий asset-basis + оба venue_id.
+// Это основа кросс-venue клиринга (сейчас OnLiquidityCurve векторизует поканально;
+// оконный агрегатор скармливает Vectorize объединённые уровни всех венью/пар).
+void TestCrossVenueSharedBasis() {
+  d::ExternalOrderLevel a;
+  a.venue_id = "binance"; a.source_order_id = "a0"; a.pair = "BTC/USDT";
+  a.base_asset = "BTC"; a.quote_asset = "USDT"; a.side = d::LevelSide::kBid;
+  a.price = Decimal{100, 0}; a.quantity = Decimal{10, 0};
+  d::ExternalOrderLevel b;
+  b.venue_id = "coinbase"; b.source_order_id = "b0"; b.pair = "BTC/USDT";
+  b.base_asset = "BTC"; b.quote_asset = "USDT"; b.side = d::LevelSide::kAsk;
+  b.price = Decimal{99, 0}; b.quantity = Decimal{10, 0};
+
+  d::VectorizeResult r = d::Vectorize({a, b});
+  expect(r.basis.num_assets == 2, "crossvenue: общий 2-актив basis [BTC,USDT]");
+  expect(r.segments.size() == 2, "crossvenue: 2 сегмента (оба venue)");
+  const bool both =
+      (r.segments[0].venue_id == "binance" && r.segments[1].venue_id == "coinbase") ||
+      (r.segments[0].venue_id == "coinbase" && r.segments[1].venue_id == "binance");
+  expect(both, "crossvenue: сегменты несут разные venue_id");
+  const int btc = r.basis.IndexOf("BTC");
+  expect(btc >= 0 &&
+             (approx(r.segments[0].w[static_cast<std::size_t>(btc)], 1.0) ||
+              approx(r.segments[0].w[static_cast<std::size_t>(btc)], -1.0)),
+         "crossvenue: ось BTC = ±1 (встречные знаки bid/ask)");
+}
+
 int main() {
   TestBasisAndSharedComponent();
   TestEffectivePriceFees();
   TestSegmentParams();
   TestSkipInvalid();
   TestDeterminism();
+  TestCrossVenueSharedBasis();
   if (g_failures == 0) { std::cout << "vectorize_test: ALL PASSED\n"; return 0; }
   std::cerr << "vectorize_test: " << g_failures << " FAILURE(S)\n";
   return 1;

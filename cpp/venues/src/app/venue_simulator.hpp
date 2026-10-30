@@ -22,7 +22,7 @@ namespace cex::venues::app {
 //
 // Math is done in double, not Decimal: this is a SIMULATOR feeding the
 // isolated, non-authoritative sim-book (ADR-016; spec §1.4 — sim reports
-// are not legally-significant execution). CLAUDE.md §9 permits double for
+// are not legally-significant execution). .claude/rules/data.md permits double for
 // simulation calculations whose result does not enter the real ledger.
 // Final quantities are converted back to Decimal for the report.
 

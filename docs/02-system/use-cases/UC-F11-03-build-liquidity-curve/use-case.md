@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F11-03
+title: Построить VenueLiquidityCurve (LOB → FOB)
 level: sea
+feature: F-11
+system-sequence: sequences/SEQ-UC-F11-03-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F11-03-build-curve-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F11-03. Построить VenueLiquidityCurve (LOB → FOB)
 

@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F11-04
+title: Деградация площадки (stale / circuit breaker)
 level: sea
+feature: F-11
+system-sequence: sequences/SEQ-UC-F11-04-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F11-04-health-routing-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F11-04. Деградация площадки (stale / circuit breaker)
 

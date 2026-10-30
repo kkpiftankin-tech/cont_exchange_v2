@@ -10,9 +10,13 @@
 // ============================================================================
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
+#include <thread>
+
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // F-18: ledger stub (валютный вектор)
 #include "app/risk_uc.hpp"
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
@@ -47,6 +51,36 @@ int main() {
         "WARN", "RISK_POSTGRES_DSN not set or libpqxx unavailable; "
                 "margin snapshots disabled");
   }
+
+  // F-18 (ADR-054 §10): stub к ledger для чтения валютного вектора биржи (NOP).
+  const std::string ledger_addr =
+      cex::common::Env::get_string("LEDGER_GRPC_ADDR", "ledger:50053");
+  auto ledger_channel =
+      grpc::CreateChannel(ledger_addr, grpc::InsecureChannelCredentials());
+  auto ledger_stub = fob::ledger::v1::LedgerService::NewStub(ledger_channel);
+  uc.SetLedgerStub(ledger_stub.get());
+  cex::common::log_json("INFO", "Risk → ledger client wired (F-18 NOP)",
+                        {{"ledger_addr", ledger_addr}});
+
+  // F-18 Phase E02: producer execution.intents + фоновый драйвер эмиссии net-хеджа
+  // (за флагом CE_NET_HEDGE_ENABLED; cooldown защищает от переэмиссии).
+  cex::common::KafkaProducer intents_producer(
+      {.brokers = brokers, .client_id = "risk-hedge"});
+  uc.SetIntentsProducer(&intents_producer);
+  std::thread hedge_thread([&uc]() {
+    const int interval = cex::common::Env::get_int("CE_HEDGE_INTERVAL_MS", 10000);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+      try { uc.EmitNetHedges(); }
+      catch (const std::exception& e) {
+        cex::common::log_json("ERROR", "EmitNetHedges failed", {{"error", e.what()}});
+      }
+      // Вариант 2 (2026-09-17): band-эмиссия ушла из опроса в событийный путь —
+      // ledger детектит пробой → ce.agent.band.breach → KafkaConsumer::band_breach_loop
+      // → uc.EmitBandHedgeFromBreach. EmitAgentBandHedges (опрос) больше не вызываем.
+    }
+  });
+  hedge_thread.detach();
 
   cex::risk::transport::GrpcRiskService svc(&uc);
 

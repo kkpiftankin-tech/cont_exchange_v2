@@ -64,6 +64,10 @@ mv1::VectorClearingResult ToVectorClearingResult(
   for (const auto& xi : outcome.solve.x) {
     *res.add_x() = xi.to_proto();
   }
+  // pi (клиринговые цены по активам) — уже Decimal (дуальные OSQP по Wx=0).
+  for (const auto& pi : outcome.solve.pi) {
+    *res.add_pi() = pi.to_proto();
+  }
   // residual (Wx per asset) — double → Decimal (диагностика).
   for (double r : outcome.solve.residual) {
     *res.add_residual() = QuantizeToProto(r, decimal_scale);

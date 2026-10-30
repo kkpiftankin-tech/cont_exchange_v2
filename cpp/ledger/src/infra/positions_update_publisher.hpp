@@ -14,7 +14,7 @@
 //
 // Delivery: at-least-once (ADR-020). Потребитель идемпотентен по batch_id.
 // Публикация best-effort: ошибка produce логируется, но НЕ валит обработку
-// батча (CLAUDE.md §17 — ledger source of truth, push — вторичный сигнал).
+// батча (cpp/ledger/CLAUDE.md — ledger source of truth, push — вторичный сигнал).
 // ============================================================================
 #include <cstdint>
 #include <string>

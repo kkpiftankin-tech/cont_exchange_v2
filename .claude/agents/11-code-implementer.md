@@ -1,10 +1,11 @@
 ---
 name: code-implementer
-description: Use this agent only after an implementation task T-FXX-NNN exists in `docs/implementation-plan/`. It implements one small scoped task with tests, following feature docs, proto contracts, data schemas, and project rules. Runs in worktree isolation to avoid clobbering parallel sessions.
+description: Implements one small scoped task T-FXX-NNN with tests, in an isolated git worktree. Use for class L/XL tasks that already have an implementation task in docs/implementation-plan/, or when the user explicitly asks for isolated/parallel implementation. For class S/M changes the main session edits directly instead. Returns a diff summary, tests run, residual risks.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: sonnet
 permissionMode: acceptEdits
 isolation: worktree
+maxTurns: 60
 color: green
 ---
 

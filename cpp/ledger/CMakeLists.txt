@@ -51,6 +51,187 @@ if (BUILD_TESTING)
 
   add_test(NAME ledger_uc_test COMMAND ledger_uc_test)
 
+  # F-18 v2: band-хедж — трёхзонные пороги от комиссии, A7-учёт позиции
+  # (эмиссия/fill/timeout/частичное), нумерарий-sweep. Kafka-producer как заглушка
+  # (produce() best-effort), PG нет — LoadBandFeeConfig берёт env-дефолты.
+  add_executable(ce_band_hedge_a7_test
+    tests/ce_band_hedge_a7_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_hedge_a7_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_hedge_a7_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_hedge_a7_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_hedge_a7_test COMMAND ce_band_hedge_a7_test)
+
+  # F-18, ADR-088: чистый домен модели порогов хеджа против эталонов страницы (golden.inc генерирует
+  # tools/hedge-threshold-model/gen_golden.js) и инварианты CALC-CE-HEDGE-THRESHOLD-MODEL.
+  add_executable(hedge_threshold_model_test
+    tests/hedge_threshold_model_test.cpp
+  )
+  target_include_directories(hedge_threshold_model_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(hedge_threshold_model_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME hedge_threshold_model_test COMMAND hedge_threshold_model_test)
+
+  # F-18, ADR-088: подключение модели в ledger — режимы off/shadow/on, пороги и размер заявки, оценка потока, связка.
+  add_executable(ce_hedge_model_wiring_test
+    tests/ce_hedge_model_wiring_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_hedge_model_wiring_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_hedge_model_wiring_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_hedge_model_wiring_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_hedge_model_wiring_test COMMAND ce_hedge_model_wiring_test)
+
+  # ADR-082 шаг 2: потолок размера хедж-заявки по обороту ленты биржи (чистые функции + эмиссия с подставным источником ν).
+  add_executable(ce_order_cap_test
+    tests/ce_order_cap_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_order_cap_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_order_cap_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_order_cap_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_order_cap_test COMMAND ce_order_cap_test)
+
+  # ADR-084: физический перевод связки между биржами (порог, сумма, срок, исполнение, ApplyNodeTransfer, boot_id).
+  add_executable(ce_link_transfer_test
+    tests/ce_link_transfer_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_link_transfer_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_link_transfer_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_link_transfer_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_link_transfer_test COMMAND ce_link_transfer_test)
+
+  # F-18 D1+#7 (T-F18-703/706): чистая функция VolScaleFactor (динамический порог).
+  add_executable(ce_band_vol_scale_test
+    tests/ce_band_vol_scale_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_vol_scale_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_vol_scale_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_vol_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_vol_scale_test COMMAND ce_band_vol_scale_test)
+
+  # ADR-081: чистая функция ResolveManualBand (ручная ширина полосы хеджа).
+  add_executable(ce_band_manual_test
+    tests/ce_band_manual_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_manual_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_manual_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_manual_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_manual_test COMMAND ce_band_manual_test)
+
+  # F-18 #7 scoped (ADR-066 §D3, T-F18-L04): чистая функция LiqScaleFactor (ликвидностная ось).
+  add_executable(ce_band_liq_scale_test
+    tests/ce_band_liq_scale_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_liq_scale_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_liq_scale_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_liq_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_liq_scale_test COMMAND ce_band_liq_scale_test)
+
+  # F-18 #6 (T-F18-804): расчётная band-комиссия зоны (band_fee_estimated),
+  # money-path — fee_incr, снимок bps на эмиссии, аккумуляция по отчётам.
+  add_executable(ce_band_fee_estimated_test
+    tests/ce_band_fee_estimated_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_fee_estimated_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_fee_estimated_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_fee_estimated_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_fee_estimated_test COMMAND ce_band_fee_estimated_test)
+
+  # F-18 #8 (ADR-068): признание прибыли по факту (house_realized_pnl/plan_fact_gap),
+  # money-path — марка=clear price, аккумуляция, guard без марки. Observation-only.
+  add_executable(ce_band_house_realized_test
+    tests/ce_band_house_realized_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_band_house_realized_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_band_house_realized_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_band_house_realized_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_band_house_realized_test COMMAND ce_band_house_realized_test)
+
+  # ADR-087 (CALC-CE-AGENT-PNL): заработок агентов через ledger целиком (дельты → хедж → GetAgentPnl, сброс, перезапуск
+  # через заглушку репозитория). Без PG и Kafka.
+  add_executable(ce_agent_pnl_test
+    tests/ce_agent_pnl_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_agent_pnl_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_agent_pnl_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_agent_pnl_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_agent_pnl_test COMMAND ce_agent_pnl_test)
+
+  # ADR-087 (CALC-CE-AGENT-PNL): чистая математика книги внутренней биржи и внешних сумм агента (Decimal, без ledger_uc/PG/Kafka).
+  add_executable(agent_pnl_book_test
+    tests/agent_pnl_book_test.cpp
+  )
+  target_include_directories(agent_pnl_book_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(agent_pnl_book_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(agent_pnl_book_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME agent_pnl_book_test COMMAND agent_pnl_book_test)
+
   # F-20 DoD-7 sim-book applier (pure; no PG, no Kafka).
   add_executable(ledger_sim_book_applier_test
     tests/sim_book_applier_test.cpp
@@ -291,5 +472,85 @@ if (BUILD_TESTING)
 
   target_compile_options(ledger_positions_update_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME ledger_positions_update_test COMMAND ledger_positions_update_test)
+
+  # F-18 v2 (T-F18-202/203, ADR-061 §1/§7, ADR-063): per-agent знаковая
+  # позиция CE (c<-c+f), GetAgentPositions RPC. Pure unit — no PG, no Kafka.
+  add_executable(ledger_ce_agent_position_test
+    tests/ce_agent_position_test.cpp
+    src/app/ledger_uc.cpp
+  )
+
+  target_include_directories(ledger_ce_agent_position_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(ledger_ce_agent_position_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(ledger_ce_agent_position_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ledger_ce_agent_position_test COMMAND ledger_ce_agent_position_test)
+
+  # F-18 v2 (наблюдаемость такта клиринга): per-batch ring-история agent
+  # дельт (agent_delta_history_) + GetAgentPositionDeltas(batch_id) проекция
+  # ДО→Δ→ПОСЛЕ. Pure unit — no PG, no Kafka.
+  add_executable(ledger_agent_position_deltas_test
+    tests/agent_position_deltas_test.cpp
+    src/app/ledger_uc.cpp
+  )
+
+  target_include_directories(ledger_agent_position_deltas_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(ledger_agent_position_deltas_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(ledger_agent_position_deltas_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ledger_agent_position_deltas_test COMMAND ledger_agent_position_deltas_test)
+
+  # F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): чистая математика закрытого
+  # учёта — MTM, W·c=0, Σ|c+in_flight|. Pure unit (static метод, без PG/Kafka).
+  add_executable(ce_system_invariants_test
+    tests/ce_system_invariants_test.cpp
+    src/app/ledger_uc.cpp
+  )
+  target_include_directories(ce_system_invariants_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(ce_system_invariants_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(ce_system_invariants_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME ce_system_invariants_test COMMAND ce_system_invariants_test)
+
+  # F-18 v2 (T-F18-204/205): PostgresAgentPositionRepository against a REAL
+  # PostgreSQL (TEST_PG_DSN / LEDGER_POSTGRES_DSN). Gracefully skips (exit 0)
+  # when no DB is configured, matching order_flow's postgres_* test pattern.
+  # Only built when libpqxx is available (same guard as the ledger binary).
+  if (LIBPQXX_FOUND)
+    add_executable(ledger_ce_agent_position_pg_test
+      tests/ce_agent_position_pg_repository_test.cpp
+      src/infra/postgres_repositories.cpp
+    )
+
+    target_include_directories(ledger_ce_agent_position_pg_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(ledger_ce_agent_position_pg_test PRIVATE
+      cex_common
+      contracts_proto
+      PkgConfig::LIBPQXX
+    )
+
+    target_compile_definitions(ledger_ce_agent_position_pg_test PRIVATE CEX_LEDGER_HAS_LIBPQXX=1)
+    target_compile_options(ledger_ce_agent_position_pg_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME ledger_ce_agent_position_pg_test COMMAND ledger_ce_agent_position_pg_test)
+  endif()
 
 endif()

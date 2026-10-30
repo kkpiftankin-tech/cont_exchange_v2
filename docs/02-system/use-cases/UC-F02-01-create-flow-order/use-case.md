@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F02-01
+title: Создать одноактивную потоковую заявку
 level: sea
+feature: F-02
+system-sequence: sequences/SEQ-UC-F02-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F02-UC-F02-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F02-01. Создать одноактивную потоковую заявку
 

@@ -1,9 +1,11 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F12-05
+title: Timeout / Underfilled / Reconciliation
 level: sea
+feature: F-12
+system-sequence: sequences/SEQ-UC-F12-05-system.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F12-05. Timeout / Underfilled / Reconciliation
 

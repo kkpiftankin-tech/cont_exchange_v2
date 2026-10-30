@@ -41,7 +41,7 @@ enum GroupStatus {
 // ---------------------------------------------------------------------------
 
 // Диагностика группового решателя.
-// double допустим для solver diagnostics (CLAUDE.md §9 — не попадает в ledger).
+// double допустим для solver diagnostics (.claude/rules/data.md — не попадает в ledger).
 message GroupSolverDiagnostics {
   // Время решения групповой задачи, мс.
   uint32 group_solve_time_ms        = 1;
@@ -49,14 +49,14 @@ message GroupSolverDiagnostics {
   repeated string binding_leg_ids   = 2;
   // Constraint_id-ы, ставшие активными при решении (binding constraints).
   repeated string binding_constraint_ids = 3;
-  // Остаточная норма по группе (diagnostic only; double допустим по CLAUDE.md §9).
+  // Остаточная норма по группе (diagnostic only; double допустим по .claude/rules/data.md).
   double group_residual_norm        = 4;
   // JSON-дамп внутренних параметров решателя (для воспроизводимости и отладки).
   string solver_params_json         = 5;
 }
 
 // Результат исполнения одной ноги в составе ExecutionGroup.
-// Все финансовые поля — fob.common.v1.Decimal (CLAUDE.md §9).
+// Все финансовые поля — fob.common.v1.Decimal (.claude/rules/data.md).
 message LegResult {
   // Идентификатор ноги (соответствует Leg.leg_id из combo.proto).
   string leg_id                       = 1;
@@ -81,7 +81,7 @@ message LegResult {
 // Partition key = parentOrderId (ADR-033).
 // Idempotency key для consumers: execution_group_id.
 message ExecutionGroup {
-  // EventMeta обязателен (CLAUDE.md §7, partition_key = parentOrderId).
+  // EventMeta обязателен (.claude/rules/contracts.md, partition_key = parentOrderId).
   fob.common.v1.EventMeta meta            = 1;
 
   // Уникальный идентификатор группы исполнения (idempotency key для consumers).

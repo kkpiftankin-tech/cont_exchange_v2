@@ -5,7 +5,7 @@
 // gRPC-фасад над PostgresComboCompensationRepository. matching остаётся
 // единственным владельцем combo_compensations; order_flow вызывает этот сервис
 // как client (read + idempotent-resolve) и сам создаёт reversing-FlowOrder.
-// Сервис НЕ создаёт ордера и не мутирует ledger (CLAUDE.md §10.3).
+// Сервис НЕ создаёт ордера и не мутирует ledger (.claude/rules/cpp.md).
 // ============================================================================
 
 #include "fob/matching/v1/compensation.grpc.pb.h"

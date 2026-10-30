@@ -22,7 +22,7 @@ using cex::common::log_json;
 using namespace cex::observability;
 
 int main() {
-  // Конфиг через env — никакого хардкода (CLAUDE.md §12.3).
+  // Конфиг через env — никакого хардкода (.claude/rules/cpp.md).
   std::string brokers = Env::get_string("KAFKA_BROKERS", "redpanda:9092");
   std::string clickhouse_url = Env::get_string("CLICKHOUSE_URL", "clickhouse:8123");
   std::string grpc_url = Env::get_string("OBSERVABILITY_GRPC_URL", "observability:50051");
@@ -41,7 +41,7 @@ int main() {
   transport::ObservabilityService grpc_service{channel, clickhouse_url};
 
   // Стандартный grpc::ServerBuilder pattern. InsecureServerCredentials —
-  // dev-only (CLAUDE.md §22 — production требует mTLS).
+  // dev-only (CLAUDE.md §1 — production требует mTLS).
   grpc::ServerBuilder builder;
   builder.AddListeningPort(grpc_url, grpc::InsecureServerCredentials());
   builder.RegisterService(&grpc_service);

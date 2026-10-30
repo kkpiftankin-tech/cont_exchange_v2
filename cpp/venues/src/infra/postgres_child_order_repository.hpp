@@ -1,8 +1,16 @@
 #pragma once
 
+#include <memory>
+#include <mutex>
 #include <string>
 
 #include "fob/execution/v1/execution.pb.h"
+
+#ifdef CEX_VENUES_HAS_LIBPQXX
+namespace pqxx {
+class connection;
+}
+#endif
 
 namespace cex::venues::infra {
 
@@ -14,9 +22,16 @@ namespace cex::venues::infra {
 // `child_order_id` is generated from the intent's `client_order_id` (UUID
 // already chosen by Execution Planning). UNIQUE INDEX on
 // (hedge_flow_id, client_order_id) provides idempotency against retries.
+//
+// Соединение долгоживущее (T-F18-601): раньше каждый метод открывал новый
+// pqxx::connection (TCP+auth-хендшейк на КАЖДУЮ запись) — на горячем пути
+// консьюмера venues_exec это доминировало над самим INSERT/UPDATE и держало
+// пропускную способность ~2.8/с при эмиссии ~6.6/с. Теперь одно
+// переиспользуемое соединение с прозрачным reconnect по broken_connection.
 class PostgresChildOrderRepository final {
  public:
   explicit PostgresChildOrderRepository(std::string connection_string);
+  ~PostgresChildOrderRepository();  // = default в .cpp (pqxx complete там)
 
   bool EnsureSchema();
 
@@ -31,6 +46,13 @@ class PostgresChildOrderRepository final {
 
  private:
   std::string connection_string_;
+#ifdef CEX_VENUES_HAS_LIBPQXX
+  // Одно соединение на репозиторий; сериализуется conn_mu_ (репозиторий может
+  // шариться, а pqxx::connection не потокобезопасен и не терпит параллельных
+  // транзакций). Пересоздаётся лениво в WithConn при broken_connection.
+  std::unique_ptr<pqxx::connection> conn_;
+  std::mutex conn_mu_;
+#endif
 };
 
 }  // namespace cex::venues::infra

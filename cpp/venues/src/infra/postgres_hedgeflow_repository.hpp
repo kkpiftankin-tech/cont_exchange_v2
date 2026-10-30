@@ -1,9 +1,17 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 
 #include "fob/execution/v1/execution.pb.h"
+
+#ifdef CEX_VENUES_HAS_LIBPQXX
+namespace pqxx {
+class connection;
+}
+#endif
 
 namespace cex::venues::infra {
 
@@ -12,9 +20,14 @@ namespace cex::venues::infra {
 // (CEX_VENUES_HAS_LIBPQXX). All methods are best-effort and log on failure
 // — they do not throw, so a PG outage degrades F-12 to "matching+venues
 // only" without breaking the hot path.
+//
+// Соединение долгоживущее (T-F18-601): раньше каждый метод открывал новый
+// pqxx::connection на КАЖДУЮ запись — узкое место консьюмера venues_exec.
+// Теперь одно переиспользуемое соединение под conn_mu_ с reconnect-once.
 class PostgresHedgeflowRepository final {
  public:
   explicit PostgresHedgeflowRepository(std::string connection_string);
+  ~PostgresHedgeflowRepository();  // = default в .cpp (pqxx complete там)
 
   // CREATE TABLE IF NOT EXISTS — keeps the C++ side self-healing if
   // infra/postgres/init.sql wasn't applied (mirrors the pattern used by
@@ -34,6 +47,10 @@ class PostgresHedgeflowRepository final {
 
  private:
   std::string connection_string_;
+#ifdef CEX_VENUES_HAS_LIBPQXX
+  std::unique_ptr<pqxx::connection> conn_;
+  std::mutex conn_mu_;
+#endif
 };
 
 }  // namespace cex::venues::infra

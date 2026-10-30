@@ -7,6 +7,7 @@ import "google/protobuf/empty.proto";
 import "fob/common/v1/common.proto";
 import "fob/venue/v1/venue.proto";
 import "fob/marketdata/v1/bbo.proto";
+import "fob/marketdata/v1/marketdata_service.proto";
 
 message PriceLevel {
   fob.common.v1.Decimal price = 1;
@@ -96,6 +97,32 @@ message GetLiquidityCurveRequest {
   fob.venue.v1.ExecutionSide side = 4;
 }
 
+message GetHedgePnLRequest {
+    string batch_id = 1;
+    string session_id = 2;
+    string user_id = 3;
+    string venue = 4;
+    google.protobuf.Timestamp from_time = 5;
+    google.protobuf.Timestamp to_time = 6;
+}
+
+message HedgePnLRecord {
+    string batch_id = 1;
+    string session_id = 2;
+    string user_id = 3;
+    string venue = 4;
+    string instrument = 5;
+    double total_hedge_pnl = 6;
+    double total_filled_qty = 7;
+    uint64 trade_count = 8;
+    google.protobuf.Timestamp batch_time = 9;
+}
+
+message GetHedgePnLResponse {
+    repeated HedgePnLRecord records = 1;
+    fob.common.v1.Error error = 2;
+}
+
 message GetLiquidityCurveResponse {
   fob.common.v1.EventMeta meta = 1;
   bool found = 2;
@@ -104,8 +131,22 @@ message GetLiquidityCurveResponse {
 }
 
 service MarketDataService {
+  // --- существующие методы ---
   rpc GetLastTicker(GetLastTickerRequest) returns (GetLastTickerResponse);
   rpc GetLiveMarketSnapshots(google.protobuf.Empty) returns (stream OrderBookSnapshot);
   rpc GetLiquidityCurve(GetLiquidityCurveRequest) returns (GetLiquidityCurveResponse);
   rpc SubscribeBBO(google.protobuf.Empty) returns (stream BBOUpdate);
+  rpc GetHedgePnL(GetHedgePnLRequest) returns (GetHedgePnLResponse);
+
+  // --- F-05 Live Market Data ---
+  // Текущий MarketDataSnapshot для инструмента (используется REST GET и UI)
+  rpc GetMarketDataSnapshot(GetMarketDataSnapshotRequest) returns (GetMarketDataSnapshotResponse);
+  // Исторические снимки из ClickHouse
+  rpc GetMarketDataHistory(GetMarketDataHistoryRequest) returns (GetMarketDataHistoryResponse);
+  // История effective spread из ClickHouse
+  rpc GetEffectiveSpread(GetEffectiveSpreadRequest) returns (GetEffectiveSpreadResponse);
+  // Batch reference prices для Matching Backend (F-04)
+  rpc GetReferencePrices(GetReferencePricesRequest) returns (GetReferencePricesResponse);
+  // WebSocket/gRPC stream: первое сообщение snapshot, далее delta-updates
+  rpc SubscribeMarketData(SubscribeMarketDataRequest) returns (stream MarketDataStreamEvent);
 }

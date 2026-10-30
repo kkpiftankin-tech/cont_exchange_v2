@@ -18,7 +18,7 @@ related:
 
 Есть ADR по docs/proto/venue/data, но нет ADR, фиксирующего **границы
 ответственности Risk Manager**. Risk уже реализует pre-trade checks (F-07) и
-`PreHedgeCheck` (F-12), kill-switch и risk alerts (CLAUDE.md §16). Без явной
+`PreHedgeCheck` (F-12), kill-switch и risk alerts ([cpp/risk/CLAUDE.md](../../../cpp/risk/CLAUDE.md)). Без явной
 границы есть риск, что routing/matching/ledger-логика «протечёт» в risk.
 
 ## Решение
@@ -44,7 +44,7 @@ related:
 
 ## Альтернативы
 
-- **Risk внутри matching/order-flow** — отклонено: нарушает SRP и CLAUDE.md §10.3 (границы сервисов).
+- **Risk внутри matching/order-flow** — отклонено: нарушает SRP и [.claude/rules/cpp.md](../../../.claude/rules/cpp.md) (границы сервисов).
 - **Risk мутирует ledger напрямую** — отклонено: ledger — единственный source of truth балансов; risk влияет через события/intents.
 
 ## Последствия

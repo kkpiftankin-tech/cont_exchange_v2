@@ -57,6 +57,47 @@ class GrpcLedgerService final : public fob::ledger::v1::LedgerService::Service {
                             const fob::ledger::v1::GetPositionsRequest* request,
                             fob::ledger::v1::GetPositionsResponse* response) override;
 
+  // F-18 (ADR-054 §10): валютный вектор биржи (house + venue + client liabilities).
+  grpc::Status GetExchangeBalances(grpc::ServerContext* context,
+                                   const fob::ledger::v1::GetExchangeBalancesRequest* request,
+                                   fob::ledger::v1::GetExchangeBalancesResponse* response) override;
+
+  // F-18 (§11): история позиции биржи по клирингам (старая → Δ → новая).
+  grpc::Status GetExchangeNopHistory(grpc::ServerContext* context,
+                                     const fob::ledger::v1::GetExchangeNopHistoryRequest* request,
+                                     fob::ledger::v1::GetExchangeNopHistoryResponse* response) override;
+
+  grpc::Status GetNodeBalances(grpc::ServerContext* context,
+                               const fob::ledger::v1::GetNodeBalancesRequest* request,
+                               fob::ledger::v1::GetNodeBalancesResponse* response) override;
+
+  // ADR-057/084: перевод актива между узлами (идемпотентно по transfer_id; исполнение через CE_TRANSFER_ETA_BATCHES тактов).
+  grpc::Status ApplyNodeTransfer(grpc::ServerContext* context,
+                                 const fob::ledger::v1::ApplyNodeTransferRequest* request,
+                                 google::protobuf::Empty* response) override;
+
+  // F-18 v2 (T-F18-203, ADR-061 §7): знаковые накопленные позиции CE-агентов.
+  grpc::Status GetAgentPositions(grpc::ServerContext* context,
+                                 const fob::ledger::v1::GetAgentPositionsRequest* request,
+                                 fob::ledger::v1::GetAgentPositionsResponse* response) override;
+
+  // F-18 v2 (наблюдаемость такта клиринга): per-agent дельты ОДНОГО такта
+  // (batch_id) — ДО → Δ → ПОСЛЕ, для вкладки Clearing.
+  grpc::Status GetAgentPositionDeltas(
+      grpc::ServerContext* context,
+      const fob::ledger::v1::GetAgentPositionDeltasRequest* request,
+      fob::ledger::v1::GetAgentPositionDeltasResponse* response) override;
+
+  grpc::Status ResetAgentPositions(
+      grpc::ServerContext* context,
+      const fob::ledger::v1::ResetAgentPositionsRequest* request,
+      fob::ledger::v1::ResetAgentPositionsResponse* response) override;
+
+  // ADR-087: заработок агентов CE (внутренняя биржа, внешние биржи, итого) — R, U, R+U в USDT.
+  grpc::Status GetAgentPnl(grpc::ServerContext* context,
+                           const fob::ledger::v1::GetAgentPnlRequest* request,
+                           fob::ledger::v1::GetAgentPnlResponse* response) override;
+
  private:
   app::LedgerUseCases* uc_;
 };

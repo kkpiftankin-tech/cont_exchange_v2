@@ -63,7 +63,7 @@ F-02/F-04) — см. open question в [IN-011.fragment-map.md](../../../incoming
 Переходы child graph (activation, OCO cancel-siblings, bracket resize-exits
 \(Q_{tp}=Q_{sl}=Q_{entry}^{filled}\)) **обязаны быть идемпотентными**; журнал
 переходов — `group_state_transitions` (аудит + дедуп повторных событий,
-CLAUDE.md §13 idempotent consumer, ADR-020).
+[.claude/rules/contracts.md](../../../.claude/rules/contracts.md) idempotent consumer, ADR-020).
 
 ### Границы сервисов
 

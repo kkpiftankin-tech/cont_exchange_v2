@@ -57,7 +57,8 @@ WHERE parent_order_id = $1::uuid
 
 std::optional<std::string> PostgresComboCompensationRepository::FindComboLegParent(
     const std::string& leg_id) {
-  if (leg_id.empty()) return std::nullopt;
+  // Не uuid ⇒ не нога combo (hedge/прочий internal_order_id): ответ «не нашли» без запроса, а не исключение PG.
+  if (!IsUuidText(leg_id)) return std::nullopt;
   auto conn = connection_factory_();
   pqxx::work tx(*conn);
   const pqxx::result r = tx.exec_params(

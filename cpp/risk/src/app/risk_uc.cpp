@@ -8,7 +8,7 @@
 //   OnExecutionReport, OnSyntheticOrder, CurveChecks, HealthChecks).
 //
 //   Решения risk выражаются enum RiskDecision: ACCEPT, REJECT, RESIZE, HALT.
-//   См. CLAUDE.md §16 — принципы risk policy.
+//   См. cpp/risk/CLAUDE.md — принципы risk policy.
 //
 // Concurrency model:
 //   * Один mutex mu_ защищает: global_halt_, instrument_halt_,
@@ -31,8 +31,12 @@
 
 #include "app/risk_uc.hpp"
 
+#include <grpcpp/grpcpp.h>     // F-18: grpc::ClientContext для вызова ledger
 #include <algorithm>           // std::max для severity escalation
+#include <chrono>              // F-18 Phase E02: epoch-ms для cooldown
 #include <unordered_set>       // дедуп affected users в OnBatchResult
+
+#include "cex/common/proto.hpp"  // F-18 Phase E02: to_bytes(ExecutionIntent)
 
 #include "cex/common/decimal.hpp"
 #include "cex/common/env.hpp"   // env vars для конфигов RISK_*
@@ -40,6 +44,7 @@
 #include "cex/common/time.hpp"
 #include "cex/common/uuid.hpp"
 #include "domain/margin_calculator.hpp"
+#include "domain/ce_agent_band.hpp"  // F-18 v2 Э3: полоса ±q агента
 #include "fob/venue/v1/venue.pb.h"
 
 namespace cex::risk::app {
@@ -415,7 +420,7 @@ bool RiskUseCases::buildRiskSnapshot(
   }
 
   if (!persisted) {
-    // Hard failure для этого user (CLAUDE.md §16 audit-критично): не
+    // Hard failure для этого user (cpp/risk/CLAUDE.md audit-критично): не
     // публикуем alert без персистентного снапшота.
     return false;
   }
@@ -757,7 +762,7 @@ void RiskUseCases::OnSyntheticOrder(
   auto new_exposure = cex::common::Decimal::add(exposure, cost);
 
   // |new_exposure| через explicit cast к double — допустимо для metrics,
-  // не для money math (см. CLAUDE.md §9 — здесь это проверка лимита, не settlement).
+  // не для money math (см. .claude/rules/data.md — здесь это проверка лимита, не settlement).
   if (std::abs(static_cast<double>(new_exposure)) <= max_exposure) {
     exposures_[venue] = new_exposure;
     return;
@@ -1069,6 +1074,335 @@ void RiskUseCases::PublishGroupedRejectAlert(const std::string &user_id,
   *alert.mutable_timestamp() = cex::common::now_ts();
 
   publisher_.publish(alert);
+}
+
+// ============================================================================
+// F-18 (ADR-054 §10): GetExchangeNOP — читает валютный вектор биржи у ledger,
+// считает NOP_a = активы_a − обязательства_a (numeraire исключён) и размер
+// хеджа (θ из env CE_HEDGE_THRESHOLD_<CCY>, режим CE_HEDGE_MODE).
+// ============================================================================
+fob::risk::v1::GetExchangeNOPResponse RiskUseCases::GetExchangeNOP(
+    const fob::risk::v1::GetExchangeNOPRequest& req) {
+  fob::risk::v1::GetExchangeNOPResponse resp;
+  *resp.mutable_meta() = req.meta();
+  resp.mutable_meta()->set_source("risk");
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const std::string mode = cex::common::Env::get_string("CE_HEDGE_MODE", "FLATTEN");
+  resp.set_numeraire(numeraire);
+  resp.set_mode(mode);
+  if (ledger_stub_ == nullptr) return resp;
+
+  fob::ledger::v1::GetExchangeBalancesRequest lreq;
+  fob::ledger::v1::GetExchangeBalancesResponse lresp;
+  grpc::ClientContext ctx;
+  const grpc::Status st = ledger_stub_->GetExchangeBalances(&ctx, lreq, &lresp);
+  if (!st.ok()) {
+    cex::common::log_json("WARN", "GetExchangeNOP: ledger call failed",
+                          {{"error", st.error_message()}});
+    return resp;
+  }
+
+  const auto zero = cex::common::Decimal::zero();
+  const auto absd = [&](const cex::common::Decimal& d) {
+    return cex::common::Decimal::cmp(d, zero) < 0 ? cex::common::Decimal::sub(zero, d) : d;
+  };
+
+  for (const auto& b : lresp.balances()) {
+    const std::string ccy = b.currency();
+    const bool is_num = (ccy == numeraire);
+    const auto assets = cex::common::Decimal::from_proto(b.assets_total());
+    const auto client = cex::common::Decimal::from_proto(b.client_liability());
+    const auto nop = cex::common::Decimal::sub(assets, client);
+    // ADR-057: Z_a = Σqty + in_transit + committed − target. target ≡ client_liability
+    // (обязательства = целевой запас), поэтому Z_a = (assets−client) + in_flight + in_transit
+    // = nop + committed (+ переводы). committed=0 ⇒ Z_a ≡ nop (частный случай NOP, §решение).
+    const auto committed = cex::common::Decimal::from_proto(b.in_flight());
+    const auto in_transit = cex::common::Decimal::zero();  // TODO: transfer-ноги (Этап 3)
+    const auto z = cex::common::Decimal::add(
+        cex::common::Decimal::add(nop, committed), in_transit);
+
+    auto* it = resp.add_items();
+    it->set_currency(ccy);
+    it->set_is_numeraire(is_num);
+    *it->mutable_nop() = nop.to_proto();
+    *it->mutable_assets_total() = assets.to_proto();
+    *it->mutable_client_liability() = client.to_proto();
+    // ADR-057 уровень актива: Z_a и его слагаемые (target=client, in_flight=committed).
+    *it->mutable_z() = z.to_proto();
+    *it->mutable_target() = client.to_proto();
+    *it->mutable_in_flight() = committed.to_proto();
+    *it->mutable_in_transit() = in_transit.to_proto();
+    if (is_num) { it->set_hedge_armed(false); continue; }
+
+    // Лимит: Z_limit из env (ADR-057 агрегатный лимит), fallback на θ (ADR-054, обратная
+    // совместимость). Хедж вооружается по |Z_a|, размер по режиму FLATTEN/TO_BAND.
+    const auto z_limit_env = ParseDecimalString(
+        cex::common::Env::get_string("CE_Z_LIMIT_" + ccy, ""));
+    const auto theta = ParseDecimalString(
+        cex::common::Env::get_string("CE_HEDGE_THRESHOLD_" + ccy, ""));
+    const bool has_zlim = cex::common::Decimal::cmp(z_limit_env, zero) > 0;
+    const auto limit = has_zlim ? z_limit_env : theta;
+    *it->mutable_threshold() = theta.to_proto();
+    *it->mutable_z_limit() = limit.to_proto();
+    const bool has_limit = cex::common::Decimal::cmp(limit, zero) > 0;
+    const auto az = absd(z);
+    const bool armed = has_limit && cex::common::Decimal::cmp(az, limit) > 0;
+    it->set_hedge_armed(armed);
+    if (armed) {
+      cex::common::Decimal qty = (mode == "TO_BAND")
+          ? cex::common::Decimal::sub(az, limit) : az;
+      *it->mutable_hedge_qty() = qty.to_proto();
+      it->set_hedge_side(cex::common::Decimal::cmp(z, zero) > 0 ? "SELL" : "BUY");
+    }
+  }
+  return resp;
+}
+
+// ============================================================================
+// F-18 Phase E02: EmitNetHedges — при CE_NET_HEDGE_ENABLED публикует
+// ExecutionIntent в execution.intents для armed-валют (излишек→SELL, дефицит→BUY).
+// Cooldown per-currency защищает от переэмиссии, пока предыдущий хедж исполняется
+// (NOP уменьшится, когда execution.venue вернёт fill и ledger сократит venue_balances).
+// ============================================================================
+void RiskUseCases::EmitNetHedges() {
+  if (intents_producer_ == nullptr) return;
+  if (!cex::common::Env::get_bool("CE_NET_HEDGE_ENABLED", false)) return;
+
+  const auto nop = GetExchangeNOP(fob::risk::v1::GetExchangeNOPRequest{});
+  const std::string numeraire = nop.numeraire();
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  const long long cooldown = cex::common::Env::get_int("CE_HEDGE_COOLDOWN_MS", 30000);
+  const std::string allowed = cex::common::Env::get_string(
+      "CE_HEDGE_ALLOWED_VENUES",
+      cex::common::Env::get_string("HEDGE_INTENT_ALLOWED_VENUES", "binance,okx"));
+
+  int emitted = 0;
+  for (const auto& item : nop.items()) {
+    if (!item.hedge_armed()) continue;
+    const std::string ccy = item.currency();
+    {
+      std::lock_guard<std::mutex> lg(hedge_mu_);
+      auto it = hedge_cooldown_.find(ccy);
+      if (it != hedge_cooldown_.end() && (now_ms - it->second) < cooldown) continue;
+      hedge_cooldown_[ccy] = now_ms;
+    }
+
+    fob::execution::v1::ExecutionIntent intent;
+    intent.mutable_meta()->set_source("risk");
+    const std::string hedge_flow_id = "ce|hedge|" + ccy;
+    intent.set_intent_id(hedge_flow_id + "|" + std::to_string(now_ms));
+    intent.set_hedge_flow_id(hedge_flow_id);
+    intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+    intent.set_reason("ce_nop_hedge");
+    auto* instr = intent.mutable_instrument();
+    instr->set_symbol(ccy + "/" + numeraire);
+    instr->set_base(ccy);
+    instr->set_quote(numeraire);
+    intent.set_side(item.hedge_side() == "SELL" ? fob::common::v1::SIDE_SELL
+                                                : fob::common::v1::SIDE_BUY);
+    *intent.mutable_target_qty() = item.hedge_qty();
+    intent.set_strategy(fob::execution::v1::EXEC_STRATEGY_MARKET);
+    intent.set_urgency(fob::execution::v1::URGENCY_HIGH);
+    intent.set_tif(fob::common::v1::TIF_IOC);
+    std::string cur;
+    for (char ch : allowed) {
+      if (ch == ',') { if (!cur.empty()) intent.add_allowed_venues(cur); cur.clear(); }
+      else if (ch != ' ') { cur += ch; }
+    }
+    if (!cur.empty()) intent.add_allowed_venues(cur);
+
+    intents_producer_->produce("execution.intents", hedge_flow_id,
+                               cex::common::to_bytes(intent));
+    ++emitted;
+    cex::common::log_json("INFO", "F-18 net-hedge intent emitted",
+                          {{"currency", ccy}, {"side", item.hedge_side()},
+                           {"hedge_flow_id", hedge_flow_id}});
+  }
+  (void)emitted;
+}
+
+// ============================================================================
+// F-18 v2 · Э3 (T-F18-303, ADR-061 §4) — EmitAgentBandHedges.
+// Per-АГЕНТ эмиссия по полосе ±q (в отличие от EmitNetHedges — агрегатный
+// NOP-порог). Читает ledger.GetAgentPositions; для переводчика с выходом за
+// свободную полосу (|c|−q−|in_flight|>0) публикует ExecutionIntent на избыток.
+// Позицию НЕ трогает — её уменьшит ledger по факту исполнения (Э4). Защита от
+// переэмиссии — in_flight (ledger помечает по hedge_flow_id), а не cooldown.
+//
+// Ограничения слайса: (1) только переводчики (арбитражёры — Э5 CE_TRANSFER_AGENT);
+// (2) инструмент строится как asset/numeraire — кросс-пары (quote≠numeraire)
+// не эмитятся здесь корректно, т.к. AgentPosition не несёт quote; на практике их
+// позиция ≈0 (эффективный рынок), но при накоплении нужен quote в контракте
+// (follow-up). (3) Security CRITICAL-2 (PreHedgeCheck/kill-switch в пути venues)
+// — отслеживаемый риск за флагом CE_AGENT_BAND (default OFF), см. F-18 open-questions.
+// ============================================================================
+void RiskUseCases::EmitAgentBandHedges() {
+  if (intents_producer_ == nullptr || ledger_stub_ == nullptr) return;
+  if (!cex::common::Env::get_bool("CE_AGENT_BAND", false)) return;
+
+  fob::ledger::v1::GetAgentPositionsRequest lreq;
+  fob::ledger::v1::GetAgentPositionsResponse lresp;
+  grpc::ClientContext ctx;
+  const grpc::Status st = ledger_stub_->GetAgentPositions(&ctx, lreq, &lresp);
+  if (!st.ok()) {
+    cex::common::log_json("WARN", "EmitAgentBandHedges: ledger call failed",
+                          {{"error", st.error_message()}});
+    return;
+  }
+
+  using cex::common::Decimal;
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const Decimal q_translator{
+      cex::common::Env::get_int("CE_AGENT_BAND_Q_TRANSLATOR", 18), 0};
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  const Decimal thousand{1000, 0};
+
+  int emitted = 0;
+  for (const auto& p : lresp.positions()) {
+    if (p.agent_kind() != "translator") continue;  // арбитражёры — Э5
+    const Decimal position = Decimal::from_proto(p.position());
+    const Decimal in_flight = Decimal::from_proto(p.in_flight());
+    const auto band = domain::ComputeBandEmission(position, in_flight, q_translator);
+    if (!band.emit) continue;
+
+    const Decimal ref_price = Decimal::from_proto(p.reference_price());
+    if (ref_price.units == 0) continue;  // без цены узла не перевести value→qty
+
+    // Стоимость избытка (k-USDT) → нотионал (USDT) → количество актива по P_node.
+    const Decimal excess = Decimal::cmp(band.signed_qty, Decimal::zero()) >= 0
+                               ? band.signed_qty
+                               : Decimal::sub(Decimal::zero(), band.signed_qty);
+    const Decimal notional = Decimal::mul(excess, thousand);   // USDT
+    const Decimal qty = Decimal::div(notional, ref_price, 8);  // единицы актива
+    if (qty.units == 0) continue;
+    const bool sell = Decimal::cmp(band.signed_qty, Decimal::zero()) >= 0;
+
+    fob::execution::v1::ExecutionIntent intent;
+    intent.mutable_meta()->set_source("risk");
+    // hedge_flow_id несёт идентичность агента для ledger (пометка in_flight +
+    // декремент по исполнению): "ce|band|<agent_id>|<asset>|<venue>".
+    const std::string flow_id =
+        "ce|band|" + p.agent_id() + "|" + p.asset() + "|" + p.venue();
+    intent.set_hedge_flow_id(flow_id);
+    intent.set_intent_id(flow_id + "|" + std::to_string(now_ms));
+    intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+    intent.set_reason("ce_agent_band");
+    intent.set_venue(p.venue());
+    auto* instr = intent.mutable_instrument();
+    instr->set_symbol(p.asset() + "/" + numeraire);
+    instr->set_base(p.asset());
+    instr->set_quote(numeraire);
+    intent.set_side(sell ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+    *intent.mutable_target_qty() = qty.to_proto();
+    *intent.mutable_target_notional() = notional.to_proto();
+    intent.set_strategy(fob::execution::v1::EXEC_STRATEGY_MARKET);
+    intent.set_urgency(fob::execution::v1::URGENCY_HIGH);
+    intent.set_tif(fob::common::v1::TIF_IOC);
+    intent.add_allowed_venues(p.venue());  // хедж — на площадке самого агента
+
+    intents_producer_->produce("execution.intents", flow_id,
+                               cex::common::to_bytes(intent));
+    ++emitted;
+    cex::common::log_json("INFO", "F-18 band hedge intent emitted",
+                          {{"agent_id", p.agent_id()},
+                           {"asset", p.asset()}, {"venue", p.venue()},
+                           {"side", sell ? "SELL" : "BUY"},
+                           {"excess_value", excess.to_string()},
+                           {"qty", qty.to_string()},
+                           {"hedge_flow_id", flow_id}});
+  }
+  (void)emitted;
+}
+
+// ============================================================================
+// Вариант 2 (2026-09-17) — EmitBandHedgeFromBreach.
+// Событие пробоя полосы от ledger (ce.agent.band.breach) → хедж-заявка в ПАРЕ
+// base/quote: qty = excess·1000/base_price (единицы base), limit = pair_price.
+// Анализ позиции/порог/in_flight — в ledger (владелец позиции); здесь только
+// формирование и публикация ExecutionIntent (layering сохранён).
+// ============================================================================
+void RiskUseCases::EmitBandHedgeFromBreach(
+    const fob::treasury::v1::AgentBandBreach& breach) {
+  if (intents_producer_ == nullptr) return;
+  using cex::common::Decimal;
+  const Decimal excess = Decimal::from_proto(breach.excess_value());   // k-USDT, модуль
+  const Decimal base_price = Decimal::from_proto(breach.base_price());  // P(base) USDT
+  const Decimal pair_price = Decimal::from_proto(breach.pair_price());  // цена пары (лимит)
+  if (excess.units == 0 || base_price.units == 0) return;
+
+  const Decimal notional = Decimal::mul(excess, Decimal{1000, 0});   // USDT
+  const Decimal qty = Decimal::div(notional, base_price, 8);          // единицы base
+  if (qty.units == 0) return;
+  const bool sell = (breach.side() == "SELL");
+  const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+  const std::string quote = breach.quote().empty() ? numeraire : breach.quote();
+  const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+
+  fob::execution::v1::ExecutionIntent intent;
+  intent.mutable_meta()->set_source("risk");
+  const std::string flow_id =
+      "ce|band|" + breach.agent_id() + "|" + breach.asset() + "|" + breach.venue();
+  intent.set_hedge_flow_id(flow_id);
+  intent.set_intent_id(flow_id + "|" + std::to_string(now_ms));
+  // client_order_id УНИКАЛЕН на заявку (= intent_id с таймстампом). hedge_flow_id
+  // стабилен по агенту (для дренажа в ledger), поэтому без уникального
+  // client_order_id каждый следующий band-хедж падал на child_orders_idem
+  // (hedge_flow_id, client_order_id='') duplicate → консьюмер venues_exec копил
+  // отказы и отставал (F-18: дрейф позиции из-за задержки исполнения хеджей).
+  intent.set_client_order_id(intent.intent_id());
+  intent.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+  intent.set_reason("ce_agent_band");
+  intent.set_venue(breach.venue());
+  auto* instr = intent.mutable_instrument();
+  instr->set_symbol(breach.asset() + "/" + quote);   // ПАРА base/quote
+  instr->set_base(breach.asset());
+  instr->set_quote(quote);
+  intent.set_venue_symbol(breach.asset() + "/" + quote);
+  intent.set_side(sell ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+  *intent.mutable_target_qty() = qty.to_proto();
+  *intent.mutable_target_notional() = notional.to_proto();
+  if (pair_price.units != 0) *intent.mutable_limit_price() = pair_price.to_proto();
+  // Трёхзонное правило (Кривые §6.4): aggressive ⇒ рыночный сброс (taker, MARKET);
+  // иначе пассивный лимит-мейкер (LIMIT, дешевле, исполнение не гарантировано).
+  // TIF_IOC в обеих зонах: single-shot на такт — неисполненный остаток по таймауту
+  // возвращается в позицию (ledger освобождает in_flight), повтор на след. такте.
+  //
+  // ADR-067 / T-F18-802 (за флагом CE_BAND_MAKER_RESERVE_ENABLED, default off):
+  // мейкер-зона (aggressive=false) вместо single-shot IOC получает резидентный
+  // лимит TIF_GTC с явным дедлайном (CE_BAND_MAKER_DEADLINE_MS) — venues держит
+  // заявку между read-циклами (T-F18-803), а по истечении дедлайна эскалирует
+  // остаток в тейкер-сброс на следующем такте (breach.aggressive() пересчитывает
+  // ledger). Тейкер-зона (aggressive=true) не меняется — MARKET+IOC, как раньше.
+  // Флаг off ⇒ поведение byte-for-byte как до ADR-067 (TIF_IOC в обеих зонах).
+  const bool aggressive = breach.aggressive();
+  const bool maker_reserve_enabled =
+      cex::common::Env::get_bool("CE_BAND_MAKER_RESERVE_ENABLED", false);
+  intent.set_strategy(aggressive ? fob::execution::v1::EXEC_STRATEGY_MARKET
+                                  : fob::execution::v1::EXEC_STRATEGY_LIMIT);
+  intent.set_urgency(aggressive ? fob::execution::v1::URGENCY_HIGH
+                                 : fob::execution::v1::URGENCY_LOW);
+  const bool maker_resting = maker_reserve_enabled && !aggressive;
+  intent.set_tif(maker_resting ? fob::common::v1::TIF_GTC : fob::common::v1::TIF_IOC);
+  if (maker_resting) {
+    const int deadline_ms = cex::common::Env::get_int("CE_BAND_MAKER_DEADLINE_MS", 30000);
+    intent.set_timeout_ms(static_cast<int64_t>(deadline_ms));
+  }
+  intent.add_allowed_venues(breach.venue());
+
+  intents_producer_->produce("execution.intents", flow_id, cex::common::to_bytes(intent));
+  cex::common::log_json("INFO", "F-18 band hedge intent emitted (breach)",
+                        {{"agent_id", breach.agent_id()},
+                         {"pair", breach.asset() + "/" + quote},
+                         {"venue", breach.venue()},
+                         {"side", sell ? "SELL" : "BUY"},
+                         {"qty", qty.to_string()},
+                         {"limit", pair_price.to_string()},
+                         {"zone", aggressive ? "taker" : "maker"},
+                         {"tif", maker_resting ? "GTC" : "IOC"},
+                         {"hedge_flow_id", flow_id}});
 }
 
 }  // namespace cex::risk::app

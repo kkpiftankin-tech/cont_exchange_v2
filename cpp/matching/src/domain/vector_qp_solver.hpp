@@ -46,8 +46,12 @@ struct VectorSegment {
   std::string segment_id;        ///< id сегмента (для трассировки x_i → сегмент)
   std::string source_order_id;   ///< исходный ордер/уровень
   std::vector<double> w;         ///< столбец W, длина = num_assets (знаковые flows)
-  double d_hl{0.0};              ///< dHL_i = p_high_i > 0 (кривизна и pH_i)
+  double d_hl{0.0};              ///< dHL_i = p_high_i > 0 (кривизна и pH_i) [F1]
   double q_max{0.0};             ///< верхняя граница box для x_i (>= 0)
+  // ADR-052 (academic двусторонний сегмент). Используются только в two-sided режиме.
+  double anchor{0.0};            ///< a_i = mid венью (линейный член цели)
+  double slope{0.0};             ///< m_i = наклон кривой (P = diag(m))
+  double q_min{0.0};             ///< нижняя граница знакового box (= −Q_bid, ≤ 0)
 };
 
 // ----------------------------------------------------------------------------
@@ -86,6 +90,8 @@ struct QpParams {
 
 struct QpSolution {
   Eigen::VectorXd x;                              ///< решение (длина I)
+  Eigen::VectorXd y;                              ///< дуальные по A (длина N+I);
+                                                  ///< первые N — тень Wx=0 (= pi)
   std::uint32_t iterations{0};
   QpBackendStatus status{QpBackendStatus::kError};
 };
@@ -108,6 +114,10 @@ enum class VectorSolveStatus {
 
 struct VectorClearingResult {
   std::vector<cex::common::Decimal> x;  ///< executed rate на сегмент, квантован
+  std::vector<cex::common::Decimal> pi; ///< клиринговые цены по активам (длина N),
+                                        ///< = дуальные OSQP по Wx=0 (тень актива),
+                                        ///< квантованы (граница §9). Индекс = порядок
+                                        ///< AssetBasis (отсортированное объединение).
   std::vector<double> residual;         ///< r = W·x по каждому активу (диагностика)
   double residual_norm{0.0};            ///< ||r||₂
   std::uint32_t iterations{0};
@@ -129,19 +139,26 @@ class VectorQpSolver final : public IVectorClearingSolver {
   explicit VectorQpSolver(IQpBackend& backend,
                           QpParams params = {},
                           double residual_tolerance = 1e-9,
-                          std::int32_t decimal_scale = 12)
+                          std::int32_t decimal_scale = 12,
+                          bool two_sided = false)
       : backend_(backend),
         params_(params),
         residual_tolerance_(residual_tolerance),
-        decimal_scale_(decimal_scale) {}
+        decimal_scale_(decimal_scale),
+        two_sided_(two_sided) {}
 
   VectorClearingResult Solve(const std::vector<VectorSegment>& segments,
                              int num_assets) override;
 
-  /// Сборка QP в стандартной форме по ADR-048. Чистая функция — юнит-тестируема
-  /// независимо от backend. `num_assets` = N (строки W); столбцы = segments.size().
+  /// Сборка QP в стандартной форме по ADR-048 (F1: P=D=diag(dHL/q), q=−pH,
+  /// box [0,q_max]). Чистая функция; `num_assets` = N (строки W).
   static QpProblem AssembleProblem(const std::vector<VectorSegment>& segments,
                                    int num_assets);
+
+  /// ADR-052 (academic двусторонний): P = diag(m_i), q = a_i (anchor), A = [W;I],
+  /// l = [0; q_min], u = [0; q_max] — знаковый box. Чистая функция.
+  static QpProblem AssembleProblemTwoSided(const std::vector<VectorSegment>& segments,
+                                           int num_assets);
 
  private:
   /// double → Decimal{units, scale} half-to-even-agnostic round (llround),
@@ -152,6 +169,7 @@ class VectorQpSolver final : public IVectorClearingSolver {
   QpParams params_;
   double residual_tolerance_;
   std::int32_t decimal_scale_;
+  bool two_sided_{false};  ///< ADR-052: academic двусторонний режим
 };
 
 }  // namespace cex::matching::domain

@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package fob.marketdata.v1;
+
+import "google/protobuf/timestamp.proto";
+import "fob/common/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// F-05 Live Market Data — message types
+//
+// MarketDataSnapshot — полный снимок рыночных данных по инструменту.
+// Публикуется в Kafka marketdata.snapshots и отправляется через WebSocket/gRPC.
+// ---------------------------------------------------------------------------
+
+// Один уровень глубины рынка (bid или ask).
+message DepthLevel {
+  fob.common.v1.Decimal price = 1;
+  fob.common.v1.Decimal qty   = 2;
+}
+
+// Полный снимок рыночных данных по инструменту.
+// Результат ComputeMarketData после каждого BatchResult.
+message MarketDataSnapshot {
+  fob.common.v1.EventMeta meta = 1;
+
+  string snapshot_id            = 2;   // UUID
+  string asset                  = 3;   // e.g. "BTCUSDT"
+
+  fob.common.v1.Decimal mid      = 10;
+  fob.common.v1.Decimal best_bid = 11;
+  fob.common.v1.Decimal best_ask = 12;
+  fob.common.v1.Decimal spread   = 13;
+  fob.common.v1.Decimal spread_bps = 14;
+
+  fob.common.v1.Decimal volume_24h       = 20;
+  fob.common.v1.Decimal volume_quote_24h = 21;
+
+  repeated DepthLevel bid_depth = 30;
+  repeated DepthLevel ask_depth = 31;
+
+  fob.common.v1.Decimal clear_price    = 40;
+  fob.common.v1.Decimal executed_rate  = 41;
+  string                batch_id       = 42;
+
+  // "internal" | "cex" | "dex" | "composite"
+  string source = 50;
+  // true если данные устаревшие (fallback без обновления)
+  bool   stale  = 51;
+
+  google.protobuf.Timestamp timestamp = 60;
+}
+
+// Delta-обновление: только изменившиеся поля снимка.
+message MarketDataUpdate {
+  fob.common.v1.EventMeta meta = 1;
+  string asset                 = 2;
+
+  // Присутствуют только если изменились
+  optional fob.common.v1.Decimal mid      = 10;
+  optional fob.common.v1.Decimal best_bid = 11;
+  optional fob.common.v1.Decimal best_ask = 12;
+  optional fob.common.v1.Decimal spread   = 13;
+  optional fob.common.v1.Decimal spread_bps = 14;
+
+  optional fob.common.v1.Decimal volume_24h = 20;
+
+  repeated DepthLevel bid_depth = 30;
+  repeated DepthLevel ask_depth = 31;
+
+  optional fob.common.v1.Decimal clear_price    = 40;
+  optional fob.common.v1.Decimal executed_rate  = 41;
+  optional string                batch_id       = 42;
+
+  string source = 50;
+  bool   stale  = 51;
+
+  google.protobuf.Timestamp timestamp = 60;
+}
+
+// ---------------------------------------------------------------------------
+// GetReferencePrices — для Matching Backend (F-04)
+// ---------------------------------------------------------------------------
+
+message ReferencePrice {
+  string                asset     = 1;
+  fob.common.v1.Decimal mid       = 2;
+  fob.common.v1.Decimal best_bid  = 3;
+  fob.common.v1.Decimal best_ask  = 4;
+  string                source    = 5;   // "internal" | "cex" | "dex"
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+message GetReferencePricesRequest {
+  fob.common.v1.EventMeta meta      = 1;
+  repeated string         assets    = 2;
+  google.protobuf.Timestamp ts_batch = 3;
+}
+
+message GetReferencePricesResponse {
+  fob.common.v1.EventMeta  meta   = 1;
+  repeated ReferencePrice  prices = 2;
+  fob.common.v1.Error      error  = 3;
+}
+
+// ---------------------------------------------------------------------------
+// GetMarketDataSnapshot — текущий снимок по инструменту (REST/gRPC)
+// ---------------------------------------------------------------------------
+
+message GetMarketDataSnapshotRequest {
+  fob.common.v1.EventMeta meta  = 1;
+  string                  asset = 2;
+}
+
+message GetMarketDataSnapshotResponse {
+  fob.common.v1.EventMeta meta     = 1;
+  bool                    found    = 2;
+  MarketDataSnapshot      snapshot = 3;
+  fob.common.v1.Error     error    = 4;
+}
+
+// ---------------------------------------------------------------------------
+// GetMarketDataHistory — исторические снимки из ClickHouse
+// ---------------------------------------------------------------------------
+
+message GetMarketDataHistoryRequest {
+  fob.common.v1.EventMeta   meta  = 1;
+  string                    asset = 2;
+  google.protobuf.Timestamp from  = 3;
+  google.protobuf.Timestamp to    = 4;
+  uint32                    limit = 5;   // max 1000, default 100
+}
+
+message GetMarketDataHistoryResponse {
+  fob.common.v1.EventMeta    meta      = 1;
+  repeated MarketDataSnapshot snapshots = 2;
+  fob.common.v1.Error         error     = 3;
+}
+
+// ---------------------------------------------------------------------------
+// GetEffectiveSpread — история effective spread из ClickHouse
+// ---------------------------------------------------------------------------
+
+message EffectiveSpreadRecord {
+  string fill_id                        = 1;
+  string asset                          = 2;
+  fob.common.v1.Decimal exec_price      = 3;
+  fob.common.v1.Decimal mid_at_exec     = 4;
+  fob.common.v1.Decimal effective_spread_bps = 5;
+  string batch_id                       = 6;
+  google.protobuf.Timestamp timestamp   = 7;
+}
+
+message GetEffectiveSpreadRequest {
+  fob.common.v1.EventMeta   meta  = 1;
+  string                    asset = 2;
+  google.protobuf.Timestamp from  = 3;
+  google.protobuf.Timestamp to    = 4;
+  uint32                    limit = 5;
+}
+
+message GetEffectiveSpreadResponse {
+  fob.common.v1.EventMeta        meta    = 1;
+  repeated EffectiveSpreadRecord records = 2;
+  fob.common.v1.Error            error   = 3;
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeMarketData — WebSocket / gRPC server-stream подписка
+// ---------------------------------------------------------------------------
+
+message SubscribeMarketDataRequest {
+  fob.common.v1.EventMeta meta  = 1;
+  string                  asset = 2;
+}
+
+// Ответ стрима: первое сообщение — полный snapshot, далее — delta-updates
+message MarketDataStreamEvent {
+  oneof event {
+    MarketDataSnapshot snapshot = 1;
+    MarketDataUpdate   update   = 2;
+  }
+}

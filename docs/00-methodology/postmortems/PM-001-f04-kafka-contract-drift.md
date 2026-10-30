@@ -20,7 +20,7 @@ Kafka топик `fills` существует в трёх местах с раз
 | [`docs/06-api/messaging/fills.md`](../../06-api/messaging/) | Файл **не существует** |
 | [`cpp/matching/src/infra/kafka/batch_outputs_producer.cpp`](../../../cpp/matching/src/infra/kafka/batch_outputs_producer.cpp) | `producer_.produce("fills", key, cex::common::to_bytes(fill))` — реально пишет |
 
-Нарушено правило [CLAUDE.md §0a "Contract rule"](../../../CLAUDE.md): *"Missing contracts become `TODO contract` files, not unlinked names."* — `fills` не имеет даже TODO-stub'а.
+Нарушено правило [.claude/rules/docs-as-code.md "Contract rule"](../../../.claude/rules/docs-as-code.md#contract-rule): *"Missing contracts become `TODO contract` files, not unlinked names."* — `fills` не имеет даже TODO-stub'а.
 
 ## Root cause
 
@@ -28,7 +28,7 @@ Kafka топик `fills` существует в трёх местах с раз
    - topic в feature.yaml → строка в create_topics.sh;
    - topic в create_topics.sh → файл в docs/06-api/messaging/;
    - producer code `produce("X")` literal → docs/06-api/messaging/X.md.
-2. **Conflict Note C-1 в `topics.md` помечен `(planned)` без deadline и без owner'а** — типичный пример "TODO без следующего шага" (нарушение CLAUDE.md §0a).
+2. **Conflict Note C-1 в `topics.md` помечен `(planned)` без deadline и без owner'а** — типичный пример "TODO без следующего шага" (нарушение [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md)).
 3. **F-04 acceptance criteria исходили из feature.yaml** (где fills упомянут как существующий), а не из реального состояния docs/code — то есть AC закрылся "зелёным" по неверным данным.
 
 ## Fix
@@ -51,7 +51,7 @@ Kafka топик `fills` существует в трёх местах с раз
 
 - AUDIT-001 T-AUDIT-002, T-AUDIT-007, T-AUDIT-008.
 - F-04 (Batch Clearing), F-09 (Batch / Combo Orders — extends fills schema).
-- [CLAUDE.md §0a "Contract rule"](../../../CLAUDE.md).
+- [.claude/rules/docs-as-code.md "Contract rule"](../../../.claude/rules/docs-as-code.md#contract-rule).
 - [docs/06-api/messaging/topics.md "Conflict Note C-1"](../../06-api/messaging/topics.md).
 
 ## Open follow-ups

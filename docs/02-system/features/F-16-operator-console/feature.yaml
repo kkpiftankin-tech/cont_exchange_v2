@@ -1,9 +1,15 @@
 feature:
   id: F-16
   name: Operator Console & Kill-Switch
-  status: partially-implemented-in-risk
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: partially-implemented-in-risk
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-RISK-003  # kill-switch
+  - FR-OPS-001  # мониторинг
+  - FR-OPS-002  # управление параметрами
 
 description: >
   Панель оператора: обзор состояния всех сервисов, метрик batch

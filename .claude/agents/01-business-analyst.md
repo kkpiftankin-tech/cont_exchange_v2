@@ -1,9 +1,10 @@
 ---
 name: business-analyst
-description: Use this agent at the start of a feature to convert raw stakeholder notes, ingested IN-NNN documents, and informal product ideas into structured business requirements, business goals, target users, and feature candidates for the Continuous Exchange / Flow Order Book project. Do not use this agent to write code or technical specs.
+description: Turns raw stakeholder notes or ingested IN-NNN documents into business requirements, goals, target users and feature candidates. Use when a new business need or a new incoming document must be analysed (class XL). Not for UI remarks, bugs, or technical specs. Returns goals, users, requirements, feature candidates (<=60 lines).
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: blue
 ---
 

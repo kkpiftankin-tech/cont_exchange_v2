@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "specs/schemas/feature.schema.json",
+  "title": "feature.yaml",
+  "description": "Этап 4 п.1 (ADR-086/IN-019 §4.4), 2026-10-27. Проверяет только форму docs/02-system/features/*/feature.yaml, не семантику (ID существуют, ссылки резолвятся — это tools/consistency/check.py C-01..C-17). Намеренно permissive на верхнем уровне (additionalProperties: true) — поля feature.yaml менялись Этапом 1 (lifecycle/status/parentRequirements) и продолжат меняться; схема фиксирует то, что уже стабильно (id/name/capabilities), не блокирует остальное.",
+  "type": "object",
+  "required": ["feature"],
+  "additionalProperties": true,
+  "properties": {
+    "feature": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string", "pattern": "^F-[0-9]+[A-Z]?$"},
+        "name": {"type": "string", "minLength": 1},
+        "parent": {"type": "string", "pattern": "^F-[0-9]+[A-Z]?$"},
+        "lifecycle": {"type": "string", "enum": ["planned", "active", "deprecated"]},
+        "status": {
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "object",
+              "properties": {
+                "docs": {"type": "string", "enum": ["none", "partial", "complete"]},
+                "code": {"type": "string", "enum": ["none", "partial", "done"]},
+                "runtime": {"type": "string", "enum": ["none", "dev", "prod"]}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "owner": {"type": "string"},
+        "level": {"type": "string", "enum": ["kite", "sea", "fish"]}
+      }
+    },
+    "parentRequirements": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^FR-[A-Za-z0-9]+-[0-9]+$"}
+    },
+    "relatedAdrs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^ADR-[0-9]+$"}
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/capability"}
+    }
+  },
+  "definitions": {
+    "capability": {
+      "type": "object",
+      "required": ["id", "title"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string", "pattern": "^CAP-F[0-9]+[A-Z]?-[A-Za-z0-9-]+$"},
+        "title": {"type": "string", "minLength": 1},
+        "status": {
+          "type": "object",
+          "properties": {
+            "docs": {"type": "string", "enum": ["none", "partial", "complete"]},
+            "code": {"type": "string", "enum": ["none", "partial", "done"]},
+            "runtime": {"type": "string", "enum": ["none", "dev", "prod"]}
+          },
+          "additionalProperties": false
+        },
+        "since": {"type": "string"},
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^AC-[A-Za-z0-9]+-[0-9]+[a-z]?$"}
+        },
+        "adrs": {"type": "array", "items": {"type": "string", "pattern": "^ADR-[0-9]+$"}},
+        "ucs": {"type": "array", "items": {"type": "string"}},
+        "calcs": {"type": "array", "items": {"type": "string", "pattern": "^CALC-"}},
+        "contracts": {"type": "array", "items": {"type": "string"}},
+        "tables": {"type": "array", "items": {"type": "string"}},
+        "ui": {"type": "array", "items": {"type": "string", "pattern": "^UI-"}},
+        "codePaths": {"type": "array", "items": {"type": "string"}},
+        "tests": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

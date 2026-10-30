@@ -56,7 +56,7 @@ related: [ADR-026, ADR-020, ADR-005, ADR-030]
    `free`/`reserved`/`total`; in-memory-контур удаляется или вырождается в read-кэш.
    Все денежные величины — fixed-point `Decimal`
    ([ADR-005](ADR-005-fixed-point-decimal-money.md)); смешение user-баланса и
-   exchange-hedge-баланса запрещено (CLAUDE.md §17, [ADR-026](ADR-026-ledger-accounting-pnl.md)).
+   exchange-hedge-баланса запрещено ([cpp/ledger/CLAUDE.md](../../../cpp/ledger/CLAUDE.md), [ADR-026](ADR-026-ledger-accounting-pnl.md)).
 
 Инвариант после перехода: для каждого `(user_id, asset)` в любой момент
 `reserved_balance = Σ открытых резервов`, и `reserved` не может стать отрицательным

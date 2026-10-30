@@ -19,7 +19,7 @@ related:
 
 ## Owner
 
-[venue-execution-adapter](../05-components/venue-execution-adapter/overview.md) — единственный writer. Read access: REST gateway (GET `/api/v1/hedge/flows/{id}/child-orders`).
+[venue-execution-adapter](../05-components/venue-execution-adapter/overview.md) — единственный writer. Read access: REST gateway (GET `/api/v1/hedge/flows/{id}/child-orders`); frontend-api (BFF) читает состоявшиеся band-хеджи агентов CE (`hedge_flow_id` вида `ce|band|…`) для панели «Живые позиции», вкладки «Граф» и графика «Сделки на внешних биржах по парам» на вкладке «PnL» ([pair-trades-history](../06-api/rest/pair-trades-history.md), запрос по индексу `idx_child_orders_created`).
 
 ## Purpose
 
@@ -104,7 +104,7 @@ PARTIALLY_FILLED becomes a normal transient state.
 | `price` | DECIMAL(24,8) | для LIMIT/POST_ONLY; NULL для MARKET |
 | `client_order_id` | VARCHAR(64) | unique per venue |
 | `venue_order_id` | VARCHAR(64) | ID от venue после ack |
-| `filled_qty`, `avg_price`, `fee_amount`, `fee_currency` | aggregates | обновляются из ExecutionReport |
+| `filled_qty`, `avg_price`, `fee_amount`, `fee_currency` | aggregates | обновляются из ExecutionReport; правила `filled_qty` и `avg_price` — в разделе «Обновление filled_qty и avg_price» |
 | `status` | enum | PENDING/FILLED/PARTIALLY_FILLED/CANCELLED/REJECTED |
 | `error_code`, `error_message` | при REJECTED | |
 | `created_at`, `updated_at` | TIMESTAMPTZ | |
@@ -117,6 +117,19 @@ PARTIALLY_FILLED becomes a normal transient state.
 - При complete fill: status='FILLED', filled_qty=qty (с допуском по lot rounding).
 - При cancel: status='CANCELLED', error_code='cancelled_by_adapter|cancelled_by_venue|timeout'.
 - При reject: status='REJECTED'.
+
+## Обновление filled_qty и avg_price
+
+`ExecutionReport.filled_qty` — накопленный объём, `average_price` — цена прироста объёма этого отчёта (тик-локальный VWAP резидентной заявки; ledger читает его так же); у терминального отчёта без нового fill цены нет. Поэтому `PostgresChildOrderRepository::ApplyReport` ведёт агрегаты так:
+
+- `filled_qty = GREATEST(старое, новое)` — объём не уменьшается от запоздавшего отчёта;
+- `avg_price` — накопленный VWAP: $\bar p_{new}=\dfrac{\bar p_{old}\,q_{old}+p\,(q_{new}-q_{old})}{q_{new}}$; первый fill задаёт цену отчёта;
+- цена не меняется, если в отчёте её нет или она нулевая, либо объём не вырос (терминальный отчёт без fill, повторная доставка);
+- строка без fill получает 0 (как раньше).
+
+Проверка формулы: `cpp/venues/tests/sql/child_orders_apply_report_avg_price.sql` (временная таблица, откат).
+
+**Инцидент 2026-10-22.** С 08:04 UTC (резидентные заявки ADR-067) прежний код записывал `avg_price = 0` при терминальном отчёте без нового fill и хранил цену только последнего тика у заявок с несколькими fill'ами: панель «Живые позиции» (R и U) и вкладка «Граф» читают эти цены и показывали искажённый заработок (ledger и ClickHouse не затронуты). Исправлено в `ApplyReport`; уже записанные строки восстанавливает `tools/child-orders-avgprice-repair/repair.sh` по отчётам из ClickHouse (с резервной копией `child_orders_avgfix_backup_20261022`). История заработка агентов `ce_agent_pnl_history` за период с 08:04 UTC до исправления содержит старые числа.
 
 ## Idempotency
 

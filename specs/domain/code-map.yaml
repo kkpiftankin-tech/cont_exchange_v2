@@ -143,6 +143,7 @@ codeMap:
       - cpp/ledger/src/main.cpp
       - cpp/ledger/src/app/ledger_uc.cpp
       - cpp/ledger/src/app/ledger_uc.hpp
+      - cpp/ledger/src/app/agent_pnl_book.hpp
       - cpp/ledger/src/app/persistence_ports.hpp
       - cpp/ledger/src/infra/kafka_consumers.cpp
       - cpp/ledger/src/infra/postgres_repositories.cpp

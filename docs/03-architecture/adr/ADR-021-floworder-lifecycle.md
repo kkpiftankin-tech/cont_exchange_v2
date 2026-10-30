@@ -16,7 +16,7 @@ related:
 
 ## Контекст
 
-`FlowOrder` — центральная бизнес-сущность MVP (CLAUDE.md §8.2), описана в
+`FlowOrder` — центральная бизнес-сущность MVP ([docs/04-domain/core-concepts-and-invariants.md](../../04-domain/core-concepts-and-invariants.md)), описана в
 `contracts/proto/fob/orders/v1/orders.proto` и в `docs/04-domain/entities.md`.
 Инварианты и параметризация уже зафиксированы, но единого ADR по жизненному
 циклу и инвариантам нет — это нужно для matching, risk и ledger, которые

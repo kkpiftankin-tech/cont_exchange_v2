@@ -1,0 +1,358 @@
+feature:
+  id: F-18
+  name: "CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge"
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: complete, code: partial, runtime: dev}  # было: draft (устарело — feature-component-map.yaml уже указывал docs-complete-code-gated; код существует за флагами, ADR-061+)
+  owner: core-team
+  level: kite              # IN-013: Feature всегда kite ☁️
+
+# IN-013. Декомпозиция Feature вниз по Use Cases.
+# ВНИМАНИЕ: v2 (виртуальные контрагенты, знаковая позиция агента с нуля, полоса ±q)
+# заменяет модель v1 (капитал → target → net-хедж). UC-F18-01..03 — SUPERSEDED (v1),
+# сохранены для истории и Conflict Notes; активный поток v2 — UC-F18-04.
+decomposedInto:
+  - UC-F18-01            # [SUPERSEDED v1] form CE capital (seed + PnL/fees) — модель заменена house-невязкой
+  - UC-F18-02            # [SUPERSEDED v1] derive CE net position (проекция x) — заменена per-agent signed c_j
+  - UC-F18-03            # [SUPERSEDED v1] hedge net position beyond θ_a — заменён per-agent полосой ±q_j
+  - UC-F18-04            # [v2] хедж по полосе ±q: такт клиринга агентов + эмиссия сверх полосы
+
+relatedAdrs:  # переименовано из parentRequirements Этап 1 п.6 (ADR-086/IN-019) — это ADR, не FR-* бизнес-требования; см. ниже
+  - ADR-061             # [accepted 2026-09-15] смена модели позиции CE: с нуля, знаковая, без target, house-невязка, полоса ±q, party_type AGENT (supersede ADR-057)
+  - ADR-055             # revised — убрать STOCK-агентов (плечи запаса)
+  - ADR-056             # revised — убрать book-узел/склад; добавить house-столбец
+  - ADR-058             # revised — committed = позиция; полоса ±q вместо cooldown/target
+  - ADR-081             # [proposed 2026-10-19] ширина полосы хеджа: ручной режим и автоматический по волатильности
+  - ADR-082             # [proposed 2026-10-20] измерение ликвидности бирж (оборот ленты ν, коэффициент исполнения f) и обратная связь в глубину агента, размер заявки и порог хеджа; шаги 0–2 реализованы (флаги выключены), 3–4 нет; карточка CALC-VENUE-LIQUIDITY-STATS
+  - ADR-079             # [proposed 2026-10-16] диагностика решения клиринга: снимок последнего такта в matching → BFF → панель «Решение клиринга» на вкладке «Граф»; карточка CALC-CE-CLEARING-DIAG
+
+parentRequirements: []  # FR-* бизнес-требование для F-18 в docs/02-system/functional-requirements.md ОТСУТСТВУЕТ
+  # (CE виртуальные контрагенты не описаны на уровне FR-*, только через ADR выше) —
+  # открытый вопрос, не решаю здесь сам (Этап 1 п.6, ADR-086/IN-019; см. known-gaps.md)
+
+# Этап 4 п.1 (ADR-086/IN-019 §4.4), пилот 2026-10-27 — решение владельца:
+# ТОЛЬКО 3 из 28 AC-F18v2-* сгруппированы в capabilities ниже (демонстрация
+# механизма). Остальные 25 — НЕ размечены: группировка в capabilities — это
+# продуктовое решение о границах возможностей, не механический перенос
+# (в отличие от Этапа 1 п.6 FR-* переноса); угадывать его на 25 ACs разом
+# не стал. acceptanceCriteria ниже остаются и в общем списке ниже
+# (не перемещены, не удалены) — capabilities дополняют, не заменяют.
+capabilities:
+  - id: CAP-F18-BAND-WIDTH
+    title: Ширина полосы хеджа — ручной и волатильностный режимы
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-21]
+    adrs: [ADR-081, ADR-066]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-SKEW-BAND-CALIBRATION]
+    contracts: [docs/06-api/rest/vector-clearing-config.md]
+    tables: [f05a_clearing_config, operator_audit_log]
+    ui: [UI-VC-BAND-MODE]
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#LoadBandFeeConfig
+    tests: []  # CALC-CE-SKEW-BAND-CALIBRATION.tests тоже [] — калибровка значений, не код-путь
+
+  - id: CAP-F18-HEDGE-MODEL
+    title: Пороги хеджа по модели оптимального управления (тейкер, мейкер+тейкер, перевод), режим off/shadow/on
+    status: {docs: complete, code: done, runtime: dev}  # на dev включается только теневой режим; рабочий режим не включён (ADR-088, условия включения)
+    acceptanceCriteria: [AC-F18v2-34, AC-F18v2-35, AC-F18v2-36, AC-F18v2-37, AC-F18v2-38, AC-F18v2-39, AC-F18v2-40]
+    adrs: [ADR-088, ADR-089]   # ADR-066 и ADR-081 затронуты частично (supersedes_rule в ADR-088), обратные ссылки появятся при принятии
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-HEDGE-THRESHOLD-MODEL]
+    contracts: [docs/06-api/grpc/ledger-agent-positions.md, docs/06-api/rest/hedge-model.md]
+    tables: [ce_agent_band_history, f05a_clearing_config, operator_audit_log]
+    ui: []  # экран «Клиринг», блок «Пороги хеджа: действующие и по модели» (HedgeModelThresholds.js, AC-F18v2-37); элемента в ui-map пока нет — пилот ui-map ограничен тремя элементами (решение владельца 2026-10-27)
+    codePaths:
+      - cpp/ledger/src/domain/hedge_threshold_model.hpp
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_update_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_flow_observe_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#detect_and_emit_band_breach_locked
+      - frontend/api/hedge_model_dto.js
+      - frontend/api/band_config.js
+      - cpp/ledger/src/app/ledger_uc.cpp#hmodel_fuse_sweep_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#ReadHedgeModePgModeLocked
+      - frontend/web/src/pages/VectorClearing/HedgeModelThresholds.js
+    tests:
+      - cpp/ledger/tests/hedge_threshold_model_test.cpp
+      - cpp/ledger/tests/ce_hedge_model_wiring_test.cpp
+      - frontend/api/hedge_model_dto.test.js
+      - frontend/api/band_config.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/HedgeModelThresholds.test.js
+
+  - id: CAP-F18-SYSTEM-PNL
+    title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый + V переоценка)
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-26]
+    adrs: [ADR-083, ADR-084]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-SYSTEM-PNL]
+    contracts: [docs/06-api/rest/system-pnl.md]
+    ui: [UI-VC-SYSTEM-PNL]
+    codePaths: [frontend/api/system_pnl.js]
+    tests: [frontend/api/system_pnl.test.js]
+
+  - id: CAP-F18-LINK-TRANSFER
+    title: Физический перевод связки между биржами
+    status: {docs: complete, code: done, runtime: dev}
+    acceptanceCriteria: [AC-F18v2-27]
+    adrs: [ADR-084, ADR-083]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-LINK-TRANSFER]
+    contracts: [docs/06-api/grpc/ledger-apply-node-transfer.md]
+    ui: []  # нет отдельного UI-ID в пилоте ui-map.yaml (Этап 3) — только упомянут в тексте "Живые позиции"/"Система по остаткам"
+    codePaths:
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferThresholdK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferAmountK
+      - cpp/ledger/src/app/ledger_uc.cpp#TransferUnits
+      - cpp/ledger/src/app/ledger_uc.cpp#maybe_queue_link_transfer_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#settle_due_transfers_locked
+    tests: [cpp/ledger/tests/ce_link_transfer_test.cpp]
+
+  - id: CAP-F18-ARBITRAGEUR-BASIS
+    title: Базис и открытая позиция арбитражёра — панель «Живые позиции»
+    status: {docs: complete, code: done, runtime: dev}
+    since: CR-F18-001
+    acceptanceCriteria: [AC-F18v2-29]
+    adrs: [ADR-080, ADR-073, ADR-069, ADR-083]
+    ucs: [UC-F18-04]
+    calcs: [CALC-F18-CE-ARBITRAGEUR-BASIS]
+    contracts: [docs/06-api/grpc/ledger-agent-positions.md]
+    ui: [UI-VC-POS-BASIS]
+    codePaths:
+      - frontend/api/trade_stats_math.js#arbPositionParts
+      - frontend/api/server.js#buildAgentRows
+    tests:
+      - frontend/api/trade_stats_math.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
+
+  - id: CAP-F18-AGENT-PNL
+    title: Заработок агентов по биржам — R, U, R+U внутренней биржи, внешних бирж и итого (вкладка «PnL»)
+    status: {docs: complete, code: done, runtime: dev}  # модель C′ (определения утверждены владельцем 2026-10-28): код и тесты готовы, выкладка на dev по CR-F18-004; открыты OQ-F18v2-28, 29, 31…33
+    since: CR-F18-002  # единый источник для панели и ряда для графика — CR-F18-003; модель C′ (справедливая цена как опорная) — CR-F18-004
+    acceptanceCriteria: [AC-F18v2-30, AC-F18v2-31, AC-F18v2-32]
+    adrs: [ADR-087]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-AGENT-PNL, CALC-CE-PAIR-TRADES]
+    contracts: [docs/06-api/grpc/ledger-agent-pnl.md, docs/06-api/rest/agent-pnl.md, docs/06-api/rest/agent-pnl-history.md, docs/06-api/rest/pair-trades-history.md]
+    tables: [ce_agent_pnl_book, ce_agent_position, ce_agent_pnl_history, ce_pnl_totals_history]
+    ui: [UI-PNL-AGENTS, UI-PNL-HISTORY, UI-PNL-PAIR-TRADES]
+    codePaths:
+      - cpp/ledger/src/app/agent_pnl_book.hpp
+      - cpp/ledger/src/app/ledger_uc.cpp#GetAgentPnl
+      - cpp/ledger/src/app/ledger_uc.cpp#book_on_delta_locked
+      - cpp/ledger/src/app/ledger_uc.cpp#apply_agent_band_report_locked
+      - frontend/api/agent_pnl_dto.js
+      - frontend/api/server.js#fetchAgentPnlDto
+      - frontend/web/src/pages/HedgePnlDashboard/AgentPnlTable.js
+      - frontend/web/src/pages/HedgePnlDashboard/PnlHistoryChart.js
+      - frontend/web/src/pages/VectorClearing/PnlLineChart.js
+      - frontend/web/src/pages/HedgePnlDashboard/PairTradesChart.js
+      - frontend/web/src/pages/HedgePnlDashboard/pairChartModel.js
+      - frontend/api/pair_trades_history.js
+      - frontend/api/server.js#loadPairTradesRows
+      - frontend/api/agent_pnl_history.js
+      - frontend/api/server.js#samplePnlHistoryOnce
+      - frontend/web/src/pages/VectorClearing/VectorClearingLive.js#AgentPositionsTables
+    tests:
+      - cpp/ledger/tests/agent_pnl_book_test.cpp
+      - cpp/ledger/tests/ce_agent_pnl_test.cpp
+      - frontend/api/agent_pnl_dto.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/AgentPnlTable.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/PnlHistoryChart.test.js
+      - frontend/api/agent_pnl_history.test.js
+      - frontend/api/pair_trades_history.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/PairTradesChart.test.js
+      - frontend/web/src/pages/HedgePnlDashboard/__tests__/pairChartModel.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/AgentPositionsTables.arb.test.js
+
+description: >
+  Биржа CE (Continuous Exchange) выступает дилером через двух виртуальных контрагентов:
+  ПЕРЕВОДЧИКОВ (Q_BIN, Q_KRK — маркет-мейкер, меняет на ОДНОЙ площадке актив на деньги)
+  и АРБИТРАЖЁРОВ (T_BTC, T_USD — перевозят ОДИН актив между площадками, тариф+срок, без
+  цены). Позиция агента c_j — накопленный по клирингу неисполненный поток: стартует с
+  НУЛЯ, знаковая, может быть отрицательной. Пока |c_j| ≤ q_j (полоса), наружу не уходит
+  ни одной заявки — такт меняет только внутреннюю позицию агента, а не владение биржи.
+  При выходе за полосу излишек (|c_j|−q_j)·sign(c_j) эмиттится наружу и помечается in_flight
+  (committed); саму c_j уменьшаем ПО ФАКТУ ИСПОЛНЕНИЯ хедж-заявки (A8), а не в момент эмиссии
+  (решение владельца 2026-09-15). По таймауту неисполненный остаток снимается с in_flight
+  (позиция не меняется). Прибыль/невязка оседает на СЧЁТЕ ДОМА (house) — это НЕ агент: без
+  якоря/наклона/полки/полосы, заявок не порождает (переменная-невязка, восстанавливает ядро W).
+  Понятия target в v2 НЕТ; committed сохраняется как поле in_flight «отправлено, не исполнено»
+  (см. Conflict Note в ADR-061).
+
+  Инвариант владения: владение биржи по каждому активу меняют РОВНО две вещи — сделка с
+  клиентом и исполнение на площадке. Клиринг, накопление позиций, перевозы и таймауты
+  владение НЕ меняют никогда. Z_a = владение_a(t) − владение_a(0); при отсутствии
+  встречного клиентского потока Z_a ≡ 0.
+
+  Полоса — механизм ИНТЕРНАЛИЗАЦИИ встречного клиентского потока: при q=18/30 против q=0
+  издержки хеджа падают на −63% (182,73 vs 495,06 USD за 30 тактов, итог +203,18 против
+  −246,03). Оговорка: без встречного клиентского потока полоса УХУДШАЕТ результат
+  (гасить нечего) — это не универсальный выигрыш, а внутренняя компенсация потоков.
+
+  Источник истины: incoming-docs/2026-09-15-CE_algorithm_v2.md (алгоритм такта A0–A8),
+  сводка docs/implementation-plan/F-18-v2-agents-review-summary.md, ADR-061 (accepted 2026-09-15).
+
+# Размещение по сервисам (проект. под ADR-061). Владелец книги позиции — ledger (§17).
+primaryComponents:
+  - market-data           # A0–A1: снимок обоих стаканов + кривые агентов (m, α, полка c)
+  - matching-fob-core     # A2–A6: сдвиг якоря σ*=m+ρ·c, граф W + house-столбец, клиринг, c_j+=f_j
+  - risk-manager          # A7: проверка полосы, sizing (walk qty), формат заявки, PreHedgeCheck
+  - ledger                # владелец ce_agent_position (signed), party_type AGENT, узловые остатки
+  - external-venues       # исполнение хедж/перевозочных ордеров, ExecutionReport
+  - observability-reporting # ClearingTrace, панель агентов/house/Z_a (read-side)
+
+# Контракты — planned под ADR-061; реальное изменение .proto вне scope этого doc-шага.
+protoContracts:
+  - contracts/proto/fob/agent/v1/agent.proto          # [planned] agent_id, agent_kind {TRANSLATOR, ARBITRAGEUR}; убрать STOCK
+  - contracts/proto/fob/ledger/v1/ledger.proto        # RPC GetAgentPositions [implemented T-F18-203]; ExchangeNOP без target [planned]
+  - contracts/proto/fob/risk/v1/risk.proto            # [planned] ExchangeNOP без target; Z_a=владение(t)−владение(0)
+  - contracts/proto/fob/execution/v1/execution.proto  # ExecutionIntent/Report (reuse F-12 router)
+  - contracts/proto/fob/common/v1/common.proto        # Decimal, EventMeta, Instrument, Side
+
+storageDependencies:
+  postgresql:
+    - ce_agent_position   # [implemented T-F18-204] (agent_id, asset, venue) → position(signed), in_flight, updated_at, last_batch_id
+    - ce_agent_pnl_book   # [implemented ADR-087, модель C′] (agent_id) → qty, avg_fair, edge, ext_realized, quote, last_batch_id, since_ms — книга агента по справедливой цене (колонки ext_*, rvf_base в ce_agent_position устарели)
+    - accounts            # house-аккаунт '__ce_house__' (party_type HOUSE); reuse F-06
+    - f05a_clearing_config # [planned +cols] ρ_Q, ρ_T, q_translator, q_arbitrageur, transfer_eta
+  # НЕТ понятия target/net-позиции v1; позиция агента знаковая, ключ (agent_id, asset@venue)
+
+codePaths:
+  # market-data — A0/A1 (кривые агентов)
+  - cpp/market_data/src/app/curve_to_levels.cpp
+  # matching — A2..A6 (якорь σ*, граф W+house, клиринг, накопление c_j)
+  - cpp/matching/src/app/vector_clearing_use_case.cpp
+  - cpp/matching/src/domain/vector_qp_solver.cpp
+  # ledger — владелец позиции агента (party_type AGENT)
+  - cpp/ledger/src/app/ledger_uc.cpp
+  # risk — A7 полоса + sizing + PreHedgeCheck
+  - cpp/risk/src/app/risk_uc.cpp
+  # venues — исполнение (A8 confirm)
+  - cpp/venues/src/app/execute_on_venue.cpp
+
+kafkaTopics:
+  produces:
+    - ce.position.delta   # matching → ledger: знаковая Δc_j агента по узлу (asset@venue)
+    - execution.intents   # risk → venues: заявка сверх полосы (hedge/transfer)
+  consumes:
+    - marketdata.raw      # market-data: снимок стаканов (A0)
+    - execution.venue     # ledger: исполнение двигает qty[asset@venue] + realized (A8 confirm)
+    - batch.outputs       # ledger: клиентские fills двигают владение (точка входа №1)
+
+grpcServices:
+  exposes:
+    - fob.ledger.v1.LedgerService.GetAgentPositions   # (agent_id, asset, venue) → signed position; implemented T-F18-203
+    - fob.ledger.v1.LedgerService.GetAgentPnl         # [proposed ADR-087] заработок агентов: внутренняя биржа, внешние биржи, итого (R, U, R+U, USDT)
+    - fob.risk.v1.RiskService.GetRiskSnapshot          # позиции агентов + band state + Z_a (для UI)
+  calls:
+    - fob.risk.v1.RiskService.PreHedgeCheck            # pre-hedge gate перед эмиссией сверх полосы (reuse F-12)
+
+# AC v2 — покрывают такт A0–A8, полосу ±q, house, party_type AGENT, инвариант владения,
+# Z_a = владение(t) − владение(0). Источник: system-analyst (AC-F18v2-01..18).
+acceptanceCriteria:
+  - "AC-F18v2-01: A0 — снимок обоих стаканов на единый момент такта; площадка со снапшотом старше stale-порога исключается, такт продолжается по оставшимся узлам."
+  - "AC-F18v2-02: A1 — кривая агента строится из трёх чисел: якорь m=1000·ln(mid/P0), консервативный наклон α=θ·min V/d, полка c=комиссия+½·|ln(ask/bid)|·1000 (эталон Binance: α=0,50·71,971=35,986)."
+  - "AC-F18v2-03: A2 — сдвиг якоря ровно ОДНО слагаемое σ*_j=m_j+ρ_j·c_j от СОБСТВЕННОЙ позиции агента (ρ_Q=0,004 переводчик, ρ_T=0,002 маршрут); отдельного target/committed-слагаемого нет."
+  - "AC-F18v2-04: A3 — матрица W: ранг V·A−1, независимых кругов (V−1)(A−1), левое ядро (1,…,1); столбец house — единственная ненулевая клетка в узле нумерария, восстанавливает ядро."
+  - "AC-F18v2-05: A4 — клиринг максимизирует Σ[−σ*_j·f_j − c_j·|f_j| − f_j²/(2α_j)] при Wf=0; закрытая форма (λ*) совпадает с OSQP в пределах 1e-9 на квадратном случае (2 площадки × 2 актива)."
+  - "AC-F18v2-06: A5 — такт активирует эмиссию только если |Wf|<1e-6 И закрытая форма == OSQP И объём заявки ≤95% остатка узла-источника; иначе такт FAILED, заявки не эмитятся, risk.alerts."
+  - "AC-F18v2-07: A6 — накопление c_j+=f_j не порождает ни одной внешней заявки; позиция может уйти в отрицательную зону (эталонный минимум −18000 тыс.); владение узлов этим шагом не меняется (property-тест)."
+  - "AC-F18v2-08: A7 — заявка эмиттится СТРОГО когда свободная часть позиции (сверх покрытого in_flight) выходит за |c_j|>q_j; размер=(|c_j|−q_j)·sign(c_j) по стоимости, переведён в qty итеративным walk по книге (2–3 итерации); в момент эмиссии c_j НЕ меняется, отправленное помечается in_flight."
+  - "AC-F18v2-09: A7 — у переводчика и арбитражёра РАЗНЫЕ полосы (q_translator=18, q_arbitrageur=30, конфигурируемые per-agent-kind), не общая константа."
+  - "AC-F18v2-10 (решение владельца 2026-09-15): эмитированная заявка помечена in_flight (committed); c_j уменьшается ПО ФАКТУ ИСПОЛНЕНИЯ (A8), не в момент эмиссии; in_flight не даёт отправить тот же излишек повторно (защита от двойного хеджа)."
+  - "AC-F18v2-11: A8/timeout — неисполненный к дедлайну остаток снимается с in_flight (разрешая повторную отправку в следующем такте); позицию c_j таймаут НЕ меняет (она уменьшалась только по исполнению)."
+  - "AC-F18v2-12 (решение владельца 2026-09-15): A8/confirm — исполнение (в т.ч. частичное) меняет qty[asset@venue] узла, realized=fq·(марка−px_факт)/1000·sgn И уменьшает позицию c_j и in_flight на fq. После ПОЛНОГО исполнения |c_j|=q_j точно."
+  - "AC-F18v2-13: Инвариант владения — владение_a(t)=Σqty[a@venue]+Σin_transit[a] меняется РОВНО двумя событиями: сделка с клиентом и исполнение на площадке; клиринг/накопление/перевоз/таймаут владение не мутируют (property-тест: N тактов без клиентского потока ⇒ Z_a≡0)."
+  - "AC-F18v2-13a (INV-CE-A0, уточнение владельца 2026-09-15): позицию агента c_j двигают встречные потоки клиринга — клиентский встречный поток (A0, когда клиенты есть) И/ИЛИ встречные потоки переводчиков и арбитражёров между разными внешними площадками (собственное накопление клиринга). Клиентов может не быть — тогда A0 нет, но c_j продолжают двигать межплощадочные встречные потоки агентов; неподвижно без клиентов/исполнения только владение Z (Z≡0), а не позиция c_j. Остаток STOCK c_j НЕ двигает (его нет)."
+  - "AC-F18v2-14: Z_a=владение_a(t)−владение_a(0); понятия target в модели v2 нет (ExchangeNOP.target удалён — breaking, за флагом до миграции клиентов контракта)."
+  - "AC-F18v2-15: Счёт дома (house) — не агент: без якоря/наклона/полки/полосы, заявок не эмиттит; остаток по нумерарию сметается в house; в стоимостных единицах баланс такта сходится ровно (double-entry)."
+  - "AC-F18v2-16: party_type=AGENT — отдельный от CLIENT/HOUSE тип участника в ledger; позиция агента знаковая; резерв-чек (неотрицательность, как у CLIENT) к AGENT НЕ применяется."
+  - "AC-F18v2-17: Перевоз (арбитражёр) — сущность {asset,src,dst,qty,eta,tariff,status}; приход учитывается на узле назначения при eta≤t; qty≤95% остатка узла-источника перед отправкой, иначе перевоз урезается/откладывается."
+  - "AC-F18v2-18: Эффект полосы измерим — при q=18/30 число внешних заявок и издержки хеджа за фиксированный 30-тактовый прогон строго меньше, чем при q=0 (ориентир −63% издержек); НО без встречного клиентского потока полоса результат ухудшает (гасить нечего)."
+  - "AC-F18v2-19 (ADR-066): динамический порог band — две независимые оси масштаба поверх плоского Z̄=c/Γ, обе за флагами, обратимы. (a) Волатильностная (D1, CE_BAND_GAMMA_MODE): выше σ ⇒ уже band (VolScaleFactor, σ из ce_asset_volatility). (b) Ликвидностная (#7 scoped, CE_BAND_LIQ_MODE, ADR-066 §D3): глубже стакан ⇒ шире band (LiqScaleFactor=(depth/depth_ref)^0.5, depth=α_e из ce_asset_liquidity, writer matching). Композиция BandTotalScale=clamp(Vol·Liq, tr_min, tr_max) с финальным клэмпом; обе off ⇒ поведение как до фичи. Решение калибровки Γ=γσ²τ — O1 (ADR-066 §Addendum), НЕ тождество эталону IN-017 A=σ√(2γ/Λ); полный O2 (реальная Λ) owner-gate. Планы: F-18-dynamic-band-gamma.tasks.md, F-18-liquidity-band.tasks.md."
+  - "AC-F18v2-20 (ADR-079): диагностика решения клиринга. Вкладка «Граф» показывает НАСТОЯЩЕЕ решение последнего такта CE-клиринга (из matching, не пересчёт): потенциалы узлов, по ребру — отклонение d, полку c с составом, запас, поток, состояние; типовые циклы «актив × пара бирж через USDT» с разрывом цен G против порога Σc; отброшенные котировки с причиной; состояние ликвидности внешних бирж (опрос, возраст кривой). Объяснение «почему потока нет» формируется в BFF по снимку; решение старше 30 с объявляется устаревшим, а не «потока нет». Ограничения: хранится только последний такт, кросс-пары без треугольников. Карточка docs/04-domain/calculations/CALC-CE-CLEARING-DIAG.md, контракт docs/06-api/rest/ce-clearing-diagnostics.md."
+  - "AC-F18v2-21 (ADR-081): ширина полосы хеджа настраивается оператором на экране «Клиринг»: ручной режим (Z̄lim и Z̄mkt в тыс. USDT, одинаково для всех агентов, 0,1 ≤ Z̄lim ≤ Z̄mkt ≤ 1000), автоматический по волатильности (ADR-066: пол, опорная σ, границы множителя) и от комиссии (прежний, по умолчанию). Режим живой (ledger перечитывает до 3 с), невалидные значения не применяются, изменение пишется в аудит-лог BFF (кто, было, стало). Множитель порога арбитражёров (ce_band_arb_scale, 0,1…20, по умолчанию 1) задаётся там же. Контракт docs/06-api/rest/vector-clearing-config.md, данные docs/07-data/f05a-clearing-config-band.md."
+  - "AC-F18v2-22 (ADR-082, шаги 0–2): измерение ликвидности бирж. venues измеряет по каждой паре оборот ленты публичных сделок и коэффициент исполнения хедж-заявок, пишет в venue_liquidity_stats (только изменившиеся пары), панель «Ликвидность бирж» на экране «Внешние биржи» показывает их как есть (нет заявок ⇒ «—», не 100 %). Заявки в период прогрева ленты в коэффициент не входят. Глубина котировки агента умножается на множитель по коэффициенту исполнения за флагом CE_DEPTH_FILL_COEF (по умолчанию выключен): сжатие к единице по числу заявок, нормировка на лучшую биржу того же актива с нижней границей опоры CE_DEPTH_FILL_REF_MIN, нижняя граница множителя, запись старше 300 с игнорируется; применяется после фильтра тонких площадок. После перезапуска venues оценки продолжаются из сохранённых строк, а не начинаются с нуля. Шаг 2: за флагом CE_ORDER_CAP_TAPE (по умолчанию выключен) заявки агентов одной биржи и пары вместе не занимают больше доли π оборота ленты за время жизни заявки (бюджет минус живые заявки, не ниже минимума); остаток над порогом остаётся в позиции и уходит следующими заявками, перепроверяется каждый такт; жёсткий выход в зоне агрессивного сброса и при избытке не меньше 5 бюджетов; нет свежей ν ⇒ ограничения нет. Карточка docs/04-domain/calculations/CALC-VENUE-LIQUIDITY-STATS.md, данные docs/07-data/venue-liquidity-stats.md, контракт docs/06-api/rest/venue-liquidity-stats.md."
+  - "AC-F18v2-23 (панель «Живые позиции»): колонки разделены на внутреннюю биржу CE (нога, было, дельта, стало) и внешнюю (отправлено, исполнено, сделки, заработок R / U). Заявка агента (отправлено/исполнено, накопленно из child_orders с дозаполнением резидентных лимитов) стоит в строке той валюты, которую торгует заявка (по BTC/USDT — в строке BTC); у арбитражёра — в строке ноги по бирже заявки. Сделки «база» и «квота» показаны одним столбцом: в строке базовой валюты — база, в строке котируемой — квота; у арбитражёра в строке ноги обе валюты её биржи. На экране объяснено, что R — реализованный заработок, а U — нереализованный результат по текущим ценам (без комиссий). По клику на агента показан график R, U и R + U во времени (окна 1 ч, 6 ч, 24 ч, 7 дн) с отдельными чекбоксами для каждого ряда: ось подгоняется под отмеченные ряды, чтобы малый R рядом с большим U не выглядел прямой: BFF раз в минуту пишет те же числа в ce_agent_pnl_history (хранение 7 дней), график читает записанное, ничего не пересчитывает; нет записей ⇒ сообщение, что история копится с момента включения записи. Данные docs/07-data/ce-agent-pnl-history.md, контракт docs/06-api/rest/agent-pnl-history.md."
+  - "AC-F18v2-24 (ADR-083): остаток паритета принадлежит связке-арбитражёру, «дом» — технический счёт-невязка. Рыночный хедж ног связки отключён флагом CE_ARB_MARKET_HEDGE=0: новых внешних заявок ce|band|A_* нет, позиция в пути связок возвращается в ноль, позиции связок ограничены (не растут монотонно), клиринг цел (ошибок нет, потоки на рёбрах ненулевые), заявки переводчиков не деградируют. Следующие шаги: учёт выгод участников S_i = w²/(2α) и прибыли системы по остаткам (CALC-CE-SYSTEM-PNL), затем физический перевод связки. Обоснование docs/experiments/EXP-2026-10-22-ce-theory-conformity.md, решение docs/03-architecture/adr/ADR-083-ce-link-parity-residual-and-no-market-hedge.md."
+  - "AC-F18v2-25 (ADR-083, учёт): панель «Живые позиции» показывает выгоду каждого участника в клиринге по теории S = w²/(2α), накопленную по тактам с момента сброса статистики (колонка «выгода по теории» во внутренней группе и итог по переводчикам и арбитражёрам), и ряд S на графике агента. Каждый такт учитывается один раз (по batchId снимка клиринга), хранится число учтённых и ожидаемых тактов, на экране — доля учтённых. Выгода неотрицательна у каждого участника и не складывается с R и U; у связки без внешних сделок это основной показатель. Источник — ce_agent_pnl_history (колонки surplus_inc_usdt, surplus_tacts, surplus_tacts_expected). Карточка docs/04-domain/calculations/CALC-CE-CLEARING-SURPLUS.md, данные docs/07-data/ce-agent-pnl-history.md, контракт docs/06-api/rest/agent-pnl-history.md."
+  - "AC-F18v2-26 (ADR-083, учёт): блок «Система по остаткам» показывает прибыль системы по реальным остаткам биржи: изменение стоимости остатков с момента базы делится точно на торговый результат T = Σ(q−q0)·m(t) и переоценку запасов V = Σ q0·(m(t)−m0), T + V = изменение стоимости остатков. База (остатки и цены) задаётся при первом замере и при сбросе статистики сделок. Валюта с остатком без цены в итог не входит и перечисляется отдельно. Без сделок T не меняется. Ряд за окно и таблица по валютам. Карточка docs/04-domain/calculations/CALC-CE-SYSTEM-PNL.md, данные docs/07-data/ce-system-pnl.md, контракт docs/06-api/rest/system-pnl.md. Перезапуск ledger (смена boot_id) не даёт ложного торгового результата: база задаётся заново, накопленное переносится (ADR-084 п. 8)."
+  - "AC-F18v2-27 (ADR-084): физический перевод связки между биржами. При CE_ARB_TRANSFER_ENABLED=1 связка не выставляет рыночных заявок; когда позиция её ноги назначения строго выше порога перевода Z̄_A = max(пол, k_band·c_tr), обе ноги сдвигаются к нулю (цель Z_targ = 0,5·Z̄_A, X = min(c_d − Z_targ, |c_s|)), перевод ставится в очередь и через CE_TRANSFER_ETA_BATCHES (3) тактов клиринга ledger двигает остатки бирж: источник −x, назначение +x·(1 − fee), x = X·1000/P_источника (вниз до 8 знаков). Сумма остатков по валюте при нулевой плате не меняется, позиции связок ограничены порогом перевода плюс приток за такт, поток по рёбрам связок не падает, ошибок нет, заявки переводчиков не деградируют. Приход в пути виден как NodeBalance.in_transit (справка). Остаток паритета r = X·1000·(1/P_s − 1/P_d) измеряется и пишется в журнал. Карточка docs/04-domain/calculations/CALC-CE-LINK-TRANSFER.md, контракт docs/06-api/grpc/ledger-apply-node-transfer.md, решение docs/03-architecture/adr/ADR-084-ce-link-physical-transfer.md."
+  - "AC-F18v2-28 (ADR-085): уценка устаревших котировок и капитальный предел глубины переводчика. Оба механизма выключены по умолчанию (CE_TRUST_MODE=OFF, CE_CAPITAL_W_T_K=0), при выключенных поведение клиринга не меняется. При включении глубина котировки к номиналу равна w·f·min{θ·α_ext, W_T/(γ·ς²·τ)}, где W_T — капитал именно этого переводчика (CE_CAPITAL_W_T_K_BY_KEY по ключу «биржа|пара», запасное CE_CAPITAL_W_T_K; пара без капитала предела не имеет): вес по возрасту w доходит до нуля плавно (порог CE_TRUST_PSI_MIN), котировка с нулевым весом исключается из клиринга с причиной «устарели» в списке отброшенных, предел идёт первым, а вес и множитель исполнения действуют поверх него; нет волатильности площадки или возраста — множитель 1 и предела нет. Раз в минуту в журнале market_data строка ADR-085 (применено, исключено, минимальный вес, под пределом, значение CE_AGE_DEAD_ZONE_K). Вход клиринга, в котором котировка ссылается на актив или площадку вне списков assets/venues, не публикуется (проверка FindInconsistentQuote, ERROR с rejected_windows_total) и не роняет matching (try/catch по std::out_of_range, сообщение отклоняется); актив без ссылок ни в одной роли пропускается, актив, на который ссылается кросс-пара, остаётся (SelectClearingAssets); тест cpp/market_data/tests/ce_input_guard_test.cpp повторяет случай инцидента 2026-10-26. Тест cpp/market_data/tests/depth_trust_scale_test.cpp на числах страницы v6, специалиста и базового документа; карточка docs/04-domain/calculations/CALC-CE-TRANSLATOR-DEPTH.md, решение docs/03-architecture/adr/ADR-085-ce-translator-depth-trust-and-capital-cap.md, аудит docs/experiments/EXP-2026-10-26-clearing-page-v6-conformity.md."
+  - "AC-F18v2-29 (ADR-080, ADR-073, ADR-083): панель «Живые позиции» у арбитражёра разделяет три разные величины, которые нельзя складывать: заработок по сделкам (realized R и unrealized U по внешним хедж-сделкам, как у переводчика; появлялся в период 2026-10-19–10-22 при включённом рыночном хедже ног связки, флаг CE_ARB_MARKET_HEDGE=1, ADR-080; с ADR-083 флаг выключен на dev (CE_ARB_MARKET_HEDGE=0), новых R/U у арбитражёров не накапливается — актуальная метрика заработка связки без рыночного хеджа — выгода по теории S_i = w_i²/(2α_i), AC-F18v2-24/25), базис (разница цен бирж на перевозимом объёме, не реализован, уходит на счёт дома по CE_algorithm_v2) и открытую позицию (нетто-количество актива на двух ногах по ценам бирж — риск изменения цены, а не убыток; 0 при зеркальных ногах, росла при несимметричном исполнении рыночных хеджей в период ADR-080, как предупреждал ADR-073). V = q_src·P_src + q_dst·P_dst раскладывается точно на открытую позицию (q_src+q_dst)·P̄ и базис ((q_dst−q_src)/2)·(P_dst−P_src), P̄=(P_src+P_dst)/2. Карточка docs/04-domain/calculations/CALC-CE-ARBITRAGEUR-BASIS.md, контракт docs/06-api/grpc/ledger-agent-positions.md."
+  - "AC-F18v2-30 (ADR-087, модель C′): вкладка «PnL» (/hedge-pnl-live) показывает по каждому агенту (переводчику и связке) R, U и R+U в USDT тремя группами: внутренняя биржа CE, внешние биржи (все вместе), итого (внутренняя плюс внешние), и строку «все агенты». Все числа считает ledger (вызов GetAgentPnl, Decimal), BFF только пересылает ответ (GET /api/vector-clearing/agent-pnl, 502 при недоступном ledger), фронт только рисует. Внутренняя биржа: всё реализуется в такте клиринга — R = Σ (F_0 − p)·dL (выгода сделки относительно справедливой цены пары в момент сделки), U всегда 0; сумма R по всем агентам равна нулю (проверяется тестом и диагностикой такта в журнале ledger). Внешние биржи: позиция хранится по справедливой стоимости входа F_in; R = качество исполнения хеджа s·(p_f − F_0 исп) + дрейф справедливой цены (F_0 закрытия − F_in) закрытой части (дрейф реализуется при любом закрытии, в том числе встречной внутренней сделкой); U = L·(F_0 сейчас − F_in) по незахеджированному остатку. Итого R = R внутр. + R внеш., U = U внеш., R+U равно результату агента по кассе. Пример владельца: покупка 1 BTC по 80 010 при F_0=80 000, хедж SELL 0,6 по 80 040 при F_0=80 030, остаток 0,4 при F_0=80 030 ⇒ R=14, U=12, R+U=26. У связки справедливая цена берётся у переводчиков того же актива. R и U известны независимо (has_data и u_has_data): R известен сразу после перезапуска, U — после первой цены; неизвестное — прочерк, не ноль. Сброс позиций обнуляет всё; CE_AGENT_PNL_ENABLED=0 выключает учёт; книги переживают перезапуск ledger (таблица ce_agent_pnl_book). Панель «Живые позиции» (колонка «заработок R / U» — внешняя группа агента; строка итогов «переводчики / арбитражёры / вместе») и ряд для графика читают те же числа из ledger (GetAgentPnl: записи агентов, by_kind, totals): в BFF формул R и U нет, браузер итоги не складывает; нет ответа ledger ⇒ «нет данных», не нули; сброс позиций сбрасывает R/U у всех потребителей одним действием. Тесты cpp/ledger/tests/agent_pnl_book_test.cpp и ce_agent_pnl_test.cpp, frontend/api/agent_pnl_dto.test.js, AgentPnlTable.test.js; карточка docs/04-domain/calculations/CALC-CE-AGENT-PNL.md, решение docs/03-architecture/adr/ADR-087-ce-agent-pnl-internal-external-total.md (CAP-F18-AGENT-PNL), контракты docs/06-api/grpc/ledger-agent-pnl.md и docs/06-api/rest/agent-pnl.md, данные docs/07-data/ce-agent-pnl-book.md."
+  - "AC-F18v2-31 (ADR-087, CR-F18-005): на вкладке «PnL» (/hedge-pnl-live) под таблицей «Заработок агентов» есть график «Заработок во времени». Охват: все агенты, переводчики, арбитражёры либо один агент (клик по строке таблицы, повторный клик снимает выбор). Группа: итого, внутренняя биржа CE, внешние биржи. Ряды R, U, R+U (галочки, выбор запоминается в браузере); окна 1 ч, 6 ч, 24 ч, 7 дн; обновление раз в 30 с, подсказка под курсором. Значения — журнал ledger: BFF раз в минуту записывает итоги ledger по охватам (таблица ce_pnl_totals_history: R и U внутренней и внешних бирж, число агентов и неполных агентов) и внутреннюю группу агента (колонки internal_realized_usdt, internal_unrealized_usdt в ce_agent_pnl_history); график читает записанное (GET /api/vector-clearing/pnl-history и agent-pnl-history), браузер ничего не пересчитывает и только выбирает группу записи, итого = внутренняя + внешние считает BFF (неизвестная часть даёт null). Неизвестное значение — разрыв линии, а не ноль; ledger недоступен — записей нет, на графике разрыв. В подсказке итогов — число агентов и сколько из них без части данных. История копится с момента выкладки (значения до модели C′ не восстанавливаются), хранение PNL_HISTORY_RETENTION_DAYS (деф. 7). Тесты frontend/api/agent_pnl_history.test.js, PnlHistoryChart.test.js, AgentPnlTable.test.js; контракт docs/06-api/rest/agent-pnl-history.md §3, данные docs/07-data/ce-pnl-totals-history.md и ce-agent-pnl-history.md."
+  - "AC-F18v2-32 (CR-F18-006): на вкладке «PnL» (/hedge-pnl-live) есть блок «Сделки на внешних биржах по парам»: пары валют выбираются чекбоксами: показаны все пары, по которым были сделки за 7 суток (поле known_pairs), по умолчанию отмечены все пары со сделками в окне, пара без сделок в окне неактивна с подписью даты последней сделки, есть кнопки «все» и «снять» (CR-F18-009); для каждой отмеченной пары — график с двумя осями: слева накопленный объём базовой валюты, справа цена покупки и цена продажи на внешних биржах в единицах второй валюты пары (цены — средневзвешенные по объёму цены исполнения наших хедж-заявок за интервал, все внешние биржи вместе, без комиссий, кроме режима чекбокса комиссии). Режим объёма: общий (покупки + продажи), нетто (покупки − продажи), покупки и продажи отдельно; галочки цен; чекбокс «+ комиссия к цене покупки» накидывает на цену покупки расчётную комиссию (стоимость каждой заявки × ставка maker для лимитных или taker для рыночных, ставки экрана «Клиринг», CR-F18-007), независимый чекбокс «− комиссия с цены продажи» вычитает её из цены продажи (CR-F18-008); комиссия только отображение графика (в R, U, ledger и панель не входит), реальная комиссия бирж в сделках не записана; окна 1 ч, 6 ч, 24 ч, 7 дн; подсказка под курсором. Графики можно построить по одному агенту (CR-F18-010): клик по строке таблицы «Заработок агентов» выбирает агента и для этого блока, и для графика «Заработок во времени»; в блоке виден значок агента с кнопкой «все агенты», список пар и график строятся по хеджам этого агента (параметр agent маршрута), выбор пар запоминается отдельно для каждого агента. Все вычисления в BFF (SQL-агрегат по child_orders и чистая функция buildPairTradesDto: цены, накопленные объёмы), маршрут GET /api/vector-clearing/pair-trades-history; браузер только выбирает готовое поле точки и рисует. Интервал без сделок стороны не даёт цены (null, не ноль), линия цены рвётся при простое длиннее четырёх интервалов. Кросс-пары (ETH/BTC) — цены в BTC. Тесты frontend/api/pair_trades_history.test.js, pairChartModel.test.js, PairTradesChart.test.js; карточка docs/04-domain/calculations/CALC-CE-PAIR-TRADES.md, контракт docs/06-api/rest/pair-trades-history.md."
+  - "AC-F18v2-33 (ADR-064, дополнение 2026-10-29, CR-F18-011): глубина кросс-пары (ETH/BTC, SOL/BTC) приводится к номиналу: α_value = α·P0_quote, где P0_quote — опорная цена котируемой валюты в USDT (константа окна). Включается флагом CE_CROSS_DEPTH_NUMERAIRE, по умолчанию 0: при выключенном флаге глубина и поведение клиринга побитно прежние; для пар с котировкой в USDT множитель равен 1. Юнит-тест cross_depth_scale_test: один рынок в USDT и в BTC даёт одну глубину после приведения (до 1e-9) и расходится ровно в P0_quote раз без него."
+  - "AC-F18v2-34 (ADR-088, CR-F18-013): режим CE_HMODEL_MODE=off не меняет поведение (рабочие пороги, эмиссия и ответ GetAgentPositions прежние, поле hedge_model не заполняется; кроме запасной комиссии мейкера ledger 2→10 bps при отсутствии строки конфигурации и переменной, ADR-089); shadow считает модельные пороги и оценки потока по каждому агенту и отдаёт их в hedge_model, но заявки идут по рабочим порогам; порт модели совпадает с ядром страницы incoming-docs/2026-10-29-porogi-hedzha5 на 29 эталонных случаях (tools/hedge-threshold-model/golden.json) с точностью 1e-6."
+  - "AC-F18v2-35 (ADR-088, CR-F18-013): в режиме on пороги переводчика заменяются модельными (ручная ширина ADR-081 главнее): рыночная заявка шлётся на избыток над z_mkt модели (а не над z_lim), лимитная — на избыток над z_lim, лимитные заявки в пути не копятся сверх ширины мейкер-зоны z_mkt − z_lim, пауза между рыночными заявками не растёт от неисполненных лимитных; порог и цель перевода связки берутся из модели. Минутная история порогов (ce_agent_band_history) и выгрузка CSV доступны через /api/vector-clearing/hedge-model-history."
+  - "AC-F18v2-36 (ADR-089, CR-F18-012): стандартная комиссия биржи 0,1 % (10 bps) для мейкера и тейкера — значение по умолчанию в ledger, BFF, экране «Клиринг» и схеме; комиссия учитывается только при хедже (пороги хеджа и расчётная комиссия хеджа) и не входит в клиринг (CE_COMMISSION_IN_POLKA=0): сумма |потоков| клиринга и вход matching до и после неизменны."
+  - "AC-F18v2-37 (ADR-088, CR-F18-013): на экране «Клиринг» под таблицами «Позиции агентов» показан блок «Пороги хеджа: действующие и по модели»: для каждого агента рядом действующие Z̄lim/Z̄mkt (ledger) и пороги модели b_м/b_т (переводчик) или B/b (связка), режим потока, шум потока, число минут оценки и состояние («считается, не применяется» в теневом режиме, причина, если не посчитано). Все числа приходят из ledger через BFF, браузер ничего не считает; ноль показывается нулём, неизвестное — прочерком; без модельных данных (режим off) показана одна строка-пояснение."
+  - "AC-F18v2-38 (ADR-088 п. 9, CR-F18-014): эффективные пороги модели (b_м, b_т; B, b связки) — экспоненциальное среднее сырых расчётов с постоянной времени 15 минут (CE_HMODEL_SMOOTH_TAU_MS), не выше потолка CE_HMODEL_BAND_CAP и не ниже пола q_пол, с сохранением b_м ≤ b_т; сырой расчёт отдаётся отдельно (b_m_raw, b_t_raw, transfer_*_raw) и пишется в историю и CSV; при временном сбое входов (нет свежей волатильности, исчерпан бюджет) прежние пороги удерживаются до 5 минут (reason <причина>_hold), затем откат на правило."
+  - "AC-F18v2-39 (ADR-088 условие 1, CR-F18-014): эффективный режим модели = меньший из потолка окружения CE_HMODEL_MODE и f05a_clearing_config.ce_hmodel_mode (не задан или не прочитан — shadow), а при сработавшем предохранителе — shadow; запись on в PG рабочий режим при потолке ниже не включает; смена режима оператором идёт через POST /api/vector-clearing/config в одной транзакции со строкой operator_audit_log (ce_hmodel_mode_change), прежнее значение читается под блокировкой строки; включение on в течение 30 минут после срабатывания предохранителя требует подтверждения; актор с зарезервированным префиксом помечается unverified:; при эффективном off блок hedge_model не отдаётся."
+  - "AC-F18v2-40 (ADR-088 условие 2, CR-F18-014): автопредохранитель режима on раз за такт обходит всех агентов, которых ведёт модель: нетто-экспозиция |c+in_flight| выше max(CE_HMODEL_FUSE_POS_K, 1,5·(2b_т − b_м)) подряд дольше CE_HMODEL_FUSE_HOLD_MS ⇒ эффективный режим shadow, в PG пишется shadow и строка ce_hmodel_fuse_trip (только при реальном переходе on → shadow); отсчёт сбрасывается ниже 0,9 предела и при разрыве наблюдения, идёт и в shadow; при неудаче записи режим остаётся shadow, повтор не чаще раза в 30 секунд."
+
+# UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
+uxScreens:
+  - id: ce_agents_dashboard
+    title: CE Virtual Counterparties / Agents & Band
+    route: /ce-agents-live
+    purpose: >
+      Панель виртуальных контрагентов: per-agent таблица (agent_id, agent_kind
+      TRANSLATOR/ARBITRAGEUR, c_j signed, q_j, |c_j|/q_j как %-полоса, in_flight qty,
+      статус эмиссии); строка house (house_residual, без якоря/полки/полосы);
+      индикатор Z_a=владение(t)−владение(0) per asset; лог перевозов (ce_transfer)
+      для арбитражёров. Подсветка агента при выходе за полосу (|c_j|>q_j) и
+      in_flight-заявок, ожидающих таймаута; alert-баннер при FAILED-такте.
+      Фронт только рендерит уже посчитанные c_j, q_j, Z_a, house_residual
+      (памятка "Frontend no domain compute") — полосу/клиринг/якорь не пересчитывает.
+    primary_data_source: risk (GetRiskSnapshot — позиции+band+Z_a) + ledger (GetAgentPositions), via frontend-api
+    api_endpoints:
+      - GET /api/v1/ce/agents (frontend-api агрегирует ledger-позиции + risk-band/Z_a)
+    refresh_mode: polling-3s
+
+knownIssues:
+  - id: v1-v2-model-conflict
+    severity: architectural
+    description: >
+      v2 содержательно ПРОТИВОРЕЧИТ v1 (UC-F18-01..03, ADR-054/057): модель
+      «капитал → target → net-хедж» заменяется на «знаковая позиция агента с нуля,
+      без target, house-невязка, полоса ±q». Per .claude/rules/docs-as-code.md (Conflict rule):
+      требуется ADR-061 (supersede ADR-057; ревизии ADR-055/056/058) и Conflict Notes
+      в UC-F18-01..03 ДО кода. UC-F18-01..03 помечены superseded, не удалены.
+    location: docs/03-architecture/adr/ (ADR-061 planned), UC-F18-01..03
+  - id: engine-consolidation-open
+    severity: open-question
+    description: >
+      Пути клиринга не сведены: ce_agent_clearing (наш), vector_qp_solver/OSQP (F-05A),
+      ContinuousClearingSolver (Engine A). Нужен отдельный ADR (кандидат ADR-062).
+  - id: agent-position-persist
+    severity: resolved
+    description: >
+      RESOLVED (Э2-шаг-2, 2026-09-16, T-F18-202/203/204/205). Позиция агента
+      теперь накапливается c←c+f per (agent_id, asset, venue) в write-through
+      кэше LedgerUseCases::agent_positions_ и персистится в PG ce_agent_position
+      (PostgresAgentPositionRepository), переживая рестарт — устраняет разрыв
+      v1, где ce_committed_ терялся при рестарте (проверено интеграционным
+      тестом ledger_ce_agent_position_pg_test: новый pool+repo после
+      "рестарта" читает то же накопленное значение из PG). party_type=AGENT в
+      ReserveFunds — no-op (ADR-063), не резервирует, позиция знаковая без
+      клампа/CHECK>=0 (проверено на отрицательной позиции). ОСТАЁТСЯ
+      открытым для Э3/Э4 (T-F18-301..304, T-F18-401+): декремент c_j по факту
+      исполнения (A8) и рост in_flight при эмиссии сверх полосы (A7) — сама
+      эмиссия ещё не реализована, in_flight persist-колонка всегда 0.
+    location: cpp/ledger/src/app/ledger_uc.{hpp,cpp}, cpp/ledger/src/infra/postgres_repositories.{hpp,cpp}
+
+tests:
+  unit:
+    - cpp/matching/tests/domain/ce_agent_clearing_closed_form_vs_osqp_test.cpp  # AC-F18v2-05
+    - cpp/matching/tests/domain/ce_band_emission_test.cpp                        # AC-F18v2-08/09/10
+    - cpp/ledger/tests/ce_agent_position_test.cpp                                # T-F18-202/203/205 (Э2-шаг-2): AC-F18v2-07 (c<-c+f, знаковая/отрицательная позиция), AC-F18v2-16 (party_type=AGENT — ReserveFunds no-op, нет резерва/неотрицательности)
+    - cpp/risk/tests/app/ownership_invariant_test.cpp                            # AC-F18v2-13/14
+  integration:
+    - Testing/f18v2_ce_tact_e2e.sh                 # A0..A8, без клиентского потока ⇒ Z_a≡0
+    - Testing/f18v2_band_vs_no_band_30_ticks.sh    # AC-F18v2-18, эффект полосы −63%
+    - cpp/ledger/tests/ce_agent_position_pg_repository_test.cpp  # T-F18-204/205: upsert+рестарт против реального PG (TEST_PG_DSN, гейт feature-gap agent-position-persist)
+  contract:
+    - cpp/matching/tests/transport/agent_delta_mapper_test.cpp

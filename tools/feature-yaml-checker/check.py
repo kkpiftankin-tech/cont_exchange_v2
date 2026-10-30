@@ -50,6 +50,72 @@ except ImportError:
     sys.exit(2)
 
 ROOT = Path.cwd()
+SCHEMA_PATH = ROOT / "specs" / "schemas" / "feature.schema.json"
+
+
+def load_schema() -> dict:
+    """Этап 4 п.1 (ADR-086/IN-019 §4.4). Загружает specs/schemas/feature.schema.json."""
+    if not SCHEMA_PATH.exists():
+        return {}
+    import json
+    try:
+        return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def validate_against_schema(value, node: dict, schema_root: dict, path: str, errors: list) -> None:
+    """Минимальный интерпретатор подмножества JSON Schema, которое реально
+    использует specs/schemas/feature.schema.json (type/required/enum/pattern/
+    items/properties/oneOf/$ref в #/definitions) — не general-purpose, не
+    заводим зависимость на пакет jsonschema (не установлен на dev-машине)."""
+    if "$ref" in node:
+        ref = node["$ref"]
+        if ref.startswith("#/definitions/"):
+            target = schema_root.get("definitions", {}).get(ref.split("/")[-1])
+            if target:
+                validate_against_schema(value, target, schema_root, path, errors)
+        return
+    if "oneOf" in node:
+        branch_errors = []
+        for branch in node["oneOf"]:
+            sub_errors: list = []
+            validate_against_schema(value, branch, schema_root, path, sub_errors)
+            if not sub_errors:
+                return
+            branch_errors.append(sub_errors)
+        errors.append(f"{path}: не соответствует ни одному варианту oneOf ({value!r})")
+        return
+
+    t = node.get("type")
+    if t == "object":
+        if not isinstance(value, dict):
+            errors.append(f"{path}: ожидался object, получено {type(value).__name__}")
+            return
+        for req in node.get("required", []):
+            if req not in value:
+                errors.append(f"{path}: отсутствует обязательное поле '{req}'")
+        for key, sub_node in node.get("properties", {}).items():
+            if key in value:
+                validate_against_schema(value[key], sub_node, schema_root, f"{path}.{key}", errors)
+    elif t == "array":
+        if not isinstance(value, list):
+            errors.append(f"{path}: ожидался array, получено {type(value).__name__}")
+            return
+        items_schema = node.get("items")
+        if items_schema:
+            for i, item in enumerate(value):
+                validate_against_schema(item, items_schema, schema_root, f"{path}[{i}]", errors)
+    elif t == "string":
+        if not isinstance(value, str):
+            errors.append(f"{path}: ожидалась string, получено {type(value).__name__}")
+            return
+        if "enum" in node and value not in node["enum"]:
+            errors.append(f"{path}: {value!r} не из перечня {node['enum']}")
+        if "pattern" in node and not re.match(node["pattern"], value):
+            errors.append(f"{path}: {value!r} не соответствует формату {node['pattern']!r}")
+        if "minLength" in node and len(value) < node["minLength"]:
+            errors.append(f"{path}: короче минимальной длины {node['minLength']}")
 
 
 def load_yaml(path: Path) -> dict:
@@ -106,6 +172,7 @@ def check_feature(
     errors: list[str],
     warns: list[str],
     topics_in_script: set[str],
+    schema: dict,
 ) -> None:
     docs_path_str = map_entry.get("docsPath")
     if not docs_path_str:
@@ -123,12 +190,34 @@ def check_feature(
         return
 
     fdata = load_yaml(feature_yaml_path)
+
+    # ----- Check 0: JSON Schema (specs/schemas/feature.schema.json) ---------
+    if schema:
+        schema_errors: list = []
+        validate_against_schema(fdata, schema, schema, fid, schema_errors)
+        for e in schema_errors:
+            errors.append(f"{fid}: schema violation — {e}")
+
     feature_block = fdata.get("feature") or {}
     f_status = feature_block.get("status")
+    f_lifecycle = feature_block.get("lifecycle")
     map_status = map_entry.get("status")
 
     # ----- Check 2: status sync ----------------------------------------------
-    if f_status and map_status and f_status != map_status:
+    if isinstance(f_status, dict):
+        # Этап 1 (ADR-086/IN-019 §4.4): feature.yaml.status перешёл на форму
+        # {docs, code, runtime} + отдельный lifecycle. feature-component-map.yaml
+        # пока хранит старую плоскую строку — прямое сравнение двух разных
+        # схем даёт только ложные ERROR, поэтому здесь WARN, а не ERROR; сама
+        # схемная рассинхронизация — известный разрыв (known-gaps.md).
+        if map_status:
+            warns.append(
+                f"{fid}: feature.yaml использует новую схему lifecycle/status "
+                f"(lifecycle={f_lifecycle!r}, status={f_status!r}); "
+                f"feature-component-map.status={map_status!r} — старая схема, "
+                f"сравнение пропущено (см. docs/00-methodology/known-gaps.md)"
+            )
+    elif f_status and map_status and f_status != map_status:
         errors.append(
             f"{fid}: status mismatch — feature.yaml={f_status!r}, "
             f"feature-component-map={map_status!r}"
@@ -231,6 +320,10 @@ def main() -> int:
     topics_in_script = read_kafka_topics_in_script(
         ROOT / "infra" / "kafka" / "create_topics.sh"
     )
+    schema = load_schema()
+    if not schema:
+        print(f"WARN: {SCHEMA_PATH.relative_to(ROOT)} не найден или не парсится — "
+              f"schema-проверка (Этап 4 п.1) пропущена", file=sys.stderr)
 
     errors: list[str] = []
     warns: list[str] = []
@@ -239,7 +332,7 @@ def main() -> int:
         if not isinstance(entry, dict):
             errors.append(f"{fid}: malformed entry (not a mapping)")
             continue
-        check_feature(fid, entry, errors, warns, topics_in_script)
+        check_feature(fid, entry, errors, warns, topics_in_script, schema)
 
     if warns:
         print("feature-yaml-checker WARNs:")

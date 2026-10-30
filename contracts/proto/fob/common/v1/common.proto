@@ -63,6 +63,24 @@ enum TimeInForce {
   TIF_FOK = 3;  // Fill Or Kill
 }
 
+// ADR-063 (F-18 v2): три несовместимых по инвариантам вида участника ledger.
+// CLIENT — accounts.free_balance >= 0 (CHECK), резерв/освобождение пары.
+// HOUSE — тот же субстрат accounts (user_id == kHouseAccountId), капитал биржи.
+// AGENT — виртуальный контрагент CE (переводчик/арбитражёр): ЗНАКОВАЯ позиция
+// в отдельной таблице ce_agent_position, БЕЗ резерва и БЕЗ неотрицательности —
+// docs/07-data/ce-agent-position.md. Аддитивно; пустое/UNSPECIFIED поле
+// трактуется вызывающей стороной как CLIENT (обратная совместимость —
+// существующие ReserveFundsRequest без party_type ведут себя как раньше).
+// Префикс PARTY_TYPE_ (а не голые CLIENT/HOUSE/AGENT из черновика ADR-063) —
+// по конвенции этого файла (SIDE_*, ORDER_STATUS_*, TIF_*), чтобы не плодить
+// голые идентификаторы в C++ codegen-неймспейсе пакета fob.common.v1.
+enum PartyType {
+  PARTY_TYPE_UNSPECIFIED = 0;  // трактуется как CLIENT
+  PARTY_TYPE_CLIENT = 1;
+  PARTY_TYPE_HOUSE = 2;
+  PARTY_TYPE_AGENT = 3;
+}
+
 message Fee {
   // maker/taker/etc (free-form, but keep stable in your system)
   string fee_type = 1;
@@ -86,4 +104,16 @@ message Error {
   string code = 1;     // e.g. "RISK_LIMIT", "INSUFFICIENT_FUNDS"
   string message = 2;  // human-readable
   string details = 3;  // optional payload
+}
+
+// §6.2 «Кривые котирования внутренних маркет-мейкеров CE»: линейный наклон
+// α_ext снимается из одного стакана четырьмя способами. MINORANT — дефолт и
+// единственный, удовлетворяющий §6.3 (αT≤αext поточечно, «целиком под
+// лестницей»); M1–M3 точнее трекают VWAP, но могут локально переобещать глубину.
+enum SlopeMethodKind {
+  SLOPE_METHOD_UNSPECIFIED = 0;
+  SLOPE_METHOD_TANGENT = 1;      // M1 касательная: D_1/δ_1
+  SLOPE_METHOD_LSQ_BAND = 2;     // M2 МНК на рабочей полосе (OLS со свободным членом)
+  SLOPE_METHOD_PROFIT_AREA = 3;  // M3 подгонка по выгоде (площади под кривыми)
+  SLOPE_METHOD_MINORANT = 4;     // M4 консервативный минорант min_k D_k/δ_k (дефолт)
 }

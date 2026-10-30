@@ -148,7 +148,7 @@ topic is the discriminator, ADR-015). 90-day TTL, monthly partition.
 Pure engine `cpp/venues/src/app/venue_simulator.{hpp,cpp}` —
 `Simulate(SimulateRequest, SimModels) -> SimulateResult`. Verified by
 `cpp/venues/tests/venue_simulator_test.cpp` (12 cases, ALL PASS on
-ubuntu-dev). Math in double (CLAUDE.md §9, sim-book non-authoritative).
+ubuntu-dev). Math in double ([.claude/rules/data.md](../../.claude/rules/data.md), sim-book non-authoritative).
 
 #### T-F20-301. VenueSimulator engine — ✅ DONE (runtime wiring deferred)
 

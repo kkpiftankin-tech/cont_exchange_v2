@@ -17,13 +17,13 @@ related:
 
 ## Финансовая точность
 
-Все суммы денег, объёмов, цен — `fob.common.v1.Decimal` (см. [common.proto](../../contracts/proto/fob/common/v1/common.proto)). `double` допустим только для диагностики (residualNorm, solveTimeMs) и метрик. См. [CLAUDE.md §9](../../CLAUDE.md).
+Все суммы денег, объёмов, цен — `fob.common.v1.Decimal` (см. [common.proto](../../contracts/proto/fob/common/v1/common.proto)). `double` допустим только для диагностики (residualNorm, solveTimeMs) и метрик. См. [.claude/rules/data.md](../../.claude/rules/data.md).
 
 ---
 
 ## F-04 Batch Clearing
 
-См. [features/F-04-batch-clearing/](../02-system/features/F-04-batch-clearing/) и [matching-fob-core/overview.md](../05-components/matching-fob-core/overview.md). Формулы VWAP и инвариант диапазона цен описаны в [CLAUDE.md §8.5 и §8.4](../../CLAUDE.md).
+См. [features/F-04-batch-clearing/](../02-system/features/F-04-batch-clearing/) и [matching-fob-core/overview.md](../05-components/matching-fob-core/overview.md). Формулы VWAP и инвариант диапазона цен описаны в [core-concepts-and-invariants.md](core-concepts-and-invariants.md).
 
 ---
 
@@ -176,6 +176,16 @@ $$
 
 ### HedgePnL
 
+> **Conflict Note (2026-09-28).** Карточка вычисления
+> [`CALC-F12-HEDGE-PNL`](calculations/CALC-F12-HEDGE-PNL.md) сверила эту
+> формулу с реализацией: `calculate_hedge_pnl` в `cpp/ledger/src/app/ledger_uc.cpp`
+> **не вычитает** `feesTotal` (это gross hedge PnL); net-метрика с учётом
+> комиссий существует отдельно как `summary.netAfterFees` на
+> `/hedge-pnl` (SQL-агрегат в `frontend/api/server.js`). Формула ниже и
+> вывод "реализация планируется" были неточны на момент правки — код и тест
+> (`cpp/ledger/tests/ledger_hedge_pnl_test.cpp`) уже существуют. Не менять
+> самостоятельно без `trading-domain-specialist` — см. §7 карточки CALC.
+
 Realized PnL на момент завершения HedgeFlow.
 
 **SELL** (продали на venue, получили quote):
@@ -192,7 +202,10 @@ $$
 
 Интерпретация: положительный hedgePnL значит, что биржа исполнила хедж лучше, чем внутренний clearingPrice (зашли с положительным capture).
 
-Реализация: целевая в [`cpp/ledger/src/app/ledger_uc.cpp`](../../cpp/ledger/src/app/ledger_uc.cpp) `ApplyExecutionReport` (планируется).
+Реализация (фактическая, gross, без вычитания комиссий): [`cpp/ledger/src/app/ledger_uc.cpp`](../../cpp/ledger/src/app/ledger_uc.cpp)
+`calculate_hedge_pnl` + `RecordHedgeExecution` / `apply_execution_report_locked`.
+Подробности, числовой пример и путь числа до экрана — в
+[`CALC-F12-HEDGE-PNL`](calculations/CALC-F12-HEDGE-PNL.md).
 
 ### FillRatio
 
@@ -232,6 +245,150 @@ $$
 - **F-11 → F-12:** Routing plan использует `SideLiquidityCurve` из топика `venue.liquidity.fob`.
 - **F-12 → F-06:** ExecutionReport обновляет `positions` через Settlement Ledger.
 - **F-15:** Backtest должен дать identical HedgePnL при тех же входах через VenueSim.
+
+---
+
+## F-18 — CE band-хедж: трёхзонное правило (Кривые §6.4)
+
+CE-агент (переводчик / арбитражёр) копит знаковую позицию `c_j` (k-USDT) клирингом; наружу
+хеджируется по **трёхзонному правилу** от порога `Γ` ([Кривые §6.4](../../incoming-docs/2026-08-06-Кривые_котирования_внутренних_маркет-мейкеров_CE_биржевое_из-e70752d0.md),
+[ADR-065](../03-architecture/adr/ADR-065-ce-commission-placement-and-arbitrageur-hedge.md),
+[ADR-066](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md)):
+
+$$
+\bar{Z}_{lim} = \frac{c_{lim}}{\Gamma},\qquad \bar{Z}_{mkt} = \frac{c_{mkt}}{\Gamma},\qquad \Gamma = \rho = \gamma\,\sigma^2\,\tau
+$$
+
+- **`|c_j| ≤ Z̄lim`** — no-action: наружу ничего, запас смещает якорь (inventory-skew) и помогает
+  внутренней разгрузке.
+- **`Z̄lim < |c_j| ≤ Z̄mkt`** — **пассивный мейкер-лимит** до цели `Ztarg`: заявка «стоит» несколько
+  тактов, накапливает частичное исполнение по мере пересекающих сделок, платит **мейкер-комиссию
+  `clim`**; исполнение НЕ гарантировано; при устойчивом неисполнении — эскалация в тейкер **по
+  таймауту** (резидентный лимит, [ADR-067](../03-architecture/adr/ADR-067-ce-maker-resting-limit-hedge.md)).
+- **`|c_j| > Z̄mkt`** — **агрессивный тейкер-сброс** до цели немедленно (спред + **тейкер-комиссия
+  `cmkt`**).
+
+где `clim = ce_maker_fee_bps`, `cmkt = ce_taker_fee_bps`, `Γ` — предельная стоимость риска запаса
+(= коэффициент inventory-skew `ρ = γσ²τ`, [ADR-066](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md)),
+`rt` = round-trip (**ADR-069: `rt=1` на ногу** для всех агентов — арбитражёр теперь держит
+ДВЕ ноги, см. ниже). Учёт позиции при эмиссии/исполнении — модель **A7/A8**
+([ADR-061](../03-architecture/adr/ADR-061-ce-v2-agent-position-band-hedge.md)): на эмиссии
+`c -= excess`, `in_flight += excess`; fill двигает только `in_flight`; таймаут/EXPIRED возвращает
+неисполненный residual в `c`.
+
+Числовой пример (§6.4): `Γ = 0.5‰/тыс`, `clim = 0.25‰`, `cmkt = 0.75‰` ⇒ `Z̄lim = 0.5 тыс`,
+`Z̄mkt = 1.5 тыс` USDT. Запас 0.33к после 1 такта — зона ожидания; 0.99к после 3 тактов — лимит
+на 0.49к; при упорном разрыве — рыночный сброс по тайм-ауту.
+
+**Динамический порог (2 оси, ADR-066, обе за флагами, обратимы).** Плоский `Z̄=c/Γ` может
+масштабироваться: (а) **волатильностная ось** D1 (`CE_BAND_GAMMA_MODE`) — выше `σ` ⇒ у́же band
+(`VolScaleFactor`, `σ` из `ce_asset_volatility`); (б) **ликвидностная ось** #7 scoped
+(`CE_BAND_LIQ_MODE`, [ADR-066 §D3](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md))
+— глубже стакан ⇒ ШИРЕ band (`LiqScaleFactor=(depth/depth_ref)^{0.5}`, `depth=α_e` из
+`ce_asset_liquidity`, writer matching). Композиция `BandTotalScale=clamp(Vol·Liq, tr_min, tr_max)`
+(финальный клэмп); обе off ⇒ поведение как до фичи. `Γ=γσ²τ` — калибровка O1 (осознанная MVP,
+не тождество эталону IN-017 `A=σ√(2γ/Λ)`; O2 owner-gate) — см. §«F-18 Теоретическая основа (IN-017)».
+
+Источники: Кривые §6.4, CE_algorithm_v2 §A1/§A7/§A8, ADR-061/065/066/067.
+
+### F-18 — Теоретическая основа (IN-017): дилер между двумя биржами
+
+Эталонная модель для якоря и порога band CE-агента — обобщение
+Barzykin–Bergault–Guéant (2023) на две сегрегированные непрерывные биржи
+([IN-017](../../incoming-docs/2026-09-28-dealer-two-continuous-exchanges-48590e82.md)
+§3, §5, §6, §8). Не заменяет действующую реализацию (ADR-061/065/066) —
+фиксируется как справочный эталон и источник будущей калибровки (см. Conflict
+Note ниже); числовой разбор — карточка
+[`CALC-CE-ANCHOR`](calculations/CALC-CE-ANCHOR.md).
+
+**Наклон = ликвидность (Лемма 1).** При линейном спросе биржи
+$\Phi_i(p) = \lambda_i(S^i - p)$ и каноническом наклоне дилера
+$\kappa_i = \lambda_i$ («зеркало рынка») поток на бирже $i$:
+$$
+v_i = \frac{\lambda_i}{2}(a^* - S^i).
+$$
+Выбор наклона не влияет на цену сделки $p_i = S^i + v_i/\lambda_i$ и издержки
+$v_i^2/\lambda_i$ — задача сводится к выбору скоростей, а не кривых как таковых.
+
+**Общий якорь (Теорема 1).** Обе биржи котируются от ОДНОГО якоря:
+$$
+a^* = P - Aq - BD = (1 - w)P + w P_\lambda - Aq,
+$$
+где $q$ — суммарный запас дилера, $P$ — фундаментальная (мартингальная) цена,
+$D = S^2 - S^1$ — разрыв цен бирж, $P_\lambda = (\lambda_1 S^1 + \lambda_2
+S^2)/\Lambda$ — цена «слияния» (взвешенная по ликвидности), $\Lambda =
+\lambda_1 + \lambda_2$, $r = \sigma\sqrt{\gamma\Lambda/2}$, $A = 2r/\Lambda$,
+$\Delta = \lambda_1\phi_1 - \lambda_2\phi_2$, $B = \tfrac{r}{\Lambda}\cdot
+\tfrac{\Delta}{r+\rho}$, $w = r/(r+\rho)$. Смысл: якорь — смесь фундаментальной
+цены и цены слияния (доля $w$ растёт с риск-неприятием $\gamma$ и падает со
+скоростью возврата разрыва $\rho$), минус сдвиг на собственный запас $Aq$.
+
+**Три сущности (Предложение 1).** Тот же якорь реализуется двумя
+Переводчиками с карманами $q_1+q_2=q$ и бесплатной внутренней биржей:
+$$
+p_{\text{int}} = \omega_1 S^1 + \omega_2 S^2 - Aq = a^*,\qquad
+\omega_1 = \phi_2 + B,\ \omega_2 = \phi_1 - B,\ \omega_1+\omega_2=1.
+$$
+**Локальное правило (Следствие 2).** В глубоком пределе разбиения карманов
+внешний поток каждого Переводчика зависит только от СВОЕГО кармана:
+$$
+v_i = -\frac{\lambda_i A}{2\omega_i}\,q_i.
+$$
+
+**Пороговое хеджирование (Предложение 2).** При комиссии $c_i$ на внешней
+бирже $i$ (внутренняя биржа бесплатна):
+$$
+\text{Переводчик } i \text{ хеджируется} \iff |q_i| > Q_i :=
+\frac{\omega_i c_i}{A},\qquad
+v_i = -\frac{\lambda_i A}{2\omega_i}\,\mathrm{sign}(q_i)\,(|q_i| - Q_i)_+
+$$
+Порог $Q_i$ зависит ТОЛЬКО от собственной позиции кармана — вся кросс-информация
+уже свёрнута во внутреннюю цену $p_{\text{int}}$ и карман $q_i$.
+
+> **Conflict Note (IN-017 ↔ CE, 2026-09-29).** Эталонная модель IN-017 и
+> действующая реализация CE (ADR-061/065/066) структурно совпадают
+> (skew на позицию + пороговое хеджирование), но РАСХОДЯТСЯ в деталях —
+> зафиксировано, не выбрано молча:
+> 1. **Масштаб порога по риск-неприятию.** CE (ADR-066): `Γ = γσ²τ`, порог
+>    `Z̄ = c/Γ` убывает как $1/\gamma$. IN-017 (Предложение 2): `Q_i =
+>    ω_i·c_i/A`, `A = σ√(2γ/Λ)` убывает как $1/\sqrt{\gamma}$ — другая
+>    степень зависимости от $\gamma$, другая модель (нет аналога `τ`,
+>    вместо него — `Λ`, суммарная ликвидность двух бирж).
+> 2. **Вес $\omega_i$.** IN-017 взвешивает порог/скорость долей ликвидности
+>    и разрыва ($\omega_i = \phi_j \pm B$); текущий inventory-skew CE
+>    (`ce_inv_skew_gamma`, `matching_loop.cpp`, ADR-066 §«Соответствие
+>    параметрам конфига») — плоский коэффициент без аналога $\omega_i$.
+> 3. **Арбитражёр — две ноги (ADR-069, 2026-10-05, Accepted).** IN-017
+>    моделирует два Переводчика + внутреннюю бесплатную биржу. CE вводит
+>    единого агента `A_*`, но теперь с ДВУМЯ ногами (`Δ=−f` на src BUY,
+>    `Δ=+f` на dst SELL, по заявке на биржу), `rt=1` на ногу, вес
+>    `ω_i=λ_i/Λ` (флаг `CE_BAND_OMEGA_MODE`, MVP-заглушка истинных
+>    `ω_i=φ_j±B`). Прежнее сворачивание в одну позицию на dst-узле
+>    (`rt=2`) теряло ногу src и не замыкало кросс-маршрут — арбитражёр не
+>    зарабатывал. **НЕ эквивалентно §6:** у CE-арбитражёра нет внутренней
+>    бесплатной биржи с `p_int=a*` (TRANSFER-ребро `anchor=0`), поэтому
+>    `Q_i` локально корректны, но без доказанной оптимальности теоремы.
+>    Полная модель (внутренний обмен + оценщик `φ_i`) — открытый §A8.1
+>    ADR-065.
+> 4. **Смесь $P$/$P_\lambda$ в якоре.** Общий якорь IN-017 явно содержит
+>    $(1-w)P + wP_\lambda$ (смесь фундаментальной цены и цены слияния,
+>    сдвиг $BD$ на разрыв). В текущей CE-реализации anchor_eff строится как
+>    `anchor − clamp(γ·c_j)` (память `ce-inventory-skew`) без явного
+>    вычисления цены слияния/веса `w` — сдвиг на разрыв `B·D` отсутствует
+>    как отдельный термин.
+>
+> Решение зафиксировано: [ADR-066 §Addendum (2026-09-29)](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md)
+> (Accepted) — **владелец выбрал O1**: `Γ=γσ²τ` принят как осознанная MVP-калибровка (не тождество
+> с эталоном IN-017); целевой пересмотр к `A=σ√(2γ/Λ)` — при появлении слоя `Λ`/`φ_i` (F-18 #7).
+> См. также §7 [`CALC-CE-ANCHOR`](calculations/CALC-CE-ANCHOR.md); текущий код —
+> откалиброванная MVP-реализация с явными флагами обратимости
+> (`CE_BAND_GAMMA_MODE`). Решение о перекалибровке под IN-017 — за владельцем
+> + `trading-domain-specialist`, не самостоятельная правка.
+
+Источники: IN-017 §3 (Лемма 1), §5 (Теорема 1), §6 (Предложение 1, Следствие
+2), §8 (Предложение 2). Связанные ADR: [ADR-061](../03-architecture/adr/ADR-061-ce-v2-agent-position-band-hedge.md),
+[ADR-065](../03-architecture/adr/ADR-065-ce-commission-placement-and-arbitrageur-hedge.md),
+[ADR-066](../03-architecture/adr/ADR-066-ce-band-threshold-gamma-definition.md).
 
 ---
 
@@ -669,10 +826,20 @@ R-CLR (ниже). Политики — [ADR-047](../03-architecture/adr/ADR-047-
 
 ### R-F05A-002 No synthetic pair book
 
-Синтетическая книга по парам **не** строится. Каждый внешний level остаётся отдельным
-flow-сегментом и отдельным столбцом `W = [w_1 … w_I]`; `venue_id` / `source_order_id`
-сохранены (provenance / source-trace). Matching multi-asset возникает из `Wx=0`, а не
-из per-pair книг.
+Синтетическая книга по парам **не** строится. Matching multi-asset возникает из `Wx=0`,
+а не из per-pair книг.
+
+**Гранулярность сегмента (модель, [ADR-051](../03-architecture/adr/ADR-051-f05a-linear-venue-segment.md)):**
+
+- **Модель B (per-level, legacy/сравнение):** каждый внешний level — отдельный
+  flow-сегмент и столбец `W`; provenance до `source_order_id`.
+- **Модель A (линейная, по умолчанию при `F05A_LINEAR_SEGMENTS_ENABLED`):** ликвидность
+  стороны венью = ОДНА линейная функция → **один** сегмент на `(venue, pair, side)` с
+  реальным наклоном (`d_hl=|worst−best price|`, `D=|b|`); provenance до
+  `(venue, pair, side)`. Синтетическая пара-книга по-прежнему не создаётся (сегмент
+  привязан к реальной стороне венью).
+
+В обеих моделях `venue_id`/`pair`/`side` сохранены (source-trace).
 
 ### R-F05A-003 Flow segment & demand curve
 
@@ -685,6 +852,46 @@ D_i(w_i^\top\pi) = q_i \cdot \mathrm{trunc}\!\left(\frac{d_i^{HL} - w_i^\top\pi}
 
 квадратичная матрица `D = diag(d^{HL}/q)` (SPD). Согласуется с R-CLR-005 (quadratic
 closed-form) и R-CLR-001 (curve forms equivalence).
+
+### R-F05A-008 Safe-translator наклон (ADR-053)
+
+Наклон двустороннего сегмента венью считается по **VWAP-глубине с safe-haircut**
+(модель «безопасного переводчика на CE»), а не по крайним точкам кривой:
+
+\[
+\alpha_{ext}=\min_k \frac{D_k}{|\delta_k|},\quad
+D_k=\sum_{i\le k}p_i v_i,\quad
+\delta_k=10^4\Bigl|\ln\tfrac{D_k/Q_k}{\text{mid}}\Bigr|,\quad
+\alpha_T=\theta\,\alpha_{ext},\ \theta=0.60,
+\]
+
+наклон (клиринг в log-ценах, ADR-052/053): `m = mid/(10^4·α_T)`, якорь `a=ln(mid)`;
+линейный эквивалент `β_T = mid²/(10^4·α_T) = mid·m` (для отображения). `α_ext` берётся
+по **обеим** сторонам (тончайшая ликвидность связывает наклон). Флаг
+`F05A_TRANSLATOR_MODEL=log_endpoint` возвращает прежнюю формулу `Δlog(p)/Δq`.
+UI показывает `α_ext/α_T/β_T` из сегмента движка (единый источник истины).
+
+**Четыре способа снятия наклона + выбор (ADR-053 §Addendum 2026-09-30, базовый документ
+«Кривые котирования» §6.2).** `α_ext` снимается из одной стороны стакана ЧЕТЫРЬМЯ способами
+(`D_k`, `δ_k` — как выше; `ΔD_k=D_k−D_{k-1}`, `D_{-1}=0`):
+
+- **M1 касательная:** `α=D_1/δ_1` (точна у mid, оптимистична на объёме);
+- **M2 МНК на полосе:** наклон OLS `D=a+α·δ` со свободным членом, `α=[nΣδD−ΣδΣD]/[nΣδ²−(Σδ)²]`
+  (наименьшая ошибка объёма — трекает VWAP);
+- **M3 подгонка по выгоде:** `α=D_n²/(2·Σ_k δ_k·ΔD_k)` (равенство площадей/денег);
+- **M4 минорант (дефолт):** `α=min_k D_k/δ_k` (наибольшая прямая целиком под лестницей).
+
+Проверка на числовом примере §6.2 (mid=60000; `(δ‰,D)=(1,100)(3,250)(6,500)`): M1=100, M2≈80.26,
+M4≈83.33, M3≈60.98 — совпадает с печатными числами дока (grounded, unit-тест). Ограничитель
+§6.2: `α_T=min{θ·α_ext, W_T/(γσ²τ)}`; `β_T=mid²/(10^4·α_T)`. **Инвариант §6.3 `α_T≤α_ext`** держит
+поточечно только M4; M1–M3 могут локально ПЕРЕОБЕЩАТЬ глубину ⇒ безопасны как диагностика/дисплей,
+в клиринг — осознанно. Выбранный для клиринга способ — `f05a_clearing_config.slope_method` (1..4,
+деф 4=MINORANT; `venues` поллит → `SetClearingSlopeMethod`). Дефолт воспроизводит прежний
+`α_ext=min_k D_k/δ_k` байт-в-байт. **Смена способа ≠ MINORANT меняет клиринговые цены** ⇒ owner
+sign-off. Наклон снимается всеми 4 способами и кладётся в контракт (диагностика) для отображения;
+BFF отдаёт 4 кривые из сегмента движка (не пересчитывает — drift устранён). Инвариант CAL-3
+(полка не зависит от наклона) сохранён. Детали и контракт —
+[ADR-053 §Addendum](../03-architecture/adr/ADR-053-f05a-safe-translator-liquidity-model.md).
 
 ### R-F05A-004 Clearing condition (asset balance)
 
@@ -716,6 +923,64 @@ no phantom inventory, §17).
 
 Внешние ноги без native atomic support на venue **не** маркируются `strict_atomic`
 (согласуется с F-09 AC-F09-006 / ADR-031).
+
+## F-18 — CE Capital, Net Position & Position-Based Hedge
+
+Источник: [ADR-054](../03-architecture/adr/ADR-054-ce-capital-net-position-hedging.md).
+
+### R-F18-001 Projection of clearing vector onto assets
+
+После **converged** батча вектор клиринга `x` проецируется на чистую позицию по
+каждому активу. Для двустороннего сегмента `(venue, BASE/QUOTE)` с знаковым потоком
+`x_i` (`x_i>0` — покупка base, `x_i<0` — продажа base) и эффективной ценой
+`P_eff = exp(w[quote] − w[base])` (log-price clearing, ADR-052/053):
+
+$$
+\Delta pos_{\text{BASE}} \mathrel{+}= x_i,\qquad
+\Delta pos_{\text{QUOTE}} \mathrel{-}= x_i\cdot P_{\text{eff}}.
+$$
+
+Δposition агрегируется по всем сегментам батча — встречные ноги неттятся. Для
+**degraded** батча проекция не применяется (клиринг ненадёжен). Применение
+идемпотентно по `batch_id`. Money — только Decimal (§9).
+
+### R-F18-002 Position-based (net) hedge
+
+Хедж эмиттится по **чистой** позиции актива, а не per-segment gross (ADR-049).
+При `|pos_a| > θ_a` формируется один хедж на актив с целью flatten к нулю:
+
+$$
+\text{side} = \begin{cases}\text{SELL}, & pos_a>0\\ \text{BUY}, & pos_a<0\end{cases},\qquad
+\text{qty} = |pos_a|.
+$$
+
+Realized PnL/fees исполненного хеджа возвращаются в капитал `ce_capital`
+(идемпотентно по `report_id`) и уменьшают `pos_a` на `filled_qty`. Realized PnL
+считается против cost-basis по формуле F-12 `calculate_hedge_pnl`
+(`(P_fill − b_a)·q·sgn(pos) − fee`). Активируется `CE_NET_HEDGE_ENABLED`; при
+выключенном флаге — legacy per-segment путь (ADR-049).
+
+### R-F18-003 Mark-to-market, equity и учётное тождество (канон)
+
+Единая книга — вектор остатков `h_a` (`ce_capital.balance`); позиция выводится
+`pos_a = h_a − target_a`. Marks берутся из клиринговых log-цен (ADR-052):
+`mark_a = exp(w[a] − w[N])`, где `N` — numeraire (`CE_NUMERAIRE`, default USDT,
+`mark_N = 1`, `θ_N = ∞`, **не хеджируется**).
+
+$$
+E = \sum_a h_a\cdot mark_a,\qquad uPnL_a = pos_a\cdot(mark_a - b_a).
+$$
+
+Инвариант казначейского учёта (с точностью до marks):
+
+$$
+E \approx E_{\text{seed}} + \sum_a rPnL_a + \sum_a uPnL_a - \sum fee.
+$$
+
+Снапшот `CeTreasurySnapshot.identity_ok` и UI-панель `/ce-capital-live` сверяют
+это тождество. `cost_basis` ведётся по WAC (пересчёт при наборе по клиринговой
+цене; при сокращении — реализация PnL против него). Это устраняет отсутствие MTM
+и неопределённость cost-basis исходной редакции ADR-054.
 
 ## Source Fragments
 

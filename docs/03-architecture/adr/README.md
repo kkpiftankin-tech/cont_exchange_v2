@@ -62,5 +62,30 @@
 | ADR-047 | F-05A Surplus / EXCHANGE_PNL policy для vectorized external clearing | [accepted](ADR-047-surplus-exchange-pnl-policy.md) |
 | ADR-048 | F-05A QP solver backend (OSQP) для vector clearing `Wx=0` | [accepted](ADR-048-qp-solver-backend.md) |
 | ADR-049 | F-05A vector clearing execution → F-12 hedge (converged-only, flag) | [accepted](ADR-049-f05a-vector-clearing-execution-hedge.md) |
+| ADR-054 | F-18 CE капитал, чистая позиция и position-based хедж (net вместо per-segment; ledger владеет книгой, matching эмиттит Δpos) | [accepted](ADR-054-ce-capital-net-position-hedging.md) |
+| ADR-055 | CE виртуальные контрагенты как агенты (переводчик + связка-арбитражёр, единая кривая с мёртвой зоной) | [accepted](ADR-055-ce-virtual-counterparties-agents.md) |
+| ADR-056 | CE граф узлов «валюта@площадка» и снятие Wx=0 (баланс по узлам площадок + свободные узлы книги) | [accepted](ADR-056-ce-node-graph-clearing.md) |
+| ADR-057 | CE трёхуровневая позиция (агент → узел → актив); Z_a ⊇ NOP | [accepted](ADR-057-ce-three-level-position.md) |
+| ADR-058 | CE committed/in-flight состояние агентов вместо cooldown-таймера хеджа | [accepted](ADR-058-ce-committed-inflight-state.md) |
+| ADR-059 | CE clearing_trace — единый аудит-артефакт такта (агенты/узлы/инварианты/PnL/заявки) | [accepted](ADR-059-ce-clearing-trace-audit.md) |
+| ADR-069 | Две ноги позиции/хеджа CE-арбитражёра (по заявке на каждую биржу) | [accepted](ADR-069-ce-arbitrageur-two-leg-position-hedge.md) |
+| ADR-070 | Быстрая полоса стакана venues — свежий сырой стакан для панели «Торговля» | [proposed](ADR-070-venues-fast-depth-lane-for-raw-book-display.md) |
+| ADR-071 | Inventory-skew для ног CE-арбитражёра — самоограничение позиции сдвигом якоря | [accepted](ADR-071-ce-arbitrageur-inventory-skew.md) |
+| ADR-072 | Прибыль переводчика — клэмп сдвига цены границей прибыли, resting-заявки симулятора, realized/unrealized P&L | [proposed](ADR-072-ce-translator-profit-hedge-price-skew-resting.md) |
+| ADR-073 | CE-арбитражёр без рыночного хеджа — позиция как дисбаланс остатков | [accepted (валидация на dev)](ADR-073-ce-arbitrageur-no-market-hedge.md) |
+| ADR-075 | Синхронные рыночные данные — биржевое время снимка и age-aware якорь | [proposed (механизм подключён, k=0 по умолчанию)](ADR-075-synchronous-market-data-anchors.md) |
+| ADR-076 | Топология графа переводов CE — полная сетка бирж против звезды вокруг дома | [proposed](ADR-076-ce-transfer-graph-topology.md) |
+| ADR-077 | Окно глубины стакана для кривой ликвидности — по объёму сделки, а не по числу уровней | [proposed](ADR-077-liquidity-depth-window-by-volume.md) |
+| ADR-078 | Опрос внешних бирж — фиксированный период на пару, лестница действий при сбое, расчёт отвязан от запросов | [accepted](ADR-078-exchange-polling-scheduler.md) |
+| ADR-079 | Диагностика решения CE-клиринга — снимок последнего такта из matching и показ на вкладке «Граф» с объяснением «почему потока нет» | [proposed](ADR-079-ce-clearing-decision-diagnostics.md) |
+| ADR-080 | Внутренний клиринг CE без барьеров — выход на внешнюю биржу у переводчиков и арбитражёров по порогу позиции | [accepted](ADR-080-ce-internal-clearing-without-barriers.md) |
+| ADR-081 | Ширина полосы хеджа CE — ручная установка и автоматический режим по волатильности | [proposed](ADR-081-ce-band-width-manual-and-volatility-modes.md) |
+| ADR-082 | Измерение ликвидности внешних бирж (оборот ленты, коэффициент исполнения) и её обратная связь в глубину агента, размер заявки и порог хеджа CE | [proposed](ADR-082-venue-liquidity-measurement-and-feedback.md) |
+| ADR-083 | Связка-арбитражёр CE — остаток паритета принадлежит связке, рыночный хедж её ног отключён, целевое действие — физический перевод | [accepted](ADR-083-ce-link-parity-residual-and-no-market-hedge.md) |
+| ADR-084 | Физический перевод связки CE между биржами — смоделированный перевод в ledger с порогом по накопленному перекосу, сроком в тактах и учётом остатка паритета | [accepted](ADR-084-ce-link-physical-transfer.md) |
+| ADR-085 | Уценка устаревших котировок и капитальный предел глубины переводчика CE — два механизма базового документа за флагами, по умолчанию выключены | [accepted](ADR-085-ce-translator-depth-trust-and-capital-cap.md) |
+| ADR-087 | Заработок агентов CE по биржам — справедливая цена как опорная (R и U внутренней биржи, внешних бирж и итого), расчёт в ledger | [accepted](ADR-087-ce-agent-pnl-internal-external-total.md) |
+| ADR-088 | Пороги хеджа позиции агентов CE по модели оптимального управления (тейкер, мейкер+тейкер, перевод) — режим «выкл./теневой/рабочий» | [proposed](ADR-088-ce-hedge-threshold-model.md) |
+| ADR-089 | Стандартная комиссия внешних бирж 0,1 % для мейкера и тейкера — только при хедже, не в клиринге | [proposed](ADR-089-ce-standard-external-fee.md) |
 
 Шаблон ADR — в [../../../ЭТАПЫ.md](../../../ЭТАПЫ.md) §7 или [incoming-docs/2026-05-13-Этапы.md](../../../incoming-docs/2026-05-13-Этапы.md).

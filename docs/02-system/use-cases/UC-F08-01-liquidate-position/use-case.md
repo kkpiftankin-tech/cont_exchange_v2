@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F08-01
+title: Принудительная ликвидация позиции
 level: sea
+feature: F-08
+system-sequence: sequences/SEQ-UC-F08-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F08-UC-F08-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F08-01. Принудительная ликвидация позиции
 

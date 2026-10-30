@@ -1,0 +1,124 @@
+# F-18 CE Virtual Counterparties — статус band-хеджа, комиссии и учёта позиции
+
+> Написано для: владельца проекта и команды — сводка сделанного и оставшегося по
+> контуру CE-агентов (переводчики/арбитражёры), band-хеджу и приведению к базовым
+> докам. Дата: 2026-09-24. Ветка: `feat/F-18-ce-treasury-nop`.
+> Источники истины: [CE_algorithm_v2](../../incoming-docs/2026-09-15-CE_algorithm_v2.md) §A1–A8,
+> [Кривые котирования ММ CE](../../incoming-docs/2026-08-06-Кривые_котирования_внутренних_маркет-мейкеров_CE_биржевое_из-e70752d0.md) §6.4.
+
+## 1. Модель (напоминание)
+
+CE — виртуальные контрагенты двух типов: **переводчики** (маркет-мейкер на одной
+площадке, пара base/quote) и **арбитражёры** (перевозят актив между площадками,
+пара asset/USDT). Позиция `c_j` (k-USDT, знаковая) стартует с нуля, копится клирингом
+(`c ← c + f`), и пока `|c_j| ≤ порог` — наружу ничего не идёт. Прибыль — на счёт дома.
+
+## 2. Сделано (реализовано и проверено на dev)
+
+### 2.1 Живость и наблюдаемость цепочки
+- **Оживление зависшей цепочки**: после reboot/suspend venues CPU-spin, ledger отдаёт
+  stale; `up -d --force-recreate` (не plain restart). Память: `ce-pipeline-freeze-force-recreate`.
+- **Liveness вкладки Clearing**: `dataAgeMs` = server clock − newest batch event_time_ms →
+  live/stale-баннер + 5-стадийная полоса (стаканы→кривые→клиринг→позиции→хеджи).
+- **Единообразные пары X/Y** для всех агентов; хедж-заявки в паре валют.
+- **Кнопка «Сбросить позиции»** — реальный сброс c_j/in_flight в ledger (ResetAgentPositions RPC).
+- **Живая панель позиций агентов** + drill-down по агенту (модалка, тёмная палитра).
+
+### 2.2 Кросс-пары и корректность объёмов
+- **Tick-collapse фикс**: грубый venue-wide tick_size=0.01 схлопывал глубину кросс-пар
+  (ETH/BTC, SOL/BTC) в canonicalizer → guard по относительной цене. `AgentPosition.base_price`
+  добавлен для корректных ног в валютах пары. Память: `ce-cross-pair-tick-collapse`.
+- **Дренаж кросс-пар**: band-fill уменьшал c_j ценой ПАРЫ, а не P_base USDT → позиции
+  кросс-пар не сливались; фикс через `st.base_price`. Память: `ledger-band-fill-crosspair-value`.
+
+### 2.3 Скорость торговли и симуляция исполнения
+- **Speed-scale**: CE-путь использовал q_grid (сток), теряя скорость v=q/τ кривой;
+  масштаб α·(dt/τ) в market_data (`CE_SPEED_SCALE`). Память: `ce-speed-scale`.
+- **Staleness-окно ленты**: окно матчинга = N × ИЗМЕРЕННЫЙ период чтения (~40с, rate-limited),
+  не MD-loop 5с. Память: `venues-sim-trade-staleness`.
+- **Price-impact** в симуляторе: `p_exec = S + k·v`, `cost = k·v²·Δt` (temporary impact),
+  `CE_PRICE_IMPACT_K`. Отражается в drill-down.
+- **Лесенка = множество матчинга**: drill-down показывает то же свежее окно recent_trades,
+  что потребляет матчер (не 60-по-счёту); инвариант «пересекающие сделки ⇔ fill ⇔ дренаж».
+  Память: `ce-sim-ladder-equals-matcher`.
+
+### 2.4 Inventory-skew (обратная связь позиция→цена)
+- `anchor_eff = anchor − clamp(γ·c_j, ±clamp)`; γ/clamp live-tunable из `f05a_clearing_config`
+  (`ce_inv_skew_gamma`/`ce_inv_skew_max_pm`). γ=0.005/clamp=8 стабильно. Память: `ce-inventory-skew`.
+
+### 2.5 Арбитражёры хеджируются
+- Убран translator-only gate в ledger; арбитражёры пробивают band и хеджируются в
+  asset/USDT. Память: `ce-arbitrageur-band-hedge`.
+
+### 2.6 Дрейф позиции — три дефекта исполнения хеджа (устранены)
+Память: `ce-band-hedge-throughput-drift`.
+- **A**: хедж не исполнялся (MARKET/IOC заявка выставлялась пассивным лимитом над рынком →
+  none_cross_limit). Фикс: venues honors `EXEC_STRATEGY_MARKET` → кроссит всю свежую ленту.
+- **B**: утечка in_flight (неисполненный IOC репортился NEW, не терминал → резерв не
+  освобождался). Фикс: IOC при неполном исполнении → EXPIRED (терминал) → release.
+- **Throughput**: консьюмер `venues_exec` в бэклоге 8400 из-за ~294 падающих PG-операций/мин
+  (стабильный `hedge_flow_id` ломал `child_orders_idem`/`hedgeflows_filled_le_target`). Фикс:
+  уникальный `client_order_id = intent_id`; hedgeflow `ON CONFLICT` аккумулирует target.
+  Результат: PG-ошибки 294→0, lag 8400→~25, binance-интенты 0→норма.
+
+### 2.7 Порог band привязан к комиссии внешних бирж + трёхзонная модель (Кривые §6.4)
+Память: `ce-band-threshold-from-commission`.
+- Две границы: `Z̄lim = k_band·clim·rt` (no-action → пассив-мейкер), `Z̄mkt = k_band·cmkt·rt`
+  (пассив → агрессив-тейкер). rt=round-trip (арбитражёр ×2 — две биржи). clim=`ce_maker_fee_bps`,
+  cmkt=`ce_taker_fee_bps`, k_band=`ce_band_fee_k` (=1/Γ), floor `CE_AGENT_BAND_Q_MIN`. Live из PG.
+- risk выбирает `EXEC_STRATEGY_MARKET` (taker) vs `EXEC_STRATEGY_LIMIT` (maker) по `AgentBandBreach.aggressive`.
+- Проверено: обе зоны эмитятся, дифференциация FILLED/EXPIRED, live-перенастройка (fee=2→q≈5/7.2, fee=26→46.8/93.6).
+
+### 2.8 Учёт позиции по модели A7 (сходимость к band)
+Память: `ce-band-position-accounting-a7`.
+- Было: c уменьшалась только по исполнению + in_flight-гард → заявка = маржинальный поток →
+  позиция ПАРКОВАЛАСЬ (T_BTC ~314), не сходилась.
+- Стало (док §A7/§A8): на эмиссии `c -= excess` (c→±q), `in_flight += excess`; fill двигает
+  только in_flight; таймаут/EXPIRED возвращает `residual` в c. Заявка = весь избыток → крупная →
+  сходится. Проверено: c+in_flight 314→~5 (у band).
+- Наблюдаемость: фронт показывает **обязательство = c_j + in_flight** (истинная позиция);
+  BFF `c_total`; фильтры по c_total.
+- **A7 double-subtraction fix** (2026-09-27): `excess = |c| − z_lim` (было `− |in_flight|` —
+  остаток от Variant-B, двойное вычитание парковало c ~314). После фикса c пиннится к band.
+
+### 2.9 Throughput консьюмера venues_exec + cooldown эмиссии (2026-09-27, коммит `2e8b84cb`)
+Память: `ce-band-hedge-throughput-drift` (Update 2026-09-27).
+- Под A7 c пиннится к band → поток каждый такт пробивает → эмиссия взлетела до ~6.6/с vs
+  консьюмер ~2.8/с → бэклог `execution.intents` отрос до 37k, `in_flight` «утекал».
+- **Cooldown эмиссии** (паллиатив): per-agent `last_band_emit_ms`, не переэмитим пока прошлый
+  хедж в полёте; `CE_BAND_HEDGE_COOLDOWN_MS=8000` → эмиссия ~1.7/с < консьюмер → lag держится 0.
+- **Дренаж бэклога**: `stop venues` → >45с (группа Empty) → `rpk group seek venues_exec --to end` →
+  `start venues` → **обязательный** `reset-positions` (seek осиротит in_flight). Проверено:
+  37k→0, sum|in_flight| 348→0, |oblig| медиана 0.0/max 2.0, сквозной emit→fill→reconcile.
+
+### 2.10 Price-impact из стакана + живой разбор времён (2026-09-27)
+- **Price-impact `k ~ τ/ρ`**: k выводится из плотности стакана ρ (лоты/цена, top-10 уровней) и
+  времени восстановления τ (`CE_IMPACT_TAU_SEC=5`), `k_eff = CE_PRICE_IMPACT_K·τ/ρ`. Убирает
+  физически неверный плоский k (SOL 240bps→~0.01–0.1bps; BTC глубокий→малый). §3 спеца price-impact.
+- **Возраст ленты от биржевого времени**: `TradePrint.exchange_ms` (Unix ms, парсинг per-venue),
+  возраст = now − exchange_ms; окно матчинга остаётся на read-time.
+- **Живой разбор времён** в drill-down: `read_request_ms`/`read_response_ms` (wall-clock REST
+  запрос/ответ), `exchange_ms` (на сделку), `created_ms` — BFF отдаёт, фронт тикает `nowMs` (1с)
+  и пересчитывает возрасты вживую.
+
+## 3. Надо сделать (follow-ups по сверке с доками)
+
+| # | Задача | Приоритет | Источник |
+|---|---|---|---|
+| 1 | ✅ **СДЕЛАНО (2026-09-25)** inventory-skew на полное обязательство `c + in_flight`: matching `FetchAgentPositionsCached` суммирует position+in_flight; BFF agent-detail skew/band выровнены на c_total + трёхзонные пороги; фронт показывает обязательство и зоны maker/taker | Высокий | §A2 + A7 |
+| 1a | ✅ **СДЕЛАНО (2026-09-25)** Арбитражёры переноса номинала (A_USDT_*, asset==numeraire) больше не паркуются: `detect_and_emit_band_breach_locked` сметает их план-позицию к band в счёт дома (без рыночного хеджа «USDT/USDT», владение не трогаем — §«клиринг/накопление/перевозы владение не меняют»). Порог = z_lim от комиссии (rt=2). Лог «F-18 numeraire swept to house». Проверено: A_USDT держится у band 7.2 при активном потоке (было ~1253). Остаток follow-up: явное кредитование house-баланса нумерарием (сейчас дренаж плана, ownership по доку не меняется) | Высокий | §A3/§«Счёт дома», numeraire freedom |
+| 2 | ✅ **ОПРЕДЕЛЕНО (2026-09-28, ADR-066)**: по базовым докам `Γ = ρ = γσ²τ` (Кривые §6.1 `ρ≈γσ²τ` + §6.4 `Z̄=clim/Γ`) — порог band = ТОТ ЖЕ коэффициент, что skew (`ce_inv_skew_gamma`), а НЕ поле `gamma` (capital-cap `α=W/(γσ²τ)`; премиса задачи «Γ=gamma» отклонена как размерностно неверная). **D2 применён** (init.sql + ledger: `ce_band_fee_k` задокументирован как плоский прокси `1/Γ`). **D1** (унификация per-asset `Γ=γσ²τ`, снятие `ce_band_fee_k`) сведён с #7 под owner-gate (нужен σ-слой + перекалибровка) | Средний | Кривые §6.1/§6.4, ADR-066 |
+| 3 | ✅ **СДЕЛАНО (2026-09-25, ADR-065 Q1 §6.4)**: комиссия убрана из полки кривой (`agent_builder.hpp`: полка = ½спред без комиссии), комиссия только в порогах band. Флаг `CE_COMMISSION_IN_POLKA` (дефолт off) возвращает §A1. market_data пересобран | Средний | ADR-065 Q1, §6.4 |
+| 4 | ✅ **РЕШЕНО (2026-09-28, ADR-065 Q2, domain-review)**: рыночный хедж арбитражёра принят как ОСОЗНАННОЕ MVP-упрощение (Alternative A) с зафиксированным долгом (рыночный риск при m=0; издержки по venue-fee, не тарифу; двойная нагрузка на venue LOB) + условие пересмотра. Полная §A8.1-подсистема перевоза (in_transit/TransferIntent/ETA/тариф) — отдельная фича F-XX (класс L, docs-first), инициируется владельцем. Не расширяет F-18 | Средний | ADR-065 Q2, §A7/§A8.1 |
+| 5 | ✅ **СДЕЛАНО за флагом (2026-09-28, ADR-067, T-F18-801..803/805)**: мейкер-зона = резидентный лимит (TIF_GTC, доматч на тиках RequestSnapshot до цели/дедлайна, мейкер-комиссия — в #6). За флагом `CE_BAND_MAKER_RESERVE_ENABLED` (off). Smoke на dev: GTC→resting follow-up→кумулятивный FILLED, 0 double-fill. Оркестрация: domain+arch+impl+review агенты. Permanent-включение — owner-gate. Багфикс: price-impact только для marketable | Средний | Кривые §6.4, ADR-067 |
+| 6 | ✅ **СДЕЛАНО (2026-09-28, T-F18-804)**: `band_fee_estimated` — расчётная band-комиссия зоны (maker=clim/taker=cmkt, bps-снимок на эмиссии), ОТДЕЛЬНО от `tot_fee` (real venue, taker-only) и gross hedge PnL. Ядро ledger + пропагация PG `hedgeflows.band_fee_estimated` + BFF `bandFeeEstimated`. CALC-F12-HEDGE-PNL §7.1 резолюция (gross + раздельные fee). code-review ×2 APPROVE, e2e на dev. **Frontend-рендер СДЕЛАН** (колонка «Band fee» в HedgeFlowMonitor + строка в drill + BFF detail-endpoint, `3af876d6`). **Unit-тест СДЕЛАН** (`ce_band_fee_estimated_test`: тейкер/аккумуляция/мейкер, зелёный на dev, `95b3515d`). Осознанно отложено: ClickHouse-агрегат hedge_pnl; смежный: реальная maker-fee в venues (сейчас всегда taker) | Низкий | Кривые §6.4, CALC-F12-HEDGE-PNL |
+| 7 | ✅ **ЧАСТИЧНО (2026-09-28, D1+#7, ADR-066)**: волатильностная ось РЕАЛИЗОВАНА и включена на dev — `Γ=γσ²τ` per-asset, `VolScaleFactor(σ,σ_ref,γ)` clamp'ит порог (σ из `ce_asset_volatility`, EWMA-писатель в market_data, T-F18-702; unit-тест `ce_band_vol_scale_test`). Память `ce-dynamic-band-threshold`. **Ликвидностная ось — scoped (2026-09-30, ADR-066 §D3, T-F18-L01..L04):** `LiqScale=clamp((depth/depth_ref)^0.5, lr_min, lr_max)` — глубже стакан ⇒ ШИРЕ band; `total_scale=clamp(VolScaleFactor·LiqScale, tr_min, tr_max)`. Сигнал `depth`=α_e: matching→PG `ce_asset_liquidity`→ledger `LoadAssetDepth`. Флаги `CE_BAND_LIQ_MODE`/`CE_LIQ_SIGNAL_ENABLED` (off). Реализовано+**e2e-подтверждено на dev (2026-09-30)**: PG-схема, ledger reader+`LiqScaleFactor`+`BandTotalScale`, matching writer (`UpsertBatch`), unit-тест `ce_band_liq_scale_test` (18/18), code-review money-path пройден. Верификация: α per-venue (0.64…1140), band точно дифференцирован (SOL/okx→z_mkt 36 ×2, ETH/coinbase→11.497 ×0.639, cross-pair→9 ×0.5, нет данных→×1.0). Флаги ON на dev для проверки; постоянное включение — owner-gate. **Полный O2** (реальная `Λ=λ1+λ2` из книг F-11, вес `ω_i`) — owner-gate, условие пересмотра O1→O2 (ADR-066 §Addendum) | Низкий | ADR-066 §D3/§Addendum, IN-017, `F-18-liquidity-band.tasks.md` |
+| 8 | ✅ **СДЕЛАНО observation-only (2026-09-28, ADR-068)**: признание прибыли по факту §A8.2 `Σ fq·(марка−px_факт)/1000·sgn`, **марка = `st.last_price`** (mid клиринга CE-агента, решение владельца), + разрыв план/факт отдельной величиной. ledger `apply_agent_band_report_locked` (**баланс `__ce_house__` НЕ двигается**), PG `hedgeflows.house_realized_pnl`/`plan_fact_gap`, BFF `houseRealizedPnl`/`planFactGap`, фронт-колонки (bundle `b9290d65`), unit-тест `ce_band_house_realized_test` (4 кейса). code-review APPROVE (1 блокер cross-pair пофикшен: quote!=USDT → skip). **e2e на dev: 16 hedgeflows с ненулевыми house/gap, BFF отдаёт отдельно от tot_fee/band_fee**. Оркестрация: trading-domain-specialist + code-reviewer. **Открыто (owner-gate)**: знак `sgn` (§A8.2 не фиксирует); фактическое кредитование дома; cross-pair конверсия (addendum ADR-068) | Низкий | §A8 #1, ADR-068 |
+| 9 | ✅ **ЧАСТИЧНО (2026-09-25)** unit-тест `cpp/ledger/tests/ce_band_hedge_a7_test.cpp` (+ CTest): A7-эмиссия (c→band, избыток в in_flight), A7-fill (c не трогаем), A7-terminal с ЧАСТИЧНЫМ исполнением (возврат остатка), трёхзонные пороги, numeraire-sweep — зелёные. Остаток: throughput-инвариант (0 падающих PG-операций) — интеграционный (live PG/Kafka), отдельно | Высокий | §20 CLAUDE.md |
+| 10 | **Выбор q при V>2 площадок** (полос столько же, сколько агентов) | Низкий | §A7, «Незакрытое» #3 |
+
+## 4. Инфраструктура / деплой
+- dev `nik@ubuntu-dev`; C++ билды ~20-30 мин (BUILD_JOBS=1); frontend webpack ~3-4 мин;
+  BFF = docker cp server.js + restart. После B→A7 нужен один reset-positions.
+- Конфиг live-настройки в `f05a_clearing_config`: `ce_taker_fee_bps`, `ce_maker_fee_bps`,
+  `ce_band_fee_k`, `ce_inv_skew_gamma`, `ce_inv_skew_max_pm`.

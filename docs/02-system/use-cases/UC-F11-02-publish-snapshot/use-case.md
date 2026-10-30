@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F11-02
+title: Опубликовать VenueSnapshot (raw → normalized)
 level: sea
+feature: F-11
+system-sequence: sequences/SEQ-UC-F11-02-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F11-02-publish-snapshot-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F11-02. Опубликовать VenueSnapshot (raw → normalized)
 

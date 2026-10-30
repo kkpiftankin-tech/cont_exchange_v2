@@ -8,6 +8,7 @@
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/batch_outputs.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // Вариант 2: AgentBandBreach
 #include "fob/venue/v1/venue.pb.h"
 
 namespace cex::risk::infra {
@@ -56,6 +57,12 @@ KafkaConsumer::KafkaConsumer(std::string brokers, app::RiskUseCases& uc)
           .group_id = "risk-batch",
           .client_id = "batch_outputs",
           .enable_auto_commit = false,
+      }),
+      band_breach_consumer_({
+          .brokers = brokers_,
+          .group_id = "risk-band-breach",
+          .client_id = "band_breach",
+          .enable_auto_commit = false,
       }) {}
 
 void KafkaConsumer::start() {
@@ -64,6 +71,7 @@ void KafkaConsumer::start() {
   execution_reports_consumer_.subscribe({"execution.venue", "execution.reports"});
   synthetic_orders_consumer_.subscribe({"venue.synthetic"});
   batch_outputs_consumer_.subscribe({"batch.outputs"});
+  band_breach_consumer_.subscribe({"ce.agent.band.breach"});
 
   running_.store(true);
   venue_liquidity_fob_t_ =
@@ -72,6 +80,7 @@ void KafkaConsumer::start() {
   execution_reports_t_ = std::thread([this]() { execution_reports_loop(); });
   synthetic_orders_t_ = std::thread([this]() { synthetic_orders_loop(); });
   batch_outputs_t_ = std::thread([this]() { batch_outputs_loop(); });
+  band_breach_t_ = std::thread([this]() { band_breach_loop(); });
 }
 
 void KafkaConsumer::stop() {
@@ -82,6 +91,7 @@ void KafkaConsumer::stop() {
   execution_reports_t_.join();
   synthetic_orders_t_.join();
   if (batch_outputs_t_.joinable()) batch_outputs_t_.join();
+  if (band_breach_t_.joinable()) band_breach_t_.join();
 }
 
 void KafkaConsumer::venue_liquidity_fob_loop() {
@@ -275,6 +285,24 @@ void KafkaConsumer::batch_outputs_loop() {
     if (bool ok = batch_outputs_consumer_.poll_once(timeout_ms, handler); !ok) {
       break;
     }
+  }
+}
+
+// Вариант 2: ledger детектит пробой полосы → ce.agent.band.breach → risk строит
+// хедж-заявку в паре base/quote и эмитит в execution.intents.
+void KafkaConsumer::band_breach_loop() {
+  const int timeout_ms = 500;
+  auto handler = [this](const std::string&, const std::string&,
+                        const std::string& payload) {
+    fob::treasury::v1::AgentBandBreach breach;
+    if (!common::from_bytes(payload, breach)) {
+      common::log_json("ERROR", "Failed to parse ce.agent.band.breach payload");
+      return;
+    }
+    uc_.EmitBandHedgeFromBreach(breach);
+  };
+  while (running_.load()) {
+    if (bool ok = band_breach_consumer_.poll_once(timeout_ms, handler); !ok) break;
   }
 }
 

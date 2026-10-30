@@ -1,8 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "app/persistence_ports.hpp"
 
@@ -78,6 +81,11 @@ class PostgresHedgeflowPnlSink final : public app::HedgeflowPnlSinkPort {
   void UpdateHedgePnlDelta(const std::string& hedge_flow_id,
                            const std::string& pnl_delta,
                            const std::string& fee_delta) override;
+  void UpdateBandFeeDelta(const std::string& hedge_flow_id,
+                          const std::string& band_fee_delta) override;
+  void UpdateHouseRealizedDelta(const std::string& hedge_flow_id,
+                                const std::string& house_realized_delta,
+                                const std::string& plan_fact_gap_delta) override;
 
  private:
   std::shared_ptr<LedgerPgPool> pool_;
@@ -138,6 +146,54 @@ class PostgresPositionAccountTx final : public app::PositionAccountTxPort {
 
  private:
   std::shared_ptr<LedgerPgPool> pool_;
+};
+
+// ---------------------------------------------------------------------------
+// F-18 v2 (T-F18-204, ADR-061 §7) — repository for the `ce_agent_position`
+// table (signed per-agent CE position, party_type=AGENT — ADR-063). ApplyDelta
+// UPSERTs `position += delta` guarded by `last_batch_id` (idempotent on
+// at-least-once Kafka redelivery); GetPositions reads the whole table and
+// lets the caller filter (dataset is small — tens of agent/asset/venue rows).
+// No-op / empty without libpqxx, matching the rest of this file.
+// ---------------------------------------------------------------------------
+class PostgresAgentPositionRepository final : public app::AgentPositionRepositoryPort {
+ public:
+  explicit PostgresAgentPositionRepository(
+      std::shared_ptr<LedgerPgPool> pool);
+
+  app::AgentPositionRow ApplyDelta(const std::string& agent_id,
+                                   const std::string& agent_kind,
+                                   const std::string& asset,
+                                   const std::string& venue,
+                                   const cex::common::Decimal& delta,
+                                   const std::string& batch_id,
+                                   int64_t updated_at_ms) override;
+  std::vector<app::AgentPositionRow> GetPositions(
+      const std::vector<std::string>& agent_ids,
+      const std::vector<std::string>& assets,
+      const std::vector<std::string>& venues) override;
+  void ApplyHedge(const std::string& agent_id,
+                  const std::string& asset,
+                  const std::string& venue,
+                  const cex::common::Decimal& position_delta,
+                  const cex::common::Decimal& in_flight_delta,
+                  int64_t updated_at_ms,
+                  const cex::common::Decimal& realized_delta =
+                      cex::common::Decimal{0, 0}) override;
+  // ADR-087 (CALC-CE-AGENT-PNL): книга агента по справедливой цене.
+  void SaveBooks(const std::vector<app::AgentPnlBookRow>& books) override;
+  bool LoadBooks(std::vector<app::AgentPnlBookRow>& out) override;
+  void ResetPnl(const std::vector<std::string>& agent_ids) override;
+
+ private:
+  // Один раз на процесс: таблица ce_agent_pnl_book (защитный блок миграции модели A → C′ — см.
+  // docs/07-data/ce-agent-pnl-book.md). Ложь ⇒ книги недоступны, учёт заработка приостановлен.
+  bool EnsurePnlSchema();
+
+  std::shared_ptr<LedgerPgPool> pool_;
+  std::mutex schema_mu_;
+  std::atomic<bool> schema_ready_{false};
+  std::atomic<long long> schema_fail_ms_{0};  // время последнего неуспеха EnsurePnlSchema: повтор не чаще раза в 30 с
 };
 
 }  // namespace cex::ledger::infra

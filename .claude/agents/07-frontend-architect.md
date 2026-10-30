@@ -1,9 +1,10 @@
 ---
 name: frontend-architect
-description: Use this agent to design frontend pages, components, customer vs ops chrome, API usage, loading/error/empty states, and UI acceptance criteria for cont_exchange_v2.0. Covers customer-facing screens (`/main`, `/profile`, `/venues`) and ops/admin pages (`/hedge-flows-live`, `/execution-live-feed-live`, etc). Do not write JS/JSX/CSS code — produce specs.
+description: Specifies UI pages, components, displayed data and loading/empty/error states with UI acceptance criteria (customer chrome vs ops chrome). Use for a NEW page or a change of page structure/displayed data (class M/L). Not for small visual fixes (main session edits directly) or backend logic. Returns a screen spec and the API fields it uses.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: pink
 ---
 

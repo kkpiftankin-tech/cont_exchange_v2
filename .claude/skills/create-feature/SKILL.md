@@ -6,7 +6,7 @@ description: Bootstrap a new F-XX feature in cont_exchange_v2.0 with the canonic
 
 ## Purpose
 
-Bootstrap a new feature F-XX with the canonical 6-file structure that the project enforces (see [CLAUDE.md §26a](../../../CLAUDE.md) — Sequence diagram placement rules).
+Bootstrap a new feature F-XX with the canonical 6-file structure that the project enforces (see [.claude/rules/sequences.md](../../rules/sequences.md) — Sequence diagram placement rules).
 
 After this skill runs, all artifacts needed by the **docs-first / no-code-before-docs** rule are in place, so the next step can be either `proto-contract-designer`, `data-schema-designer`, or `implementation-planner`.
 

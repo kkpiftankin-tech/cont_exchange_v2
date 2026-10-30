@@ -1,3 +1,13 @@
+---
+id: UC-F20-01
+title: "SIM_ONLY execution (симулированное исполнение child-ордера)"
+level: sea
+feature: F-20
+system-sequence: sequences/SEQ-UC-F20-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F20-UC-F20-01-services.md
+status: active  # draft | active | superseded | deprecated
+---
+
 # UC-F20-01 — SIM_ONLY execution (симулированное исполнение child-ордера)
 
 - **Feature:** [F-20 Live Venue Simulator](../../features/F-20-live-venue-simulator/README.md)

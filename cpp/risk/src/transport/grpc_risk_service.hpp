@@ -35,6 +35,11 @@ class GrpcRiskService final : public fob::risk::v1::RiskService::Service {
                                const fob::risk::v1::GetRiskSnapshotRequest* request,
                                fob::risk::v1::GetRiskSnapshotResponse* response) override;
 
+  // F-18 (ADR-054 §10): NOP биржи по валюте + размер хеджа.
+  grpc::Status GetExchangeNOP(grpc::ServerContext* context,
+                              const fob::risk::v1::GetExchangeNOPRequest* request,
+                              fob::risk::v1::GetExchangeNOPResponse* response) override;
+
  private:
   app::RiskUseCases* uc_;
 };

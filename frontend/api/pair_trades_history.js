@@ -1,0 +1,156 @@
+'use strict';
+// Сделки на внешних биржах по паре валют во времени (график на вкладке «PnL», CR-F18-006, CALC-CE-PAIR-TRADES).
+// Источник — состоявшиеся хедж-заявки агентов CE (child_orders). SQL в server.js отдаёт БЕЗЗНАКОВЫЕ суммы по (пара, интервал); здесь —
+// чистые функции без ввода-вывода: размер интервала по окну, средневзвешенные цены покупки и продажи, накопленные объёмы базовой валюты
+// (общий, нетто, покупки, продажи). Браузер только рисует готовые значения: никаких вычислений на фронте.
+
+const finite = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
+const num = (v) => (finite(v) ? Number(v) : 0);
+
+// Размер интервала по длине окна: 1 ч — 1 мин; 6 ч — 5 мин; 24 ч — 15 мин; больше суток — 1 ч.
+function bucketMsForHours(hours) {
+  const h = Number(hours);
+  if (!(h > 0)) return 900000;
+  if (h <= 1) return 60000;
+  if (h <= 6) return 300000;
+  if (h <= 24) return 900000;
+  return 3600000;
+}
+
+// 'BTC/USDT' → { base: 'BTC', quote: 'USDT' }; символ без косой черты — база весь символ, вторая валюта неизвестна.
+function splitPair(symbol) {
+  const s = String(symbol || '');
+  const i = s.indexOf('/');
+  return i > 0 ? { base: s.slice(0, i), quote: s.slice(i + 1) } : { base: s, quote: '' };
+}
+
+// Средневзвешенная цена: сумма (количество × цена) / сумма количества; нет количества — null (не ноль).
+const vwap = (notional, qty) => (num(qty) > 0 ? num(notional) / num(qty) : null);
+
+// Ставки расчётной комиссии хеджа, б.п., по умолчанию — те же, что у ledger (CE_BAND_MAKER_FEE_BPS = 2, CE_BAND_REF_FEE_BPS = 10).
+const DEFAULT_MAKER_BPS = 10;   // ADR-089: стандартная комиссия 0,1 % для мейкера и тейкера
+const DEFAULT_TAKER_BPS = 10;
+
+// Разбор ставок: row — строка f05a_clearing_config { ce_maker_fee_bps, ce_taker_fee_bps } или null; env — { CE_BAND_MAKER_FEE_BPS, CE_BAND_REF_FEE_BPS }.
+// Ставка из конфигурации действует, только если больше нуля («не больше нуля» — не задана, как в ledger); иначе env (если больше нуля), иначе значение по
+// умолчанию. source: 'config' — обе ставки из конфигурации; 'default' — ни одной; 'mixed' — одна из конфигурации, другая по умолчанию или из env.
+function resolveFeeBps(row, env) {
+  const e = env || {};
+  const pick = (cfg, envVal, def) => (Number(cfg) > 0 ? { v: Number(cfg), cfg: true } : { v: Number(envVal) > 0 ? Number(envVal) : def, cfg: false });
+  const maker = pick(row && row.ce_maker_fee_bps, e.CE_BAND_MAKER_FEE_BPS, DEFAULT_MAKER_BPS);
+  const taker = pick(row && row.ce_taker_fee_bps, e.CE_BAND_REF_FEE_BPS, DEFAULT_TAKER_BPS);
+  const source = maker.cfg && taker.cfg ? 'config' : (!maker.cfg && !taker.cfg ? 'default' : 'mixed');
+  return { maker_bps: maker.v, taker_bps: taker.v, source };
+}
+
+// Ставки расчётной комиссии, б.п.: maker — лимитные заявки (пассивные), taker — рыночные; источник: 'config', 'mixed' или 'default' (resolveFeeBps).
+const normFee = (fee) => ({
+  maker_bps: finite(fee && fee.maker_bps) ? Number(fee.maker_bps) : null,
+  taker_bps: finite(fee && fee.taker_bps) ? Number(fee.taker_bps) : null,
+  source: fee && fee.source ? String(fee.source) : 'default',
+});
+
+// rows — строки SQL по (symbol, t): { symbol, t, buy_qty, sell_qty, buy_notional, sell_notional, buy_fee, sell_fee, fills }; t — начало интервала, мс;
+// buy_fee и sell_fee — расчётная комиссия покупок и продаж интервала во второй валюте пары (SQL: стоимость × ставка по типу заявки, CALC-CE-PAIR-TRADES §2.1).
+// fee — ставки, по которым она посчитана (попадают в ответ). Возвращает DTO графика: пары (по убыванию числа исполнений, затем по имени), у пары
+// точки по возрастанию t с ценами интервала (в том числе покупки с комиссией) и накопленными от начала окна объёмами, плюс итоги пары за окно.
+function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
+  const feeInfo = normFee(fee);
+  const feeKnown = feeInfo.maker_bps !== null && feeInfo.taker_bps !== null;   // ставок нет — комиссия неизвестна (null), а не нулевая
+  const bucket = Number(bucketMs) > 0 ? Number(bucketMs) : bucketMsForHours(hours);
+  const by = new Map();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || !r.symbol || !finite(r.t)) continue;
+    if (!by.has(r.symbol)) by.set(r.symbol, []);
+    by.get(r.symbol).push(r);
+  }
+  const pairs = [];
+  let firstMs = null;
+  for (const [symbol, list] of by) {
+    list.sort((x, y) => Number(x.t) - Number(y.t));
+    let cb = 0, cs = 0, fills = 0, nb = 0, ns = 0, fb = 0, fs = 0, buyFeeGap = false, sellFeeGap = false;
+    const points = [];
+    for (const r of list) {
+      const bq = num(r.buy_qty), sq = num(r.sell_qty);
+      if (!(bq > 0) && !(sq > 0)) continue;   // интервал без исполнений в ответ не идёт
+      // У стороны с объёмом нет комиссии (устаревший запрос или фикстура) — комиссия неизвестна, а не нулевая: цена с комиссией null, а не равна цене без неё
+      const buyFeeOk = !(bq > 0) || finite(r.buy_fee), sellFeeOk = !(sq > 0) || finite(r.sell_fee);
+      if (!buyFeeOk) buyFeeGap = true;
+      if (!sellFeeOk) sellFeeGap = true;
+      cb += bq; cs += sq; nb += num(r.buy_notional); ns += num(r.sell_notional); fb += num(r.buy_fee); fs += num(r.sell_fee); fills += Math.trunc(num(r.fills));
+      points.push({
+        t: Number(r.t),
+        buy_qty: bq, sell_qty: sq,
+        buy_price: vwap(r.buy_notional, bq), sell_price: vwap(r.sell_notional, sq),
+        buy_price_fee: feeKnown && buyFeeOk ? vwap(num(r.buy_notional) + num(r.buy_fee), bq) : null,   // цена покупки с комиссией: цена + комиссия на единицу базовой валюты
+        sell_price_fee: feeKnown && sellFeeOk ? vwap(num(r.sell_notional) - num(r.sell_fee), sq) : null,  // цена продажи за вычетом комиссии: цена − комиссия на единицу базовой валюты
+        cum_buy_qty: cb, cum_sell_qty: cs, cum_total_qty: cb + cs, cum_net_qty: cb - cs,
+      });
+    }
+    if (!points.length) continue;
+    if (firstMs === null || points[0].t < firstMs) firstMs = points[0].t;
+    const { base, quote } = splitPair(symbol);
+    pairs.push({
+      pair: symbol, base, quote, fills,
+      totals: { buy_qty: cb, sell_qty: cs, total_qty: cb + cs, net_qty: cb - cs, buy_price: vwap(nb, cb), sell_price: vwap(ns, cs), buy_price_fee: feeKnown && !buyFeeGap ? vwap(nb + fb, cb) : null, buy_fee: feeKnown && !buyFeeGap ? fb : null,
+        sell_price_fee: feeKnown && !sellFeeGap ? vwap(ns - fs, cs) : null, sell_fee: feeKnown && !sellFeeGap ? fs : null },
+      points,
+    });
+  }
+  pairs.sort((a, b) => (b.fills - a.fills) || a.pair.localeCompare(b.pair));
+  return {
+    window_hours: hours,
+    bucket_ms: bucket,
+    since_ms: Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null,
+    first_ms: firstMs,
+    fee: feeInfo,
+    pairs,
+    has_data: pairs.length > 0,
+  };
+}
+
+// Все известные пары для чекбоксов экрана: пары с исполнениями в окне плюс пары, торговавшиеся раньше (knownRows — строки SQL за 7 суток
+// { symbol, last_trade_ms }). Пара без исполнений в окне остаётся в списке (in_window = false) — экран показывает её неактивной с датой последней
+// сделки, а не прячет. Порядок: сначала пары окна по числу исполнений, затем остальные по давности последней сделки (свежие выше).
+function buildKnownPairs(windowPairs, knownRows) {
+  const byName = new Map();
+  for (const r of Array.isArray(knownRows) ? knownRows : []) {
+    if (!r || !r.symbol) continue;
+    byName.set(r.symbol, { last_trade_ms: finite(r.last_trade_ms) ? Number(r.last_trade_ms) : null });
+  }
+  const out = [];
+  const inWindow = new Set();
+  for (const p of Array.isArray(windowPairs) ? windowPairs : []) {
+    inWindow.add(p.pair);
+    const last = p.points && p.points.length ? p.points[p.points.length - 1].t : null;
+    const known = byName.get(p.pair);
+    out.push({ pair: p.pair, base: p.base, quote: p.quote, in_window: true, fills: p.fills, last_trade_ms: Math.max(known && known.last_trade_ms !== null ? known.last_trade_ms : 0, finite(last) ? Number(last) : 0) || null });
+  }
+  const rest = [];
+  for (const [symbol, v] of byName) {
+    if (inWindow.has(symbol)) continue;
+    const { base, quote } = splitPair(symbol);
+    rest.push({ pair: symbol, base, quote, in_window: false, fills: 0, last_trade_ms: v.last_trade_ms });
+  }
+  rest.sort((a, b) => (Number(b.last_trade_ms) || 0) - (Number(a.last_trade_ms) || 0) || a.pair.localeCompare(b.pair));
+  return out.concat(rest);
+}
+
+// Параметр agent маршрута: идентификатор агента CE (T_BTC_binance, A_BTC_binanceokx, T_ETH_BTC_okx) — латиница, цифры, «_», «.», «-», до 64 знаков.
+// Пусто — все агенты (agent: null); иной формат — ok: false (маршрут отвечает 400). Значение уходит в SQL только параметром, формат проверяется для кэша.
+const AGENT_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+function parseAgent(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, agent: null };
+  const s = String(raw);
+  return AGENT_RE.test(s) ? { ok: true, agent: s } : { ok: false, agent: null };
+}
+
+// Запись в кэш на Map с вытеснением давно не обновлявшихся: удаление перед записью переносит ключ в конец порядка вставки (Map.set по существующему
+// ключу порядок не меняет, и самый горячий ключ вытеснялся бы первым); сверх max удаляются самые старые.
+function lruSet(map, key, value, max) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value);
+}
+
+module.exports = { bucketMsForHours, splitPair, buildPairTradesDto, buildKnownPairs, parseAgent, lruSet, resolveFeeBps, DEFAULT_MAKER_BPS, DEFAULT_TAKER_BPS };

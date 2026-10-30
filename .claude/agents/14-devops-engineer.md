@@ -1,9 +1,10 @@
 ---
 name: devops-engineer
-description: Use this agent to design and update Docker Compose stacks (`infra/docker-compose.dev.yml`, `Testing/*-override.yml`), Dockerfiles, env variables (`infra/env/.env-example`), Kafka topic init scripts, health checks, build commands, CI jobs, and deployment docs for cont_exchange_v2.0. Can edit infra files but stays away from application logic.
+description: Changes Docker Compose stacks, Dockerfiles, env vars, Kafka init scripts, health checks, CI. Use when infra files must change, or a build/deploy fails for infrastructure reasons (class L trigger in .claude/rules/agent-routing.md). Not for application code. Returns changed files and how to apply them on the dev host.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: sonnet
 permissionMode: acceptEdits
+maxTurns: 40
 color: orange
 ---
 

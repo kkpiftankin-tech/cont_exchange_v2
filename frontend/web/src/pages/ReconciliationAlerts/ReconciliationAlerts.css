@@ -1,6 +1,6 @@
 .alerts-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   --alerts-panel: rgba(20, 10, 40, 0.86);
   --alerts-panel-strong: rgba(27, 14, 50, 0.94);
   --alerts-border: rgba(255, 179, 107, 0.28);

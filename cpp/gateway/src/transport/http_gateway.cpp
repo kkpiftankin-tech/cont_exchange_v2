@@ -26,10 +26,10 @@
 //     GET /healthz                            — liveness probe.
 //
 // Auth middleware:
-//   transport/auth_middleware.hpp — JWT / header-based. CLAUDE.md §22:
+//   transport/auth_middleware.hpp — JWT / header-based. CLAUDE.md §1:
 //   production требует mTLS termination перед gateway.
 //
-// CLAUDE.md §10 layering: gateway не имеет бизнес-логики — только marshalling
+// .claude/rules/cpp.md layering: gateway не имеет бизнес-логики — только marshalling
 // HTTP/JSON ↔ gRPC. Все use cases живут в order_flow/backtest/etc.
 // ============================================================================
 

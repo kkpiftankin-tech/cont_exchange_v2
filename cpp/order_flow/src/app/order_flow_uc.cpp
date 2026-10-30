@@ -18,7 +18,7 @@
 //                          из batch.outputs (вызывается consumer'ом).
 //
 // Контракт и инварианты:
-//   * Все money через cex::common::Decimal (CLAUDE.md §9).
+//   * Все money через cex::common::Decimal (.claude/rules/data.md).
 //   * Идempotency по order_id: повторный CreateFlowOrder ON CONFLICT DO NOTHING.
 //   * BUY резервирует quote = total_qty * price_high (worst-case).
 //   * SELL резервирует base = total_qty.
@@ -48,7 +48,7 @@ using cex::common::Decimal;
 
 // ----------------------------------------------------------------------------
 // validate_order — базовые sanity-чеки FlowOrder (MVP-уровень).
-// Полные инварианты (CLAUDE.md §8.2) проверяются в domain слое; здесь —
+// Полные инварианты (docs/04-domain/core-concepts-and-invariants.md) проверяются в domain слое; здесь —
 // быстрый gate перед дорогими операциями (Risk RPC + Ledger reserve).
 //
 // Возвращает true/false и заполняет err сообщением при false.
@@ -64,7 +64,7 @@ static bool validate_order(const fob::orders::v1::FlowOrder& o, std::string& err
   // и знак определяется только знаком units.
   if (o.total_qty().units() <= 0) { err = "total_qty must be > 0"; return false; }
   // Сравнение Decimal через cmp учитывает разные scale полей price_low/high.
-  // > 0 = price_low > price_high → нарушение инварианта (CLAUDE.md §8.2 (6)).
+  // > 0 = price_low > price_high → нарушение инварианта (docs/04-domain/core-concepts-and-invariants.md (6)).
   if (Decimal::cmp(Decimal::from_proto(o.price_low()), Decimal::from_proto(o.price_high())) > 0) {
     err = "price_low must be <= price_high"; return false;
   }
@@ -140,7 +140,7 @@ fob::orders::v1::CreateFlowOrderResponse OrderFlowUseCases::CreateFlowOrder(
   }
 
   // 2) Call Risk (pre-trade)
-  // Conformance с CLAUDE.md §16: pre-trade checks ДО активации заявки.
+  // Conformance с cpp/risk/CLAUDE.md: pre-trade checks ДО активации заявки.
   fob::risk::v1::PreTradeCheckRequest risk_req;
   *risk_req.mutable_meta() = req.meta();
   risk_req.set_user_id(req.order().user_id());

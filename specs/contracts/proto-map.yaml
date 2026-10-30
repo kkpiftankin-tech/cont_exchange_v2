@@ -226,6 +226,7 @@ protoContracts:
       - F-04
       - F-06
       - F-12
+      - F-18
     components:
       - ledger
       - order-flow
@@ -239,6 +240,17 @@ protoContracts:
       - ApplyBatchResultRequest
       - ApplyBatchResultResponse
       - ApplyExecutionReportRequest
+      - GetAgentPnlRequest
+      - GetAgentPnlResponse
+      - AgentPnl
+      - PnlGroup
+      - AgentPnlTotals
+      - KindPnlTotals
+      - AgentPosition
+      - GetAgentPositionsRequest
+      - GetAgentPositionsResponse
+      - AgentHedgeModel
+      - HedgeModelRegime
 
   execution:
     files:
@@ -381,3 +393,25 @@ protoContracts:
       - SimConfigEvent
       - SimAlert
       - SimExecutionAnnotation
+
+  treasury:
+    files:
+      - contracts/proto/fob/treasury/v1/treasury.proto
+    features:
+      - F-18
+    components:
+      - matching
+      - ledger
+      - risk
+    entities:
+      - CeCapital
+      - CePosition
+      - CePositionDelta
+      - AgentKind
+      - AssetDelta
+      - CePositionDeltaBatch
+      - AgentBandBreach
+      - CePositionStep
+      - CeClearingPosition
+      - CeNetHedgeIntent
+      - CeTreasurySnapshot

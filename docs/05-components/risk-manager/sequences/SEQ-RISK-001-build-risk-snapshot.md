@@ -108,11 +108,11 @@ sequenceDiagram
 - Mark price stale → используется последний сохранённый, snapshot помечается
   флагом, alert не подавляется.
 - Ошибка `INSERT risk_snapshots` → hard failure для этого user, offset не
-  коммитится до успешной записи (audit-критично, CLAUDE.md §16).
+  коммитится до успешной записи (audit-критично, [cpp/risk/CLAUDE.md](../../../../cpp/risk/CLAUDE.md)).
 - `RiskAlert` публикуется **после** успешного `INSERT` снапшота (нет alert без
   персистентного снапшота).
 
-## Decimal / precision notes (CLAUDE.md §9)
+## Decimal / precision notes ([.claude/rules/data.md](../../../../.claude/rules/data.md))
 
 - Все margin/collateral величины — `Decimal`; `double` допустим только для
   diagnostics (`leverage` для дашборда), не для записей в `risk_snapshots`.

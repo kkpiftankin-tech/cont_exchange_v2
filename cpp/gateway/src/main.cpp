@@ -16,7 +16,7 @@
 //   - Auth middleware (см. transport/auth_middleware.hpp) — JWT/header-based.
 //
 // Это edge service — единственный публичный entrypoint снаружи.
-// CLAUDE.md §22: prod требует mTLS/TLS termination перед gateway.
+// CLAUDE.md §1: prod требует mTLS/TLS termination перед gateway.
 // ============================================================================
 #include <algorithm>
 #include <chrono>

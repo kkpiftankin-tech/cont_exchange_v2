@@ -120,6 +120,21 @@ int main() {
     return response;
   });
 
+  // ADR-079: снимок последнего решения CE-клиринга (диагностика «почему нет потока»). Читает BFF.
+  CROW_ROUTE(metrics_app, "/ce/clearing/last")([&loop] {
+    crow::response response;
+    response.set_header("Content-Type", "application/json");
+    const std::string body = loop.last_ce_clearing_snapshot_json();
+    if (body.empty()) {
+      response.code = 404;
+      response.write("{\"error\":\"no_snapshot\"}");
+      return response;
+    }
+    response.code = 200;
+    response.write(body);
+    return response;
+  });
+
   CROW_ROUTE(metrics_app, "/orders/<string>")(
       [&loop](const std::string& order_id) {
         const auto snap = loop.snapshot_order(order_id);

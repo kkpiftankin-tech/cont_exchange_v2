@@ -15,13 +15,28 @@
     "    of chat attachments'. Registered here (not in settings.local.json)",
     "    per AUDIT-001 T-AUDIT-004 so every developer gets archiving out of",
     "    the box.",
-    "  - hooks.PostToolUse: runs scripts/hooks/post_edit_hint.sh after every",
+    "  - hooks.PostToolUse: runs scripts/hooks/post_edit_hint.py after every",
     "    Edit/Write to surface project-specific reminders (rebuild, init.sql",
-    "    semantics, bundle hash verification, etc).",
+    "    semantics, bundle hash verification, CALC-card updates, etc), scoped",
+    "    to the single file just edited and delivered via additionalContext",
+    "    so the model actually sees it (plain stdout does not reach the",
+    "    model on PostToolUse — see incoming-docs, 'Золотая середина...').",
+    "  - hooks.SessionStart/SubagentStart/SubagentStop: append one JSON line",
+    "    per event to .claude/logs/agents.jsonl (log_subagents.py) so",
+    "    tools/agents_report.py can show which subagents actually get",
+    "    called, to calibrate .claude/rules/agent-routing.md.",
+    "  - hooks.Stop: money_path_guard.py refuses to end the turn (exit 2)",
+    "    if money-path files changed and code-reviewer never ran in this",
+    "    session — the one call the routing rule always requires.",
+    "  - env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1: subagents cannot spawn",
+    "    further subagents; all delegation stays visible in the main thread.",
     "",
     "  Encodes the lessons of PR-F02-001..016 + PR-AUDIT-004 — every footgun",
     "  we hit becomes a hook reminder or a deny rule."
   ],
+  "env": {
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+  },
   "permissions": {
     "deny": [
       "Bash(rm -rf /*)",
@@ -43,7 +58,12 @@
       "Bash(*TRUNCATE TABLE hedgeflows*)",
       "Bash(*TRUNCATE TABLE ledger_*)",
       "Bash(*--no-verify*)",
-      "Bash(*--no-gpg-sign*)"
+      "Bash(*--no-gpg-sign*)",
+      "Read(./infra/.env)",
+      "Read(./infra/env/*.local)",
+      "Read(./secrets/**)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)"
     ]
   },
   "hooks": {
@@ -63,7 +83,47 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/post_edit_hint.sh"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/post_edit_hint.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/log_subagents.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/log_subagents.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/log_subagents.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/money_path_guard.py\""
           }
         ]
       }

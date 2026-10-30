@@ -33,6 +33,7 @@
 | UC-F05A-03 | `…/UC-F05A-03-display-vector-liquidity/sequences/SEQ-UC-F05A-03-system.md` | `SEQ-F05A-UC-F05A-03-services.md` | (planned) |
 | UC-F05A-04 | `…/UC-F05A-04-validate-real-orderbooks/sequences/SEQ-UC-F05A-04-system.md` | `SEQ-F05A-UC-F05A-04-services.md` | (planned) |
 | UC-F05A-05 | `…/UC-F05A-05-replay-vector-clearing/sequences/SEQ-UC-F05A-05-system.md` | `SEQ-F05A-UC-F05A-05-services.md` | (planned) |
+| UC-F05A-06 | `…/UC-F05A-06-ce-agent-tact-clearing/sequences/SEQ-UC-F05A-06-system.md` | `SEQ-F05A-UC-F05A-06-services.md` | (planned) |
 | UC-F06-01 | `…/UC-F06-01-show-positions/sequences/` | `SEQ-F06-UC-F06-01-services.md` | (none yet) |
 | UC-F07-01 | `…/UC-F07-01-pretrade-risk-check/sequences/` | `SEQ-F07-UC-F07-01-services.md` | (none yet) |
 | UC-F08-01 | `…/UC-F08-01-liquidate-position/sequences/` | `SEQ-F08-UC-F08-01-services.md` | (none yet) |
@@ -41,7 +42,7 @@
 | UC-F09-03 | `…/UC-F09-03-external-leg-execution/sequences/` | `SEQ-F09-UC-F09-03-services.md` | (none yet) |
 | UC-F10-01 | `…/UC-F10-01-publish-mm-curve/sequences/` | `SEQ-F10-UC-F10-01-services.md` | (none yet) |
 | UC-F11-01 (onboard) | `…/UC-F11-01-onboard-venue/sequences/` | `SEQ-F11-01-onboard-venue-services.md` | (none yet) |
-| UC-F11-01 (ingest) | `…/UC-F11-01-ingest-external-marketdata/sequences/` | `SEQ-F11-UC-F11-01-services.md` | (none yet) |
+| UC-F11-06 (ingest, legacy) | `…/UC-F11-06-ingest-external-marketdata-legacy/sequences/` | `SEQ-F11-UC-F11-01-services.md` | (none yet) |
 | UC-F11-02 | `…/UC-F11-02-publish-snapshot/sequences/` | `SEQ-F11-02-publish-snapshot-services.md` | `cpp/venues/src/infra/cex_ws_rest_adapter.cpp` (L2 sequences планируются) |
 | UC-F11-03 | `…/UC-F11-03-build-liquidity-curve/sequences/` | `SEQ-F11-03-build-curve-services.md` | `cpp/venues/src/domain/depth_curve_builder.cpp` (L2 sequences планируются) |
 | UC-F11-04 | `…/UC-F11-04-venue-health-degradation/sequences/` | `SEQ-F11-04-health-routing-services.md` | (none yet) |
@@ -54,7 +55,7 @@
 | UC-F13-01 | `…/UC-F13-01-generate-posttrade-report/sequences/` | `SEQ-F13-UC-F13-01-services.md` | (none yet) |
 | UC-F14-01 | `…/UC-F14-01-deposit-funds/sequences/` | `SEQ-F14-UC-F14-01-services.md` | (none yet) |
 | UC-F15-01 (create) | `…/UC-F15-01-create-replay-session/sequences/` | `SEQ-F15-01-create-session-services.md` | `cpp/backtest/src/app/run_replay_session_uc.cpp` (L2 sequences планируются) |
-| UC-F15-01 (replay) | `…/UC-F15-01-replay-historical-batch/sequences/` | `SEQ-F15-02-replay-cycle-services.md` | (none yet) |
+| UC-F15-01 (replay) | `…/UC-F15-07-replay-historical-batch-legacy/sequences/` | `SEQ-F15-02-replay-cycle-services.md` | (none yet) |
 | UC-F15-02 | `…/UC-F15-02-cancel-replay-session/sequences/` | (TBD) | (none yet) |
 | UC-F15-03 | `…/UC-F15-03-ab-compare-sessions/sequences/` | (TBD) | (none yet) |
 | UC-F15-04 | `…/UC-F15-04-audit-mode-replay/sequences/` | (TBD) | (none yet) |
@@ -62,6 +63,14 @@
 | UC-F15-06 | `…/UC-F15-06-replay-determinism-check/sequences/` | (TBD) | (none yet) |
 | UC-F16-01 | `…/UC-F16-01-trigger-kill-switch/sequences/` | (TBD) | (none yet) |
 | UC-F17-01 | `…/UC-F17-01-fire-alert/sequences/` | (TBD) | (none yet) |
+| UC-F18-04 (v2, primary) | `…/UC-F18-04-ce-v2-agent-band-hedge/sequences/SEQ-UC-F18-04-system.md` | `SEQ-F18-UC-F18-04-services.md` | (planned — L2 gated под ADR-061) |
+| UC-F18-01 (v1, superseded) | `…/UC-F18-01-form-ce-capital/sequences/` | — | — (заменён UC-F18-04) |
+| UC-F18-02 (v1, superseded) | `…/UC-F18-02-derive-ce-position/sequences/` | — | — (заменён UC-F18-04) |
+| UC-F18-03 (v1, superseded) | `…/UC-F18-03-hedge-net-position/sequences/` | — | — (заменён UC-F18-04) |
+
+> **F-18 v2 (2026-09-15):** активная цепочка — UC-F18-04 → L0 `SEQ-UC-F18-04-system`
+> (kite) + L1 `SEQ-F18-UC-F18-04-services` (sea). v1 UC-F18-01..03 сохранены как
+> superseded ([.claude/rules/docs-as-code.md](../../.claude/rules/docs-as-code.md) Conflict rule), модель заменяется под ADR-061 (planned).
 
 ## L2 Component-internal sequences (Fish 🐟)
 

@@ -53,6 +53,8 @@ add_executable(venues
   src/infra/postgres_venue_config_repository.cpp
   src/infra/postgres_hedgeflow_repository.cpp
   src/infra/postgres_child_order_repository.cpp
+  src/infra/postgres_fill_diagnostics_repository.cpp
+  src/infra/postgres_liquidity_stats_repository.cpp
   src/infra/sim_session_pg_codec.cpp
   src/infra/postgres_sim_session_repository.cpp
   src/app/sim_session_manager.cpp
@@ -63,7 +65,16 @@ add_executable(venues
   src/domain/amm_pool_extractor.cpp
   src/domain/amm_virtual_lob.cpp
   src/domain/amm_direct_fob.cpp
+  src/domain/trades_fetch_scheduler.cpp
+  src/domain/depth_window.cpp
+  src/domain/venue_endpoints.cpp
+  src/domain/poll_planner.cpp
+  src/app/poll_runner.cpp
+  src/app/latest_wins_pool.cpp
+  src/app/async_snapshot_storage.cpp
+  src/app/depth_window_controller.cpp
   src/app/snapshot_producer.cpp
+  src/app/depth_watch_registry.cpp
   src/infra/snapshot_clickhouse_writer.cpp
 )
 
@@ -342,6 +353,100 @@ if (BUILD_TESTING)
   target_compile_options(venues_snapshot_producer_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_snapshot_producer_test COMMAND venues_snapshot_producer_test)
 
+  add_executable(venues_depth_window_test
+    tests/depth_window_test.cpp
+    src/domain/depth_window.cpp
+  )
+  target_include_directories(venues_depth_window_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_depth_window_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_window_test COMMAND venues_depth_window_test)
+
+  add_executable(venues_depth_window_controller_test
+    tests/depth_window_controller_test.cpp
+    src/app/depth_window_controller.cpp
+    src/domain/depth_window.cpp
+  )
+  target_include_directories(venues_depth_window_controller_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_depth_window_controller_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_depth_window_controller_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_window_controller_test COMMAND venues_depth_window_controller_test)
+
+  add_executable(venues_endpoints_test
+    tests/venue_endpoints_test.cpp
+    src/domain/venue_endpoints.cpp
+  )
+  target_include_directories(venues_endpoints_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_endpoints_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_endpoints_test COMMAND venues_endpoints_test)
+
+  add_executable(venues_poll_planner_test
+    tests/poll_planner_test.cpp
+    src/domain/poll_planner.cpp
+  )
+  target_include_directories(venues_poll_planner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_poll_planner_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_poll_planner_test COMMAND venues_poll_planner_test)
+
+  add_executable(venues_poll_runner_test
+    tests/poll_runner_test.cpp
+    src/app/poll_runner.cpp
+    src/domain/poll_planner.cpp
+  )
+  target_include_directories(venues_poll_runner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_poll_runner_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_poll_runner_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_poll_runner_test COMMAND venues_poll_runner_test)
+
+  add_executable(venues_latest_wins_pool_test
+    tests/latest_wins_pool_test.cpp
+    src/app/latest_wins_pool.cpp
+  )
+  target_include_directories(venues_latest_wins_pool_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_latest_wins_pool_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_latest_wins_pool_test COMMAND venues_latest_wins_pool_test)
+
+  add_executable(venues_async_snapshot_storage_test
+    tests/async_snapshot_storage_test.cpp
+    src/app/async_snapshot_storage.cpp
+  )
+  target_include_directories(venues_async_snapshot_storage_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(venues_async_snapshot_storage_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+  target_compile_options(venues_async_snapshot_storage_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_async_snapshot_storage_test COMMAND venues_async_snapshot_storage_test)
+
+  add_executable(venues_depth_watch_registry_test
+    tests/depth_watch_registry_test.cpp
+    src/app/depth_watch_registry.cpp
+  )
+  target_include_directories(venues_depth_watch_registry_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_options(venues_depth_watch_registry_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_depth_watch_registry_test COMMAND venues_depth_watch_registry_test)
+
   add_executable(venues_liquidity_curve_producer_test
     tests/liquidity_curve_producer_test.cpp
     src/app/liquidity_curve_producer.cpp
@@ -601,4 +706,36 @@ if (BUILD_TESTING)
 
   target_compile_options(venues_amm_virtual_lob_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
   add_test(NAME venues_amm_virtual_lob_test COMMAND venues_amm_virtual_lob_test)
+
+  # F-11/F-20 (IN-0xx fair trades scheduling): чистая функция выбора самого
+  # "голодного" по чтению ленты трейдов символа venue (round-robin), чинит
+  # starvation recent-trades на символах кроме первого в такте опроса.
+  add_executable(venues_trades_fetch_scheduler_test
+    tests/trades_fetch_scheduler_test.cpp
+    src/domain/trades_fetch_scheduler.cpp
+  )
+
+  target_include_directories(venues_trades_fetch_scheduler_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(venues_trades_fetch_scheduler_test PRIVATE
+    cex_common
+    contracts_proto
+  )
+
+  target_compile_options(venues_trades_fetch_scheduler_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_trades_fetch_scheduler_test COMMAND venues_trades_fetch_scheduler_test)
+
+  # ADR-082 (шаг 0): чистые оценщики ликвидности — оборот ленты ν и коэффициент исполнения f.
+  add_executable(venues_liquidity_stats_test
+    tests/liquidity_stats_test.cpp
+  )
+
+  target_include_directories(venues_liquidity_stats_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_compile_options(venues_liquidity_stats_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+  add_test(NAME venues_liquidity_stats_test COMMAND venues_liquidity_stats_test)
 endif()

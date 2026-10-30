@@ -33,10 +33,10 @@ F-06 усугубляет проблему: ApplyBatchResult и buildRiskSnapsho
 Ввести **in-app connection pool** в каждом сервисе, работающем с PostgreSQL:
 
 1. Общая реализация `cex::common::PgConnectionPool` (в `cpp/common`, т.к. это
-   действительно cross-service утилита, CLAUDE.md §10.2) — фиксированный/ограниченный
+   действительно cross-service утилита, [.claude/rules/cpp.md](../../../.claude/rules/cpp.md)) — фиксированный/ограниченный
    набор переиспользуемых `pqxx::connection`, выдача/возврат через RAII-handle,
    ожидание свободного соединения с таймаутом.
-2. **Размер пула — через env** (`cex::common::Env`, без хардкода, CLAUDE.md §12.3),
+2. **Размер пула — через env** (`cex::common::Env`, без хардкода, [.claude/rules/cpp.md](../../../.claude/rules/cpp.md)),
    отдельно на сервис, с безопасным dev-default для docker-compose.
 3. **pgbouncer — будущая опция** на уровне инфраструктуры (transaction pooling
    перед PostgreSQL), не исключающая in-app пул: суммарный размер всех in-app пулов
@@ -65,7 +65,7 @@ F-06 усугубляет проблему: ApplyBatchResult и buildRiskSnapsho
 - ✅ Делает практичными mirror-проводки [ADR-044](ADR-044-ledger-balance-source-of-truth.md)
   и пер-батчевые риск-снапшоты в горячем пути.
 - ⚠️ Управление жизненным циклом соединений: detect/recover «битых» соединений
-  (reconnect), таймаут ожидания свободного, корректный graceful shutdown (CLAUDE.md §12.2).
+  (reconnect), таймаут ожидания свободного, корректный graceful shutdown ([.claude/rules/cpp.md](../../../.claude/rules/cpp.md)).
 - ⚠️ Нужна конфигурационная дисциплина: Σ(размеров пулов) ≤ `max_connections`
   (или лимит pgbouncer), иначе проблема исчерпания вернётся.
 - ⚠️ Транзакционные границы должны оставаться внутри одного одолженного соединения

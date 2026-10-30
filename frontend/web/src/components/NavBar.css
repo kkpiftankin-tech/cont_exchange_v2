@@ -1,0 +1,69 @@
+/* Единый верхний навбар — стабильная раскладка.
+ *
+ * Причина правки: 15 вкладок при `flex-wrap: wrap` + `justify-content: flex-end`
+ * (см. Main.css) переносились на несколько строк и «плавали» при смене ширины
+ * i18n-подписей (часть вкладок берёт текст из t(key), часть — статичный label),
+ * из-за чего вкладки прыгали между рядами. Хвост (Sim / Clearing / Replay)
+ * к тому же заезжал под fixed .language-switcher (App.css: top/right:20, z-index:1000)
+ * и становился некликабельным → «Clearing вообще недоступна».
+ *
+ * Решение: подпись вкладки сразу берётся из статичного label (см. NavBar.js),
+ * поэтому ширина не скачет при загрузке i18n; лента вкладок при нехватке ширины
+ * стабильно переносится на вторую строку (все вкладки видны, Clearing не прячется);
+ * logout вынесен из ленты и всегда виден; справа зарезервировано место под
+ * fixed .language-switcher. Селекторы .navbar-main ... повышают специфичность над
+ * одноклассовыми правилами Main.css. */
+
+.navbar-main .nav-links {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+
+/* Лента вкладок: все вкладки видны, при нехватке ширины — стабильный перенос
+ * на вторую строку (а не горизонтальный скролл, который прятал Clearing).
+ * Перенос детерминирован (justify-content: flex-start) и не зависит от тайминга
+ * загрузки i18n, поэтому меню не «прыгает». */
+.navbar-main .nav-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  row-gap: 6px;
+}
+
+.navbar-main .nav-scroll a {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.navbar-main .logout-btn {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* Навбар центрируем ОДИНАКОВО на всех страницах, не завися от того, каким
+ * контейнером его обернула конкретная страница (block прижимает влево, а
+ * flex-колонка с align-items:center центрирует — из-за этого весь навбар
+ * прыгал по X на 0/34/41px между страницами). Фиксированная ширина + auto-поля
+ * дают одинаковый X везде. Симметричный резерв скроллбара — в index.css
+ * (scrollbar-gutter: stable both-edges), чтобы центр совпадал и на страницах с
+ * min-width:100vw. nav.navbar-main (0,1,1) надёжно перекрывает Main.css. */
+nav.navbar-main {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* На десктопе резервируем справа место под fixed .language-switcher,
+ * чтобы logout и крайние вкладки не уходили под него. */
+@media (min-width: 769px) {
+  nav.navbar-main {
+    padding-right: 96px;
+  }
+}

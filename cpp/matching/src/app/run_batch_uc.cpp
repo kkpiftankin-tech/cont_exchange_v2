@@ -9,7 +9,7 @@
 //   считает позиции и оценивает hedge-triggers (F-12) → возвращает
 //   fill_deltas для writer'а UpdateFilledVolumes.
 //
-// Контракт инвариантов (CLAUDE.md §15):
+// Контракт инвариантов (cpp/matching/CLAUDE.md):
 //   * SUM(fills[order_id].executed_qty) <= snapshot.remaining_qty
 //     — обеспечивается CapFillsAgainstRemaining (PR-IN-007 BUG-2).
 //   * Цена fill ∈ [p_low, p_high] заявки — гарантирует solver.
@@ -178,7 +178,7 @@ void BackfillFillProvenance(const domain::ExternalLiquidityBySymbol& external_li
 // the trailing fills so the invariant
 //     SUM(fills[order_id].executed_qty) <= snapshot.remaining_qty
 // holds. Without this guard the system effectively short-sells without
-// inventory and violates the ledger invariant from CLAUDE.md §17.
+// inventory and violates the ledger invariant from cpp/ledger/CLAUDE.md.
 //
 // Fills that get fully zeroed remain in the batch (executed_qty = 0) — this
 // preserves audit trail; downstream consumers should treat zero-qty fills

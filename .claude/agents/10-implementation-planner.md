@@ -1,9 +1,10 @@
 ---
 name: implementation-planner
-description: Use this agent after feature.yaml, use cases, sequence diagrams, proto contracts, data schemas, frontend specs, backend specs, and test plans exist. It creates small PR-FXX-NNN sized implementation tasks mapped to files, tests, and acceptance criteria. Do not write code.
+description: Splits an approved class L/XL design (feature.yaml + use case + sequence + proto + schema + frontend/backend + test plan) into PR-FXX-NNN sized tasks. Use after those specs exist. Not for class S/M changes — those skip straight to implementation. Returns a task list with files, tests, acceptance criteria.
 tools: Read, Grep, Glob
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: orange
 ---
 

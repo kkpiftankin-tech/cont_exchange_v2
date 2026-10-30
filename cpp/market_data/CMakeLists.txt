@@ -18,10 +18,13 @@ find_package(Boost REQUIRED COMPONENTS thread)
 include(FetchContent)
 
 set(WITH_OPENSSL YES CACHE BOOL "Enable OpenSSL in clickhouse-cpp" FORCE)
+# clickhouse-cpp через codeload tar.gz archive, а НЕ git clone: анонимный git-клон
+# github в Docker-build падает ("could not read Username", rate-limit), тогда как
+# https archive отдаёт 200. v2.6.0 самодостаточен (contrib вендорится, сабмодулей нет).
+# Тот же приём, что уже применён к json ниже и к osqp (matching).
 FetchContent_Declare(
         clickhouse-cpp
-        GIT_REPOSITORY https://github.com/ClickHouse/clickhouse-cpp.git
-        GIT_TAG v2.6.0
+        URL https://github.com/ClickHouse/clickhouse-cpp/archive/refs/tags/v2.6.0.tar.gz
 )
 FetchContent_MakeAvailable(clickhouse-cpp)
 
@@ -59,6 +62,8 @@ add_executable(market_data
         src/app/curve_to_levels.cpp
         # infra/postgres
         src/infra/postgres/pg_market_data_config.cpp
+        src/infra/postgres/postgres_asset_volatility_repository.cpp
+        src/infra/postgres/pg_venue_liquidity_reader.cpp
         # transport
         src/transport/grpc_market_data_service.cpp
         src/transport/mappers/order_book.cpp
@@ -70,6 +75,7 @@ add_executable(market_data
         src/infra/kafka_consumer.cpp
         src/infra/kafka_snapshots_producer.cpp
         src/infra/kafka_vectorized_producer.cpp
+        src/infra/kafka_ce_clearing_producer.cpp
         src/infra/clickhouse_storage.cpp
         src/infra/clickhouse/order_book_storage.cpp
         src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
@@ -110,6 +116,8 @@ if (BUILD_TESTING)
             src/domain/entities/order_book.cpp
             src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
             src/infra/postgres/pg_market_data_config.cpp
+            src/infra/postgres/postgres_asset_volatility_repository.cpp
+            src/infra/postgres/pg_venue_liquidity_reader.cpp
     )
 
     target_include_directories(market_data_uc_test PRIVATE
@@ -141,6 +149,76 @@ if (BUILD_TESTING)
     )
     target_compile_options(market_data_vectorize_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME market_data_vectorize_test COMMAND market_data_vectorize_test)
+
+    # F-05A CE — book-derived quote-агент (Срез 3, T-CEA-104, ADR-055 §A1).
+    # domain/agent_builder.hpp header-only; тест линкует cex_common (Decimal).
+    add_executable(market_data_agent_builder_test
+            tests/agent_builder_test.cpp
+    )
+    target_include_directories(market_data_agent_builder_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(market_data_agent_builder_test PRIVATE
+            cex_common
+    )
+    target_compile_options(market_data_agent_builder_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME market_data_agent_builder_test COMMAND market_data_agent_builder_test)
+
+    # ADR-082 шаг 1: множитель глубины агента по коэффициенту исполнения f (domain/fill_depth_scale.hpp, header-only).
+    add_executable(market_data_fill_depth_scale_test
+            tests/fill_depth_scale_test.cpp
+    )
+    target_include_directories(market_data_fill_depth_scale_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_fill_depth_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_fill_depth_scale_test COMMAND market_data_fill_depth_scale_test)
+
+    # ADR-085: уценка устаревших котировок и капитальный предел глубины агента (domain/depth_trust_scale.hpp, header-only).
+    add_executable(market_data_depth_trust_scale_test
+            tests/depth_trust_scale_test.cpp
+    )
+    target_include_directories(market_data_depth_trust_scale_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_depth_trust_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_depth_trust_scale_test COMMAND market_data_depth_trust_scale_test)
+
+    # Защита входа CE-клиринга от несогласованности активов и площадок (domain/ce_input_guard.hpp, header-only).
+    add_executable(market_data_ce_input_guard_test
+            tests/ce_input_guard_test.cpp
+    )
+    target_include_directories(market_data_ce_input_guard_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(market_data_ce_input_guard_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_ce_input_guard_test COMMAND market_data_ce_input_guard_test)
+
+    # CR-F18-016: очередь записи истории кривых вне потока потребителя (infra/async_sink.hpp, header-only, только std).
+    add_executable(market_data_async_sink_test
+            tests/async_sink_test.cpp
+    )
+    target_include_directories(market_data_async_sink_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(market_data_async_sink_test PRIVATE Threads::Threads)
+    target_compile_options(market_data_async_sink_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_async_sink_test COMMAND market_data_async_sink_test)
+
+    # ADR-064 (дополнение 2026-10-29, OQ-F18v2-37): приведение глубины кросс-пары к номиналу (domain/cross_depth_scale.hpp, header-only);
+    # тест строит агента через agent_builder на одном рынке в USDT и в BTC ⇒ линкует cex_common (Decimal).
+    add_executable(market_data_cross_depth_scale_test
+            tests/cross_depth_scale_test.cpp
+    )
+    target_include_directories(market_data_cross_depth_scale_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(market_data_cross_depth_scale_test PRIVATE
+            cex_common
+    )
+    target_compile_options(market_data_cross_depth_scale_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME market_data_cross_depth_scale_test COMMAND market_data_cross_depth_scale_test)
 
     # F-05A (T-F05A-205): curve→levels + proto mapping (needs contracts_proto).
     add_executable(market_data_vectorize_wiring_test
@@ -193,6 +271,8 @@ if (BUILD_TESTING)
                 src/transport/mappers/vectorized_liquidity.cpp    # F-05A
                 src/infra/clickhouse/clickhouse_liquidity_curve_storage.cpp
                 src/infra/postgres/pg_market_data_config.cpp
+                src/infra/postgres/postgres_asset_volatility_repository.cpp
+                src/infra/postgres/pg_venue_liquidity_reader.cpp
         )
         target_include_directories(market_data_integration_test PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/src

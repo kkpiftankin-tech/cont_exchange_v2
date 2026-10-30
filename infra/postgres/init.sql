@@ -139,8 +139,11 @@ CREATE TABLE IF NOT EXISTS hedgeflows (
   target_notional  NUMERIC(38, 18),
   reference_mid    NUMERIC(38, 18),
   avg_fill_price   NUMERIC(38, 18),
-  tot_fee          NUMERIC(38, 18) NOT NULL DEFAULT 0,
-  hedge_pnl        NUMERIC(38, 18),             -- computed by Settlement Ledger
+  tot_fee          NUMERIC(38, 18) NOT NULL DEFAULT 0,   -- РЕАЛЬНАЯ venue-комиссия (report.fee_total, сейчас taker-only)
+  band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- F-18 #6: РАСЧЁТНАЯ band-комиссия зоны (maker=clim/taker=cmkt), ledger; НЕ путать с tot_fee (CALC-F12-HEDGE-PNL §7.1)
+  house_realized_pnl NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- F-18 #8 (ADR-068, observation-only): признание прибыли по факту к марке (mid клиринга); НЕ двигает баланс __ce_house__
+  plan_fact_gap    NUMERIC(38, 18) NOT NULL DEFAULT 0,    -- F-18 #8 (ADR-068): накопленный разрыв план/факт (качество исполнения)
+  hedge_pnl        NUMERIC(38, 18),             -- computed by Settlement Ledger (gross)
   urgency          TEXT NOT NULL CHECK (urgency IN ('LOW', 'MEDIUM', 'HIGH')),
   timeout_ms       INTEGER NOT NULL CHECK (timeout_ms > 0),
   status           TEXT NOT NULL CHECK (status IN ('OPEN', 'COMPLETED', 'UNDERFILLED', 'REJECTED', 'RISK_REJECTED', 'CANCELLED')),
@@ -156,6 +159,11 @@ CREATE INDEX IF NOT EXISTS idx_hedgeflows_provider_symbol ON hedgeflows (provide
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_batch_id ON hedgeflows (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_open ON hedgeflows (status, updated_at) WHERE status IN ('OPEN');
 CREATE INDEX IF NOT EXISTS idx_hedgeflows_status_underfilled ON hedgeflows (status, created_at) WHERE status IN ('UNDERFILLED', 'REJECTED');
+-- F-18 #6 (T-F18-804): расчётная band-комиссия зоны для существующих БД.
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS band_fee_estimated NUMERIC(38, 18) NOT NULL DEFAULT 0;
+-- F-18 #8 (ADR-068, observation-only): признание прибыли по факту + разрыв план/факт для существующих БД.
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS house_realized_pnl NUMERIC(38, 18) NOT NULL DEFAULT 0;
+ALTER TABLE hedgeflows ADD COLUMN IF NOT EXISTS plan_fact_gap NUMERIC(38, 18) NOT NULL DEFAULT 0;
 
 -- child_orders: one row per actual order placed on a venue (CEX/DEX/AMM).
 -- Multi-venue routing decomposes single HedgeFlow into N child_orders.
@@ -192,6 +200,154 @@ CREATE INDEX IF NOT EXISTS idx_child_orders_venue ON child_orders (venue_id, sta
 CREATE INDEX IF NOT EXISTS idx_child_orders_hedge_flow ON child_orders (hedge_flow_id);
 CREATE INDEX IF NOT EXISTS idx_child_orders_venue_order_id
   ON child_orders (venue_id, venue_order_id) WHERE venue_order_id IS NOT NULL;
+-- Панель «Живые позиции» (BFF) берёт заявки агентов за последние 2 часа: окно по времени делает запрос индексным.
+CREATE INDEX IF NOT EXISTS idx_child_orders_created ON child_orders (created_at);
+
+-- ce_agent_pnl_history: история заработка агента CE во времени (график по клику на агента в «Живых позициях»).
+-- Единственный писатель — BFF (frontend/api/server.js, семплер раз в PNL_HISTORY_SAMPLE_MS, деф. 60 с): пишет те же R и U
+-- (USDT, без комиссий), что видны в колонке «заработок R / U». Только отображение: в ledger/risk не читается. Хранение —
+-- PNL_HISTORY_RETENTION_DAYS (деф. 7), BFF сам убирает старше. Схему BFF также создаёт при старте (IF NOT EXISTS).
+-- Описание: docs/07-data/ce-agent-pnl-history.md.
+CREATE TABLE IF NOT EXISTS ce_agent_pnl_history (
+  agent_id        TEXT NOT NULL,
+  ts              TIMESTAMPTZ NOT NULL,
+  realized_usdt   NUMERIC(38, 12),
+  unrealized_usdt NUMERIC(38, 12),
+  trade_fills     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, ts)
+);
+-- ADR-083: выгода участника в клиринге (CALC-CE-CLEARING-SURPLUS) — приращение за интервал и число тактов (учтено / ожидалось).
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_inc_usdt NUMERIC(38, 12);
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts INTEGER;
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS surplus_tacts_expected INTEGER;
+CREATE INDEX IF NOT EXISTS idx_ce_pnl_hist_ts ON ce_agent_pnl_history (ts);   -- сумма выгоды с момента сброса и часовая очистка читают таблицу по времени без agent_id
+-- ADR-087 (CR-F18-005): внутренняя группа заработка агента (R, U) — для графика «Заработок во времени» на вкладке «PnL».
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_realized_usdt NUMERIC(38, 12);
+ALTER TABLE ce_agent_pnl_history ADD COLUMN IF NOT EXISTS internal_unrealized_usdt NUMERIC(38, 12);
+
+-- ce_pnl_totals_history: история итогов заработка агентов по охватам (все агенты / переводчики / арбитражёры) для графика на вкладке «PnL».
+-- Единственный писатель — BFF (тот же семплер раз в минуту): переписывает итоги ledger (GetAgentPnl) как есть, ничего не считает. Только
+-- отображение. Хранение — PNL_HISTORY_RETENTION_DAYS. Схему BFF также создаёт при старте (IF NOT EXISTS). Описание: docs/07-data/ce-pnl-totals-history.md.
+CREATE TABLE IF NOT EXISTS ce_pnl_totals_history (
+  scope        TEXT NOT NULL CHECK (scope IN ('all', 'translator', 'arbitrageur')),
+  ts           TIMESTAMPTZ NOT NULL,
+  internal_r   NUMERIC(38, 12),
+  internal_u   NUMERIC(38, 12),
+  external_r   NUMERIC(38, 12),
+  external_u   NUMERIC(38, 12),
+  agents       INTEGER NOT NULL DEFAULT 0,
+  incomplete   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, ts)
+);
+
+-- ce_agent_band_history: история порогов хеджа агентов CE (ADR-088, CR-F18-013): рабочие и модельные пороги, позиция, оценки шума и дрейфа
+-- потока, режим, версия настроек модели. Единственный писатель — BFF (frontend/api/server.js, тот же минутный проход, что и история заработка):
+-- переписывает поле hedge_model из ответа ledger GetAgentPositions как есть, ничего не считает. Только отображение и выгрузка эксперту:
+-- ledger/risk/matching её не читают. Хранение — BAND_HISTORY_RETENTION_DAYS (деф. 14), BFF сам убирает старше. Схему BFF также создаёт при
+-- старте (IF NOT EXISTS). Описание: docs/07-data/ce-agent-band-history.md.
+CREATE TABLE IF NOT EXISTS ce_agent_band_history (
+  agent_id           TEXT NOT NULL,
+  ts                 TIMESTAMPTZ NOT NULL,            -- начало минуты (floor), не now(): запись идемпотентна
+  kind               TEXT,
+  mode               TEXT,                            -- 'shadow' | 'on'
+  position           NUMERIC(38, 12),                 -- c, тыс. USDT, знаковая
+  in_flight          NUMERIC(38, 12),
+  z_lim              NUMERIC(38, 12),                 -- РАБОЧИЕ пороги
+  z_mkt              NUMERIC(38, 12),
+  b_m                NUMERIC(38, 12),                 -- ЭФФЕКТИВНЫЕ пороги МОДЕЛИ (сглаженные, с потолком); NULL — не посчитаны; 0 — законное значение
+  b_t                NUMERIC(38, 12),
+  b_m_raw            NUMERIC(38, 12),                 -- сырой расчёт того же такта до сглаживания (поправка о сглаживании ADR-088)
+  b_t_raw            NUMERIC(38, 12),
+  regime             TEXT,                            -- 'noise' | 'mixed' | 'drift'
+  computed           BOOLEAN NOT NULL DEFAULT FALSE,
+  applied            BOOLEAN NOT NULL DEFAULT FALSE,
+  reason             TEXT,
+  sz_est             DOUBLE PRECISION,                -- диагностика модели (не деньги): шум потока, тыс. USDT за корень минуты
+  mu_est             DOUBLE PRECISION,
+  theta_est          DOUBLE PRECISION,
+  peclet             DOUBLE PRECISION,
+  sigma_bps          DOUBLE PRECISION,
+  fee_maker_bps      DOUBLE PRECISION,
+  fee_taker_bps      DOUBLE PRECISION,
+  transfer_threshold NUMERIC(38, 12),
+  transfer_target    NUMERIC(38, 12),
+  transfer_threshold_raw NUMERIC(38, 12),             -- сырые B и b связки до сглаживания
+  transfer_target_raw    NUMERIC(38, 12),
+  est_minutes        INTEGER NOT NULL DEFAULT 0,      -- 0 => sz_est по умолчанию, а не оценка
+  params_hash        BIGINT,
+  PRIMARY KEY (agent_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_ce_band_hist_ts ON ce_agent_band_history (ts);
+-- Таблица, созданная до поправки о сглаживании (ADR-088), получает колонки сырых порогов (BFF делает то же при старте).
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS b_m_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS b_t_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS transfer_threshold_raw NUMERIC(38, 12);
+ALTER TABLE ce_agent_band_history ADD COLUMN IF NOT EXISTS transfer_target_raw NUMERIC(38, 12);
+
+-- ce_system_pnl_baseline / ce_system_pnl_history: прибыль системы CE по реальным остаткам (CALC-CE-SYSTEM-PNL, ADR-083).
+-- Единственный писатель — BFF (frontend/api/server.js, тот же семплер раз в минуту). База (остатки и цены) задаётся при первом замере и
+-- при сбросе статистики сделок. Только отображение: ledger и matching таблиц не читают. Описание: docs/07-data/ce-system-pnl.md.
+CREATE TABLE IF NOT EXISTS ce_system_pnl_baseline (
+  id       INTEGER PRIMARY KEY CHECK (id = 1),
+  ts       TIMESTAMPTZ NOT NULL,
+  reset_ms BIGINT NOT NULL,
+  q0       JSONB NOT NULL,
+  m0       JSONB NOT NULL,
+  boot_id  TEXT,                                   -- запуск ledger на момент базы (ADR-084): смена = ledger перезапущен, остатки бирж обнулились
+  carry    JSONB NOT NULL DEFAULT '{}'::jsonb      -- накопленные торговый результат и переоценка, перенесённые через перезапуск ledger
+);
+CREATE TABLE IF NOT EXISTS ce_system_pnl_history (
+  ts               TIMESTAMPTZ PRIMARY KEY,
+  trading_usdt     NUMERIC(38, 12) NOT NULL,
+  revaluation_usdt NUMERIC(38, 12) NOT NULL,
+  mtm_change_usdt  NUMERIC(38, 12) NOT NULL,
+  mtm_usdt         NUMERIC(38, 12) NOT NULL,
+  skipped          INTEGER NOT NULL DEFAULT 0
+);
+
+-- venue_fill_diagnostics: per hedge-order sim-fill attempt (ADR-060) — почему
+-- симулятор исполнил / не исполнил заявку. Захватывается в момент матчинга
+-- (cex_ws_rest_adapter ApplyRealTradeFillLocked), где доступна лента публичных
+-- сделок venue. Диагностика для вкладки Clearing: показать заявку рядом с
+-- рассматриваемыми публичными исполнениями + причиной. Одна строка на intent.
+CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
+  intent_id         TEXT PRIMARY KEY,             -- = ExecutionIntent.intent_id
+  hedge_flow_id     TEXT,                          -- корреляция с hedgeflows
+  batch_id          TEXT,                          -- такт клиринга (у §A7-заявок; у band пусто)
+  venue             TEXT NOT NULL,
+  symbol            TEXT NOT NULL,                 -- канонический ключ ленты
+  side              TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  limit_price       NUMERIC(38, 18),               -- лимит заявки (NULL/0 ⇒ матчинг пропущен!)
+  target_qty        NUMERIC(38, 18),
+  filled_qty        NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  avg_price         NUMERIC(38, 18),
+  status            TEXT NOT NULL,                 -- NEW | PARTIALLY_FILLED | FILLED | REJECTED
+  reason            TEXT NOT NULL,                 -- код причины (no_limit_price | no_trades_in_window | none_cross_limit | partial_window_volume | partial_book_depth | none_book_depth | filled | ...)
+  window_trades     INTEGER NOT NULL DEFAULT 0,    -- сколько публичных сделок было в окне
+  considered_trades JSONB,                         -- [{price, qty, ts_ms, crosses}] — те самые публичные исполнения
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_batch ON venue_fill_diagnostics (batch_id);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_hedge ON venue_fill_diagnostics (hedge_flow_id);
+CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_created ON venue_fill_diagnostics (created_at DESC);
+
+-- venue_liquidity_stats: измерение ликвидности внешних бирж по парам (ADR-082, шаг 0) — оборот ленты
+-- публичных сделок ν и коэффициент исполнения f хедж-заявок. Пишет venues раз в CE_LIQ_STATS_PUBLISH_MS
+-- (UPSERT по (venue, symbol)); читают BFF (экран «Внешние биржи») и — позже, за флагами — market_data
+-- (глубина агента), ledger (потолок размера заявки, порог). Числа double: метрики, в ledger-деньги не попадают.
+CREATE TABLE IF NOT EXISTS venue_liquidity_stats (
+  venue            TEXT NOT NULL,
+  symbol           TEXT NOT NULL,                       -- канонический ключ ленты (BTCUSDT, ETHBTC, ...)
+  tape_quote_per_s DOUBLE PRECISION NOT NULL DEFAULT 0, -- оборот ленты, валюты котирования в секунду (EWMA, τ=CE_TAPE_EWMA_TAU_S)
+  tape_samples     BIGINT NOT NULL DEFAULT 0,           -- сколько чтений ленты вошло в оценку (0 — оценки ещё нет)
+  fill_coef        DOUBLE PRECISION NOT NULL DEFAULT 1, -- f ∈ [0,1]: исполнено/запрошено по хедж-заявкам (τ=CE_FILL_COEF_TAU_S); нет заявок ⇒ 1
+  fill_weight      DOUBLE PRECISION NOT NULL DEFAULT 0, -- вес оценки f: запрошенный объём заявок (база) с забыванием
+  fill_orders      BIGINT NOT NULL DEFAULT 0,           -- сколько заявок вошло в f
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (venue, symbol)
+);
+-- ADR-082 шаг 1: число заявок в f с забыванием на момент записи (вес доверия к f у потребителя; убывает без новых заявок).
+ALTER TABLE venue_liquidity_stats ADD COLUMN IF NOT EXISTS fill_orders_eff DOUBLE PRECISION NOT NULL DEFAULT 0;
 
 -- execution_reports_raw: optional landing zone for normalized ExecutionReport
 -- events before aggregation into ClickHouse `execution_reports`. Useful for:
@@ -369,7 +525,7 @@ INSERT INTO replay_fee_models (id, version, body_json) VALUES (
 -- Creation order respects FK dependencies:
 --   batch_orders → combo_orders → combo_order_legs / combo_constraints /
 --   conditional_links → execution_groups → group_state_transitions.
--- All monetary / qty / price fields: NUMERIC(38,18) per CLAUDE.md §9.
+-- All monetary / qty / price fields: NUMERIC(38,18) per .claude/rules/data.md.
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
@@ -737,7 +893,7 @@ CREATE INDEX IF NOT EXISTS idx_venue_order_levels_batch
 --   accounts, positions  -> ledger  (single writer; risk + gateway read).
 --   risk_limits          -> risk    (writer; matching + gateway read).
 --   risk_snapshots       -> risk    (writer; ledger + gateway + observability read).
--- All monetary / qty / price fields: NUMERIC(38,18) per CLAUDE.md §9 and the
+-- All monetary / qty / price fields: NUMERIC(38,18) per .claude/rules/data.md and the
 --   precision already used by flow_orders / hedgeflows in this file.
 -- NOTE: user_id is TEXT (no FK to `users`) — there is no `users` table in this
 --   init.sql (matching the rest of the schema: flow_orders.user_id is TEXT too).
@@ -934,3 +1090,320 @@ BEGIN
       ADD CONSTRAINT risk_limits_entity_id_nonempty CHECK (entity_id <> '');
   END IF;
 END $$;
+
+-- F-05A ADR-050/052: runtime-настраиваемый параметр цикла батч-клиринга.
+-- Единственная строка (id=1). market_data полит эту таблицу в таймере окна;
+-- frontend-api (вкладка Clearing) читает/пишет. Больше окно = больше кривых
+-- накапливается перед клирингом.
+CREATE TABLE IF NOT EXISTS f05a_clearing_config (
+    id               INT PRIMARY KEY DEFAULT 1,
+    batch_window_ms  INT NOT NULL DEFAULT 1000,
+    stale_level_ms   INT NOT NULL DEFAULT 60000,
+    -- Порог устаревания venue-снапшота (venues polls this): снапшот старше
+    -- порога → venue.liquidity.fob пропускается как stale. Настраивается из UI
+    -- (вкладка Площадки). Должен превышать цикл md_publish_loop при N венью.
+    venue_stale_ms   INT NOT NULL DEFAULT 180000,
+    -- ADR-055/056/057 (CE-агенты, Этап 1): параметры такта. Не используются до
+    -- включения режима агентов; для существующих БД добавить ALTER-миграцией.
+    theta            NUMERIC(38,18) NOT NULL DEFAULT 0.5,   -- haircut глубины (0.3..0.7)
+    dhl_fraction     NUMERIC(38,18) NOT NULL DEFAULT 0.01,  -- квадратичная цена запаса
+    rho              NUMERIC(38,18) NOT NULL DEFAULT 0.004, -- сдвиг якоря на остаток/committed
+    z_limit          NUMERIC(38,18) NOT NULL DEFAULT 0,     -- агрегатный лимит Z_a (0 = выкл)
+    gamma            NUMERIC(38,18) NOT NULL DEFAULT 1,     -- неприятие риска (α=W/(γσ²τ))
+    -- Настраиваемая с фронта комиссия тейкера (bps) для мёртвой зоны агента
+    -- c = комиссия + ½·spread. <0 = брать комиссию из стакана venue (прежнее поведение);
+    -- =0 = линейные кривые без полки-комиссии. market_data поллит эту строку.
+    ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 0,
+    -- Inventory-skew (F-18 v2, обратная связь позиция→цена): matching смещает
+    -- эффективный якорь агента на clamp(γ·c_j, ±max_pm), разворачивая поток при
+    -- накоплении позиции. γ=0 ⇒ выкл. matching поллит эту строку (живая настройка).
+    ce_inv_skew_gamma  NUMERIC(38,18) NOT NULL DEFAULT 0.005, -- ‰ на k-USDT позиции (0=выкл)
+    ce_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 8,    -- клэмп величины смещения (‰)
+    -- Порог band агента ПРИВЯЗАН К КОМИССИИ внешних бирж (F-18): q = k_band·φ_rt,
+    -- φ_rt — round-trip комиссия в bps (переводчик: fee_bps; арбитражёр: 2·fee_bps
+    -- — покупка+продажа на двух биржах). fee_bps = ce_taker_fee_bps (fallback env).
+    -- k_band в k-USDT на bps; 1.8 калибрует переводчика к ~18 при 10 bps. 0 = линк
+    -- выключен (плоский env-порог). ledger поллит эту строку (живая настройка).
+    -- ADR-066: k_band = 1/Γ, где по Кривые §6.4 `Z̄=clim/Γ` и §6.1 `Γ=ρ=γσ²τ` —
+    -- ТОТ ЖЕ коэффициент риск-неприятия, что и snос якоря (skew, ce_inv_skew_gamma),
+    -- а НЕ поле `gamma` (оно — capital-cap `α=W/(γσ²τ)`). Здесь 1.8 — плоский прокси
+    -- 1/Γ при фиксированных σ,τ (D2); унификация per-asset Γ=γσ²τ — целевой D1 (см. #7).
+    ce_band_fee_k      NUMERIC(38,18) NOT NULL DEFAULT 1.8,
+    -- Мейкер-комиссия clim (bps) для ПАССИВНОЙ зоны трёхзонного правила (Кривые §6.4):
+    -- Z̄lim = k_band·clim·rt (no-action → пассив-мейкер), Z̄mkt = k_band·cmkt·rt
+    -- (пассив → агрессив-тейкер), cmkt = ce_taker_fee_bps. clim < cmkt (мейкер дешевле).
+    ce_maker_fee_bps   NUMERIC(38,18) NOT NULL DEFAULT 10,   -- ADR-089: стандартная комиссия 0,1 % (было 2)
+    -- Фаза 2 (наведение порядка): ключевые ручки порога band — здесь, в одном месте
+    -- (ledger читает из PG, env — fallback). ADR-066 D1 (vol-масштаб Γ=γσ²τ).
+    ce_band_q_floor       NUMERIC(38,18) NOT NULL DEFAULT 5,       -- пол порога (k-USDT)
+    ce_band_gamma_mode    BOOLEAN        NOT NULL DEFAULT false,   -- vol-масштаб порога вкл
+    ce_band_sigma_ref     NUMERIC(38,18) NOT NULL DEFAULT 0.0005,  -- σ-якорь VolScaleFactor
+    ce_band_vol_ratio_min NUMERIC(38,18) NOT NULL DEFAULT 0.1,     -- клэмп vol-масштаба (мин)
+    ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10,      -- клэмп vol-масштаба (макс)
+    -- §6.2 «Кривые котирования»: способ снятия наклона α_ext кривой переводчика,
+    -- идущего в КЛИРИНГ. 1=TANGENT (касательная), 2=LSQ_BAND (МНК на полосе),
+    -- 3=PROFIT_AREA (подгонка по выгоде), 4=MINORANT (консервативный минорант,
+    -- §6.3-safe — дефолт). venues поллит эту строку и вызывает SetClearingSlopeMethod.
+    -- M1–M3 точнее трекают VWAP, но могут локально переобещать глубину (см. ADR-053).
+    slope_method     SMALLINT NOT NULL DEFAULT 4,
+    -- Отметка сброса накоплений по состоявшимся сделкам (панель «Живые позиции»):
+    -- статистика base/quote/заработок считается по fills с created_at > этой метки.
+    -- Выставляется при сбросе позиций агентов (reset-positions). NULL = считать всё.
+    trade_stats_reset_at TIMESTAMPTZ,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT f05a_clearing_config_singleton CHECK (id = 1),
+    CONSTRAINT f05a_clearing_config_slope_method CHECK (slope_method BETWEEN 1 AND 4)
+);
+-- Миграция для существующих БД (таблица уже создана без колонки).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_taker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 0;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_inv_skew_gamma NUMERIC(38,18) NOT NULL DEFAULT 0.005;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 8;
+-- ADR-071: inventory-skew ноги арбитражёра (γ_A/K_A). Деф γ_A=0 ⇒ выключен (старое
+-- поведение); K_A=50 — клэмп сдвига (глубина transfer-ребра иная, чем у переводчика).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_arb_inv_skew_gamma NUMERIC(38,18) NOT NULL DEFAULT 0;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_arb_inv_skew_max_pm NUMERIC(38,18) NOT NULL DEFAULT 50;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_fee_k NUMERIC(38,18) NOT NULL DEFAULT 1.8;
+-- capital-cap γ (α=W/(γσ²τ), ADR-066). Есть в CREATE TABLE, но тома, созданные ДО
+-- его добавления, остаются без колонки → SELECT с `gamma` (BFF agent-detail) падает
+-- и дисплей молча откатывается на дефолты (пороги/skew не отражают живой конфиг).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS gamma NUMERIC(38,18) NOT NULL DEFAULT 1;
+-- Фаза 2 (наведение порядка в пороге, ADR-066): ключевые ручки порога band — в ОДНОМ
+-- месте (f05a_clearing_config), ledger читает из PG (env — fallback). Одна точка настройки.
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_q_floor NUMERIC(38,18) NOT NULL DEFAULT 5;        -- пол порога (k-USDT)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_gamma_mode BOOLEAN NOT NULL DEFAULT false;        -- vol-масштаб порога вкл (Γ=γσ²τ)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_sigma_ref NUMERIC(38,18) NOT NULL DEFAULT 0.0005; -- σ-якорь VolScaleFactor
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_min NUMERIC(38,18) NOT NULL DEFAULT 0.1;-- клэмп vol-масштаба (мин)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_vol_ratio_max NUMERIC(38,18) NOT NULL DEFAULT 10; -- клэмп vol-масштаба (макс)
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_maker_fee_bps NUMERIC(38,18) NOT NULL DEFAULT 10;   -- ADR-089 (существующую строку не меняет)
+-- ADR-081: ручная ширина полосы хеджа (тыс. USDT). ce_band_manual=true ⇒ Z̄lim/Z̄mkt берутся отсюда и не зависят от
+-- комиссии, волатильности, ликвидности и веса ноги; иначе ширина считается как раньше (ce_band_gamma_mode — по σ).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual_q_lim NUMERIC(38,18) NOT NULL DEFAULT 5;   -- Z̄lim вручную
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_manual_q_mkt NUMERIC(38,18) NOT NULL DEFAULT 25;  -- Z̄mkt вручную
+-- ADR-081: множитель порога выхода арбитражёров (1 — без изменения; переводчиков не касается; ручной режим его игнорирует).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_band_arb_scale NUMERIC(38,18) NOT NULL DEFAULT 1;
+
+-- ADR-088 (условие 1): режим модели порогов хеджа. NULL — не задан: ledger считает shadow. off | shadow | on. Эффективный режим в ledger =
+-- меньший из потолка окружения CE_HMODEL_MODE и этого значения, поэтому рабочий режим включается только согласием и окружения, и PG.
+-- Пишут: BFF (оператор, строка аудита ce_hmodel_mode_change) и ledger (автопредохранитель, только on → shadow, строка ce_hmodel_fuse_trip).
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS ce_hmodel_mode TEXT CONSTRAINT f05a_clearing_config_hmodel_mode CHECK (ce_hmodel_mode IN ('off', 'shadow', 'on'));
+
+-- ADR-081: журнал операторских действий (аудит, CLAUDE.md §1.7). Пишет BFF в одной транзакции с изменением настроек;
+-- запись неизменяема по соглашению (только INSERT). Пишут BFF (оператор) и ledger (автопредохранитель ADR-088, actor 'ledger:auto-fuse'). actor — заголовок X-User-Id (клиент выставляет сам, не доказательство личности).
+CREATE TABLE IF NOT EXISTS operator_audit_log (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor       TEXT        NOT NULL,
+    action      TEXT        NOT NULL,           -- например ce_band_width_change
+    remote_addr TEXT,
+    user_agent  TEXT,
+    details     JSONB       NOT NULL            -- режим до/после и изменившиеся поля (прежнее → новое)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_audit_log_ts ON operator_audit_log (ts DESC);
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS slope_method SMALLINT NOT NULL DEFAULT 4;
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS trade_stats_reset_at TIMESTAMPTZ;
+INSERT INTO f05a_clearing_config (id, batch_window_ms, stale_level_ms, venue_stale_ms)
+VALUES (1, 1000, 60000, 180000)
+ON CONFLICT (id) DO NOTHING;
+
+-- F-18 remediation этап 0 (причина 6: «конфиг — одна строка без истории»):
+-- версионирование f05a_clearing_config для воспроизводимости прогонов.
+-- config_version растёт при КАЖДОМ реальном изменении значений; снимок старой
+-- строки пишется в историю как jsonb (устойчиво к добавлению колонок).
+-- Выжимка эксперимента (docs/experiments/) ссылается на config_version.
+ALTER TABLE f05a_clearing_config
+    ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS f05a_clearing_config_history (
+    version    BIGINT      NOT NULL,   -- config_version снимка (ДО изменения)
+    snapshot   JSONB       NOT NULL,   -- полная строка конфига ДО изменения
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (version, changed_at)
+);
+
+-- Триггер: при UPDATE с реальным изменением значений (игнорируя служебные
+-- config_version/updated_at) архивируем OLD-строку и инкрементим версию.
+CREATE OR REPLACE FUNCTION f05a_clearing_config_versioning()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'config_version' - 'updated_at')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'config_version' - 'updated_at') THEN
+        INSERT INTO f05a_clearing_config_history (version, snapshot)
+        VALUES (OLD.config_version, to_jsonb(OLD));
+        NEW.config_version := OLD.config_version + 1;
+        NEW.updated_at := now();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS f05a_clearing_config_versioning_trg ON f05a_clearing_config;
+CREATE TRIGGER f05a_clearing_config_versioning_trg
+    BEFORE UPDATE ON f05a_clearing_config
+    FOR EACH ROW EXECUTE FUNCTION f05a_clearing_config_versioning();
+
+-- ---------------------------------------------------------------------------
+-- ce_agent_position: F-18 v2 (T-F18-204, ADR-061 §7, ADR-063) — знаковая
+-- накопленная позиция CE-агента (виртуального контрагента: переводчик |
+-- арбитражёр) между тактами клиринга. Owner: ledger (консюмер
+-- ce.position.delta, docs/06-api/messaging/ce-position-delta.md).
+--
+-- Несовместима с accounts (party_type=CLIENT/HOUSE, CHECK free_balance>=0,
+-- резерв/освобождение) — намеренно ОТДЕЛЬНАЯ таблица: position ЗНАКОВАЯ, БЕЗ
+-- CHECK неотрицательности (A6: базис ядра W·c=0 требует противоположную
+-- компоненту), концепта резерва нет (party_type=AGENT, ADR-063). Прецедент
+-- трёхсоставного PK — sim_positions (ADR-016).
+--
+-- position (c_j) меняется по факту клиринга такта (c ← c + f) — накопление
+-- идемпотентно по last_batch_id (UPSERT-guard в PostgresAgentPositionRepository
+-- / ledger_uc.cpp ApplyPositionDelta, cpp/ledger/CLAUDE.md "применять fill дважды"
+-- запрещено). in_flight зарезервировано для Э3 (полоса ±q, T-F18-304) —
+-- до включения CE_AGENT_BAND всегда 0.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_agent_position (
+    agent_id      TEXT NOT NULL,                     -- 'Q_BIN' | 'T_BTC' ... (= имя ребра CeEdge.name)
+    asset         TEXT NOT NULL,                      -- 'BTC' | 'USD' ...
+    venue         TEXT NOT NULL,                      -- площадка узла; route-level (арбитражёр) — см. data-doc Open Question
+    agent_kind    TEXT CHECK (agent_kind IN ('translator', 'arbitrageur')),
+    position      NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- c_j, ЗНАКОВАЯ (см. коммент выше)
+    in_flight     NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- committed (Э3+), ЗНАКОВАЯ
+    realized_vs_fair NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- ADR-072 §C: накопл. заработок vs fair (quote), персист
+    last_batch_id TEXT,                                -- идемпотентность per batch_id
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_id, asset, venue)
+);
+-- Миграция на существующем dev-volume (init.sql применяется только при создании
+-- volume; на живой БД колонку добавляем вручную этим ALTER — ADR-072 §C).
+ALTER TABLE ce_agent_position
+    ADD COLUMN IF NOT EXISTS realized_vs_fair NUMERIC(38, 18) NOT NULL DEFAULT 0;
+-- Запросы «все переводчики/арбитражёры вне полосы» + staleness-мониторинг.
+CREATE INDEX IF NOT EXISTS ce_agent_position_kind_updated_idx
+    ON ce_agent_position (agent_kind, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- ADR-087 (CALC-CE-AGENT-PNL, docs/07-data/ce-agent-pnl-book.md): заработок агентов CE по биржам (модель C′).
+-- Owner: ledger (writer и reader). ce_agent_pnl_book — книга агента по справедливой цене (одна строка на агента,
+-- абсолютное состояние, обновляется пакетом раз в такт); истории нет, строки удаляет сброс позиций.
+--   qty/avg_fair — открытый остаток и средняя справедливая стоимость его входа; edge — R внутренней биржи;
+--   ext_realized — R внешних бирж; quote — валюта котировки значений (для перевода в USDT).
+-- ledger при старте выполняет тот же блок сам (один раз на процесс); вручную на живой БД — до выкладки ledger.
+-- Таблица модели A (avg_price/realized) переименовывается и очищается один раз: страж — наличие колонки avg_price.
+-- Колонки ext_*/rvf_base таблицы ce_agent_position (модель A) не используются; на живых томах остаются как есть.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_agent_pnl_book (
+    agent_id      TEXT PRIMARY KEY,
+    agent_kind    TEXT NOT NULL CHECK (agent_kind IN ('translator', 'arbitrageur')),
+    qty           NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- L: остаток, штуки базового актива (плюс — длинная позиция)
+    avg_fair      NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (avg_fair >= 0),  -- F_in: средняя справедливая стоимость входа
+    edge          NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R внутренней биржи: Σ (F − p)·dL, валюта котировки, нарастает
+    ext_realized  NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- R внешних бирж: дрейф при закрытии + качество исполнения, нарастает
+    quote         TEXT NOT NULL DEFAULT '',            -- валюта котировки значений ('' — не известна)
+    last_batch_id TEXT,                                -- последний учтённый такт (повторная доставка не удваивает книгу)
+    since_ms      BIGINT NOT NULL CHECK (since_ms > 0),  -- начало накопления, unix ms
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ce_agent_pnl_book_flat_chk CHECK (qty <> 0 OR avg_fair = 0)
+) WITH (fillfactor = 70);
+
+do $$
+declare
+  has_avg_price boolean;
+begin
+  perform set_config('lock_timeout', '5s', true);
+  select exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass
+                  and attname = 'avg_price' and not attisdropped) into has_avg_price;
+  if has_avg_price then
+    -- блокировка и перепроверка стража: параллельный прогон (psql и ledger) мог уже выполнить переход
+    lock table ce_agent_pnl_book in access exclusive mode;
+    select exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass
+                    and attname = 'avg_price' and not attisdropped) into has_avg_price;
+  end if;
+  if has_avg_price then
+    alter table ce_agent_pnl_book rename column avg_price to avg_fair;
+    delete from ce_agent_pnl_book;  -- значения модели A в C′ не пересчитываются: книги заводятся заново
+  end if;
+  if exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'realized' and not attisdropped)
+     and not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'edge' and not attisdropped) then
+    alter table ce_agent_pnl_book rename column realized to edge;
+  end if;
+  if exists (select 1 from pg_constraint where conrelid = 'ce_agent_pnl_book'::regclass and conname = 'ce_agent_pnl_book_avg_price_check') then
+    alter table ce_agent_pnl_book rename constraint ce_agent_pnl_book_avg_price_check to ce_agent_pnl_book_avg_fair_check;
+  end if;
+  -- ADD COLUMN IF NOT EXISTS берёт ACCESS EXCLUSIVE даже когда колонка есть: на каждом старте не выполняем
+  if not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'ext_realized' and not attisdropped) then
+    alter table ce_agent_pnl_book add column ext_realized numeric(38,18) not null default 0;
+  end if;
+  if not exists (select 1 from pg_attribute where attrelid = 'ce_agent_pnl_book'::regclass and attname = 'quote' and not attisdropped) then
+    alter table ce_agent_pnl_book add column quote text not null default '';
+  end if;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
+-- ce_asset_volatility: F-18 D1+#7 (ADR-066, T-F18-701) — оценка волатильности σ
+-- актива для ДИНАМИЧЕСКОГО порога band. По базовым докам Γ=ρ=γσ²τ (Кривые §6.1
+-- ρ≈γσ²τ, §6.4 Z̄=clim/Γ): порог хеджа масштабируется волатильностью площадки.
+--
+-- Owner writer: market_data (EWMA реализованной волатильности лог-доходностей
+-- mid-цены). Reader: ledger (detect_and_emit_band_breach_locked, TTL-кэш как у
+-- f05a_clearing_config) — считает Γ=γσ²τ, z_lim=clim/Γ за флагом CE_BAND_GAMMA_MODE=1.
+--
+-- sigma — БЕЗРАЗМЕРНАЯ доля (σ лог-доходности за окно; масштаб к τ — на стороне
+-- ledger). venue='' = агрегат по площадкам (первый срез per-asset; per-venue —
+-- расширение, отдельная строка). staleness: updated_at старше порога → ledger
+-- fallback на плоский ce_band_fee_k. Контракт: docs/07-data/ce-asset-volatility.md.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_asset_volatility (
+    asset       TEXT NOT NULL,                       -- ИНСТРУМЕНТ-СИМВОЛ без слэша: 'BTCUSDT'|'ETHBTC'|'SOLUSDT' (snap.asset writer'а; ledger строит ключ agent.asset+quote)
+    venue       TEXT NOT NULL DEFAULT '',            -- '' = агрегат по площадкам
+    sigma       NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- σ лог-доходности mid (доля), EWMA
+    window_sec  INT NOT NULL DEFAULT 60,             -- окно/полупериод EWMA (диагностика)
+    samples     INT NOT NULL DEFAULT 0,              -- сколько тиков вошло (доверие к σ)
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asset, venue)
+);
+CREATE INDEX IF NOT EXISTS ce_asset_volatility_updated_idx
+    ON ce_asset_volatility (updated_at DESC);
+
+-- ce_asset_liquidity: F-18 #7 scoped (ADR-066 §D3, T-F18-L01) — глубина стакана
+-- depth (α_e, capital-depth CE-агента) для ЛИКВИДНОСТНОЙ оси band поверх O1/D1.
+-- По ADR-066 §D3: LiqScale=clamp((depth/depth_ref)^0.5, lr_min, lr_max) — глубже
+-- рынок ⇒ ШИРЕ band (можно держать больший запас); p=0.5 по IN-017 Q∝√Λ.
+--
+-- Owner writer: MATCHING (α_e — конфиг matching CE_TRANSFER_ALPHA_*/CE_STOCK_ALPHA_*,
+-- НЕ рыночный сигнал market_data), throttled-UPSERT per (asset,venue), за флагом
+-- CE_LIQ_SIGNAL_ENABLED. Reader: ledger (LoadAssetDepth, TTL-кэш как σ) за флагом
+-- CE_BAND_LIQ_MODE=1. Отдельная таблица (НЕ колонка в ce_asset_volatility) —
+-- разные писатели (matching vs market_data), иначе гонка UPSERT.
+--
+-- depth — тыс.USDT на ‰ (α_e). staleness: updated_at старше порога → ledger
+-- fallback LiqScale=1.0 (нейтрально). Контракт: docs/07-data/ce-asset-liquidity.md.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ce_asset_liquidity (
+    asset       TEXT NOT NULL,                       -- ИНСТРУМЕНТ-СИМВОЛ без слэша (как ce_asset_volatility.asset)
+    venue       TEXT NOT NULL DEFAULT '',            -- площадка; '' = агрегат
+    depth       NUMERIC(38, 18) NOT NULL DEFAULT 0,  -- α_e, тыс.USDT/‰ (capital-depth CE-агента)
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asset, venue)
+);
+CREATE INDEX IF NOT EXISTS ce_asset_liquidity_updated_idx
+    ON ce_asset_liquidity (updated_at DESC);

@@ -23,7 +23,7 @@
 // Контракт:
 //   * НЕ ходит в Kafka/PG — pure compute. snapshot подаётся caller'ом.
 //   * НЕ имеет state — каждый вызов независим.
-//   * Decimal для qty, double для health_score (CLAUDE.md §9: double OK
+//   * Decimal для qty, double для health_score (.claude/rules/data.md: double OK
 //     для metrics, не для money settlement).
 // ============================================================================
 

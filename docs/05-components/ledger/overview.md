@@ -47,6 +47,7 @@
 - F-04 (Batch Clearing) — потребитель `batch.outputs`
 - F-06 (Positions / PnL / Margin) — основной владелец
 - F-12 (Execution Hedge) — потребитель `execution.reports`
+- [F-18 v2](../../02-system/features/F-18-ce-capital-position-hedge/) (CE Virtual Counterparties) — владелец книги знаковой позиции агента (`ce_agent_position`, PG), декремент при эмиссии (A7), A8 подтверждение `qty[asset@venue]` + realized; код planned (гейт ADR-061)
 
 ## Participates In Features
 
