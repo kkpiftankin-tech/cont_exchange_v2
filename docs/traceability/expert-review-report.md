@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **41**
+- Открытых структурированных вопросов (`OQ-*`): **42**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **8**
 - ADR в статусе `proposed` (ждут решения владельца): **15**
-- Инженерных долгов в known-gaps.md: **37**
+- Инженерных долгов в known-gaps.md: **38**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -86,6 +86,7 @@
 - **OQ-F18v2-47** (F-18) — чем ограничивать лимитную зону хеджа, когда комиссии мейкера и тейкера равны · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-49** (F-18) — судьба временного влияния `CE_PRICE_IMPACT_K` при исполнении по стакану · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-50** (F-18) — включать ли полуспред и ожидаемое проскальзывание в порог полосы хеджа · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-52** (F-18) — положительный итог агентов после включения ADR-088 держится на «мгновенных» лимитных исполнениях симулятора: включать ли forward-only · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### инженер с утверждением владельца
 
@@ -181,3 +182,4 @@
 - market_data: долги после CR-F18-016 (2026-10-30, ревью `code-reviewer`, не блокируют).
 - dev, 2026-10-30 08:30–08:32 UTC: позиции ETH-агентов Coinbase и Kraken за полосой 18 тыс. USDT, наблюдение без вывода.
 - dev, 2026-10-30: «агенты перестали зарабатывать» — с 13:00 UTC 29.10 все хеджи полосы рыночные (IOC); причина — комиссии мейкера и тейкера по 10 б.п. при плоском режиме порогов; решение за владельцем (OQ-F18v2-47).
+- dev, 2026-10-30: режим `on` модели порогов ADR-088 включён в 13:39:56 UTC (CR-F18-014); побочное — шум журнала ledger и условие готовности для пар без потока.
