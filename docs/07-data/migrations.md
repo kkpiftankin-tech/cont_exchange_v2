@@ -55,3 +55,12 @@ related:
 - **Откат:** `DROP TABLE ce_reset_epoch CASCADE` и `DROP FUNCTION` перечисленных функций; BFF прежней версии продолжает читать запасную метку `f05a_clearing_config.trade_stats_reset_at`, которую маршрут сброса
   обновляет вместе с эпохой. Таблицу нельзя править обычными командами (триггеры запрещают): `DROP` — только владельцем.
 
+## 2026-11-02 — ce_ledger_boot: запуски ledger как граница для анализа (OQ-F18v2-63, CR-F18-018)
+
+- **Владелец DDL:** frontend-api (BFF), `ensureEpochSchema` (тот же шаг, что у `ce_reset_epoch`); дубль в `infra/postgres/init.sql`. Существующие таблицы **не изменяются**, вручную ничего делать не нужно.
+- **Изменения:** новая таблица `ce_ledger_boot(boot_id PK, first_seen_at)` ([документ](ce-ledger-boot.md)); класс E в `specs/domain/epoch-classes.yaml`.
+- **Начальное состояние:** пустая; первым запишется текущий `boot_id` как «первое наблюдение». Прошлые перезапуски восстановить нельзя, предупреждения о них до этого момента не будет (ответы BFF называют
+  `ledger_restarts_known_since_ms`).
+- **Проверка:** `frontend/api/testdata/epoch_schema_check.sh` (повторная вставка того же `boot_id` даёт одну строку, момент заполняется).
+- **Откат:** `DROP TABLE ce_ledger_boot`; Python-инструменты после этого пишут «запуски ledger неизвестны».
+

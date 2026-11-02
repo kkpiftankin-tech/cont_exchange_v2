@@ -48,6 +48,8 @@ services:
       CE_BAND_SIGMA_REF: ${CE_BAND_SIGMA_REF:-0.00015}
       # ADR-090: сброс позиций разрешён только в песочнице (нет контракта отмены заявок на живых биржах). В production задайте 0 (или NODE_ENV=production).
       CE_RESET_ALLOWED: ${CE_RESET_ALLOWED:-1}
+      # ADR-090 / OQ-F18v2-62: длина прогрева эпохи, мин (первый час модель порогов хеджа копит оценки потока); экраны подписывают, разборы по умолчанию исключают.
+      CE_EPOCH_WARMUP_MIN: ${CE_EPOCH_WARMUP_MIN:-60}
     ports:
       - "8090:8090"
     networks: [default, cex_net]

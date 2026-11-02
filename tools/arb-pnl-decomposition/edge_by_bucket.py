@@ -23,7 +23,8 @@ _bootstrap_lib()
 import epochs as E
 try:
     EPOCHS = E.load_epochs()
-    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS)
+    BOOTS = E.load_boots()   # запуски ledger: перезапуск в окне — предупреждение в шапке (остатки площадок в памяти ledger обнулялись)
+    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS, boots=BOOTS)
 except (E.EpochsUnavailable, E.CrossesResetError, ValueError) as _e:
     raise SystemExit('ОТКАЗ: %s' % _e)
 START, END = WINDOW.from_ms, WINDOW.to_ms
@@ -72,7 +73,7 @@ for line in ch.splitlines():
         except Exception:
             t0 = t
         if STRICT and t0 < START:
-            old_epoch_orders += 1   # заявка создана до начала эпохи: к ней не относится, даже если дозаполнена позже
+            old_epoch_orders += 1   # заявка создана до начала окна (старая эпоха или прогрев): к нему не относится, даже если дозаполнена позже
             continue
         fills.append(dict(kind=m['agent'][0], venue=m['venue'], symbol=m['symbol'], side=m['side'], otype=m['otype'],
                           t=t, age_s=(t - t0) / 1000.0, q=d, p=px))
@@ -143,7 +144,7 @@ def line(label, pred):
         label, len(sel), nt, e, 1e4 * e / nt, len(bps), 'n/a' if t is None else '%.2f' % t))
 
 
-print('window %d..%d ms, fills=%d, no-mid skipped=%d, old-epoch order fills skipped=%d' % (START, END, len(rows), skipped, old_epoch_orders))
+print('window %d..%d ms, fills=%d, no-mid skipped=%d, fills of orders created before the window (old epoch / warm-up) skipped=%d' % (START, END, len(rows), skipped, old_epoch_orders))
 for kind, kname in (('', 'ALL'), ('A', 'arbitrageurs'), ('T', 'translators')):
     sel = (lambda r, k=kind: (k == '' or r['kind'] == k))
     print(kname)

@@ -40,6 +40,7 @@ epochRegistry:
       venue_order_levels: { class: C }
       # --- метка (E)
       ce_reset_epoch: { class: E }
+      ce_ledger_boot: { class: E, note: "запуски ledger (граница для анализа: остатки площадок обнуляются при перезапуске)" }
       # --- не связаны с позициями CE (N)
       accounts: { class: N }
       hedge_ledger_entries: { class: N, note: "проводки клиентского контура ledger" }

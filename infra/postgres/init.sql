@@ -1526,6 +1526,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
+CREATE TABLE IF NOT EXISTS ce_ledger_boot (
+  boot_id       TEXT PRIMARY KEY,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+
 CREATE OR REPLACE FUNCTION ce_epoch_backfill_legacy() RETURNS INTEGER AS $$
 DECLARE
   rec RECORD;

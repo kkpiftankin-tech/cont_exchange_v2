@@ -86,7 +86,7 @@ capabilities:
     ucs: [UC-F18-04]
     calcs: [CALC-CE-PAIR-TRADES, CALC-CE-AGENT-PNL, CALC-CE-SYSTEM-PNL]
     contracts: [docs/06-api/rest/epochs.md, docs/06-api/rest/reset-positions.md]
-    tables: [ce_reset_epoch, f05a_clearing_config, operator_audit_log]
+    tables: [ce_reset_epoch, ce_ledger_boot, f05a_clearing_config, operator_audit_log]
     ui: []  # кнопка «Сбросить позиции» и подпись эпохи на графике «Сделки по парам»; элемента в ui-map пока нет
     codePaths:
       - frontend/api/epoch.js
@@ -95,6 +95,7 @@ capabilities:
       - tools/lib/epochs.py
       - tools/epoch-guard-checker/check.py
       - tools/reset/absolute_reset.sh
+      - tools/reset/absolute_reset_tx.sql
       - specs/domain/epoch-classes.yaml
       - frontend/web/src/pages/VectorClearing/resetFlow.js
     tests:
@@ -104,6 +105,8 @@ capabilities:
       - frontend/api/testdata/epoch_schema_check.sh
       - tools/lib/test_epochs.py
       - tools/epoch-guard-checker/tests/test_check.py
+      - tools/reset/test_absolute_reset_sql.sh
+      - tools/reset/test_absolute_reset_flow.sh
       - frontend/web/src/pages/VectorClearing/__tests__/resetFlow.test.js
       - frontend/web/src/pages/VectorClearing/__tests__/VectorClearingLive.reset.test.js
 

@@ -161,20 +161,47 @@ function resolveEpochWindow(epochs, q, nowMs, opts) {
   };
 }
 
-// Блок для ответа любого маршрута истории. resolved — результат resolveEpochWindow (ok:true).
-function epochBlock(resolved) {
+// Прогрев: в первый час эпохи модель порогов хеджа (ADR-088) копит оценки потока, поэтому он несопоставим с остальным временем эпохи (OQ-F18v2-62).
+// warmup_until_ms — момент конца прогрева текущей эпохи; экраны подписывают его, скрипты разбора по умолчанию исключают (tools/lib/epochs.py).
+function withWarmup(e, warmupMin) {
+  if (!e || !(e.epoch > 0) || !(warmupMin > 0)) return e;
+  return { ...e, warmup_until_ms: e.at_ms + warmupMin * 60000 };
+}
+
+// Блок для ответа любого маршрута истории. resolved — результат resolveEpochWindow (ok:true); warmupMin — длина прогрева эпохи, мин (необязательно).
+function epochBlock(resolved, warmupMin) {
   return {
     epoch_supported: resolved.supported,
-    epoch: resolved.epoch,
+    epoch: withWarmup(resolved.epoch, warmupMin),
     window: resolved.window,
     reset_markers: resolved.reset_markers,
   };
 }
 
 // Короткий блок для шапки ответов «текущего состояния» (позиции, заработок): только текущая эпоха.
-function epochHeader(epochs) {
+function epochHeader(epochs, warmupMin) {
   if (!Array.isArray(epochs)) return { epoch_supported: false, epoch: null };
-  return { epoch_supported: true, epoch: pick(currentEpoch(epochs)) };
+  return { epoch_supported: true, epoch: withWarmup(pick(currentEpoch(epochs)), warmupMin) };
+}
+
+// Перезапуски ledger в окне (OQ-F18v2-63). boots — [{ at_ms }] по возрастанию, первая запись — первое наблюдение BFF (перезапуском не считается).
+// Остатки площадок живут в памяти ledger и обнуляются при перезапуске, поэтому окно через него смешивает два состояния; это граница для анализа, не эпоха.
+// at_ms — момент ПЕРВОГО НАБЛЮДЕНИЯ, он позже настоящего старта не более чем на BOOT_SLACK_MS (опрос 60 с + кэш 30 с): окно, которое кончается в этот
+// промежуток, тоже получает предупреждение. Запуск, начатый абсолютным сбросом (ledger поднимает сам скрипт сразу после метки), перезапуском посреди
+// эпохи не считается: состояние там исходное, смеси нет — его пропускает окно ABSOLUTE_BOOT_GRACE_MS после метки kind='absolute' (нужен epochs).
+const BOOT_SLACK_MS = 90000;
+const ABSOLUTE_BOOT_GRACE_MS = 10 * 60000;
+function bootsInWindow(boots, fromMs, toMs, epochs) {
+  const list = Array.isArray(boots) ? boots : [];
+  const marks = (Array.isArray(epochs) ? epochs : []).filter((e) => e && e.kind === 'absolute' && Number.isFinite(Number(e.at_ms)));
+  return list.slice(1).map((b) => Number(b.at_ms)).filter((t) => Number.isFinite(t) && t > Number(fromMs) && t - BOOT_SLACK_MS <= Number(toMs)
+    && !marks.some((e) => t >= Number(e.at_ms) && t <= Number(e.at_ms) + ABSOLUTE_BOOT_GRACE_MS));
+}
+// Момент, с которого запуски ledger известны (первое наблюдение BFF); null — ни одного запуска не наблюдалось. Окно, начавшееся раньше, может содержать
+// неизвестные перезапуски.
+function bootsKnownSince(boots) {
+  const t = Array.isArray(boots) && boots.length ? Number(boots[0].at_ms) : NaN;
+  return Number.isFinite(t) ? t : null;
 }
 
 // Строки с полем времени (мс) → те же строки с полем epoch (для allow_cross_reset: каждая точка несёт свою эпоху). Если у строки уже есть
@@ -189,5 +216,5 @@ function tagEpoch(rows, epochs, tsField) {
 
 module.exports = {
   VIRTUAL_EPOCH, normalizeEpochs, currentEpoch, epochAt, findEpoch, epochWindows,
-  resolveEpochWindow, epochBlock, epochHeader, tagEpoch, parseBool,
+  resolveEpochWindow, epochBlock, epochHeader, tagEpoch, parseBool, bootsInWindow, bootsKnownSince, withWarmup, BOOT_SLACK_MS, ABSOLUTE_BOOT_GRACE_MS,
 };

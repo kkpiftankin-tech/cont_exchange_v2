@@ -26,7 +26,8 @@ _bootstrap_lib()
 import epochs as E
 try:
     EPOCHS = E.load_epochs()
-    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS)
+    BOOTS = E.load_boots()   # запуски ledger: перезапуск в окне — предупреждение в шапке (остатки площадок в памяти ledger обнулялись)
+    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS, boots=BOOTS)
 except (E.EpochsUnavailable, E.CrossesResetError, ValueError) as _e:
     raise SystemExit('ОТКАЗ: %s' % _e)
 START, END = WINDOW.from_ms, WINDOW.to_ms
@@ -59,6 +60,7 @@ ch = sh("docker exec -i infra-clickhouse-1 clickhouse-client -q \"SELECT intent_
 fills = []
 prev = {}
 zero_px_ticks = 0
+before_window_orders = 0
 for line in ch.splitlines():
     p = line.split('\t')
     iid, t, cum, px = p[0], int(p[1]), float(p[2]), float(p[3])
@@ -77,7 +79,8 @@ for line in ch.splitlines():
         except Exception:
             t0 = t
         if STRICT and t0 < START:
-            continue   # заявка создана до начала эпохи: старая эпоха, даже если дозаполнена позже (ADR-090)
+            before_window_orders += 1   # заявка создана до начала окна (старая эпоха или прогрев): к нему не относится, даже если дозаполнена позже (ADR-090)
+            continue
         fills.append(dict(agent=m['agent'], venue=m['venue'], symbol=m['symbol'], side=m['side'], otype=m['otype'],
                           t=t, age_s=(t - t0) / 1000.0, q=d, p=px))
 
@@ -176,8 +179,8 @@ for a, fl in by_agent.items():
     tot['direct'] += total_direct
 
 rows.sort(key=lambda r: r[6])
-print('window %s .. %s UTC, fills used=%d skipped(no mid)=%d zero_px_ticks=%d' % (
-    datetime.datetime.utcfromtimestamp(START / 1000), datetime.datetime.utcfromtimestamp(END / 1000), tot['n'], skipped, zero_px_ticks))
+print('window %s .. %s UTC, fills used=%d skipped(no mid)=%d zero_px_ticks=%d orders-created-before-window skipped=%d' % (
+    datetime.datetime.utcfromtimestamp(START / 1000), datetime.datetime.utcfromtimestamp(END / 1000), tot['n'], skipped, zero_px_ticks, before_window_orders))
 print('%-22s %5s %9s | %8s %8s %8s | %8s %8s | %8s %8s %9s' % (
     'agent', 'fills', 'gross$', 'exec', 'basis', 'invent', 'sum', 'direct', 'R_panel', 'R_placeb', 'net_inv'))
 for r in rows:

@@ -85,6 +85,13 @@ BEGIN
   ok := FALSE; BEGIN PERFORM ce_epoch_open('owner', 'partial', 'вид', 'req-kind', '{}', '{}', NULL, NULL, now() + interval '2 seconds'); EXCEPTION WHEN OTHERS THEN ok := TRUE; END;
   IF NOT ok THEN RAISE EXCEPTION 'неизвестный вид метки должен быть отклонён'; END IF;
   IF ce_current_epoch() <> 6 THEN RAISE EXCEPTION 'отклонённые вызовы не должны создавать эпох, а текущая %', ce_current_epoch(); END IF;
+
+  -- 8. Запуски ledger (OQ-F18v2-63): повторная вставка того же boot_id даёт одну строку, момент первого наблюдения заполнен.
+  INSERT INTO ce_ledger_boot (boot_id) VALUES ('boot-a') ON CONFLICT DO NOTHING;
+  INSERT INTO ce_ledger_boot (boot_id) VALUES ('boot-a') ON CONFLICT DO NOTHING;
+  IF (SELECT count(*) FROM ce_ledger_boot WHERE boot_id = 'boot-a') <> 1 THEN RAISE EXCEPTION 'повторное наблюдение того же запуска должно давать одну строку'; END IF;
+  IF (SELECT first_seen_at FROM ce_ledger_boot WHERE boot_id = 'boot-a') IS NULL THEN RAISE EXCEPTION 'first_seen_at не заполнен'; END IF;
+  IF ce_current_epoch() <> 6 THEN RAISE EXCEPTION 'запись запуска ledger не должна менять эпоху'; END IF;
 END
 $$;
 

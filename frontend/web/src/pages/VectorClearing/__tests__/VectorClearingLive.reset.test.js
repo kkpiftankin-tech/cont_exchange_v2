@@ -41,6 +41,7 @@ test('запрос несёт название, подтверждение, requ
   await waitFor(() => expect(screen.getByText(/эпоха 4 «опыт D»/)).toBeTruthy());
   expect(screen.getByText(/НЕ сброшены/)).toBeTruthy();
   expect(window.prompt.mock.calls[0][0]).toMatch(/absolute_reset\.sh/);
+  expect(window.prompt).toHaveBeenCalledTimes(2);   // название и его повторный ввод
 });
 
 test('отмена вопроса или пустое название — запрос не отправляется', async () => {
@@ -52,6 +53,19 @@ test('отмена вопроса или пустое название — за�
   window.prompt = jest.fn(() => '   ');
   fireEvent.click(screen.getByText('⟲ Сбросить позиции'));
   await waitFor(() => expect(screen.getByText(/нужно название эксперимента/)).toBeTruthy());
+  expect(resetPosts().length).toBe(0);
+});
+
+test('повторный ввод названия: не совпал или отменён — запрос не отправляется', async () => {
+  render(<VectorClearingLive />);
+  window.prompt = jest.fn().mockReturnValueOnce('опыт D').mockReturnValueOnce('опыт X');
+  await clickReset();
+  await waitFor(() => expect(screen.getByText(/повторно введённое название не совпало/)).toBeTruthy());
+  expect(window.prompt).toHaveBeenCalledTimes(2);
+  expect(resetPosts().length).toBe(0);
+  window.prompt = jest.fn().mockReturnValueOnce('опыт D').mockReturnValueOnce(null);
+  fireEvent.click(screen.getByText('⟲ Сбросить позиции'));
+  await waitFor(() => expect(window.prompt).toHaveBeenCalledTimes(2));
   expect(resetPosts().length).toBe(0);
 });
 

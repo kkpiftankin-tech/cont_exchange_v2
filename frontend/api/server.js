@@ -7131,6 +7131,44 @@ async function loadEpochs(pool, force) {
   }
   return epochInflight;
 }
+// Прогрев эпохи, мин (OQ-F18v2-62): первый час модель порогов копит оценки потока; экраны это подписывают, скрипты разбора по умолчанию исключают.
+const EPOCH_WARMUP_MIN = (() => {
+  const raw = process.env.CE_EPOCH_WARMUP_MIN;
+  if (raw === undefined || String(raw).trim() === "") return 60;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 0 && n <= 24 * 60) return n;
+  console.error("[epoch] CE_EPOCH_WARMUP_MIN=" + JSON.stringify(raw) + " — не целое от 0 до 1440; использую 60");   // молча выключать прогрев нельзя
+  return 60;
+})();
+// Запуски ledger (OQ-F18v2-63): остатки площадок обнуляются при каждом перезапуске, а позиции в Postgres остаются. Записывается момент ПЕРВОГО
+// НАБЛЮДЕНИЯ BFF каждого boot_id (UUID без времени), точность — интервал опроса BFF. Граница для анализа, не эпоха: ничего не сбрасывается.
+let lastBootSeen = "";
+function noteLedgerBoot(bootId) {
+  const id = String(bootId || "");
+  if (!id || id === lastBootSeen) return;
+  const pool = getPgPool();
+  if (!pool) return;
+  lastBootSeen = id;
+  ensureEpochReady(pool)
+    .then(() => pool.query("INSERT INTO ce_ledger_boot (boot_id) VALUES ($1) ON CONFLICT DO NOTHING", [id]))
+    .then(() => { bootsCache.at = 0; })
+    .catch((e) => {   // повтор при следующем наблюдении; в журнал — не чаще раза в минуту (опрос идёт раз в ~10 с)
+      lastBootSeen = "";
+      if (Date.now() - bootErrLogAt > 60000) { bootErrLogAt = Date.now(); console.error("[epoch] запуск ledger не записан:", (e && e.message) || e); }
+    });
+}
+let bootErrLogAt = 0;
+let bootsCache = { at: 0, boots: [] };
+async function loadBoots(pool) {
+  if (!pool) return bootsCache.boots;
+  if (Date.now() - bootsCache.at < 30000) return bootsCache.boots;
+  try {
+    await ensureEpochReady(pool);
+    const r = await pool.query("SELECT (EXTRACT(EPOCH FROM first_seen_at)*1000)::bigint AS at_ms FROM ce_ledger_boot ORDER BY first_seen_at");
+    bootsCache = { at: Date.now(), boots: r.rows.map((x) => ({ at_ms: Number(x.at_ms) })) };
+  } catch (e) { bootsCache = { at: Date.now(), boots: bootsCache.boots }; }   // сбой — прежний список; повтор через 30 с
+  return bootsCache.boots;
+}
 // Граница «с момента сброса» (мс): начало текущей эпохи; пока меток нет — прежняя метка конфигурации; нет и её — 0 (всё время).
 async function resetFloorMs(pool) {
   const epochs = await loadEpochs(pool);
@@ -7148,7 +7186,12 @@ async function epochWindowFor(pool, query, opts) {
     hours: q.hours, from_ms: q.from_ms, to_ms: q.to_ms, epoch: q.epoch, allow_cross_reset: q.allow_cross_reset,
   }, Date.now(), opts);
   if (!resolved.ok) return resolved;
-  return { ok: true, resolved, epochs, block: epochLib.epochBlock(resolved), fromMs: resolved.window.effective_from_ms, toMs: resolved.window.to_ms };
+  const block = epochLib.epochBlock(resolved, EPOCH_WARMUP_MIN);
+  // Перезапуски ledger внутри окна (OQ-F18v2-63): остатки площадок в памяти ledger при них обнулялись, окно через перезапуск смешивает два состояния.
+  const boots = await loadBoots(pool);
+  block.window = { ...block.window, ledger_restarts: epochLib.bootsInWindow(boots, resolved.window.effective_from_ms, resolved.window.to_ms, epochs),
+    ledger_restarts_known_since_ms: epochLib.bootsKnownSince(boots) };
+  return { ok: true, resolved, epochs, block, fromMs: resolved.window.effective_from_ms, toMs: resolved.window.to_ms };
 }
 
 // ── Сброс позиций: вспомогательное (ADR-090) ──
@@ -7201,6 +7244,7 @@ async function snapshotBeforeReset(led) {
     try {
       const resp = await grpcCall(led, "GetExchangeBalances", { currencies: [] });
       out.boot_id = String((resp && resp.boot_id) || "");
+      noteLedgerBoot(out.boot_id);   // запуск ledger — граница для анализа (OQ-F18v2-63)
       out.exchange = {};
       for (const b of (resp && resp.balances) || []) {
         out.exchange[b.currency] = { assets: decStr(b.assets_total), client_liability: decStr(b.client_liability), venue: decStr(b.venue_total), in_flight: decStr(b.in_flight) };
@@ -7305,6 +7349,7 @@ async function loadSystemPnlInputs() {
   const led = initLedgerClient();
   if (!led) throw new Error("ledger_unavailable");
   const resp = await grpcCall(led, "GetExchangeBalances", { currencies: [] });
+  noteLedgerBoot(resp && resp.boot_id);   // запуск ledger — граница для анализа (OQ-F18v2-63)
   // десятичное из gRPC: нечисловое значение не превращаем в 0 (иначе остаток выглядел бы нулевым и дал ложный результат), валюту пропускаем
   const dn = (d) => (d && d.units !== undefined && d.units !== null && Number.isFinite(Number(d.units))) ? Number(d.units) / Math.pow(10, Number(d.scale) || 0) : null;
   const q = {};
@@ -8870,9 +8915,13 @@ async function handleVectorClearing(req, res, pathname, query) {
     if (!Array.isArray(epochs)) return writeJson(res, 200, { supported: false, current: null, epochs: [], count: 0, has_more: false, generatedAt: new Date().toISOString() });
     // Публично только номер, момент, вид и название: автор (подменяемый X-User-Id) и boot_id остаются в базе для аудита.
     const pub = (e) => ({ epoch: e.epoch, at_ms: e.at_ms, kind: e.kind, note: e.note });
+    const boots = await loadBoots(pool);
     return writeJson(res, 200, {
-      supported: true, current: pub(epochLib.currentEpoch(epochs)), epochs: epochs.slice().reverse().slice(0, limit).map(pub), count: epochs.length,
-      has_more: epochs.length > limit, generatedAt: new Date().toISOString(),
+      supported: true, current: epochLib.withWarmup(pub(epochLib.currentEpoch(epochs)), EPOCH_WARMUP_MIN), epochs: epochs.slice().reverse().slice(0, limit).map(pub), count: epochs.length,
+      has_more: epochs.length > limit, warmup_min: EPOCH_WARMUP_MIN,
+      // моменты перезапусков ledger (первое наблюдение BFF и запуск, начатый абсолютным сбросом, не считаются), последние 20
+      ledger_restarts: epochLib.bootsInWindow(boots, -1, Number.MAX_SAFE_INTEGER, epochs).slice(-20), ledger_restarts_known_since_ms: epochLib.bootsKnownSince(boots),
+      generatedAt: new Date().toISOString(),
     });
   }
   if (pathname === "/api/vector-clearing/agent-pnl") {
@@ -8882,7 +8931,7 @@ async function handleVectorClearing(req, res, pathname, query) {
     const ids = String((query && query.agent_ids) || "").split(",").map((x) => x.trim()).filter(Boolean);
     try {
       const resp = await grpcCall(led, "GetAgentPnl", { agent_ids: ids });
-      return writeJson(res, 200, { ...buildAgentPnlDto(resp), ...epochLib.epochHeader(await loadEpochs(getPgPool())) });
+      return writeJson(res, 200, { ...buildAgentPnlDto(resp), ...epochLib.epochHeader(await loadEpochs(getPgPool()), EPOCH_WARMUP_MIN) });
     } catch (e) {
       console.error("[ledger] GetAgentPnl failed:", (e && e.message) || e);
       return writeJson(res, 502, { error: "ledger_unavailable", reason: (e && e.code === 12) ? "unimplemented" : String((e && e.message) || e) });
@@ -8890,7 +8939,7 @@ async function handleVectorClearing(req, res, pathname, query) {
   }
   if (pathname === "/api/vector-clearing/agent-positions") {
     const { agentRows, newest, pnlTotals } = await loadLiveAgentRows();
-    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, hmodel_supported: ledgerKnowsHedgeModel, ...epochLib.epochHeader(await loadEpochs(getPgPool())), generatedAt: new Date().toISOString() });
+    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, hmodel_supported: ledgerKnowsHedgeModel, ...epochLib.epochHeader(await loadEpochs(getPgPool()), EPOCH_WARMUP_MIN), generatedAt: new Date().toISOString() });
   }
   // История заработка агента во времени (график по клику на агента): R, U и R+U, записанные семплером раз в минуту.
   // Прибыль системы по реальным остаткам: текущие значения (торговый результат, переоценка запасов, по валютам) и ряд за окно.
@@ -8927,7 +8976,7 @@ async function handleVectorClearing(req, res, pathname, query) {
       })), 500);
       return writeJson(res, 200, {
         window_hours: hours, baseline_ms: base ? base.ts_ms : null, current, current_error: currentError, points, has_data: points.length > 0,
-        ...epochLib.epochHeader(await loadEpochs(pool)), epoch_floor_ms: await resetFloorMs(pool).catch(() => null),   // ряд идёт с начала текущей эпохи (ADR-090)
+        ...epochLib.epochHeader(await loadEpochs(pool), EPOCH_WARMUP_MIN), epoch_floor_ms: await resetFloorMs(pool).catch(() => null),   // ряд идёт с начала текущей эпохи (ADR-090)
         generatedAt: new Date().toISOString(),
       });
     } catch (e) {

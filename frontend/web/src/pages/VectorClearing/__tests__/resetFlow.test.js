@@ -1,4 +1,4 @@
-import { newRequestId, resetErrorInfo, resetSuccessText, RESET_PROMPT, RESET_TOOLTIP } from '../resetFlow';
+import { newRequestId, resetErrorInfo, resetSuccessText, confirmationMatches, RESET_PROMPT, RESET_TOOLTIP } from '../resetFlow';
 
 // Поток кнопки сброса позиций (ADR-090): тексты и идентификатор запроса. Домена здесь нет — только показ кодов, которые вернул BFF.
 describe('newRequestId', () => {
@@ -57,5 +57,17 @@ describe('подсказки', () => {
   test('называют абсолютный сброс и скрипт', () => {
     expect(RESET_PROMPT).toMatch(/absolute_reset\.sh/);
     expect(RESET_TOOLTIP).toMatch(/absolute_reset\.sh/);
+  });
+});
+
+describe('confirmationMatches', () => {
+  test('совпадает с точностью до пробелов по краям', () => {
+    expect(confirmationMatches('опыт D', '  опыт D ')).toBe(true);
+  });
+  test('иное название, пустое, не строка — не совпадает', () => {
+    expect(confirmationMatches('опыт D', 'опыт d')).toBe(false);
+    expect(confirmationMatches('опыт D', '')).toBe(false);
+    expect(confirmationMatches('', '')).toBe(false);
+    expect(confirmationMatches('опыт D', null)).toBe(false);
   });
 });

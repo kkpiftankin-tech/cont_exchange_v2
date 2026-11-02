@@ -76,6 +76,38 @@ def load_epochs(psql=None):
         raise EpochsUnavailable('нет docker/psql на этой машине (скрипты запускаются на dev-хосте): %s' % e)
 
 
+_SQL_BOOTS = "SELECT (EXTRACT(EPOCH FROM first_seen_at)*1000)::bigint FROM ce_ledger_boot ORDER BY first_seen_at"
+
+
+def load_boots(psql=None):
+    """Моменты запусков ledger (мс; первое наблюдение BFF каждого boot_id, по возрастанию) или None, если таблицы нет (OQ-F18v2-63).
+    Первая запись — первое наблюдение, а не перезапуск; перезапуски — со второй."""
+    run = psql or _psql
+    try:
+        out = run(_SQL_BOOTS)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return [int(float(l.split('\t')[0])) for l in str(out).splitlines() if l.strip()]
+
+
+BOOT_SLACK_MS = 90 * 1000                   # BFF видит запуск позже его настоящего старта (опрос 60 с + кэш 30 с)
+ABSOLUTE_BOOT_GRACE_MS = 10 * 60 * 1000     # запуск ledger, начатый абсолютным сбросом, — часть сброса, а не перезапуск посреди эпохи
+
+
+def restarts_in(boots, from_ms, to_ms, epochs=None, slack_ms=BOOT_SLACK_MS):
+    """Перезапуски ledger внутри окна (from, to]: остатки площадок в памяти ledger при них обнулялись.
+    Метка запуска — момент первого наблюдения, он позже настоящего старта до slack_ms, поэтому окно, кончающееся в этот промежуток, тоже считается
+    пересекшим перезапуск. Запуск в первые 10 мин после метки kind='absolute' (его поднимает сам скрипт сброса) перезапуском не считается."""
+    absolute = [e['at_ms'] for e in (epochs or []) if e.get('kind') == 'absolute']
+    return [t for t in (boots or [])[1:]
+            if from_ms < t and t - slack_ms <= to_ms and not any(a <= t <= a + ABSOLUTE_BOOT_GRACE_MS for a in absolute)]
+
+
+def boots_known_since(boots):
+    """Момент, с которого запуски ledger известны (первое наблюдение BFF), или None. Окно, начавшееся раньше, может содержать неизвестные перезапуски."""
+    return boots[0] if boots else None
+
+
 def current(epochs):
     return epochs[-1] if epochs else VIRTUAL
 
@@ -111,7 +143,13 @@ def intervals(epochs):
 class Window(object):
     """Результат resolve(): границы выборки и сведения об эпохах для шапки отчёта."""
 
-    def __init__(self, from_ms, to_ms, epochs_in, markers, crosses, reason, requested):
+    def __init__(self, from_ms, to_ms, epochs_in, markers, crosses, reason, requested, warmup_min=0, warmup_skipped=False, restarts=None, boots_known=True,
+                 boots_since=None):
+        self.warmup_min = warmup_min            # исключённый прогрев эпохи, мин (0 — не исключался)
+        self.warmup_skipped = warmup_skipped    # прогрев не исключён, потому что окно не длиннее прогрева
+        self.restarts = restarts or []          # перезапуски ledger в окне (мс)
+        self.boots_known = boots_known          # False — таблицы запусков нет, перезапуски неизвестны
+        self.boots_since = boots_since          # момент, с которого запуски известны (мс) или None
         self.from_ms = from_ms
         self.to_ms = to_ms
         self.epochs = epochs_in            # эпохи, которых касается окно
@@ -129,10 +167,24 @@ class Window(object):
             lines.append('  эпоха %d: с %s, вид=%s, «%s», автор=%s' % (e['epoch'], fmt(e['at_ms']), e['kind'] or '—', e['note'], e['actor'] or '—'))
         lines.append('crosses_reset=%s%s' % ('true' if self.crosses_reset else 'false',
                                              ('  причина: ' + self.cross_reason) if self.crosses_reset else ''))
+        if self.warmup_min:
+            lines.append('прогрев модели порогов: первые %d мин эпохи исключены (--warmup-min 0, чтобы включить)' % self.warmup_min)
+        elif self.warmup_skipped:
+            lines.append('прогрев модели порогов НЕ исключён: окно не длиннее прогрева')
+        if self.restarts:
+            lines.append('ВНИМАНИЕ: окно пересекает %d перезапуск(ов) ledger (%s): остатки площадок в памяти ledger при них обнулялись, '
+                         'позиции остались — сравнение до и после перезапуска некорректно' % (
+                             len(self.restarts), ', '.join(time.strftime('%m-%d %H:%M', time.gmtime(t / 1000.0)) for t in self.restarts)))
+        if not self.boots_known:
+            lines.append('запуски ledger неизвестны (таблицы ce_ledger_boot нет): перезапуски в окне проверить нельзя')
+        elif self.boots_since is None:
+            lines.append('запуски ledger ещё не наблюдались (ce_ledger_boot пуста): перезапуски в окне проверить нельзя')
+        elif self.from_ms < self.boots_since:
+            lines.append('ВНИМАНИЕ: запуски ledger известны только с %s — перезапуски в начале окна могли остаться незамеченными' % fmt(self.boots_since))
         return lines
 
 
-def resolve(epochs, from_ms=None, to_ms=None, epoch=None, allow_cross=False, reason=None, now_ms=None):
+def resolve(epochs, from_ms=None, to_ms=None, epoch=None, allow_cross=False, reason=None, now_ms=None, warmup_min=0, boots=None):
     """Окно разбора с проверкой метки.
 
     epoch: None | 'current' | 'all' | номер. Без epoch и без from/to — текущая эпоха до сейчас.
@@ -140,6 +192,7 @@ def resolve(epochs, from_ms=None, to_ms=None, epoch=None, allow_cross=False, rea
     allow_cross разрешает пересечение ТОЛЬКО вместе с непустой причиной (она попадает в шапку отчёта).
     """
     now = int(now_ms if now_ms is not None else time.time() * 1000)
+    warmup_min = max(0, int(warmup_min or 0))   # отрицательный прогрев сдвинул бы начало окна ДО метки, мимо проверки пересечения
     cur = current(epochs)
     if epoch is not None and (from_ms is not None or to_ms is not None):
         raise ValueError('--epoch нельзя сочетать с явными START/END')
@@ -176,7 +229,18 @@ def resolve(epochs, from_ms=None, to_ms=None, epoch=None, allow_cross=False, rea
             raise ValueError('--allow-cross-reset требует --cross-reason "причина": она попадает в шапку отчёта')
     touched = [VIRTUAL if w[0] == 0 else find(epochs, w[0]) for w in intervals(epochs)
                if (w[2] is None or w[2] > from_ms) and w[1] < to_ms]
-    return Window(from_ms, to_ms, touched, markers, crosses, (reason or '').strip(), requested)
+    # Прогрев (OQ-F18v2-62): первый час эпохи модель порогов копит оценки потока — несопоставим с остальным временем. Исключается по умолчанию
+    # только когда окно задано эпохой (current / N), не для явных START..END и не для «all».
+    applied, skipped = 0, False
+    if warmup_min and requested != 'explicit' and requested != 'all' and touched and touched[0]['epoch'] > 0:
+        shifted = max(from_ms, touched[-1]['at_ms'] if requested == 'current' else touched[0]['at_ms']) + warmup_min * 60000
+        if shifted < to_ms:
+            from_ms, applied = shifted, warmup_min
+        else:
+            skipped = True
+    restarts = restarts_in(boots, from_ms, to_ms, epochs)
+    return Window(from_ms, to_ms, touched, markers, crosses, (reason or '').strip(), requested, applied, skipped, restarts, boots is not None,
+                  boots_known_since(boots))
 
 
 def split_by_epoch(rows, ts_ms_of, epochs):
@@ -197,6 +261,17 @@ def warn_if_beyond_ttl(from_ms, now_ms=None, stream=None):
     return False
 
 
+def _nonneg_int(text):
+    import argparse
+    try:
+        n = int(text)
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError('нужно целое число минут >= 0, получено %r' % (text,))
+    return n
+
+
 def add_cli_args(parser):
     """Единые параметры окна для всех скриптов разбора."""
     parser.add_argument('start', nargs='?', type=int, help='начало окна, мс (необязательно; без start/end — текущая эпоха)')
@@ -204,9 +279,11 @@ def add_cli_args(parser):
     parser.add_argument('--epoch', default=None, help='current | all | номер эпохи (целиком); нельзя вместе с START/END')
     parser.add_argument('--allow-cross-reset', action='store_true', help='разрешить окну пересекать метку сброса (нужна --cross-reason)')
     parser.add_argument('--cross-reason', default='', help='причина смешения эпох; попадает в шапку отчёта')
+    parser.add_argument('--warmup-min', type=_nonneg_int, default=60, help='исключить первые N минут эпохи (прогрев оценок модели порогов); 0 — не исключать; '
+                        'действует, когда окно задано эпохой (по умолчанию текущая или --epoch N)')
     return parser
 
 
-def window_from_args(args, epochs, now_ms=None):
+def window_from_args(args, epochs, now_ms=None, boots=None):
     return resolve(epochs, from_ms=args.start, to_ms=args.end, epoch=args.epoch, allow_cross=args.allow_cross_reset,
-                   reason=args.cross_reason, now_ms=now_ms)
+                   reason=args.cross_reason, now_ms=now_ms, warmup_min=args.warmup_min, boots=boots)

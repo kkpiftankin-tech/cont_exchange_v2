@@ -9,7 +9,7 @@ import { groupTranslators, groupArbitrageurs, isIdleAgent, mergeStableRows } fro
 import HedgeModelThresholds from './HedgeModelThresholds';
 import AgentPnlChart from './AgentPnlChart';
 import SystemPnlBlock from './SystemPnlBlock';
-import { newRequestId, resetErrorInfo, resetSuccessText, RESET_PROMPT, RESET_TOOLTIP } from './resetFlow';  // сброс позиций с меткой эпохи (ADR-090)
+import { newRequestId, resetErrorInfo, resetSuccessText, confirmationMatches, RESET_PROMPT, RESET_CONFIRM_PROMPT, RESET_TOOLTIP } from './resetFlow';  // сброс позиций с меткой эпохи (ADR-090)
 import './VectorClearingLive.css';
 
 // F-05A: живой мониторинг векторного клиринга (ClickHouse vector_clearing_results).
@@ -1425,6 +1425,9 @@ function VectorClearingLive() {
       if (raw === null) return;
       const note = String(raw).trim();
       if (!note) { setResetMsg('сброс отменён: нужно название эксперимента'); return; }
+      const again = window.prompt(RESET_CONFIRM_PROMPT, '');   // повторный ввод названия: защита от случайного клика
+      if (again === null) return;
+      if (!confirmationMatches(note, again)) { setResetMsg('сброс отменён: повторно введённое название не совпало'); return; }
       req = { requestId: newRequestId(window.crypto, Date.now(), Math.random), note, expected: current };
     }
     setResetting(true); setResetMsg('');

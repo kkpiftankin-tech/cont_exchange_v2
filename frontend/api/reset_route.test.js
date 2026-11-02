@@ -22,6 +22,8 @@ const state = {
     { epoch_id: 3, at_ms: T0 - 2 * H, kind: 'absolute', note: 'опыт C', actor: 'owner', boot_id: 'b3', request_id: 'req-3' },
   ],
   queries: [],
+  boots: [{ at_ms: T0 - 20 * H }, { at_ms: T0 - 8 * H }, { at_ms: T0 - 3 * H }],   // запуски ledger: первая запись — первое наблюдение BFF
+  bootInserts: [],
   events: [],            // порядок значимых событий: audit:<action>, ledger:reset, sql:epoch_open, sql:commit, sql:rollback
   audits: [],            // записи operator_audit_log
   failEpochOpen: 0,      // сколько ближайших вызовов ce_epoch_open должны упасть
@@ -54,6 +56,8 @@ function fakeQuery(sql, params, client) {
     client.pending.push(e);
     return Promise.resolve({ rows: [{ epoch_id: String(e.epoch_id), at_ms: String(e.at_ms), kind: e.kind, note: e.note }] });
   }
+  if (/INSERT INTO ce_ledger_boot/.test(text)) { state.bootInserts.push(p[0]); return Promise.resolve({ rows: [], rowCount: 1 }); }
+  if (/FROM ce_ledger_boot/.test(text)) return Promise.resolve({ rows: state.boots.map((b) => ({ at_ms: String(b.at_ms) })) });
   if (/INSERT INTO operator_audit_log/.test(text)) { state.events.push('audit:' + p[1]); state.audits.push({ actor: p[0], action: p[1], ip: p[2], details: JSON.parse(p[4]) }); return Promise.resolve({ rows: [], rowCount: 1 }); }
   return Promise.resolve({ rows: [], rowCount: 0 });
 }
@@ -248,6 +252,10 @@ const RESET = '/api/vector-clearing/reset-positions';
   const cnt = state.epochs.length;
   check('/epochs: supported, текущая эпоха, новые первыми, has_more', r.status === 200 && r.json.supported === true && r.json.current.epoch === cnt
     && r.json.epochs.length === 2 && r.json.epochs[0].epoch === cnt && r.json.epochs[1].epoch === cnt - 1 && r.json.has_more === true && r.json.count === cnt);
+  check('/epochs: прогрев текущей эпохи, длина прогрева и перезапуски ledger (первое наблюдение не считается перезапуском)',
+    r.json.warmup_min === 60 && r.json.current.warmup_until_ms === lastEpoch().at_ms + 3600000 && r.json.ledger_restarts.join() === [T0 - 8 * H, T0 - 3 * H].join()
+    && r.json.ledger_restarts_known_since_ms === T0 - 20 * H);
+  check('снимок перед сбросом записал boot_id ledger как запуск (граница для анализа)', state.bootInserts.includes('boot-X'));
   check('/epochs не отдаёт автора и boot_id (подменяемые/служебные поля остаются в базе)', !JSON.stringify(r.json).includes('actor') && !JSON.stringify(r.json).includes('boot_id') && !JSON.stringify(r.json).includes('tester'));
 
   // --- окна по метке в маршрутах истории
@@ -271,6 +279,9 @@ const RESET = '/api/vector-clearing/reset-positions';
   r = await call('GET', `/api/vector-clearing/pnl-history?scope=all&from_ms=1&to_ms=${Date.now()}`);
   check('явное окно длиннее потолка → 400 window_too_large (а не запрос на весь срок хранения)', r.status === 400 && r.json.error === 'window_too_large');
   r = await call('GET', '/api/vector-clearing/pnl-history?scope=all&hours=48&allow_cross_reset=true');
+  check('окно через перезапуски ledger называет их в блоке window.ledger_restarts, а эпоха несёт warmup_until_ms',
+    r.json.window.ledger_restarts.join() === [T0 - 8 * H, T0 - 3 * H].join() && r.json.epoch.warmup_until_ms === cur.at_ms + 3600000
+    && r.json.window.ledger_restarts_known_since_ms === T0 - 20 * H);
   check('allow_cross_reset: окно не усечено, видны затронутые эпохи', r.status === 200 && r.json.window.truncated_by_reset === false && r.json.window.crosses_reset === true && r.json.window.window_epochs.length >= 3);
   r = await call('GET', '/api/vector-clearing/pair-trades-history?hours=48&allow_cross_reset=true');
   check('pair-trades-history: окно через метку не поддержано (накопления склеили бы эксперименты) → 400', r.status === 400 && r.json.error === 'cross_reset_not_supported');

@@ -11,6 +11,7 @@ related:
   - docs/06-api/rest/epochs.md
   - docs/06-api/rest/reset-positions.md
   - specs/domain/epoch-classes.yaml (классы хранилищ относительно метки)
+  - docs/07-data/ce-ledger-boot.md (запуски ledger — граница для анализа, не эпоха)
   - frontend/api/epoch_schema.js (единственный источник текста DDL; init.sql сверяется тестом)
 ---
 
@@ -57,7 +58,7 @@ related:
 
 ## Retention и связь с историей
 
-Метки не удаляются (аудит). Журналы истории (`child_orders`, `ce_agent_pnl_history`, `ce_pnl_totals_history`, `ce_agent_band_history`, `ce_system_pnl_history`, таблицы ClickHouse) связываются с
+Метки не удаляются (аудит). Запуски ledger (рестарт посреди эпохи) — отдельная таблица [ce-ledger-boot.md](ce-ledger-boot.md). Журналы истории (`child_orders`, `ce_agent_pnl_history`, `ce_pnl_totals_history`, `ce_agent_band_history`, `ce_system_pnl_history`, таблицы ClickHouse) связываются с
 эпохой по времени (`ce_epoch_at`); колонка `epoch_id` при записи в четыре истории BFF — этап Э2 (эпоха берётся из того же ответа ledger, что и данные). Классы таблиц —
 `specs/domain/epoch-classes.yaml`. ClickHouse хранит 7 суток: разбор эпохи старше недели по его таблицам неполон (OQ-F18v2-64).
 

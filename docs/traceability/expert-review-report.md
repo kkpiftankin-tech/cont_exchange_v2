@@ -8,11 +8,11 @@
 ## Сводка
 
 - **Blocking** вопросов (нельзя продолжать фичу): **5**
-- Открытых структурированных вопросов (`OQ-*`): **49**
+- Открытых структурированных вопросов (`OQ-*`): **44**
 - Фич со старым списком вопросов без структуры (мигрировать по касанию): **4** (97 пунктов суммарно)
 - Карточек вычислений не в статусе `implemented`: **8**
 - ADR в статусе `proposed` (ждут решения владельца): **16**
-- Инженерных долгов в known-gaps.md: **42**
+- Инженерных долгов в known-gaps.md: **43**
 
 ## Blocking — нельзя продолжать фичу, пока не снято
 
@@ -56,11 +56,7 @@
 - **OQ-F18v2-19** (F-18) — возвращать ли арбитражёра к модели «только перевозка, без выхода на рынок» · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-20** (F-18) — источник дохода арбитражёра по продукту · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-21** (F-18) — делать ли честный симулятор исполнения режимом по умолчанию · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-54** (F-18) — основной вид объёма сделок: нетто или оборот · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-59** (F-18) — что такое «исходное состояние» при абсолютном сбросе · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-60** (F-18) — защита операции абсолютного сброса · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-61** (F-18) — выборочный сброс агентов · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-63** (F-18) — рестарт ledger посреди эксперимента · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-65** (F-18) — абсолютный сброс: сбой после перемотки Kafka и запоздавшие отчёты · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### владелец (решение продуктовое — писать ли FR-* постфактум)
 
@@ -92,8 +88,7 @@
 - **OQ-F18v2-49** (F-18) — судьба временного влияния `CE_PRICE_IMPACT_K` при исполнении по стакану · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-50** (F-18) — включать ли полуспред и ожидаемое проскальзывание в порог полосы хеджа · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 - **OQ-F18v2-52** (F-18) — положительный итог агентов после включения ADR-088 держится на «мгновенных» лимитных исполнениях симулятора: включать ли forward-only · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-62** (F-18) — первый час после сброса: пороги модели и статистика исполнения · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
-- **OQ-F18v2-64** (F-18) — срок хранения ClickHouse и длинные эксперименты · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
+- **OQ-F18v2-66** (F-18) — ключ прогрева эпохи: метка сброса или последний запуск ledger · [docs/02-system/features/F-18-ce-capital-position-hedge/open-questions.md](../02-system/features/F-18-ce-capital-position-hedge/open-questions.md)
 
 ### инженер с утверждением владельца
 
@@ -195,3 +190,4 @@
 - dev, 2026-11-02: дефекты сброса позиций, найденные при проектировании CR-F18-018 (ADR-090).
 - dev, 2026-11-02: что ещё мешает «абсолютному» сбросу и анализу эпох, найдено при пересмотре CR-F18-018 (требования владельца про метку и абсолютный сброс).
 - dev, 2026-11-02: долги по итогам ревью этапа Э1 CR-F18-018 (метка сброса, маршрут сброса позиций; `code-reviewer`, `security-reviewer`).
+- dev, 2026-11-02: долги по итогам ревью приращения Э1 CR-F18-018 (прогрев эпохи, запуски ledger, скрипт абсолютного сброса; `code-reviewer`, `data-schema-designer`, `security-reviewer`).

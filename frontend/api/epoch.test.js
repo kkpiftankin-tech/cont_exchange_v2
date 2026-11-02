@@ -1,6 +1,6 @@
 // Self-contained node-тест: `node epoch.test.js` (у frontend/api нет jest).
 const {
-  VIRTUAL_EPOCH, normalizeEpochs, currentEpoch, epochAt, findEpoch, epochWindows, resolveEpochWindow, epochBlock, epochHeader, tagEpoch, parseBool,
+  VIRTUAL_EPOCH, normalizeEpochs, currentEpoch, epochAt, findEpoch, epochWindows, resolveEpochWindow, epochBlock, epochHeader, tagEpoch, parseBool, bootsInWindow, bootsKnownSince, withWarmup,
 } = require('./epoch');
 
 let failed = 0;
@@ -126,6 +126,30 @@ check('метки недоступны: window_epochs пуст (эпоха да�
 const blk = epochBlock(resolveEpochWindow(E, { hours: '24' }, NOW, {}));
 check('epochBlock: epoch, window, reset_markers, epoch_supported', blk.epoch_supported === true && blk.epoch.epoch === 3 && blk.window.truncated_by_reset === true && Array.isArray(blk.reset_markers));
 check('epochHeader: текущая эпоха; недоступно — epoch_supported=false', epochHeader(E).epoch.epoch === 3 && epochHeader(null).epoch_supported === false && epochHeader(null).epoch === null);
+
+// --- прогрев эпохи и перезапуски ledger (OQ-F18v2-62, OQ-F18v2-63)
+const blkW = epochBlock(resolveEpochWindow(E, { hours: '24' }, NOW, {}), 60);
+check('прогрев: в текущей эпохе есть warmup_until_ms = момент эпохи + 60 мин', blkW.epoch.warmup_until_ms === NOW - 2 * H + 60 * 60000);
+check('прогрев не задан — поля нет (прежние ответы не меняются)', epochBlock(resolveEpochWindow(E, { hours: '24' }, NOW, {})).epoch.warmup_until_ms === undefined);
+check('прогрев не добавляется виртуальной эпохе 0 и при нулевой длине', withWarmup(VIRTUAL_EPOCH, 60).warmup_until_ms === undefined && withWarmup(E[2], 0).warmup_until_ms === undefined);
+check('epochHeader с прогревом', epochHeader(E, 60).epoch.warmup_until_ms === E[2].at_ms + 3600000 && epochHeader(null, 60).epoch === null);
+const boots = [{ at_ms: NOW - 20 * H }, { at_ms: NOW - 8 * H }, { at_ms: NOW - 3 * H }];
+check('перезапуски в окне: первая запись (первое наблюдение) не считается перезапуском', bootsInWindow(boots, NOW - 30 * H, NOW).join() === [NOW - 8 * H, NOW - 3 * H].join());
+check('перезапуски в окне: только внутри (from, to]', bootsInWindow(boots, NOW - 5 * H, NOW).join() === String(NOW - 3 * H) && bootsInWindow(boots, NOW - 3 * H, NOW).length === 0);
+check('перезапуски: нет данных — пусто', bootsInWindow(null, 0, NOW).length === 0 && bootsInWindow([], 0, NOW).length === 0 && bootsInWindow([{ at_ms: 1 }], 0, NOW).length === 0);
+{
+  const bs = [{ at_ms: NOW - 20 * H }, { at_ms: NOW - 5 * H }];
+  check('перезапуски: запись сделана позже правого края окна, но внутри слэка наблюдения — предупреждение остаётся', bootsInWindow(bs, NOW - 9 * H, NOW - 5 * H - 60000).length === 1);
+  check('перезапуски: за пределами слэка — не в окне', bootsInWindow(bs, NOW - 9 * H, NOW - 5 * H - 120000).length === 0);
+  const abs = [{ epoch: 1, at_ms: NOW - 2 * H, kind: 'absolute' }, { epoch: 0, at_ms: 0, kind: 'bridge' }];
+  const after = [{ at_ms: NOW - 20 * H }, { at_ms: NOW - 8 * H }, { at_ms: NOW - 2 * H + 30000 }];
+  check('запуск, начатый абсолютным сбросом, не перезапуск посреди эпохи', bootsInWindow(after, NOW - 2 * H, NOW, abs).length === 0);
+  check('перезапуск внутри эпохи до абсолютной метки остаётся', bootsInWindow(after, NOW - 9 * H, NOW, abs).join() === String(NOW - 8 * H));
+  check('без списка эпох запуск после метки виден (прежнее поведение)', bootsInWindow(after, NOW - 2 * H, NOW).length === 1);
+  check('через 10 минут после абсолютной метки это уже настоящий перезапуск', bootsInWindow([{ at_ms: NOW - 20 * H }, { at_ms: NOW - 2 * H + 11 * 60000 }], NOW - 2 * H, NOW, abs).length === 1);
+  check('bridge-метка запуск не освобождает', bootsInWindow([{ at_ms: NOW - 20 * H }, { at_ms: NOW - 3 * H + 5000 }], NOW - 3 * H, NOW, [{ epoch: 2, at_ms: NOW - 3 * H, kind: 'bridge' }]).length === 1);
+  check('запуски известны с первого наблюдения; нет данных — null', bootsKnownSince(bs) === NOW - 20 * H && bootsKnownSince([]) === null && bootsKnownSince(null) === null);
+}
 
 // --- tagEpoch
 const pts = [{ ts_ms: NOW - 20 * H }, { ts_ms: NOW - 5 * H }, { ts_ms: NOW - H, epoch_id: 2 }, { ts_ms: NOW - 40 * H }];

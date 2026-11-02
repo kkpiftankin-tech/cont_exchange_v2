@@ -20,6 +20,7 @@ check('ни один оператор не меняет существующие
 check('есть функция выдачи номера, эпоха по времени, текущая эпоха, окна, досборка',
   ['ce_epoch_open', 'ce_epoch_at', 'ce_current_epoch', 'ce_epoch_windows', 'ce_epoch_backfill_legacy', 'ce_epoch_intervals'].every((n) => ALL_STATEMENTS.some((s) => s.includes(n))));
 check('таблица защищена от изменения (триггеры на UPDATE/DELETE и TRUNCATE)', ALL_STATEMENTS.join('\n').includes('BEFORE INSERT OR UPDATE OR DELETE') && ALL_STATEMENTS.join('\n').includes('BEFORE TRUNCATE'));
+check('есть таблица запусков ledger (граница для анализа при перезапуске)', ALL_STATEMENTS.some((x) => x.includes('CREATE TABLE IF NOT EXISTS ce_ledger_boot')));
 check('название эксперимента ограничено 1-200 знаков на уровне таблицы', ALL_STATEMENTS[0].includes('BETWEEN 1 AND 200'));
 check('вид метки ограничен списком', ALL_STATEMENTS[0].includes("('absolute', 'bridge', 'legacy')"));
 check('sqlScript: каждый оператор завершён точкой с запятой', sqlScript().trimEnd().endsWith(';') && sqlScript().split('\n\n').length === ALL_STATEMENTS.length);
