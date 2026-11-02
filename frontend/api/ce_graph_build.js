@@ -27,6 +27,9 @@
 // (venue_fill_diagnostics, ce|band|<агент>|…) с момента сброса статистики. Пара X/Y: X += BUY−SELL
 // (кол-во базы), Y += выручка SELL − затраты BUY (в единицах quote). Разбивка по виду агента (T_/A_).
 // hedgeFills — строки {agent_id, venue, symbol, buy_base, sell_base, buy_notional, sell_notional}.
+// Карточка агента (edge.agentView, вкладка «Граф» → «Добавить»): flowQty — поток последнего такта в ЕДИНИЦАХ валюты каждого
+// конца ветви, «+» — агент отдаёт валюту узлу, «−» — получает (то же направление, что ends: Δends = −flowQty); hedge — нетто-позиция
+// от хеджа именно этого агента по биржам и активам (те же заполнения, что node.hedgePos, но не сложенные по видам).
 // Цена актива на бирже в USDT по сегментам клиринга (mid пары на бирже): USDT = 1; прямая пара X/USDT; иначе одна
 // кросс-пара X/Q × цена Q. Нет данных ⇒ null. Общая для графа и панели «Живые позиции»: оба экрана берут цены по бирже
 // из одних и тех же сегментов (в строке ledger цена актива одна на все биржи и разницу между биржами не отражает).
@@ -94,6 +97,7 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
     const pQuoteL = prow && Number(prow.reference_price) > 0 ? Number(prow.base_price) / Number(prow.reference_price) : null;
     const pQuote = pQuoteL || priceOf(quote, s.venue);
     const v = c * 1000;
+    const flowUsdt = -dOf(dByAgent.get(agentId)) * 1000;
     const ends = rows ? {
       from: { asset: quote, qty: pQuote > 0 ? v / pQuote : null },
       to: { asset: base, qty: pBase > 0 ? -v / pBase : null },
@@ -105,7 +109,9 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
       alphaUsdt, rBp100: alphaUsdt ? 100 / alphaUsdt : null, rBp1M: alphaUsdt ? 1e6 / alphaUsdt : null,
       positionUsdt: c * 1000, hasAgent: !!rows, eventMs: Number(s.eventMs) || 0,
       source: s.source === 'live' ? 'live' : 'clearing', levelsBid: s.levelsBid, levelsAsk: s.levelsAsk,
-      flowUsdt: -dOf(dByAgent.get(agentId)) * 1000,
+      flowUsdt,
+      // карточка агента: from = quote, to = base; f > 0 — агент платит quote и получает base (те же цены, что у ends)
+      agentView: { flowQty: { from: pQuote > 0 ? flowUsdt / pQuote : null, to: pBase > 0 ? -flowUsdt / pBase : null }, hedge: [] },
     });
   }
 
@@ -131,13 +137,16 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
     nodeSet.add(from); nodeSet.add(to);
     const unit = (usdt, price) => (asset === 'USDT' ? usdt : (price > 0 ? usdt / price : null));
     const ends = { from: { asset, qty: unit(leg(src), p1) }, to: { asset, qty: unit(leg(dst), p2) } };
+    const flowUsdt = (dOf((dByAgent.get(agentId) || []).filter((d) => d.venue === dst))
+                      - dOf((dByAgent.get(agentId) || []).filter((d) => d.venue === src))) / 2 * 1000;
     edges.push({
       id: `A:${agentId}`, kind: 'arbitrageur', agentId, asset, src, dst, from, to, ends,
       anchor: 0, alphaA, alphaUsdt: alphaA ? alphaA * 100 : null, rBp100: alphaA ? 1 / alphaA : null, rBp1M: alphaA ? 1e4 / alphaA : null,
       deadZonePm: tr && Number(tr.c) >= 0 ? Number(tr.c) : null, emfBp,
       legSrcUsdt: leg(src), legDstUsdt: leg(dst),
-      flowUsdt: (dOf((dByAgent.get(agentId) || []).filter((d) => d.venue === dst))
-                 - dOf((dByAgent.get(agentId) || []).filter((d) => d.venue === src))) / 2 * 1000,
+      flowUsdt,
+      // карточка агента: f > 0 (src→dst) — агент отдаёт актив узлу src и получает его от узла dst (Δq_src = −f, Δq_dst = +f)
+      agentView: { flowQty: { from: unit(flowUsdt, p1), to: unit(-flowUsdt, p2) }, hedge: [] },
     });
   }
 
@@ -152,17 +161,29 @@ function buildCeGraph({ segs = [], positions = [], deltas = [], hedgeFills = [],
     return null;
   };
   const hedge = new Map();
-  const addHedge = (asset, venue, kind, qty) => {
+  const hedgeByAgent = new Map();                          // agent_id → Map('venue|asset' → {venue, asset, qty})
+  const addHedge = (asset, venue, kind, qty, agentId) => {
     const id = `${asset}@${venue}`;
     if (!hedge.has(id)) hedge.set(id, { qty: 0, translator: 0, arbitrageur: 0 });
     const h = hedge.get(id); h.qty += qty; h[kind] += qty;
+    if (!agentId) return;
+    if (!hedgeByAgent.has(agentId)) hedgeByAgent.set(agentId, new Map());
+    const m = hedgeByAgent.get(agentId), k = `${venue}|${asset}`;
+    if (!m.has(k)) m.set(k, { venue, asset, qty: 0 });
+    m.get(k).qty += qty;
   };
   for (const f of hedgeFills) {
     const sp = splitSymbol(f.symbol);
     if (!sp || !f.venue) continue;
     const kind = String(f.agent_id || '').startsWith('A_') ? 'arbitrageur' : 'translator';
-    addHedge(sp.base, f.venue, kind, (Number(f.buy_base) || 0) - (Number(f.sell_base) || 0));
-    addHedge(sp.quote, f.venue, kind, (Number(f.sell_notional) || 0) - (Number(f.buy_notional) || 0));
+    addHedge(sp.base, f.venue, kind, (Number(f.buy_base) || 0) - (Number(f.sell_base) || 0), f.agent_id);
+    addHedge(sp.quote, f.venue, kind, (Number(f.sell_notional) || 0) - (Number(f.buy_notional) || 0), f.agent_id);
+  }
+  // карточка агента: его собственная нетто-позиция от хеджа по биржам и активам (px — цена актива на бирже, USDT, для масштаба)
+  for (const e of edges) {
+    const m = hedgeByAgent.get(e.agentId);
+    e.agentView.hedge = m ? [...m.values()].sort((a, b) => (a.venue + a.asset < b.venue + b.asset ? -1 : 1))
+      .map((h) => ({ ...h, px: priceOf(h.asset, h.venue) })) : [];
   }
 
   const nodes = [...nodeSet].map((id) => {

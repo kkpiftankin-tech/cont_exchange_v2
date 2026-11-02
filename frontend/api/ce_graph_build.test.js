@@ -121,6 +121,39 @@ const valSum = ge.nodes.reduce((sum, n) => sum + n.cePos.qty * (n.priceUsdt || 0
 check('Σ позиций агентов в USDT-стоимости по узлам ≈ 0 (замкнутость), |Σ| < 20 USDT на разницу цен BTC между биржами', Math.abs(valSum) < 20);
 
 
+// ── Карточка агента (edge.agentView): поток такта в единицах валюты и хедж-позиция именно этого агента ──
+// Переводчик T_BTC_v1, Δc = +2 k-USDT ⇒ f = −2000: продал базу за quote ⇒ отдаёт 0,025 BTC (+), получает 2000 USDT (−).
+check('переводчик: поток base = −f/P_base = +0,025 BTC (отдаёт)', near(tf.agentView.flowQty.to, 2000 / 80000));
+check('переводчик: поток quote = f/P_quote = −2000 USDT (получает)', near(tf.agentView.flowQty.from, -2000));
+// шаг позиции за такт = −поток в единицах (позиции из ledger считаются теми же ценами)
+{
+  const row = { agent_id: 'T_BTC_v1', agent_kind: 'translator', asset: 'BTC', venue: 'v1', in_flight: 0, base_price: 80000, reference_price: 80000 };
+  const d = [{ agent_id: 'T_BTC_v1', venue: 'v1', delta: 2 }];
+  const q0 = buildCeGraph({ segs, positions: [{ ...row, position: 100 }], deltas: d, cfg: {} }).edges.find((e) => e.id === 'T:v1:BTC/USDT');
+  const q1 = buildCeGraph({ segs, positions: [{ ...row, position: 102 }], deltas: d, cfg: {} }).edges.find((e) => e.id === 'T:v1:BTC/USDT');
+  check('Δ позиции base за такт = −поток base', near(q1.ends.to.qty - q0.ends.to.qty, -q0.agentView.flowQty.to));
+  check('Δ позиции quote за такт = −поток quote', near(q1.ends.from.qty - q0.ends.from.qty, -q0.agentView.flowQty.from));
+}
+check('арбитражёр: src отдаёт f/P_src, dst получает f/P_dst', near(af.agentView.flowQty.from, 3000 / 80000) && near(af.agentView.flowQty.to, -3000 / 80080));
+check('ветвь без дельт: потоки в единицах нулевые', gf.edges.find((e) => e.id === 'T:v1:ETH/BTC').agentView.flowQty.to === 0);
+check('нет цены ног (кросс-пара без USDT-пар на бирже) ⇒ поток в единицах null, а не бесконечность', (() => {
+  const e = buildCeGraph({ segs: [{ venue: 'v3', pair: 'ETH/BTC', mid: 0.03, alphaT: 1, betaT: 1, eventMs: 1 }], positions: [], deltas: [{ agent_id: 'T_ETH_BTC_v3', venue: 'v3', delta: 2 }], cfg: {} }).edges[0];
+  return e.agentView.flowQty.from === null && e.agentView.flowQty.to === null && near(e.flowUsdt, -2000);
+})());
+const hv = (id) => gh.edges.find((e) => e.id === id).agentView.hedge;
+const hq = (id, venue, asset) => (hv(id).find((h) => h.venue === venue && h.asset === asset) || {}).qty;
+check('хедж агента T_BTC_v1: BTC +0,3 (0,5 − 0,2), USDT −23 900', near(hq('T:v1:BTC/USDT', 'v1', 'BTC'), 0.3) && near(hq('T:v1:BTC/USDT', 'v1', 'USDT'), -23900));
+check('хедж кросс-пары T_ETH_BTC_v1: ETH +3, BTC −0,09 — не смешивается с хеджем T_BTC_v1', near(hq('T:v1:ETH/BTC', 'v1', 'ETH'), 3) && near(hq('T:v1:ETH/BTC', 'v1', 'BTC'), -0.09));
+check('хедж арбитражёра — на своей бирже dst: BTC −1, USDT +80 000', near(hq('A:A_BTC_v1v2', 'v2', 'BTC'), -1) && near(hq('A:A_BTC_v1v2', 'v2', 'USDT'), 80000) && hv('A:A_BTC_v1v2').every((h) => h.venue === 'v2'));
+check('хедж: цена актива на бирже для масштаба (BTC@v1 = 80000, USDT = 1)', hv('T:v1:BTC/USDT').find((h) => h.asset === 'BTC').px === 80000 && hv('T:v1:BTC/USDT').find((h) => h.asset === 'USDT').px === 1);
+check('агент без хедж-сделок: пустой список, а не null', gh.edges.every((e) => Array.isArray(e.agentView.hedge)) && buildCeGraph({ segs, positions: posL, cfg: {} }).edges.every((e) => e.agentView.hedge.length === 0));
+// Σ хедж-позиций агентов по узлу = hedgePos узла (те же заполнения, только не сложены по видам). Исключение — агент без ветви в графе
+// (T_XRP_v1: XRP/USDT нет среди сегментов): его −6 USDT есть в узле USDT@v1, но ни в одной карточке.
+check('Σ хеджа агентов с ветвями по (биржа, актив) = nodes[].hedgePos (без сирот)', gh.nodes.every((n) => {
+  const s = gh.edges.reduce((acc, e) => acc + e.agentView.hedge.filter((h) => `${h.asset}@${h.venue}` === n.id).reduce((x, h) => x + h.qty, 0), 0);
+  return near(s, n.id === 'USDT@v1' ? n.hedgePos.qty + 6 : n.hedgePos.qty);
+}));
+
 // --- Цена актива по бирже (общая для графа и панели «Живые позиции»)
 {
   const priceOf = makePriceOf(segs);

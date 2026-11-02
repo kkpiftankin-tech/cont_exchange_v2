@@ -5,6 +5,8 @@ import axios from 'axios';
 import { isAuthenticated } from '../../api/authService';
 import useInterval from '../../hooks/useInterval';
 import CeClearingPanel from './CeClearingPanel';
+import AgentFlowCard from './AgentFlowCard';
+import { vColor, aColor, fmt, sgn, fmtQty, fmtUsd, flowW, flowDur, flowDots } from './ceGraphUtil';
 import './CeGraphLive.css';
 
 // Граф CE: узлы — активы на биржах (asset@venue), рёбра — заявки агентов (переводчики T внутри
@@ -18,34 +20,10 @@ const LEASE_HEARTBEAT_MS = 2500;   // как в панели «Торговля�
 const LEASE_TTL_MS = 6000;         // без сигналов быстрая полоса гаснет сама за ≤6 с
 const PAIR_PRIORITY = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ETH/BTC', 'SOL/BTC'];
 const ASSET_ORDER = ['USDT', 'BTC', 'ETH', 'SOL'];
-const VENUE_COLORS = { binance: '#f3ba2f', okx: '#7aa2ff', kraken: '#b08cff', coinbase: '#4aa3ff', uniswap_v3: '#ff6ec7' };
-const ASSET_COLORS = { USDT: '#26a17b', BTC: '#f7931a', ETH: '#8a9bff', SOL: '#14c9a5' };
-const vColor = (v) => VENUE_COLORS[v] || '#9aa7b4';
-const aColor = (a) => ASSET_COLORS[a] || '#9aa7b4';
-
-const fmt = (v, d = 4) => {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '—';
-  const a = Math.abs(n);
-  if (a !== 0 && (a < 1e-3 || a >= 1e7)) return n.toExponential(3);
-  return n.toLocaleString('ru-RU', { maximumFractionDigits: a >= 1000 ? 2 : d });
-};
-const sgn = (v, d = 3) => (Number.isFinite(Number(v)) ? (v > 0 ? '+' : '') + fmt(v, d) : '—');
-
-// Количество валюты со знаком, компактно (для подписей у узла и внутри кружка): +1,23M / −12,3k / +0,0123 / 0.
-// Минус — короткая позиция. Только отображение: единицы и знак посчитаны бэкендом.
-const fmtQty = (v) => {
-  const n = Number(v);
-  if (v == null || !Number.isFinite(n)) return '—';
-  if (n === 0) return '0';
-  const a = Math.abs(n), s = n > 0 ? '+' : '−';
-  let t;
-  if (a >= 1e6) t = (a / 1e6).toLocaleString('ru-RU', { maximumFractionDigits: 3 }) + 'M';
-  else if (a >= 1e4) t = (a / 1e3).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + 'k';
-  else if (a >= 100) t = a.toLocaleString('ru-RU', { maximumFractionDigits: 1 });
-  else if (a >= 1) t = a.toLocaleString('ru-RU', { maximumFractionDigits: 3 });
-  else t = Number(a.toPrecision(3)).toLocaleString('ru-RU', { maximumFractionDigits: 9 });
-  return s + t;
+const LS_AGENTS = 'ceGraph.agents';   // id ветвей, добавленных в раздел «Агенты» (удобство просмотра, хранится в браузере)
+const loadAgents = () => {
+  try { const v = JSON.parse(window.localStorage.getItem(LS_AGENTS)); return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []; }
+  catch (_) { return []; }
 };
 
 // Точка на квадратичной кривой Безье и касательная (для подписей и точек потока вдоль ребра).
@@ -67,14 +45,6 @@ const arcT = (P0, P1, P2, frac) => {
   const seg = acc[i] - acc[i - 1] || 1; return { t: (i - 1 + (target - acc[i - 1]) / seg) / N, len: tot };
 };
 
-// Поток по ветви: положителен в направлении from → to. Скорость и число точек растут с |f| (логарифм).
-// Масштаб относительно самого крупного потока видимых ветвей (потоки такта — доли и единицы USDT,
-// абсолютная шкала их не различила бы): u = |f|/max ∈ (0,1].
-const flowU = (f, maxF) => (maxF > 0 ? Math.min(1, Math.abs(f) / maxF) : 0);
-const flowDur = (f, maxF) => 5.2 - 3.9 * Math.sqrt(flowU(f, maxF));
-const flowDots = (f, maxF) => 1 + Math.floor(3 * flowU(f, maxF));
-const flowW = (f, maxF) => 2 + 2.4 * Math.sqrt(flowU(f, maxF));
-const fmtUsd = (v) => { const a = Math.abs(Number(v)); return Number.isFinite(a) ? (a >= 100 ? fmt(a, 0) : a >= 1 ? fmt(a, 1) : fmt(a, 3)) : '—'; };
 const EPS = { anchor: 1e-9, r: 1e-6, price: 1e-9 };
 const CHG_MS = 15000;   // сколько секунд показывать «шаг» последнего изменения позиции
 const rel = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b !== 0 ? (a - b) / Math.abs(b) : 0);
@@ -104,6 +74,9 @@ const CeGraphLive = () => {
   const [labels, setLabels] = useState('flow');  // flow | none
   const [chg, setChg] = useState({ edges: {}, nodes: {} });  // что изменилось при последнем пересчёте
   const [beat, setBeat] = useState(0);
+  const [clickMode, setClickMode] = useState('details');   // что делает клик по ветви: details — панель деталей, add — добавить агента в раздел «Агенты»
+  const [agents, setAgents] = useState(loadAgents);        // id добавленных ветвей (порядок добавления)
+  const [addNote, setAddNote] = useState(null);            // подтверждение «добавлен» (4 с)
   // Быстрая полоса (ADR-070): якоря/наклоны пересчитываются по глубокому стакану ~каждые 2–3 с
   const [liveOn, setLiveOn] = useState(false);
   const [lease, setLease] = useState(null);
@@ -146,6 +119,8 @@ const CeGraphLive = () => {
         posPrev.current[key] = val;
       };
       for (const x of d.edges) for (const w of ['from', 'to']) { const q = x.ends && x.ends[w]; if (q) track(`e|${x.id}|${w}`, q.qty, q.asset); }
+      // хедж-позиция самого агента (карточка в разделе «Агенты»): шаг последнего изменения рисуется на ребре к внешней бирже
+      for (const x of d.edges) for (const h of (x.agentView && x.agentView.hedge) || []) track(`h|${x.id}|${h.venue}|${h.asset}`, h.qty, h.asset);
       for (const x of d.nodes) {
         if (x.hedgePos) track(`n|${x.id}`, x.hedgePos.qty, x.asset);
         if (x.cePos) track(`c|${x.id}`, x.cePos.qty, x.asset);
@@ -160,6 +135,15 @@ const CeGraphLive = () => {
   useEffect(() => { if (isAuth) load(); }, [isAuth, load]);
   useInterval(load, isAuth ? POLL_MS : null);
   useInterval(() => setNow(Date.now()), 1000);
+  useEffect(() => { try { window.localStorage.setItem(LS_AGENTS, JSON.stringify(agents)); } catch (_) { /* хранилище недоступно — список живёт до перезагрузки */ } }, [agents]);
+  useEffect(() => { if (!addNote) return undefined; const t = setTimeout(() => setAddNote(null), 4000); return () => clearTimeout(t); }, [addNote]);
+  // Клик по ветви: в режиме «Добавить» выводит её агента в раздел «Агенты» (повторный клик ничего не дублирует), иначе — панель деталей.
+  const onEdge = (e) => {
+    if (clickMode !== 'add') { setSel({ type: 'edge', id: e.id }); return; }
+    const dup = agents.includes(e.id);
+    if (!dup) setAgents((a) => (a.includes(e.id) ? a : [...a, e.id]));
+    setAddNote({ agentId: e.agentId, dup });
+  };
   const toggle = (grp, k) => setHidden((h) => ({ ...h, [grp]: { ...h[grp], [k]: !h[grp][k] } }));
 
   // Видимость: скрытая биржа/актив убирает узлы и все рёбра при них; скрытая пара — рёбра пары.
@@ -288,6 +272,7 @@ const CeGraphLive = () => {
   const recentChg = (key) => { const c = posChg.current[key]; return c && now - c.ts < CHG_MS ? c : null; };
   const lastChgTxt = (key) => { const c = posChg.current[key]; return c ? `${fmtQty(c.d)} ${c.unit}, ${Math.max(0, Math.round((now - c.ts) / 1000))} с назад` : 'с открытия страницы не менялась'; };
   const flows = view ? [...view.edges].filter((e) => Math.abs(e.flowUsdt) > 1e-6).sort((a, b) => Math.abs(b.flowUsdt) - Math.abs(a.flowUsdt)) : [];
+  const shown = data ? agents.map((id) => data.edges.find((e) => e.id === id)).filter(Boolean) : [];   // карточки: только ветви, что есть в ответе BFF
   const flowTotal = flows.reduce((s, e) => s + Math.abs(e.flowUsdt), 0);
   // Масштаб анимации — относительно max(крупнейший поток, F_REF): иначе единственный микропоток (доли цента) выглядел бы
   // так же крупно, как поток в сотни USDT, и создавал впечатление движения капитала без изменения позиций.
@@ -365,6 +350,13 @@ const CeGraphLive = () => {
               </span>
             )}
             {liveOn && lease && !lease.ok && <span className="cg-chip cg-warn">{lease.error}</span>}
+            <span className="cg-chip cg-mode" role="group" aria-label="Что делает клик по ветви">
+              клик по ветви:
+              <button type="button" className={`cg-seg${clickMode === 'details' ? ' on' : ''}`} aria-pressed={clickMode === 'details'} onClick={() => setClickMode('details')}>Подробности</button>
+              <button type="button" className={`cg-seg${clickMode === 'add' ? ' on' : ''}`} aria-pressed={clickMode === 'add'} onClick={() => setClickMode('add')}
+                title="Клик по ветви графа выводит её агента в раздел «Агенты» ниже">Добавить</button>
+            </span>
+            {addNote && <span className="cg-chip cg-added-note" role="status">{addNote.dup ? `${addNote.agentId} уже в разделе «Агенты»` : `➕ ${addNote.agentId} добавлен — раздел «Агенты» ниже`}</span>}
             <label className="cg-chip">подписи ветвей:{' '}
               <select value={labels} onChange={(ev) => setLabels(ev.target.value)}>
                 <option value="flow">поток</option>
@@ -383,7 +375,7 @@ const CeGraphLive = () => {
                 ))}
                 {view.edges.map((e) => {
                   const { A, B, C } = edgeGeom(e);
-                  const col = edgeColor(e), on = selEdge && selEdge.id === e.id;
+                  const col = edgeColor(e), on = selEdge && selEdge.id === e.id, added = agents.includes(e.id);
                   const f = Number(e.flowUsdt) || 0, c = chg.edges[e.id];
                   const d = `M${A[0]} ${A[1]}Q${C[0]} ${C[1]} ${B[0]} ${B[1]}`;
                   const dRev = `M${B[0]} ${B[1]}Q${C[0]} ${C[1]} ${A[0]} ${A[1]}`;
@@ -393,7 +385,7 @@ const CeGraphLive = () => {
                   let l1 = '';
                   if (labels === 'flow' && Math.abs(f) > 1e-6) l1 = `${f >= 0 ? '→' : '←'} ${fmtUsd(f)} $`;
                   return (
-                    <g key={e.id} className="cg-edge" onClick={() => setSel({ type: 'edge', id: e.id })}>
+                    <g key={e.id} className={`cg-edge${clickMode === 'add' ? ' cg-addable' : ''}${added ? ' cg-added' : ''}`} onClick={() => onEdge(e)}>
                       <path d={d} fill="none" stroke="transparent" strokeWidth={14} />
                       <path d={d} fill="none" stroke={col} opacity={Math.abs(f) > 1e-6 ? 1 : 0.55}
                         strokeWidth={on ? 3.8 : flowW(f, maxF)} strokeDasharray={e.kind === 'arbitrageur' ? '6 4' : undefined} strokeLinecap="round" />
@@ -418,7 +410,8 @@ const CeGraphLive = () => {
                           </g>
                         );
                       })}
-                      <title>{`${e.agentId}: ${e.from} → ${e.to}`}</title>
+                      {added && <path d={d} fill="none" stroke={col} strokeWidth={13} opacity={0.22} strokeLinecap="round" className="cg-added-ring" />}
+                      <title>{`${e.agentId}: ${e.from} → ${e.to}${clickMode === 'add' ? (added ? ' — уже в разделе «Агенты»' : ' — клик: добавить в раздел «Агенты»') : ''}`}</title>
                     </g>
                   );
                 })}
@@ -451,7 +444,7 @@ const CeGraphLive = () => {
               <div className="cg-legend">
                 <span><i style={{ borderColor: '#9aa7b4' }} /> переводчик (цвет — биржа)</span>
                 <span><i style={{ borderColor: '#9aa7b4', borderTopStyle: 'dashed' }} /> арбитражёр (цвет — актив)</span>
-                <span>Клик по ветви или узлу — подробности.</span>
+                <span>{clickMode === 'add' ? 'Режим «Добавить»: клик по ветви выводит агента в раздел «Агенты» ниже (подсвеченные ветви уже там); узел — по-прежнему подробности.' : 'Клик по ветви или узлу — подробности.'}</span>
               </div>
             </div>
             <div className="cg-side">
@@ -480,7 +473,7 @@ const CeGraphLive = () => {
                 {flows.slice(0, 8).map((e) => {
                   const [fa, fb] = fromTo(e);
                   return (
-                    <div key={e.id} className="cg-flow" onClick={() => setSel({ type: 'edge', id: e.id })}>
+                    <div key={e.id} className="cg-flow" onClick={() => onEdge(e)}>
                       <span className="cg-mono">{fa} → {fb}</span>
                       <b style={{ color: e.kind === 'translator' ? vColor(e.venue) : aColor(e.asset) }}>{fmtUsd(e.flowUsdt)}</b>
                     </div>
@@ -509,6 +502,24 @@ const CeGraphLive = () => {
                 {!selEdge && !selNode && <div className="cg-note">Выберите ветвь или узел на графе.</div>}
               </div>
             </div>
+          </div>
+          <div className="cg-agents">
+            <div className="cg-agents-head">
+              <h3 className="cg-agents-title">Агенты на экране <span className="cg-chip">{shown.length}</span></h3>
+              {shown.length > 0 && <button type="button" className="cg-seg" onClick={() => setAgents([])}>Очистить</button>}
+              {agents.length > shown.length && <span className="cg-note">в текущем графе нет ветвей: {agents.length - shown.length}</span>}
+            </div>
+            {shown.length === 0 ? (
+              <div className="cg-note">
+                Переключите «клик по ветви» на «Добавить» и нажмите на ветви основного графа — агент появится здесь схемой «CE — агент — биржа»:
+                рёбра — валюты, толщина — стоимость потока за такт, стрелка от агента — он отдаёт валюту, к агенту — получает; подписи — что агент
+                делает с валютой и его позиция. У переводчика справа — хедж на внешней бирже (позиция от хеджа и последний шаг).
+              </div>
+            ) : (
+              <div className="cg-agents-grid">
+                {shown.map((e) => <AgentFlowCard key={e.id} edge={e} maxF={maxF} recent={recentChg} onRemove={() => setAgents((a) => a.filter((x) => x !== e.id))} />)}
+              </div>
+            )}
           </div>
         </>)}
         {isAuth && <CeClearingPanel />}

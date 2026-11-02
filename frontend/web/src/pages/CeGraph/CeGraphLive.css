@@ -51,3 +51,15 @@
 @media (prefers-reduced-motion: reduce) { .cg-dot, .cg-pulse, .cg-npulse, .cg-beat { display: none; } }
 .cg-warn-t { color: #e0b060; }
 .cg-delta { pointer-events: none; }
+
+.cg-mode { display: inline-flex; align-items: center; gap: 4px; }
+.cg-seg { background: #1a2531; color: #cdd9e4; border: 1px solid #223140; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+.cg-seg:hover { border-color: #4a7bd0; }
+.cg-seg.on { background: #1f3a63; border-color: #4a7bd0; color: #fff; }
+.cg-addable { cursor: copy; }
+.cg-added-ring { pointer-events: none; }
+.cg-added-note { border-color: #2f6f4a; color: #7fd6a0; }
+.cg-agents { margin-top: 16px; }
+.cg-agents-head { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.cg-agents-title { font-size: 16px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.cg-agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 12px; }
