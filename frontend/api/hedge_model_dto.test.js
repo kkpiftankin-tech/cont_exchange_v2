@@ -81,8 +81,11 @@ const notComputed = buildHedgeModelDto({ computed: false, mode: 'shadow', reason
 check('не посчитано: сырые пороги скрыты, потолок виден', notComputed.b_m_raw === null && notComputed.mode_ceiling === 'shadow');
 const smSample = bandSamples([{ agent_id: 'T_BTC_binance', agent_kind: 'translator', c_position: 1, in_flight: 0, z_lim: 18, z_mkt: 18, hmodel: sm }], 60000)[0];
 check('история: сырые пороги идут в строку', smSample.b_t_raw === 9.72 && smSample.b_m_raw === 9.1 && smSample.transfer_threshold_raw === 41.557);
-check('CSV: прежние 25 колонок на прежних местах, сырые пороги — в конце (обратная совместимость позиционных разборов)',
-  CSV_COLUMNS.length === 29 && CSV_COLUMNS[0] === 'ts' && CSV_COLUMNS[24] === 'params_hash' && CSV_COLUMNS.slice(25).join() === 'b_m_raw,b_t_raw,transfer_threshold_raw,transfer_target_raw');
+check('CSV: прежние 25 колонок на прежних местах, сырые пороги и затем номер эпохи — в конце (обратная совместимость позиционных разборов)',
+  CSV_COLUMNS.length === 30 && CSV_COLUMNS[0] === 'ts' && CSV_COLUMNS[24] === 'params_hash'
+  && CSV_COLUMNS.slice(25).join() === 'b_m_raw,b_t_raw,transfer_threshold_raw,transfer_target_raw,epoch_id');
+check('CSV: epoch_id выводится в строках (ADR-090: выгрузки разных эпох не смешивать)',
+  historyCsv([{ ts: '2026-11-02T00:00:00Z', agent_id: 'T_BTC_binance', epoch_id: 7 }]).split('\n')[1].endsWith(',7'));
 check('CSV: колонки сырых порогов есть', ['b_m_raw', 'b_t_raw', 'transfer_threshold_raw', 'transfer_target_raw'].every((c) => CSV_COLUMNS.includes(c)));
 check('DDL: сырые пороги в CREATE и в списке колонок для существующей таблицы',
   BAND_HISTORY_DDL.includes('b_t_raw') && BAND_HISTORY_RAW_COLUMNS.length === 4

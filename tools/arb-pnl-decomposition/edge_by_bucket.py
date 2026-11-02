@@ -1,6 +1,7 @@
 """Execution edge of CE band hedges by order type and fill age (EXP-2026-10-22-arbitrageur-pnl, experiment E1).
 
-Run on the dev host:  python3 -W ignore - START_MS END_MS < edge_by_bucket.py
+Run on the dev host:  python3 tools/arb-pnl-decomposition/edge_by_bucket.py [START_MS END_MS | --epoch current|N|all]
+(старый вызов `python3 -W ignore - START_MS END_MS < edge_by_bucket.py` работает; без аргументов — текущая эпоха; ADR-090)
 Edge of a fill = s * (p - mid_venue(t)) * q with s=+1 for SELL, -1 for BUY: positive means the fill price is better than the
 venue mid at the report time. Only */USDT pairs (BTC, ETH, SOL) are used, all agents (A_* arbitrageurs, T_* translators).
 Buckets: 'instant' = fill within 2 s of emission (matched against prints already in the buffer; with CE_SIM_FORWARD_ONLY=1 these
@@ -8,7 +9,27 @@ must vanish) and 'followup' = later fills of resting orders. t-statistic across 
 """
 import sys, subprocess, bisect, collections, math
 
-START, END = int(sys.argv[1]), int(sys.argv[2])
+# --- Метка сброса позиций (эпоха), ADR-090: окно разбора определяет tools/lib/epochs.py. Окно, пересекающее метку, отвергается, если
+# явно не разрешено (--allow-cross-reset --cross-reason "причина"); по умолчанию — текущая эпоха. Заявки, созданные до начала эпохи, к ней не относятся.
+import os, argparse
+def _bootstrap_lib():
+    here = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else None
+    for base in (os.environ.get('CE_TOOLS_LIB'), os.path.join(here, '..', 'lib') if here else None, '/home/nik/cont_exchange_v2/tools/lib', 'tools/lib'):
+        if base and os.path.exists(os.path.join(base, 'epochs.py')):
+            sys.path.insert(0, base)
+            return
+    raise SystemExit('не найдена tools/lib/epochs.py: задайте CE_TOOLS_LIB')
+_bootstrap_lib()
+import epochs as E
+try:
+    EPOCHS = E.load_epochs()
+    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS)
+except (E.EpochsUnavailable, E.CrossesResetError, ValueError) as _e:
+    raise SystemExit('ОТКАЗ: %s' % _e)
+START, END = WINDOW.from_ms, WINDOW.to_ms
+STRICT = WINDOW.requested != 'explicit'   # окно задано эпохой: заявки, созданные до её начала, — старой эпохи (даже если дозаполнены позже)
+print('\n'.join(WINDOW.header(EPOCHS)))
+E.warn_if_beyond_ttl(START)
 MAX_STALE_MS = 120000
 BLOCK_MS = 900000
 
@@ -19,6 +40,7 @@ def sh(cmd):
 
 pg = sh("docker exec -i infra-postgres-1 psql -U cex -d cex -At -F '\t' -c "
         "\"SELECT client_order_id, split_part(hedge_flow_id,'|',3), venue_id, symbol, side, order_type "
+        # epoch-guard: window (границы START..END из tools/lib/epochs.py)
         "FROM child_orders WHERE hedge_flow_id LIKE 'ce|band|%' AND created_at > to_timestamp(" + str(START - 900000) + "/1000.0)\"")
 meta = {}
 for line in pg.splitlines():
@@ -27,10 +49,12 @@ for line in pg.splitlines():
         meta[p[0]] = dict(agent=p[1], venue=p[2], symbol=p[3], side=p[4], otype=p[5])
 
 ch = sh("docker exec -i infra-clickhouse-1 clickhouse-client -q \"SELECT intent_id, event_time_ms, filled_qty, average_price "
+        # epoch-guard: window (границы START..END из tools/lib/epochs.py)
         "FROM default.execution_venue WHERE startsWith(intent_id, 'ce|band|') AND event_time_ms > %d AND event_time_ms <= %d "
         "ORDER BY intent_id, event_time_ms FORMAT TSV\"" % (START - 900000, END))
 fills = []
 prev = {}
+old_epoch_orders = 0
 for line in ch.splitlines():
     p = line.split('\t')
     iid, t, cum, px = p[0], int(p[1]), float(p[2]), float(p[3])
@@ -47,6 +71,9 @@ for line in ch.splitlines():
             t0 = int(iid.rsplit('|', 1)[1])
         except Exception:
             t0 = t
+        if STRICT and t0 < START:
+            old_epoch_orders += 1   # заявка создана до начала эпохи: к ней не относится, даже если дозаполнена позже
+            continue
         fills.append(dict(kind=m['agent'][0], venue=m['venue'], symbol=m['symbol'], side=m['side'], otype=m['otype'],
                           t=t, age_s=(t - t0) / 1000.0, q=d, p=px))
 
@@ -116,7 +143,7 @@ def line(label, pred):
         label, len(sel), nt, e, 1e4 * e / nt, len(bps), 'n/a' if t is None else '%.2f' % t))
 
 
-print('window %d..%d ms, fills=%d, no-mid skipped=%d' % (START, END, len(rows), skipped))
+print('window %d..%d ms, fills=%d, no-mid skipped=%d, old-epoch order fills skipped=%d' % (START, END, len(rows), skipped, old_epoch_orders))
 for kind, kname in (('', 'ALL'), ('A', 'arbitrageurs'), ('T', 'translators')):
     sel = (lambda r, k=kind: (k == '' or r['kind'] == k))
     print(kname)

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import NavBar from '../../components/NavBar';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +9,7 @@ import { groupTranslators, groupArbitrageurs, isIdleAgent, mergeStableRows } fro
 import HedgeModelThresholds from './HedgeModelThresholds';
 import AgentPnlChart from './AgentPnlChart';
 import SystemPnlBlock from './SystemPnlBlock';
+import { newRequestId, resetErrorInfo, resetSuccessText, RESET_PROMPT, RESET_TOOLTIP } from './resetFlow';  // сброс позиций с меткой эпохи (ADR-090)
 import './VectorClearingLive.css';
 
 // F-05A: живой мониторинг векторного клиринга (ClickHouse vector_clearing_results).
@@ -1259,6 +1260,7 @@ function VectorClearingLive() {
   const [cfgSaving, setCfgSaving] = useState(false);
   const [resetMsg, setResetMsg] = useState('');   // #3 фидбек сброса позиций
   const [resetting, setResetting] = useState(false);
+  const resetRetryRef = useRef(null);   // запрос, после которого позиции сброшены, а метка не записана: повтор допишет метку (тот же request_id)
 
   const loadConfig = useCallback(async () => {
     try {
@@ -1406,18 +1408,36 @@ function VectorClearingLive() {
     });
   }, [loadAgentDetail]);
 
-  // #3 РЕАЛЬНЫЙ сброс позиций агентов в ledger (не фронт-фикс): c_j→0, in_flight→0,
-  // band-хеджи очищаются. После — сразу перезагружаем, чтобы видеть рост с нуля.
+  // #3 РЕАЛЬНЫЙ сброс позиций агентов в ledger (не фронт-фикс): c_j→0, in_flight→0, книги и band-хеджи очищаются, BFF записывает метку сброса
+  // (эпоху; ADR-090). Название эксперимента обязательно; expected_epoch — номер эпохи, который виден экрану (защита от двойного нажатия и
+  // устаревшего экрана). Это сброс агентов: остатки площадок и план по активу им не обнуляются (абсолютный — tools/reset/absolute_reset.sh).
+  // После — сразу перезагружаем, чтобы видеть рост с нуля.
   const resetPositions = useCallback(async () => {
     if (resetting) return;
-    if (!window.confirm('Сбросить ВСЕ позиции агентов к нулю? Это реальный сброс в ledger — позиции начнут копиться заново с текущего клиринга.')) return;
+    let req = resetRetryRef.current;   // предыдущий запрос завершился «позиции сброшены, метка не записана»: повторяем его без нового вопроса
+    if (!req) {
+      let current = 0;
+      try {
+        const e = await axios.get(`${API_BASE}/vector-clearing/epochs`, { params: { limit: 1 }, timeout: 8000 });
+        current = (e.data && e.data.supported && e.data.current && Number(e.data.current.epoch)) || 0;
+      } catch (err) { setResetMsg('сброс не выполнен: не удалось получить текущую эпоху сброса'); return; }
+      const raw = window.prompt(RESET_PROMPT, '');
+      if (raw === null) return;
+      const note = String(raw).trim();
+      if (!note) { setResetMsg('сброс отменён: нужно название эксперимента'); return; }
+      req = { requestId: newRequestId(window.crypto, Date.now(), Math.random), note, expected: current };
+    }
     setResetting(true); setResetMsg('');
     try {
-      const r = await axios.post(`${API_BASE}/vector-clearing/reset-positions`, {}, { timeout: 10000 });
-      setResetMsg(`сброшено агентов: ${(r.data && r.data.cleared) || 0} ✓ — позиции копятся с нуля`);
+      const r = await axios.post(`${API_BASE}/vector-clearing/reset-positions`,
+        { note: req.note, confirm: true, request_id: req.requestId, expected_epoch: req.expected }, { timeout: 40000 });
+      resetRetryRef.current = null;
+      setResetMsg(resetSuccessText(r.data));
       await load();
     } catch (e) {
-      setResetMsg('ошибка сброса: ' + (e.message || 'не выполнено'));
+      const info = resetErrorInfo(e);
+      resetRetryRef.current = info.retry ? req : null;
+      setResetMsg(info.text);
     } finally { setResetting(false); }
   }, [resetting, load]);
 
@@ -1564,7 +1584,7 @@ function VectorClearingLive() {
             <button
               onClick={resetPositions}
               disabled={resetting}
-              title="Реальный сброс c_j→0 в ledger — наблюдать расхождение позиций с нуля"
+              title={RESET_TOOLTIP}
               style={{
                 padding: '4px 12px', borderRadius: 6, fontSize: 12.5, fontWeight: 600,
                 cursor: resetting ? 'default' : 'pointer',

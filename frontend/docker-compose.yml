@@ -46,6 +46,8 @@ services:
       # F-18 D1+#7 (T-F18-705): σ_ref для ПРЕВЬЮ динамического порога в agent-detail —
       # должен совпадать с ledger CE_BAND_SIGMA_REF, иначе превью разойдётся с активным порогом.
       CE_BAND_SIGMA_REF: ${CE_BAND_SIGMA_REF:-0.00015}
+      # ADR-090: сброс позиций разрешён только в песочнице (нет контракта отмены заявок на живых биржах). В production задайте 0 (или NODE_ENV=production).
+      CE_RESET_ALLOWED: ${CE_RESET_ALLOWED:-1}
     ports:
       - "8090:8090"
     networks: [default, cex_net]

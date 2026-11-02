@@ -16,7 +16,9 @@ const { cumulativeBookVwap } = require("./book_vwap");  // CALC-BOOK-VWAP: ед�
 const { buildCeGraph, makePriceOf } = require("./ce_graph_build");
 const { placeholderAgentRows } = require("./agent_placeholders");  // недостающие агенты панели «Живые позиции»  // граф CE: узлы asset@venue, рёбра агентов
 const { buildClearingView } = require("./ce_clearing_view");  // ADR-079: решение клиринга + ликвидность бирж
-const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, hmodelModeAuditRecord, HMODEL_FIELD, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS } = require("./band_config");  // ADR-081: ширина полосы хеджа
+const { parseBandConfig, bandMode, normalizeBandRow, auditRecord, hmodelModeAuditRecord, HMODEL_FIELD, configAuditRecord, CORE_FIELDS, checkOperatorRequest, BAND_FIELDS, sanitizeActor } = require("./band_config");  // ADR-081
+const epochLib = require("./epoch");  // метка сброса (эпоха) для потребителей истории: помощник окна, определение эпохи (ADR-090)
+const epochSchema = require("./epoch_schema");  // схема метки в Postgres: самовосстанавливающийся DDL и досборка унаследованных эпох (ADR-090): ширина полосы хеджа
 const { mergeVenueStages } = require("./venue_stage_merge");  // тайминги стадий опроса (этап 0)
 const { buildLiquidityStatsView } = require("./venue_liquidity_view");  // ADR-082: ν и f бирж по парам
 const { aggregateLines } = require("./slope_aggregate");  // суммарные линейные кривые бирж
@@ -5553,6 +5555,7 @@ async function handleHedgeFlowV1ById(req, res, pathname) {
              fee::text AS fee,
              fee_currency, client_order_id, venue_order_id, status,
              error_code, error_message, created_at, updated_at
+      -- epoch-guard: ok(заявки одного потока хеджа по его идентификатору, не окно по времени)
       FROM child_orders
       WHERE hedge_flow_id = $1
       ORDER BY created_at ASC
@@ -6903,9 +6906,9 @@ async function fetchVenueFillDiagnostics(batchId) {
               status, reason, window_trades, considered_trades, created_at`;
     const [batchRes, recentRes] = await Promise.all([
       batchId
-        ? pool.query(`SELECT ${cols} FROM venue_fill_diagnostics WHERE batch_id=$1 ORDER BY created_at DESC LIMIT 40`, [batchId])
+        ? pool.query(`SELECT ${cols} FROM venue_fill_diagnostics WHERE batch_id=$1 ORDER BY created_at DESC LIMIT 40`, [batchId])  // epoch-guard: ok(последние 40 строк диагностики исполнения, не накопление)
         : Promise.resolve({ rows: [] }),
-      pool.query(`SELECT ${cols} FROM venue_fill_diagnostics ORDER BY created_at DESC LIMIT 40`),
+      pool.query(`SELECT ${cols} FROM venue_fill_diagnostics ORDER BY created_at DESC LIMIT 40`),  // epoch-guard: ok(последние 40 строк диагностики исполнения, не накопление)
     ]);
     const seen = new Set();
     const rows = [];
@@ -7049,6 +7052,166 @@ async function ensurePnlHistoryTable(pool) {
   }
 }
 
+// ── Метка сброса позиций (эпоха), ADR-090 / CR-F18-018, этап Э1 ──
+// Сброс создаёт запись в ce_reset_epoch (номер, момент, кто, название эксперимента). Все чтения истории и все «с момента сброса» в этом файле
+// берут границу отсюда: loadEpochs → resolveEpochWindow (окна графиков) и resetFloorMs (накопления с момента сброса). Прежняя метка
+// f05a_clearing_config.trade_stats_reset_at остаётся запасным источником только пока в ce_reset_epoch нет ни одной записи (и откатом на
+// прежнюю версию BFF: маршрут сброса пишет обе). Схема создаётся здесь же (только CREATE ... IF NOT EXISTS), унаследованные эпохи
+// дособираются из истории конфигурации один раз.
+let epochSchemaReady = null;
+let epochSchemaFailAt = 0, epochSchemaFailErr = null;
+const EPOCH_DDL_BACKOFF_MS = 30000;
+function ensureEpochReady(pool) {
+  if (epochSchemaReady) return epochSchemaReady;
+  // Сбой DDL не повторяем на каждый запрос чтения: транзакция DDL с lock_timeout добавляла бы секунды к опросу панелей.
+  if (epochSchemaFailErr && Date.now() - epochSchemaFailAt < EPOCH_DDL_BACKOFF_MS) return Promise.reject(epochSchemaFailErr);
+  epochSchemaReady = epochSchema.ensureEpochSchema(pool)
+    .then(async () => {
+      try {
+        const n = await epochSchema.backfillLegacyEpochs(pool);
+        if (n) console.log(`[epoch] дособрано унаследованных эпох сброса: ${n}`);
+      } catch (e) {   // досборка — удобство, а не условие: метки читаются и без неё
+        console.error("[epoch] досборка унаследованных эпох не удалась (повтор при следующем запуске):", (e && e.message) || e);
+      }
+      epochSchemaFailErr = null;
+    })
+    .catch((e) => { epochSchemaReady = null; epochSchemaFailAt = Date.now(); epochSchemaFailErr = e; throw e; });
+  return epochSchemaReady;
+}
+const EPOCH_TTL_MS = 3000;
+let epochCache = { at: 0, epochs: null };   // epochs: нормализованный список или null (метки недоступны)
+let epochInflight = null;
+let lastSeenEpochNo = null;
+let epochErrLogAt = 0;
+// Накопители и кэши, зависящие от начала отсчёта: после смены эпохи считаются заново (выгода до сброса после него не засчитывается).
+function invalidateEpochCaches() {
+  tradeStatsCache.at = 0; hedgeMapCache.at = 0; hedgePosCache.at = 0; surplusTotalsCache.at = 0; sysInputsCache.at = 0;
+  pairTradesCache.clear(); knownPairsCache.clear();
+  drainTacts(surplusAcc); surplusInflight = null;
+}
+function noteEpochChange(epochs) {
+  const no = epochLib.currentEpoch(epochs).epoch;
+  if (lastSeenEpochNo !== null && lastSeenEpochNo !== no) {
+    console.log(`[epoch] смена эпохи ${lastSeenEpochNo} → ${no}: кэши, зависящие от сброса, очищены`);
+    invalidateEpochCaches();
+  }
+  lastSeenEpochNo = no;
+}
+// Список эпох (новые в конце) или null, если метки недоступны. Кэш 3 с; при сбое отдаётся последнее известное значение (граница окна не
+// должна «прыгать» из-за кратковременной ошибки Postgres), а если его не было — null (поведение без усечения, ответ помечает supported:false).
+// Сбой запоминается на 15 с (повторы не гонят DDL и запросы на каждое обращение). force — после записи метки: летящий запрос мог начаться ДО
+// коммита и вернуть старый список, поэтому его результат не используется, а запрос выполняется заново.
+let epochFailAt = 0;
+async function loadEpochs(pool, force) {
+  if (!pool) return epochCache.epochs;
+  if (!force) {
+    if (epochCache.epochs !== null && Date.now() - epochCache.at < EPOCH_TTL_MS) return epochCache.epochs;
+    if (epochFailAt && Date.now() - epochFailAt < 15000) return epochCache.epochs;
+  } else if (epochInflight) {
+    try { await epochInflight; } catch (_) { /* итог не нужен: ниже читаем заново */ }
+  }
+  if (!epochInflight) {
+    epochInflight = (async () => {
+      try {
+        await ensureEpochReady(pool);
+        const r = await pool.query(
+          "SELECT epoch_id, (EXTRACT(EPOCH FROM reset_at)*1000)::bigint AS at_ms, kind, note, actor, boot_id FROM ce_reset_epoch ORDER BY epoch_id");
+        const epochs = epochLib.normalizeEpochs(r.rows);
+        if (epochs === null) throw new Error("метки сброса испорчены: время не растёт вместе с номером");
+        epochFailAt = 0;
+        epochCache = { at: Date.now(), epochs };
+        noteEpochChange(epochs);
+        return epochs;
+      } catch (e) {
+        epochFailAt = Date.now();
+        if (Date.now() - epochErrLogAt > 60000) { epochErrLogAt = Date.now(); console.error("[epoch] метки сброса недоступны:", (e && e.message) || e); }
+        return epochCache.epochs;
+      }
+    })().finally(() => { epochInflight = null; });
+  }
+  return epochInflight;
+}
+// Граница «с момента сброса» (мс): начало текущей эпохи; пока меток нет — прежняя метка конфигурации; нет и её — 0 (всё время).
+async function resetFloorMs(pool) {
+  const epochs = await loadEpochs(pool);
+  if (Array.isArray(epochs) && epochs.length) return epochLib.currentEpoch(epochs).at_ms;
+  const r = await pool.query("SELECT (EXTRACT(EPOCH FROM trade_stats_reset_at)*1000)::bigint AS ms FROM f05a_clearing_config WHERE id=1");
+  return Number(r.rows[0] && r.rows[0].ms) || 0;
+}
+// Окно запроса истории → границы выборки и блок ответа. Единая точка для всех маршрутов истории: по умолчанию окно усекается до текущей
+// эпохи, пересечение метки — только allow_cross_reset=true, вся прошлая эпоха — epoch=N. Возвращает { ok:false, status, error } для ответа
+// об ошибке или { ok:true, resolved, epochs, block, fromMs, toMs }.
+async function epochWindowFor(pool, query, opts) {
+  const epochs = await loadEpochs(pool);
+  const q = query || {};
+  const resolved = epochLib.resolveEpochWindow(epochs, {
+    hours: q.hours, from_ms: q.from_ms, to_ms: q.to_ms, epoch: q.epoch, allow_cross_reset: q.allow_cross_reset,
+  }, Date.now(), opts);
+  if (!resolved.ok) return resolved;
+  return { ok: true, resolved, epochs, block: epochLib.epochBlock(resolved), fromMs: resolved.window.effective_from_ms, toMs: resolved.window.to_ms };
+}
+
+// ── Сброс позиций: вспомогательное (ADR-090) ──
+const RESET_NOTE_BAD = /[\u0000-\u001f\u007f]/;            // управляющие символы (включая NUL) в названии эксперимента не допускаются
+const RESET_REQID_OK = /^[A-Za-z0-9_-]{8,80}$/;
+let resetInFlight = false;                                  // один сброс за раз (процессный замок поверх блокировки Postgres)
+// Сброс определён только для песочницы (ADR-090 п. 4): на живых биржах нет контракта отмены заявок. CE_RESET_ALLOWED=1 разрешает явно, 0 запрещает;
+// не задан — разрешён вне production.
+function resetAllowed() {
+  const v = String(process.env.CE_RESET_ALLOWED === undefined ? "" : process.env.CE_RESET_ALLOWED).trim();
+  if (v === "1") return true;
+  if (v === "0") return false;
+  return NODE_ENV !== "production";
+}
+// Запись события сброса в аудит оператора (попытка, отказ, ошибка, исход). Best effort: сбой записи не должен мешать ответу, но виден в логе.
+async function auditResetEvent(pool, action, req, actor, details) {
+  try {
+    if (!pool) return;
+    const ip = String(req.headers["x-real-ip"] || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || (req.socket && req.socket.remoteAddress) || "").slice(0, 120);
+    const rec = { ts: new Date().toISOString(), level: "INFO", msg: "ADR-090 сброс позиций агентов", action, user: actor, ...details };
+    await pool.query("INSERT INTO operator_audit_log (actor, action, remote_addr, user_agent, details) VALUES ($1,$2,$3,$4,$5::jsonb)",
+      [String(actor).slice(0, 120), action, ip, String(req.headers["user-agent"] || "").slice(0, 300), JSON.stringify(rec)]);
+    console.log(JSON.stringify(rec));
+  } catch (e) { console.error("[reset-positions] аудит не записан:", (e && e.message) || e); }
+}
+
+// Снимок состояния перед сбросом для метки (before_state): число агентов, суммы |c| и |in_flight| (тыс. USDT), остатки по валютам (активы,
+// обязательства перед клиентами, план) и boot_id ledger. Деньги — строками. Ограничен по времени: медленный ledger не должен блокировать
+// сброс, тогда в метку попадает пометка об ошибке (снимок — для аудита, а не условие сброса).
+async function snapshotBeforeReset(led) {
+  const work = (async () => {
+    const out = { source: "bff-bridge", at_ms: Date.now() };
+    const fx = (n) => (Number.isFinite(n) ? n.toFixed(6) : null);   // только агрегаты агентов (приближённо, для аудита)
+    // Деньги из ответа ledger — точными строками из units/scale (BigInt), без перехода через double.
+    const decStr = (d) => {
+      if (!d || d.units === undefined || d.units === null) return null;
+      let u;
+      try { u = BigInt(String(d.units)); } catch (_) { return null; }
+      const sc = Math.max(0, Math.trunc(Number(d.scale) || 0));
+      const neg = u < 0n;
+      const t = (neg ? -u : u).toString().padStart(sc + 1, "0");
+      return (neg ? "-" : "") + (sc ? t.slice(0, t.length - sc) + "." + t.slice(-sc) : t);
+    };
+    try {
+      const { agentRows } = await loadLiveAgentRows();
+      out.agents = agentRows.length;
+      out.sum_abs_c_total_kusdt_approx = fx(agentRows.reduce((acc, a) => acc + Math.abs(Number(a.c_total) || 0), 0));
+      out.sum_abs_in_flight_kusdt_approx = fx(agentRows.reduce((acc, a) => acc + Math.abs(Number(a.in_flight) || 0), 0));
+    } catch (e) { out.agents_error = String((e && e.message) || e).slice(0, 160); }
+    try {
+      const resp = await grpcCall(led, "GetExchangeBalances", { currencies: [] });
+      out.boot_id = String((resp && resp.boot_id) || "");
+      out.exchange = {};
+      for (const b of (resp && resp.balances) || []) {
+        out.exchange[b.currency] = { assets: decStr(b.assets_total), client_liability: decStr(b.client_liability), venue: decStr(b.venue_total), in_flight: decStr(b.in_flight) };
+      }
+    } catch (e) { out.exchange_error = String((e && e.message) || e).slice(0, 160); }
+    out.complete = !(out.agents_error || out.exchange_error);   // false — снимок неполный: это видно в метке и аудите (сброс при этом не блокируется)
+    return out;
+  })();
+  return Promise.race([work, new Promise((_, rej) => setTimeout(() => rej(new Error("snapshot_timeout")), 6000).unref())]);
+}
+
 // ── Выгода участников в клиринге (CALC-CE-CLEARING-SURPLUS): опрос последнего снимка matching раз в CE_SURPLUS_POLL_MS (деф. 700 мс,
 // такт ≈ 1,08 с; 0 — выключен), каждый такт учитывается один раз по batchId; копилка сбрасывается проходом записи истории. ──
 const CE_SURPLUS_POLL_MS = Math.max(0, parseInt(process.env.CE_SURPLUS_POLL_MS || "700", 10) || 0);
@@ -7083,13 +7246,15 @@ async function loadAgentSurplusTotals() {
   const pool = getPgPool();
   if (!pool) return surplusTotalsCache.value;
   try {
+    const floorMs = await resetFloorMs(pool);   // начало текущей эпохи (ADR-090)
     const r = await pool.query(
       `SELECT agent_id, SUM(surplus_inc_usdt)::float8 AS surplus,
               SUM(surplus_tacts)::float8 AS seen, SUM(surplus_tacts_expected)::float8 AS expected
+         -- epoch-guard: window (resetFloorMs: сумма выгоды с начала текущей эпохи)
          FROM ce_agent_pnl_history
         WHERE surplus_inc_usdt IS NOT NULL
-          AND ts > COALESCE((SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1), to_timestamp(0))
-        GROUP BY agent_id`);
+          AND ts > to_timestamp($1::float8 / 1000.0)
+        GROUP BY agent_id`, [floorMs]);
     const m = new Map();
     for (const x of r.rows) m.set(x.agent_id, { surplus: Number(x.surplus) || 0, coverage: Number(x.expected) > 0 ? Math.min(1, Number(x.seen) / Number(x.expected)) : null });
     surplusTotalsCache = { at: Date.now(), value: m, ok: true };
@@ -7151,9 +7316,9 @@ async function loadSystemPnlInputs() {
   const segRows = await fetchCeSegmentRows(600);
   return { q, m: assetUsdMids(segRows, Object.keys(q), Date.now()), boot_id: String((resp && resp.boot_id) || "") };
 }
+// Момент последнего сброса статистики сделок — начало текущей эпохи (ADR-090); имя сохранено для вызывающих мест.
 async function tradeStatsResetMs(pool) {
-  const r = await pool.query("SELECT (EXTRACT(EPOCH FROM trade_stats_reset_at)*1000)::bigint AS ms FROM f05a_clearing_config WHERE id=1");
-  return Number(r.rows[0] && r.rows[0].ms) || 0;
+  return resetFloorMs(pool);
 }
 async function loadSystemPnlBaseline(pool) {
   const r = await pool.query("SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, reset_ms::text AS reset_ms, q0, m0, boot_id, carry FROM ce_system_pnl_baseline WHERE id = 1");
@@ -7174,7 +7339,7 @@ async function sampleSystemPnlOnce(pool, nowMs) {
     let carry = { trading: 0, revaluation: 0 };
     if (act === 'rebase') {
       const last = await pool.query(
-        "SELECT trading_usdt::float8 AS t, revaluation_usdt::float8 AS v FROM ce_system_pnl_history WHERE ts >= to_timestamp($1::float8 / 1000.0) ORDER BY ts DESC LIMIT 1", [base.ts_ms]);
+        "SELECT trading_usdt::float8 AS t, revaluation_usdt::float8 AS v FROM ce_system_pnl_history WHERE ts >= to_timestamp($1::float8 / 1000.0) ORDER BY ts DESC LIMIT 1", [base.ts_ms]);  // epoch-guard: ok(последняя точка после момента базы; база создаётся не раньше начала эпохи)
       carry = last.rows[0] ? { trading: Number(last.rows[0].t) || 0, revaluation: Number(last.rows[0].v) || 0 } : (base.carry || carry);
     }
     await pool.query(
@@ -7208,7 +7373,7 @@ async function runSystemPnlSample() {
     ]);
     if (nowMs - sysPnlLastPruneMs > 3600 * 1000) {
       sysPnlLastPruneMs = nowMs;
-      await pool.query("DELETE FROM ce_system_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
+      await pool.query("DELETE FROM ce_system_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);  // epoch-guard: ok(удаление по сроку хранения)
     }
   } catch (e) {
     console.error("[system-pnl] sample failed:", e.message || e);
@@ -7271,7 +7436,7 @@ async function writeBandHistory(pool, agentRows, nowMs) {
        col("transfer_target_raw"), samples.map((x) => x.est_minutes || 0), col("params_hash")]);
     if (nowMs - bandLastPruneMs > 3600 * 1000) {
       bandLastPruneMs = nowMs;
-      await pool.query("DELETE FROM ce_agent_band_history WHERE ts < now() - make_interval(days => $1)", [BAND_HISTORY_RETENTION_DAYS]);
+      await pool.query("DELETE FROM ce_agent_band_history WHERE ts < now() - make_interval(days => $1)", [BAND_HISTORY_RETENTION_DAYS]);  // epoch-guard: ok(удаление по сроку хранения)
     }
   } catch (e) {
     console.error("[band-history] write failed:", e.message || e);
@@ -7330,8 +7495,8 @@ async function samplePnlHistoryOnce() {
     if (await refreshSurplusTotalsAfterWrite()) { if (surplusInflight === wasWritten) surplusInflight = null; }
     if (nowMs - pnlLastPruneMs > 3600 * 1000) {   // раз в час убираем записи старше срока хранения
       pnlLastPruneMs = nowMs;
-      await pool.query("DELETE FROM ce_agent_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
-      await pool.query("DELETE FROM ce_pnl_totals_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);
+      await pool.query("DELETE FROM ce_agent_pnl_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);  // epoch-guard: ok(удаление по сроку хранения)
+      await pool.query("DELETE FROM ce_pnl_totals_history WHERE ts < now() - make_interval(days => $1)", [PNL_HISTORY_RETENTION_DAYS]);  // epoch-guard: ok(удаление по сроку хранения)
     }
   } catch (e) {
     if (drained) { restoreTacts(surplusAcc, drained); if (surplusInflight === drained) surplusInflight = null; }   // выгода не теряется: уйдёт со следующим проходом
@@ -7668,16 +7833,19 @@ async function loadAgentHedgeMap() {
   const pool = getPgPool();
   if (!pool) return hedgeMapCache.value;
   try {
+    // Последняя заявка агента показывается только из текущей эпохи (ADR-090): заявка, созданная до сброса, — старой эпохи.
+    const floorMs = await resetFloorMs(pool);
     const r = await pool.query(
       `SELECT DISTINCT ON (split_part(hedge_flow_id,'|',3), venue_id)
               split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue,
               symbol, side,
               qty::text AS target_qty, filled_qty::text AS filled_qty, status,
               (EXTRACT(EPOCH FROM created_at)*1000)::bigint AS created_ms
+         -- epoch-guard: window (последняя заявка агента из текущей эпохи, resetFloorMs)
          FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%'
-          AND created_at > now() - interval '2 hours'
-        ORDER BY split_part(hedge_flow_id,'|',3), venue_id, created_at DESC`);
+          AND created_at > GREATEST(now() - interval '2 hours', to_timestamp($1::float8 / 1000.0))
+        ORDER BY split_part(hedge_flow_id,'|',3), venue_id, created_at DESC`, [floorMs]);
     hedgeMapCache = { at: Date.now(), value: buildHedgeMap(r.rows) };
     return hedgeMapCache.value;
   } catch (e) { return hedgeMapCache.value; }  // сбой PG — остаётся прошлое значение (пустое, если заявок ещё не было)
@@ -7700,6 +7868,7 @@ async function loadAgentTradeStats() {
   const pool = getPgPool();
   if (!pool) return tradeStatsCache.value;
   try {
+    const floorMs = await resetFloorMs(pool);   // начало текущей эпохи (ADR-090): единая метка вместо отдельной записи BFF
     const r = await pool.query(
       `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue,
               SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
@@ -7707,13 +7876,12 @@ async function loadAgentTradeStats() {
               SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
               SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional,
               COUNT(*) AS fills
+         -- epoch-guard: window (resetFloorMs: «Сделки» панели с начала текущей эпохи)
          FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0
               AND avg_price IS NOT NULL
-              AND created_at > COALESCE(
-                    (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
-                    to_timestamp(0))
-        GROUP BY 1, 2`);
+              AND created_at > to_timestamp($1::float8 / 1000.0)
+        GROUP BY 1, 2`, [floorMs]);
     tradeStatsCache = { at: Date.now(), value: combineTradeStatsByVenue(r.rows) };
     return tradeStatsCache.value;
   } catch (e) { return tradeStatsCache.value; }  // сбой PG — прошлая статистика, а не пустая: иначе количества сделок на панели пропадают
@@ -7730,21 +7898,19 @@ async function fetchHedgePositionRows() {
   const pool = getPgPool();
   if (!pool) return hedgePosCache.value;
   try {
+    const floorMs = await resetFloorMs(pool);   // начало текущей эпохи (ADR-090): тот же момент, что у «Сделок» панели
     const r = await pool.query(
       `SELECT split_part(hedge_flow_id,'|',3) AS agent_id, venue_id AS venue, replace(symbol,'/','') AS symbol,
               SUM(CASE WHEN side='BUY'  THEN filled_qty ELSE 0 END)::float8 AS buy_base,
               SUM(CASE WHEN side='SELL' THEN filled_qty ELSE 0 END)::float8 AS sell_base,
               SUM(CASE WHEN side='BUY'  THEN filled_qty*avg_price ELSE 0 END)::float8 AS buy_notional,
               SUM(CASE WHEN side='SELL' THEN filled_qty*avg_price ELSE 0 END)::float8 AS sell_notional
+         -- epoch-guard: window (resetFloorMs: позиция от хеджей с начала текущей эпохи)
          FROM child_orders
         WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price IS NOT NULL
-              AND created_at > COALESCE(
-                    (SELECT trade_stats_reset_at FROM f05a_clearing_config WHERE id=1),
-                    to_timestamp(0))
-        GROUP BY 1, 2, 3`);
-    const since = await pool.query(
-      "SELECT (EXTRACT(EPOCH FROM trade_stats_reset_at)*1000)::bigint AS ms FROM f05a_clearing_config WHERE id=1");
-    hedgePosCache = { at: Date.now(), value: { rows: r.rows, sinceMs: Number(since.rows[0] && since.rows[0].ms) || 0 } };
+              AND created_at > to_timestamp($1::float8 / 1000.0)
+        GROUP BY 1, 2, 3`, [floorMs]);
+    hedgePosCache = { at: Date.now(), value: { rows: r.rows, sinceMs: floorMs } };
   } catch (e) { /* нет таблицы/строк — остаётся прежнее значение, позиции от хеджей не покажем */ }
   return hedgePosCache.value;
 }
@@ -7775,11 +7941,15 @@ async function loadBandFeeBps(pool) {
   } catch (e) { /* нет таблицы или строки — значения по умолчанию */ }
   return resolveFeeBps(row, { CE_BAND_MAKER_FEE_BPS: process.env.CE_BAND_MAKER_FEE_BPS, CE_BAND_REF_FEE_BPS: process.env.CE_BAND_REF_FEE_BPS });
 }
-async function loadPairTradesRows(hours, agent = null) {
+// win — окно по метке сброса (ADR-090): { fromMs, toMs }, любое из значений null = «относительно сейчас» (началом тогда служит now − hours).
+async function loadPairTradesRows(hours, agent = null, win = null) {
   const pool = getPgPool();
   if (!pool) throw new Error("postgres_unavailable");
   const bucketMs = bucketMsForHours(hours);
   const fee = await loadBandFeeBps(pool);
+  const nowMs = Date.now();
+  const toMs = win && win.toMs != null ? Number(win.toMs) : nowMs;
+  const fromMs = win && win.fromMs != null ? Number(win.fromMs) : toMs - hours * MS_PER_HOUR;
   const r = await pool.query(
     `SELECT symbol,
             (floor(extract(epoch from created_at) * 1000 / $1::bigint)::bigint * $1::bigint)::bigint AS t,
@@ -7792,13 +7962,14 @@ async function loadPairTradesRows(hours, agent = null) {
             SUM(CASE WHEN side = 'SELL' THEN filled_qty * avg_price
                        * (CASE WHEN order_type IN ('LIMIT', 'POST_ONLY') THEN $3::float8 ELSE $4::float8 END) / 10000.0 END)::float8 AS sell_fee,
             COUNT(*)::int AS fills
+       -- epoch-guard: window (границы окна из epochWindowFor)
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0
-            AND created_at > now() - make_interval(hours => $2::int)
+            AND created_at >= to_timestamp($2::float8 / 1000.0) AND created_at < to_timestamp($6::float8 / 1000.0)
             AND ($5::text IS NULL OR split_part(hedge_flow_id, '|', 3) = $5::text)
       GROUP BY 1, 2
-      ORDER BY 1, 2`, [bucketMs, hours, fee.maker_bps, fee.taker_bps, agent]);
-  return buildPairTradesDto(r.rows, hours, Date.now(), bucketMs, fee);
+      ORDER BY 1, 2`, [bucketMs, fromMs, fee.maker_bps, fee.taker_bps, agent, toMs]);
+  return buildPairTradesDto(r.rows, hours, nowMs, bucketMs, fee, fromMs);
 }
 // Пары, по которым были исполненные band-хеджи за последние 7 суток (для чекбоксов: пара без сделок в окне остаётся в списке). Запрос идёт по
 // индексу idx_child_orders_created и агрегирует около 190 тыс. подходящих строк (dev 2026-10-28: 0,26 с на тёплом кэше PostgreSQL), но при
@@ -7822,6 +7993,7 @@ function refreshKnownPairs(agent) {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("known_pairs_timeout")), KNOWN_PAIRS_QUERY_TIMEOUT_MS).unref());
   const query = pool.query(
     `SELECT symbol, (EXTRACT(EPOCH FROM MAX(created_at)) * 1000)::bigint AS last_trade_ms
+       -- epoch-guard: ok(справочник пар, торговавшихся за 7 суток: список для чекбоксов, не показатель позиции)
        FROM child_orders
       WHERE hedge_flow_id LIKE 'ce|band|%' AND filled_qty > 0 AND avg_price > 0 AND created_at > now() - interval '7 days'
             AND ($1::text IS NULL OR split_part(hedge_flow_id, '|', 3) = $1::text)
@@ -7840,8 +8012,9 @@ function loadKnownPairs(agent = null) {
   return Promise.race([refreshKnownPairs(agent), wait]);
 }
 // agent — идентификатор агента CE (null — все агенты); график и справочник пар считаются по его хеджам (сегмент hedge_flow_id «ce|band|<агент>|…»).
-function fetchPairTrades(hours, agent = null) {
-  const key = `${hours}|${agent || ''}`;
+// win — окно по метке сброса: { key, fromMs, toMs } (key входит в ключ кэша: смена эпохи или границы окна не должна отдавать чужой ответ).
+function fetchPairTrades(hours, agent = null, win = null) {
+  const key = `${hours}|${agent || ''}|${win && win.key ? win.key : 'rel'}`;
   const hit = pairTradesCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return Promise.resolve(hit.value);
   if (!pairTradesInflight.has(key)) {
@@ -7851,7 +8024,7 @@ function fetchPairTrades(hours, agent = null) {
     }
     const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("pair_trades_timeout")), PAIR_TRADES_TIMEOUT_MS).unref());
     pairTradesInflight.set(key, Promise.race([
-      Promise.all([loadPairTradesRows(hours, agent), loadKnownPairs(agent)])
+      Promise.all([loadPairTradesRows(hours, agent, win), loadKnownPairs(agent)])
         .then(([dto, known]) => ({ value: { ...dto, agent: agent || null, known_pairs: buildKnownPairs(dto.pairs, known.rows) }, degraded: known.degraded })),
       timeout])
       .then(({ value, degraded }) => {
@@ -8518,39 +8691,115 @@ async function handleVectorClearing(req, res, pathname, query) {
     return writeJson(res, 405, { error: "method_not_allowed" });
   }
 
-  // #3 Кнопка сброса позиций: РЕАЛЬНЫЙ сброс c_j/in_flight в ledger (не фронт-фикс).
-  // POST — чтобы отличать от чтений. Пустой agent_ids ⇒ все агенты.
+  // #3 Сброс позиций (ADR-090, CR-F18-018, этап Э1). Реальный сброс агентских состояний в ledger (c_j, in_flight, книги R/U, band-хеджи) и
+  // ЗАПИСЬ МЕТКИ (эпохи) в ce_reset_epoch: по ней BFF и скрипты разбора отделяют интервалы до и после сброса. Это «мост»: ledger до этапа Э2
+  // не обнуляет остатки площадок, план по активу и очередь переводов, поэтому метка имеет вид bridge и в ответе absolute:false. Начало
+  // эксперимента с исходного состояния — tools/reset/absolute_reset.sh (метка absolute).
+  // Порядок защищает от «сброса без следа»: всё, что способно отказать, проверяется ДО ledger (строгие идентификаторы, песочница, интервал между
+  // сбросами, часы, ожидаемая эпоха под блокировкой Postgres), попытка и исход пишутся в аудит оператора, а метка открывается в той же транзакции,
+  // что держит блокировку (откат при отказе ledger). Выборочный сброс (agent_ids) отклоняется (OQ-F18v2-61). Название эксперимента, подтверждение,
+  // request_id и expected_epoch обязательны; повтор с тем же request_id и теми же актором и названием возвращает прежний результат.
   if (pathname === "/api/vector-clearing/reset-positions") {
     if (req.method !== "POST") return writeJson(res, 405, { error: "method_not_allowed" });
-    const led = initLedgerClient();
-    if (!led) return writeJson(res, 502, { error: "ledger_unavailable" });
+    const pool = getPgPool();
+    const actor = String(sanitizeActor(req.headers["x-user-id"])).replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120);
+    const deny = async (status, error, message, extra) => {
+      await auditResetEvent(pool, "ce_reset_positions_denied", req, actor, { error, status });
+      return writeJson(res, status, { error, message, ...(extra || {}) });
+    };
+    const gate = checkOperatorRequest(req.headers, String(process.env.OPERATOR_ALLOWED_ORIGINS || "").split(","));
+    if (!gate.ok) return deny(gate.status, gate.code, gate.message);
+    if (!resetAllowed()) return deny(403, "reset_not_allowed", "сброс позиций разрешён только в песочнице (CE_RESET_ALLOWED=1)");
     let body = {};
-    try { body = await parseBody(req); } catch (e) { /* пустое тело = сбросить всё */ }
-    const agentIds = Array.isArray(body && body.agent_ids) ? body.agent_ids : [];
+    try { body = await parseBody(req); } catch (e) { return deny(400, "bad_body", "тело запроса не разобрано"); }
+    if (Array.isArray(body && body.agent_ids) && body.agent_ids.length) {
+      return deny(400, "selective_reset_not_supported", "выборочный сброс не поддерживается: сброс всегда общий (ADR-090)");
+    }
+    const note = typeof (body && body.note) === "string" ? body.note.trim() : "";
+    if (note.length < 1 || note.length > 200 || RESET_NOTE_BAD.test(note)) return deny(400, "note_required", "укажите название эксперимента (1–200 знаков, без управляющих символов)");
+    if (!(body && (body.confirm === true || body.confirm === "true"))) return deny(400, "confirm_required", "подтвердите сброс: confirm=true");
+    const requestId = body && body.request_id !== undefined && body.request_id !== null ? body.request_id : randomUUID();
+    if (typeof requestId !== "string" || !RESET_REQID_OK.test(requestId)) return deny(400, "bad_request_id", "request_id: 8–80 знаков [A-Za-z0-9_-]");
+    const expected = body && body.expected_epoch !== undefined && body.expected_epoch !== null && /^\d+$/.test(String(body.expected_epoch)) ? Number(body.expected_epoch) : null;
+    if (expected === null) return deny(400, "expected_epoch_required", "укажите expected_epoch — номер текущей эпохи, который видит экран (защита от повторного нажатия и устаревшего экрана)");
+    if (!pool) return deny(503, "postgres_unavailable", "без Postgres метка сброса не запишется; сброс не выполнен");
+    if (resetInFlight) return deny(409, "reset_in_progress", "другой сброс уже выполняется");
+    resetInFlight = true;
+    let client = null, broken = false, txOpen = false;
+    const rollback = async () => {
+      if (!txOpen) return;
+      try { await client.query("ROLLBACK"); txOpen = false; } catch (_) { broken = true; }   // соединение с неснятой транзакцией в пул не возвращаем
+    };
     try {
-      const resp = await grpcCall(led, "ResetAgentPositions", { agent_ids: agentIds });
-      // Сброс позиций ⇒ сбросить и накопления по состоявшимся сделкам (панель «Живые
-      // позиции»): метка в f05a_clearing_config, агрегат fetchAgentTradeStats считает
-      // сделки только ПОСЛЕ неё. Глобальная метка (reset-кнопка сбрасывает всех агентов).
-      let statsReset = false;
-      const pool = getPgPool();
-      if (pool) {
-        try {
-          await pool.query(
-            "INSERT INTO f05a_clearing_config (id, trade_stats_reset_at, updated_at)"
-            + " VALUES (1, now(), now()) ON CONFLICT (id) DO UPDATE SET"
-            + " trade_stats_reset_at=now(), updated_at=now()");
-          statsReset = true;
-          tradeStatsCache.at = 0; hedgeMapCache.at = 0; hedgePosCache.at = 0; surplusTotalsCache.at = 0;
-          drainTacts(surplusAcc); surplusInflight = null;   // выгода до сброса не засчитывается после него
-          try { await pool.query("DELETE FROM ce_system_pnl_baseline"); } catch (_) { /* таблицы ещё нет */ }   // база прибыли системы будет задана заново при ближайшем замере   // следующий ответ панели считается уже после метки сброса
-        } catch (e) { /* метка опциональна — позиции всё равно сброшены */ }
+      try { await ensureEpochReady(pool); } catch (e) {
+        console.error("[reset-positions] схема меток недоступна:", (e && e.message) || e);
+        return deny(503, "epoch_schema_unavailable", "метки сброса недоступны; сброс не выполнен");
       }
-      return writeJson(res, 200, { cleared: Number(resp && resp.cleared) || 0,
-        scope: agentIds.length ? "filtered" : "all", trade_stats_reset: statsReset });
+      client = await pool.connect();
+      await client.query("BEGIN"); txOpen = true;
+      await client.query("SET LOCAL lock_timeout = '10s'");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('ce_reset_epoch'))");   // тот же ключ, что в ce_epoch_open: сбросы строго по очереди
+      const epochOut = (e, extra) => ({ epoch: Number(e.epoch_id), reset_at_ms: Number(e.at_ms), kind: e.kind, note: e.note, request_id: requestId, ...extra });
+      const prior = (await client.query(
+        "SELECT epoch_id, (EXTRACT(EPOCH FROM reset_at)*1000)::bigint AS at_ms, kind, note, actor FROM ce_reset_epoch WHERE request_id = $1", [requestId])).rows[0];
+      if (prior) {
+        await rollback();
+        if (prior.actor !== actor || prior.note !== note) return deny(409, "request_id_conflict", "этот request_id уже использован другим запросом");
+        return writeJson(res, 200, epochOut(prior, { cleared: null, scope: "all", absolute: prior.kind === "absolute", replay: true, trade_stats_reset: true }));
+      }
+      const st = (await client.query(
+        `SELECT COALESCE(max(epoch_id), 0) AS cur, COALESCE(clock_timestamp() - max(reset_at) < interval '60 seconds', false) AS too_recent,
+                COALESCE(max(reset_at) > clock_timestamp(), false) AS in_future FROM ce_reset_epoch`)).rows[0];
+      if (Number(st.cur) !== expected) { await rollback(); return deny(409, "epoch_changed", "эпоха уже сменилась (повторное нажатие или устаревший экран); сброс не выполнен", { current: Number(st.cur) }); }
+      if (st.too_recent === true || st.too_recent === "t") { await rollback(); return deny(429, "reset_too_frequent", "сброс возможен не чаще раза в минуту"); }
+      if (st.in_future === true || st.in_future === "t") { await rollback(); return deny(409, "epoch_clock_skew", "последняя метка опережает часы базы; сброс не выполнен"); }
+      const led = initLedgerClient();
+      if (!led) { await rollback(); return deny(502, "ledger_unavailable", "ledger недоступен; сброс не выполнен"); }
+      await auditResetEvent(pool, "ce_reset_positions_attempt", req, actor, { note, request_id: requestId, expected_epoch: expected });
+      const before = await snapshotBeforeReset(led).catch((e) => ({ source: "bff-bridge", complete: false, error: String((e && e.message) || e).slice(0, 200) }));
+      let resp;
+      try {
+        resp = await grpcCall(led, "ResetAgentPositions", { agent_ids: [] });
+      } catch (e) {
+        console.error("[ledger] ResetAgentPositions failed:", e.message || e);
+        await rollback();
+        await auditResetEvent(pool, "ce_reset_positions_failed", req, actor, { stage: "ledger", note, request_id: requestId, error: String((e && e.message) || e).slice(0, 200) });
+        return writeJson(res, 502, { error: "grpc_error", message: "ledger не выполнил сброс (метка не создана)", request_id: requestId });
+      }
+      const cleared = Number(resp && resp.cleared) || 0;
+      let ep;
+      try {
+        ep = (await client.query(
+          `SELECT epoch_id, (EXTRACT(EPOCH FROM reset_at)*1000)::bigint AS at_ms, kind, note
+             FROM ce_epoch_open($1, 'bridge', $2, $3, $4::jsonb, '{}'::jsonb, $5, NULL)`,
+          [actor, note, requestId, JSON.stringify(before), before && before.boot_id ? String(before.boot_id) : null])).rows[0];
+        await client.query("COMMIT"); txOpen = false;
+      } catch (e) {
+        // Позиции в ledger уже сброшены, а метка не записана: прятать это нельзя (графики не увидят границу). Повтор с тем же request_id допишет метку.
+        console.error("[reset-positions] метка не записана после сброса в ledger:", (e && e.message) || e);
+        await rollback();
+        await auditResetEvent(pool, "ce_reset_positions_failed", req, actor, { stage: "epoch_after_ledger_reset", note, request_id: requestId, cleared, error: String((e && e.message) || e).slice(0, 200) });
+        return writeJson(res, 502, { error: "epoch_not_recorded", message: "позиции в ledger сброшены, но метка не записана; повторите запрос с тем же request_id", request_id: requestId, cleared });
+      }
+      // Прежняя метка конфигурации — только откат на прежнюю версию BFF (читает её); база прибыли системы задаётся заново ближайшим замером.
+      try {
+        await pool.query("INSERT INTO f05a_clearing_config (id, trade_stats_reset_at, updated_at) VALUES (1, to_timestamp($1::float8 / 1000.0), now()) ON CONFLICT (id) DO UPDATE SET trade_stats_reset_at = EXCLUDED.trade_stats_reset_at, updated_at = now()", [Number(ep.at_ms)]);
+      } catch (e) { /* только запасной путь отката */ }
+      try { await pool.query("DELETE FROM ce_system_pnl_baseline"); } catch (_) { /* таблицы ещё нет */ }
+      await auditResetEvent(pool, "ce_reset_positions", req, actor, { epoch: Number(ep.epoch_id), kind: "bridge", note, request_id: requestId, cleared, snapshot_complete: before && before.complete === true });
+      await loadEpochs(pool, true);   // смена номера эпохи очищает зависящие кэши (noteEpochChange)
+      invalidateEpochCaches();        // и на случай, если номер уже был виден
+      return writeJson(res, 200, epochOut(ep, {
+        cleared, scope: "all", absolute: false, trade_stats_reset: true, snapshot_complete: before && before.complete === true,
+        warning: "сброшены позиции, книги и хеджи агентов; остатки площадок, план по активу и очередь переводов ledger не сброшены — для начала эксперимента с исходного состояния используйте tools/reset/absolute_reset.sh",
+      }));
     } catch (e) {
-      console.error("[ledger] ResetAgentPositions failed:", e.message || e);
-      return writeJson(res, 502, { error: "grpc_error", message: String(e.message || e) });
+      console.error("[reset-positions] ошибка:", (e && e.message) || e);
+      await rollback();
+      return writeJson(res, 502, { error: "reset_failed", message: "сброс не выполнен", request_id: requestId });
+    } finally {
+      if (client) { try { client.release(broken); } catch (_) { /* уже освобождено */ } }
+      resetInFlight = false;
     }
   }
 
@@ -8610,6 +8859,22 @@ async function handleVectorClearing(req, res, pathname, query) {
   // ADR-087: заработок агентов CE по биржам (вкладка «PnL»): R, U, R+U внутренней биржи, внешних бирж и итого, USDT.
   // Всё посчитано в ledger (GetAgentPnl); здесь только пересылка. Недоступность ledger — 502, а не пустой список: «нет данных»
   // не должно выглядеть как «агентов нет» (в отличие от fetchAgentPositions, который при ошибке возвращает []).
+  // Метки сброса позиций (ADR-090): текущая эпоха и список прошлых (новые первыми). Для экранов, скриптов разбора и проверки «какая эпоха
+  // сейчас». supported:false — метки недоступны (Postgres не ответил или таблицы ещё нет): потребитель обязан это показать, а не считать «меток не было».
+  if (pathname === "/api/vector-clearing/epochs") {
+    if (req.method !== "GET") return writeJson(res, 405, { error: "method_not_allowed" });
+    const pool = getPgPool();
+    if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
+    const epochs = await loadEpochs(pool);
+    const limit = Math.max(1, Math.min(200, parseInt(query && query.limit, 10) || 50));
+    if (!Array.isArray(epochs)) return writeJson(res, 200, { supported: false, current: null, epochs: [], count: 0, has_more: false, generatedAt: new Date().toISOString() });
+    // Публично только номер, момент, вид и название: автор (подменяемый X-User-Id) и boot_id остаются в базе для аудита.
+    const pub = (e) => ({ epoch: e.epoch, at_ms: e.at_ms, kind: e.kind, note: e.note });
+    return writeJson(res, 200, {
+      supported: true, current: pub(epochLib.currentEpoch(epochs)), epochs: epochs.slice().reverse().slice(0, limit).map(pub), count: epochs.length,
+      has_more: epochs.length > limit, generatedAt: new Date().toISOString(),
+    });
+  }
   if (pathname === "/api/vector-clearing/agent-pnl") {
     if (req.method !== "GET") return writeJson(res, 405, { error: "method_not_allowed" });
     const led = initLedgerClient();
@@ -8617,7 +8882,7 @@ async function handleVectorClearing(req, res, pathname, query) {
     const ids = String((query && query.agent_ids) || "").split(",").map((x) => x.trim()).filter(Boolean);
     try {
       const resp = await grpcCall(led, "GetAgentPnl", { agent_ids: ids });
-      return writeJson(res, 200, buildAgentPnlDto(resp));
+      return writeJson(res, 200, { ...buildAgentPnlDto(resp), ...epochLib.epochHeader(await loadEpochs(getPgPool())) });
     } catch (e) {
       console.error("[ledger] GetAgentPnl failed:", (e && e.message) || e);
       return writeJson(res, 502, { error: "ledger_unavailable", reason: (e && e.code === 12) ? "unimplemented" : String((e && e.message) || e) });
@@ -8625,7 +8890,7 @@ async function handleVectorClearing(req, res, pathname, query) {
   }
   if (pathname === "/api/vector-clearing/agent-positions") {
     const { agentRows, newest, pnlTotals } = await loadLiveAgentRows();
-    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, hmodel_supported: ledgerKnowsHedgeModel, generatedAt: new Date().toISOString() });
+    return writeJson(res, 200, { agentRows, pnl_totals: pnlTotals, batch_id: newest, hmodel_supported: ledgerKnowsHedgeModel, ...epochLib.epochHeader(await loadEpochs(getPgPool())), generatedAt: new Date().toISOString() });
   }
   // История заработка агента во времени (график по клику на агента): R, U и R+U, записанные семплером раз в минуту.
   // Прибыль системы по реальным остаткам: текущие значения (торговый результат, переоценка запасов, по валютам) и ряд за окно.
@@ -8642,6 +8907,7 @@ async function handleVectorClearing(req, res, pathname, query) {
         if (base) {
           rows = (await pool.query(
             `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, trading_usdt, revaluation_usdt, mtm_change_usdt
+               -- epoch-guard: window (ряд идёт с начала текущей эпохи, resetMs)
                FROM ce_system_pnl_history
               WHERE ts > now() - make_interval(hours => $1) AND ts >= to_timestamp($2::float8 / 1000.0) ORDER BY ts`, [hours, resetMs])).rows;   // с метки сброса, не с момента базы: после перезапуска ledger ряд непрерывен (точки включают перенос)
         }
@@ -8661,6 +8927,7 @@ async function handleVectorClearing(req, res, pathname, query) {
       })), 500);
       return writeJson(res, 200, {
         window_hours: hours, baseline_ms: base ? base.ts_ms : null, current, current_error: currentError, points, has_data: points.length > 0,
+        ...epochLib.epochHeader(await loadEpochs(pool)), epoch_floor_ms: await resetFloorMs(pool).catch(() => null),   // ряд идёт с начала текущей эпохи (ADR-090)
         generatedAt: new Date().toISOString(),
       });
     } catch (e) {
@@ -8672,17 +8939,23 @@ async function handleVectorClearing(req, res, pathname, query) {
     // семплером раз в минуту (ce_pnl_totals_history). Ничего не пересчитывается: группы внутренняя / внешние / итого — как в ledger.
     const scope = String((query && query.scope) || "all");
     if (!["all", "translator", "arbitrageur"].includes(scope)) return writeJson(res, 400, { error: "bad_scope" });
-    const hours = Math.max(1, Math.min(PNL_HISTORY_MAX_HOURS, parseInt(query && query.hours, 10) || 24));
     const pool = getPgPool();
     if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
+      // Окно по метке сброса (ADR-090): по умолчанию с начала текущей эпохи; через метку — только allow_cross_reset=true, тогда точки несут эпоху.
+      const ew = await epochWindowFor(pool, query, { defaultHours: 24, maxHours: PNL_HISTORY_MAX_HOURS });
+      if (!ew.ok) return writeJson(res, ew.status, { error: ew.error, message: ew.message });
+      const w = ew.resolved.window;
+      const hours = w.hours;   // длина окна — единый расчёт помощника эпох
       await ensurePnlHistoryReady(pool);   // таблицы создаёт семплер; при чтении до его первого прохода — создаём здесь
       const r = await pool.query(
         `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, internal_r, internal_u, external_r, external_u, agents, incomplete
+           -- epoch-guard: window (границы окна из epochWindowFor)
            FROM ce_pnl_totals_history
-          WHERE scope = $1 AND ts > now() - make_interval(hours => $2)
-          ORDER BY ts`, [scope, hours]);
-      return writeJson(res, 200, { ...buildTotalsHistoryDto(scope, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+          WHERE scope = $1 AND ts >= to_timestamp($2::float8 / 1000.0) AND ts < to_timestamp($3::float8 / 1000.0)
+          ORDER BY ts`, [scope, w.effective_from_ms, w.to_ms]);
+      const opts = { sinceMs: w.effective_from_ms, epochOf: w.allow_cross_reset && Array.isArray(ew.epochs) ? (t) => epochLib.epochAt(ew.epochs, t) : null };
+      return writeJson(res, 200, { ...buildTotalsHistoryDto(scope, r.rows, hours, Date.now(), 500, opts), ...ew.block, generatedAt: new Date().toISOString() });
     } catch (e) {
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
@@ -8690,13 +8963,28 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/pair-trades-history") {
     // График «Сделки на внешних биржах по парам» на вкладке «PnL»: накопленный объём базовой валюты и цены покупки и продажи (вторая
     // валюта пары) по состоявшимся хеджам агентов CE; всё посчитано здесь, браузер только рисует (CALC-CE-PAIR-TRADES).
-    const hours = Math.max(1, Math.min(168, parseInt(query && query.hours, 10) || 24));
     const agentArg = parseAgent(query && query.agent);   // необязательный фильтр: хеджи одного агента (идентификатор как в таблице «Заработок агентов»)
     if (!agentArg.ok) return writeJson(res, 400, { error: "bad_agent" });
     if (!getPgPool()) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
-      const dto = await fetchPairTrades(hours, agentArg.agent);
-      return writeJson(res, 200, { ...dto, generatedAt: new Date().toISOString() });
+      // Окно по метке сброса (ADR-090): по умолчанию усекается до текущей эпохи, прошлая эпоха целиком — epoch=N. Объём накапливается от начала
+      // окна, поэтому окно через метку дало бы линию, склеенную из двух экспериментов: такой режим пока не поддержан (кумулятивы не рвутся на метке).
+      const ew = await epochWindowFor(getPgPool(), query, { defaultHours: 24, maxHours: 168 });
+      if (!ew.ok) return writeJson(res, ew.status, { error: ew.error, message: ew.message });
+      const w = ew.resolved.window;
+      if (w.allow_cross_reset && w.crosses_reset) return writeJson(res, 400, { error: "cross_reset_not_supported", message: "график накопленных объёмов не поддерживает окно через метку сброса; запросите каждую эпоху отдельно (epoch=N)", ...ew.block });
+      const hours = w.hours;   // размер интервалов — по длине окна (единый расчёт помощника эпох)
+      // Ключ кэша: относительное окно ('rel') или фиксированные границы (эпоха, усечение по метке, явные from_ms/to_ms); без этого кэш отдал бы
+      // ответ прошлой эпохи после сброса, а явное окно считалось бы как «последние N часов».
+      const pinned = w.epoch_requested !== null || w.truncated_by_reset || w.explicit_window;
+      const fixedTo = w.explicit_window || (w.epoch_requested !== null && w.to_ms < Date.now() - 5000);
+      const win = {
+        key: w.epoch_requested !== null ? `e${w.epoch_requested}@${w.effective_from_ms}` : (w.explicit_window ? `x${w.effective_from_ms}-${w.to_ms}` : (w.truncated_by_reset ? `s${w.effective_from_ms}` : 'rel')),
+        fromMs: pinned ? w.effective_from_ms : null,
+        toMs: fixedTo ? w.to_ms : null,
+      };
+      const dto = await fetchPairTrades(hours, agentArg.agent, win);
+      return writeJson(res, 200, { ...dto, ...ew.block, generatedAt: new Date().toISOString() });
     } catch (e) {
       if (e && e.message === "pair_trades_busy") return writeJson(res, 503, { error: "pair_trades_busy" });
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
@@ -8705,19 +8993,25 @@ async function handleVectorClearing(req, res, pathname, query) {
   if (pathname === "/api/vector-clearing/agent-pnl-history") {
     const agentId = String((query && query.agent_id) || "").slice(0, 120);
     if (!agentId) return writeJson(res, 400, { error: "agent_id_required" });
-    const hours = Math.max(1, Math.min(PNL_HISTORY_MAX_HOURS, parseInt(query && query.hours, 10) || 24));
     const pool = getPgPool();
     if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
+      // Окно по метке сброса (ADR-090): как у pnl-history; накопленная выгода s начинается заново на метке.
+      const ew = await epochWindowFor(pool, query, { defaultHours: 24, maxHours: PNL_HISTORY_MAX_HOURS });
+      if (!ew.ok) return writeJson(res, ew.status, { error: ew.error, message: ew.message });
+      const w = ew.resolved.window;
+      const hours = w.hours;   // длина окна — единый расчёт помощника эпох
       await ensurePnlHistoryReady(pool);   // колонки внутренней группы создаёт семплер (или этот вызов), иначе SELECT до первого прохода упал бы
       const r = await pool.query(
         `SELECT (EXTRACT(EPOCH FROM ts)*1000)::bigint AS ts_ms, realized_usdt, unrealized_usdt,
                 internal_realized_usdt, internal_unrealized_usdt,
                 surplus_inc_usdt, surplus_tacts, surplus_tacts_expected
+           -- epoch-guard: window (границы окна из epochWindowFor)
            FROM ce_agent_pnl_history
-          WHERE agent_id = $1 AND ts > now() - make_interval(hours => $2)
-          ORDER BY ts`, [agentId, hours]);
-      return writeJson(res, 200, { ...buildPnlHistoryDto(agentId, r.rows, hours, Date.now()), generatedAt: new Date().toISOString() });
+          WHERE agent_id = $1 AND ts >= to_timestamp($2::float8 / 1000.0) AND ts < to_timestamp($3::float8 / 1000.0)
+          ORDER BY ts`, [agentId, w.effective_from_ms, w.to_ms]);
+      const opts = { sinceMs: w.effective_from_ms, epochOf: w.allow_cross_reset && Array.isArray(ew.epochs) ? (t) => epochLib.epochAt(ew.epochs, t) : null };
+      return writeJson(res, 200, { ...buildPnlHistoryDto(agentId, r.rows, hours, Date.now(), 500, opts), ...ew.block, generatedAt: new Date().toISOString() });
     } catch (e) {
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
@@ -8726,12 +9020,18 @@ async function handleVectorClearing(req, res, pathname, query) {
   // (без него все агенты), hours — окно (до срока хранения), format=csv — выгрузка для эксперта, limit — не более 50 000 строк.
   if (pathname === "/api/vector-clearing/hedge-model-history") {
     const agentId = String((query && query.agent_id) || "").slice(0, 120);
-    const hours = Math.max(1, Math.min(BAND_HISTORY_RETENTION_DAYS * 24, parseInt(query && query.hours, 10) || 24));
     const limit = Math.max(1, Math.min(50000, parseInt(query && query.limit, 10) || 20000));
     const asCsv = String((query && query.format) || "") === "csv";
     const pool = getPgPool();
     if (!pool) return writeJson(res, 503, { error: "postgres_unavailable" });
     try {
+      // Окно по метке сброса (ADR-090): по умолчанию с начала текущей эпохи; через метку — allow_cross_reset=true, прошлая эпоха — epoch=N.
+      // Каждая строка получает номер эпохи (epoch_id), чтобы выгрузки разных эпох не смешивались при разборе.
+      const maxHours = BAND_HISTORY_RETENTION_DAYS * 24;
+      const ew = await epochWindowFor(pool, query, { defaultHours: 24, maxHours });
+      if (!ew.ok) return writeJson(res, ew.status, { error: ew.error, message: ew.message });
+      const w = ew.resolved.window;
+      const hours = w.hours;   // длина окна — единый расчёт помощника эпох
       await ensureBandHistoryReady(pool);
       const r = await pool.query(
         `SELECT ts, agent_id, kind, mode, position::float8 AS position, in_flight::float8 AS in_flight, z_lim::float8 AS z_lim, z_mkt::float8 AS z_mkt,
@@ -8739,19 +9039,24 @@ async function handleVectorClearing(req, res, pathname, query) {
                 sz_est, mu_est, theta_est, peclet, sigma_bps, fee_maker_bps, fee_taker_bps, transfer_threshold::float8 AS transfer_threshold,
                 transfer_target::float8 AS transfer_target, transfer_threshold_raw::float8 AS transfer_threshold_raw,
                 transfer_target_raw::float8 AS transfer_target_raw, est_minutes, params_hash::text AS params_hash
+           -- epoch-guard: window (границы окна из epochWindowFor)
            FROM ce_agent_band_history
-          WHERE ts > now() - make_interval(hours => $1) AND ($2 = '' OR agent_id = $2)
-          ORDER BY ts DESC, agent_id DESC LIMIT $3`, [hours, agentId, limit + 1]);
+          WHERE ts >= to_timestamp($1::float8 / 1000.0) AND ts < to_timestamp($2::float8 / 1000.0) AND ($3 = '' OR agent_id = $3)
+          ORDER BY ts DESC, agent_id DESC LIMIT $4`, [w.effective_from_ms, w.to_ms, agentId, limit + 1]);
       // Берём самые свежие строки: при переполнении лимита старые отбрасываются, а не свежие, и ответ помечается усечённым.
       const truncated = r.rows.length > limit;
-      const rows = r.rows.slice(0, limit).reverse();
+      const rows = r.rows.slice(0, limit).reverse().map((x) => ({ ...x, epoch_id: Array.isArray(ew.epochs) ? epochLib.epochAt(ew.epochs, x.ts instanceof Date ? x.ts.getTime() : Date.parse(x.ts)) : null }));
       if (asCsv) {
         res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
                              "Content-Disposition": 'attachment; filename="hedge-model-history.csv"',
-                             "X-Truncated": truncated ? "1" : "0" });
+                             "X-Truncated": truncated ? "1" : "0",
+                             "X-Epoch": ew.resolved.epoch ? String(ew.resolved.epoch.epoch) : "",
+                             "X-Window-From-Ms": String(w.effective_from_ms),
+                             "X-Clipped-To-Epoch": w.truncated_by_reset ? "1" : "0",
+                             "X-Crosses-Reset": w.crosses_reset && w.allow_cross_reset ? "1" : "0" });
         return res.end(historyCsv(rows));
       }
-      return writeJson(res, 200, { window_hours: hours, agent_id: agentId || null, columns: BAND_CSV_COLUMNS, rows, count: rows.length, limit, truncated, generatedAt: new Date().toISOString() });
+      return writeJson(res, 200, { window_hours: hours, since_ms: w.effective_from_ms, agent_id: agentId || null, columns: BAND_CSV_COLUMNS, rows, count: rows.length, limit, truncated, ...ew.block, generatedAt: new Date().toISOString() });
     } catch (e) {
       return writeJson(res, 502, { error: "pg_error", message: String(e.message || e) });
     }
@@ -8953,6 +9258,7 @@ async function handleVectorClearing(req, res, pathname, query) {
                   read_request_ms, read_response_ms,
                   base_vwap::text AS base_vwap, impact_shift::text AS impact_shift,
                   impact_cost::text AS impact_cost, impact_v, impact_dt_sec
+             -- epoch-guard: ok(последняя диагностика исполнения агента для разбора «сейчас», не накопление)
              FROM venue_fill_diagnostics
             WHERE split_part(hedge_flow_id,'|',3) = $1 ORDER BY created_at DESC LIMIT 1`,
           [agentId]);  // equality по agent_id (functional idx idx_vfd_agent_created) — не LIKE-seqscan
@@ -10017,6 +10323,7 @@ const server = createServer(async (req, res) => {
         || pathname === "/api/vector-clearing/liveness"
         || pathname === "/api/vector-clearing/agent-positions"
         || pathname === "/api/vector-clearing/agent-pnl"
+        || pathname === "/api/vector-clearing/epochs"
         || pathname === "/api/vector-clearing/agent-pnl-history"
         || pathname === "/api/vector-clearing/hedge-model-history"
         || pathname === "/api/vector-clearing/pnl-history"

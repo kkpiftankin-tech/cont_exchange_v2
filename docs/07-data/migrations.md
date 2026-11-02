@@ -42,3 +42,16 @@ related:
 - **Владелец DDL:** ledger (`EnsurePnlSchema`, один раз на процесс), дубль в `infra/postgres/init.sql`.
 - **Изменения:** колонки `avg_price` → `avg_fair`, `realized` → `edge`, добавлены `ext_realized`, `quote`; строки модели A удалены (значения в C′ не пересчитываются). Колонки `ext_*`, `rvf_base` таблицы `ce_agent_position` не используются и остаются.
 - **Безопасность и откат:** [ce-agent-pnl-book](ce-agent-pnl-book.md), раздел «Миграция» (независимые идемпотентные шаги, блокировка с перепроверкой стража; откат — удаление таблицы `ce_agent_pnl_book`, старый ledger пересоздаст её).
+
+## 2026-11-02 — ce_reset_epoch: метка сброса позиций (ADR-090, CR-F18-018, этап Э1)
+
+- **Владелец DDL:** frontend-api (BFF), `ensureEpochSchema` (`frontend/api/epoch_schema.js`); тот же текст в `infra/postgres/init.sql` (свежий том), тест `epoch_schema.test.js` сверяет их.
+- **Изменения:** новая таблица `ce_reset_epoch` ([документ](ce-reset-epoch.md)), функции `ce_epoch_open`, `ce_epoch_at`, `ce_current_epoch`, `ce_epoch_windows`, `ce_guard_window`, `ce_epoch_backfill_legacy`,
+  представление `ce_epoch_intervals`, два триггера (запрет UPDATE, DELETE, TRUNCATE; монотонность времени). Существующие таблицы **не изменяются** (урок CR-F18-015: `ALTER` берёт `ACCESS EXCLUSIVE`).
+  Колонка `epoch_id` в четырёх историях BFF — этап Э2.
+- **Безопасность:** DDL выполняется в одной транзакции с `SET LOCAL lock_timeout = '5s'`; сбой не повторяется на каждый запрос (ожидание 30 с). Вручную до выкладки ничего делать не нужно: схема создаётся при первом обращении BFF;
+  унаследованные эпохи дособираются из `f05a_clearing_config_history` один раз (на dev — девять: восемь прошлых сбросов с 2026-10-12 и текущий).
+- **Проверка:** `frontend/api/testdata/epoch_schema_check.sh` (настоящий Postgres, откатываемая транзакция во временной схеме).
+- **Откат:** `DROP TABLE ce_reset_epoch CASCADE` и `DROP FUNCTION` перечисленных функций; BFF прежней версии продолжает читать запасную метку `f05a_clearing_config.trade_stats_reset_at`, которую маршрут сброса
+  обновляет вместе с эпохой. Таблицу нельзя править обычными командами (триггеры запрещают): `DROP` — только владельцем.
+

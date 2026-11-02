@@ -6,6 +6,9 @@
 // разойтись с таблицей. Чистые функции без ввода-вывода; запись и чтение PG — в server.js.
 
 const finite = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
+// Начало окна для ответа: усечённое по метке сброса (opts.sinceMs) или «сейчас минус часы».
+const sinceOf = (opts, nowMs, hours) => (opts && finite(opts.sinceMs) ? Number(opts.sinceMs)
+  : (Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null));
 
 // rows — строки панели (agentRows); tsMs — момент выборки; surplus — результат drain() накопителя тактов
 // ({ agents: Map(agent → { surplus, tacts }), tacts, expected }) или null. В выборку попадают агенты, у которых есть хотя бы R, U
@@ -102,7 +105,10 @@ function totalsSamples(pnlTotals, tsMs) {
 
 // DTO графика итогов: dbRows — строки ce_pnl_totals_history одного охвата { ts_ms, internal_r, internal_u, external_r, external_u, agents,
 // incomplete } за окно. Точка: { t, groups: { internal, external, total }, agents, incomplete }; incomplete — сколько агентов в итог не вошло.
-function buildTotalsHistoryDto(scope, dbRows, hours, nowMs, maxPoints = 500) {
+// opts (необязательно, ADR-090): sinceMs — начало окна, усечённое по метке сброса; epochOf(t) — номер эпохи момента t: тогда каждая точка
+// несёт epoch (окно через метку, allow_cross_reset).
+function buildTotalsHistoryDto(scope, dbRows, hours, nowMs, maxPoints = 500, opts = null) {
+  const epochOf = opts && typeof opts.epochOf === 'function' ? opts.epochOf : null;
   const raw = [];
   const sorted = (Array.isArray(dbRows) ? dbRows : []).slice().sort((x, y) => Number(x.ts_ms) - Number(y.ts_ms));
   for (const r of sorted) {
@@ -114,13 +120,14 @@ function buildTotalsHistoryDto(scope, dbRows, hours, nowMs, maxPoints = 500) {
       t, groups: groupsOf(ir, iu, er, eu),
       agents: finite(r.agents) ? Math.trunc(Number(r.agents)) : 0,
       incomplete: finite(r.incomplete) ? Math.trunc(Number(r.incomplete)) : 0,
+      ...(epochOf ? { epoch: epochOf(t) } : {}),
     });
   }
   const points = downsample(raw, maxPoints);
   return {
     scope,
     window_hours: hours,
-    since_ms: Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null,
+    since_ms: sinceOf(opts, nowMs, hours),
     first_ms: points.length ? points[0].t : null,
     points,
     has_data: points.length > 0,
@@ -130,9 +137,11 @@ function buildTotalsHistoryDto(scope, dbRows, hours, nowMs, maxPoints = 500) {
 // dbRows — строки PG { ts_ms, realized_usdt, unrealized_usdt, surplus_inc_usdt, surplus_tacts, surplus_tacts_expected } одного агента за
 // окно. DTO для графика: R, U, R+U (total) и накопленная за окно выгода s. R+U считается только когда известны обе части; иначе null
 // (неизвестное U не превращается в ноль, чтобы после перезапуска ledger R+U на графике не проваливалось на размер U).
-function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
+// opts — как у buildTotalsHistoryDto; накопленная выгода s начинается заново на метке сброса (иначе линия склеивала бы два эксперимента).
+function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500, opts = null) {
+  const epochOf = opts && typeof opts.epochOf === 'function' ? opts.epochOf : null;
   const raw = [];
-  let sCum = 0, hasS = false, tactsSeen = 0, tactsExp = 0;
+  let sCum = 0, hasS = false, tactsSeen = 0, tactsExp = 0, lastEp = null;
   const sorted = (Array.isArray(dbRows) ? dbRows : []).slice().sort((x, y) => Number(x.ts_ms) - Number(y.ts_ms));
   for (const r of sorted) {
     const t = Number(r.ts_ms);
@@ -142,6 +151,9 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
     const ir = numOrNull(r.internal_realized_usdt), iu = numOrNull(r.internal_unrealized_usdt);
     const si = finite(r.surplus_inc_usdt) ? Number(r.surplus_inc_usdt) : null;
     if (rr === null && uu === null && ir === null && iu === null && si === null) continue;
+    const ep = epochOf ? epochOf(t) : null;
+    if (ep !== null && lastEp !== null && ep !== lastEp) { sCum = 0; hasS = false; tactsSeen = 0; tactsExp = 0; }   // новая эпоха — выгода с нуля
+    if (ep !== null) lastEp = ep;
     if (si !== null) {
       sCum += si; hasS = true;
       tactsSeen += finite(r.surplus_tacts) ? Number(r.surplus_tacts) : 0;
@@ -152,13 +164,14 @@ function buildPnlHistoryDto(agentId, dbRows, hours, nowMs, maxPoints = 500) {
       total: (rr === null || uu === null) ? null : rr + uu,
       groups: groupsOf(ir, iu, rr, uu),   // внутренняя, внешние (r, u выше), итого — для графика на вкладке «PnL»
       s: hasS ? sCum : null,
+      ...(ep !== null ? { epoch: ep } : {}),
     });
   }
   const points = downsample(raw, maxPoints);
   return {
     agent_id: agentId,
     window_hours: hours,
-    since_ms: Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null,
+    since_ms: sinceOf(opts, nowMs, hours),
     first_ms: points.length ? points[0].t : null,
     points,
     has_data: points.length > 0,

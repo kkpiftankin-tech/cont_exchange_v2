@@ -58,12 +58,36 @@ def clear(node_ids, pinned, edges, use_raw=False):
     return x, flows
 
 
+# Метка сброса (ADR-090): записи сэмплера несут поле epoch. Файл со СМЕСЬЮ эпох отвергается, если явно не разрешено
+# (--allow-cross-reset --cross-reason "причина") или не выбрана одна эпоха (--epoch N): иначе поверхностные средние склеили бы эксперименты.
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument('file')
+_ap.add_argument('--epoch', type=int, default=None, help='взять только записи этой эпохи')
+_ap.add_argument('--allow-cross-reset', action='store_true')
+_ap.add_argument('--cross-reason', default='')
+_args = _ap.parse_args()
+
 samples = []
-for l in open(sys.argv[1]):
+for l in open(_args.file):
     try:
         samples.append(json.loads(l))
     except ValueError:
         pass   # last line may be partial while the sampler is still writing
+_eps = sorted(set(r.get('epoch') for r in samples if r.get('epoch') is not None))
+if _args.epoch is not None:
+    samples = [r for r in samples if r.get('epoch') == _args.epoch]
+    if not samples:
+        raise SystemExit('ОТКАЗ: в файле нет записей эпохи %d (есть: %s)' % (_args.epoch, _eps or 'метки эпохи в записях отсутствуют'))
+elif len(_eps) > 1:
+    if not (_args.allow_cross_reset and _args.cross_reason.strip()):
+        raise SystemExit('ОТКАЗ: файл содержит записи нескольких эпох сброса %s; выберите одну (--epoch N) или разрешите явно: '
+                         '--allow-cross-reset --cross-reason "причина"' % _eps)
+    print('ВНИМАНИЕ: смешение эпох %s разрешено: %s' % (_eps, _args.cross_reason.strip()))
+elif not _eps and samples:
+    print('ВНИМАНИЕ: в записях нет метки эпохи (файл старого формата) — границу сброса проверить нельзя')
+if _eps:
+    print('epoch_id=%s' % ','.join(str(e) for e in sorted(set(r.get('epoch') for r in samples if r.get('epoch') is not None))))
 print('tacts sampled: %d, window %.1f min' % (len(samples), (samples[-1]['t'] - samples[0]['t']) / 60000.0))
 
 max_diff = 0.0

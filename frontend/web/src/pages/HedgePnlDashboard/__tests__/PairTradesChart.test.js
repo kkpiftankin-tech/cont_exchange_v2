@@ -20,8 +20,11 @@ const dto = (pairs, over = {}) => ({ window_hours: 24, bucket_ms: STEP, first_ms
 const PAIRS = [pair('BTC/USDT', 'BTC', 'USDT', 120), pair('ETH/BTC', 'ETH', 'BTC', 40, 3, (i) => pt(i, { buy_price: 0.051, sell_price: 0.0515, sell_qty: 1 })), pair('SOL/USDT', 'SOL', 'USDT', 10)];
 
 afterEach(() => { jest.clearAllMocks(); try { window.localStorage.clear(); } catch (e) { /* нет хранилища */ } });
+// По умолчанию график показывает нетто (как панель «Живые позиции», ADR-090); тесты линии оборота выбирают режим явно, как это делает пользователь.
+const useTurnoverMode = () => window.localStorage.setItem('pnl.pairs.mode', JSON.stringify('total'));
 
 test('по умолчанию отмечены все пары с данными и для каждой свой график; запрос окна 24 ч; две оси и линии объёма и цены', async () => {
+  useTurnoverMode();
   axios.get.mockResolvedValue({ data: dto(PAIRS) });
   render(<PairTradesChart pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
@@ -55,6 +58,43 @@ test('чекбоксы пар выключают и включают графи�
   expect(screen.getByTestId('pair-none')).toBeTruthy();
   fireEvent.click(screen.getByTestId('pair-check-SOL/USDT'));
   expect(screen.getByTestId('pair-chart-SOL/USDT')).toBeTruthy();
+});
+
+test('по умолчанию основной вид — нетто (как на панели «Живые позиции»), оборот подписан «не позиция»', async () => {
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]]) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.getByTestId('pair-mode').value).toBe('net');
+  expect(screen.getByTestId('pair-line-cum_net_qty-BTC/USDT')).toBeTruthy();
+  expect(screen.queryByTestId('pair-line-cum_total_qty-BTC/USDT')).toBeNull();
+  expect(screen.getByTestId('pair-mode').textContent).toMatch(/оборот \(покупки \+ продажи\) — не позиция/);
+});
+
+test('ранее выбранный пользователем режим сохраняется (оборот остаётся оборотом)', async () => {
+  useTurnoverMode();
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]]) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.getByTestId('pair-mode').value).toBe('total');
+});
+
+test('эпоха сброса: номер, название, время и признак усечения окна по метке показаны из ответа BFF', async () => {
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]], {
+    epoch_supported: true, epoch: { epoch: 4, at_ms: T0, kind: 'bridge', note: 'опыт D' },
+    window: { truncated_by_reset: true, crosses_reset: true },
+  }) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-epoch')).toBeTruthy());
+  const t = screen.getByTestId('pair-epoch').textContent;
+  expect(t).toMatch(/Эпоха сброса 4 «опыт D»/);
+  expect(t).toMatch(/окно усечено по метке сброса/);
+});
+
+test('нет эпохи (метки недоступны или ещё не было) — подписи нет', async () => {
+  axios.get.mockResolvedValue({ data: dto([PAIRS[0]], { epoch_supported: false, epoch: null }) });
+  render(<PairTradesChart pollMs={600000} />);
+  await waitFor(() => expect(screen.getByTestId('pair-chart-BTC/USDT')).toBeTruthy());
+  expect(screen.queryByTestId('pair-epoch')).toBeNull();
 });
 
 test('режим объёма выбирает готовое поле без запроса: нетто — одна линия, раздельно — две', async () => {
@@ -98,6 +138,7 @@ test('окно меняет запрос; запоздавший ответ пр
 });
 
 test('подсказка под курсором показывает объём и цены точки, значения не пересчитываются', async () => {
+  useTurnoverMode();
   axios.get.mockResolvedValue({ data: dto([PAIRS[1]]) });
   render(<PairTradesChart pollMs={600000} />);
   await waitFor(() => expect(screen.getByTestId('pair-chart-ETH/BTC')).toBeTruthy());
@@ -106,7 +147,7 @@ test('подсказка под курсором показывает объём
   svg.getBoundingClientRect = () => ({ left: 0, width: 780, top: 0, height: 250 });
   fireEvent.mouseMove(svg, { clientX: 780 - 64 });   // правый край рабочей области: последняя точка
   const txt = screen.getByTestId('pair-hover-ETH/BTC').textContent;
-  expect(txt).toMatch(/объём 1\.40 ETH/);            // cum_total_qty последней точки = 0,5·2 + 0,4
+  expect(txt).toMatch(/оборот 1\.40 ETH/);           // cum_total_qty последней точки = 0,5·2 + 0,4 (режим «оборот»)
   expect(txt).toMatch(/покупка 0\.0510/);
   expect(txt).toMatch(/продажа 0\.0515/);
 });
@@ -142,6 +183,7 @@ test('пользователь снял все пары: пустой выбор
 });
 
 test('ряд из одной точки виден (линия цены — точка), на оси времени всё окно запроса', async () => {
+  useTurnoverMode();
   const one = { ...pair('BTC/USDT', 'BTC', 'USDT', 3, 1), points: [pt(0, { sell_price: 80100, sell_qty: 0.2 })] };
   axios.get.mockResolvedValue({ data: dto([one], { since_ms: T0 - 24 * 3600 * 1000, generatedAt: new Date(T0 + 5 * STEP).toISOString() }) });
   render(<PairTradesChart pollMs={600000} />);

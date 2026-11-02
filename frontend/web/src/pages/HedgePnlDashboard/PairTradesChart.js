@@ -6,6 +6,10 @@ import { buildPairChartModel, fmtAxis, VOLUME_MODES, PRICE_SERIES } from './pair
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const WINDOWS = [[1, '1 ч'], [6, '6 ч'], [24, '24 ч'], [168, '7 дн']];
 const W = 780, H = 250;
+// Время метки сброса для подписи (число приходит готовым из BFF; здесь только форматирование).
+function fmtEpochTime(ms) {
+  try { return new Date(Number(ms)).toLocaleString('ru-RU', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (e) { return String(ms); }
+}
 const LS_PAIRS = 'pnl.pairs.selected';
 const LS_MODE = 'pnl.pairs.mode';
 const LS_PRICES = 'pnl.pairs.prices';
@@ -110,7 +114,7 @@ function PairChart({ pair, bucketMs, mode, prices, win, withFee, withSellFee }) 
 // осями. Всё посчитано в BFF (накопленные объёмы, средневзвешенные цены покупки и продажи по всем внешним биржам); браузер только рисует.
 export default function PairTradesChart({ selectedAgent = null, onClearAgent, pollMs = 30000 }) {
   const [hours, setHours] = useState(24);
-  const [mode, setMode] = useState(() => { const m = readLs(LS_MODE, 'total'); return VOLUME_MODES.some((x) => x.key === m) ? m : 'total'; });
+  const [mode, setMode] = useState(() => { const m = readLs(LS_MODE, 'net'); return VOLUME_MODES.some((x) => x.key === m) ? m : 'net'; });   // по умолчанию нетто, как на панели «Живые позиции» (ADR-090, OQ-F18v2-54)
   const [prices, setPrices] = useState(() => { const v = readLs(LS_PRICES, null); return { buy_price: !v || v.buy_price !== false, sell_price: !v || v.sell_price !== false }; });
   // Выбор пар помним отдельно для «всех агентов» и для каждого агента (у агента известны не все пары): без выбора (null) отмечены все пары с данными.
   const lsPairsKey = selectedAgent ? `${LS_PAIRS}.${selectedAgent}` : LS_PAIRS;
@@ -194,6 +198,12 @@ export default function PairTradesChart({ selectedAgent = null, onClearAgent, po
           Слева накопленный объём базовой валюты, справа цены покупки и продажи во второй валюте пары. Факт исполнения хеджей агентов CE, все
           внешние биржи вместе, без комиссий (кроме режимов чекбоксов комиссии). Считает BFF; обновление каждые 30 сек.
         </span>
+        {data && data.epoch_supported && data.epoch && data.epoch.epoch > 0 && (
+          <span className="agent-pnl-sub" data-testid="pair-epoch" style={{ display: 'block' }}>
+            Эпоха сброса {data.epoch.epoch}{data.epoch.note ? ` «${data.epoch.note}»` : ''}, с {fmtEpochTime(data.epoch.at_ms)}
+            {data.window && data.window.truncated_by_reset ? ' — окно усечено по метке сброса: данные до сброса не показаны' : ''}
+          </span>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' }}>
@@ -276,7 +286,7 @@ export default function PairTradesChart({ selectedAgent = null, onClearAgent, po
 
       {pairs.length > 0 && (
         <div style={{ fontSize: 12, color: '#8a9aa8', marginTop: 6 }}>
-          Объём — сумма исполненного количества базовой валюты хедж-заявок с начала окна (общий: покупки и продажи вместе; нетто: покупки минус продажи).
+          Объём — сумма исполненного количества базовой валюты хедж-заявок с начала окна (нетто — основной вид, как на панели «Живые позиции»: покупки минус продажи; оборот: покупки и продажи вместе, это объём торговли, а не позиция).
           Цена — средневзвешенная по объёму цена исполнения за интервал (покупки и продажи отдельно, все биржи вместе) во второй валюте пары. Интервал
           без сделок стороны не даёт точки цены, линия цены рвётся при долгом простое. Время заявки — момент её создания. «+ комиссия к цене покупки» добавляет к
           цене покупки расчётную комиссию на единицу базовой валюты: стоимость каждой заявки × ставка (maker для лимитных, taker для рыночных), делённая на

@@ -12,10 +12,24 @@ const K = arg('k', 1.8), FLOOR = arg('floor', 2), SZ_DEFAULT = arg('szdef', 2);
 const lines = fs.readFileSync(0, 'utf8').split('\n').filter((l) => l.includes('|') && !/^\(\d+ row/.test(l));
 const head = lines.shift().split('|');
 const rows = lines.map((l) => Object.fromEntries(l.split('|').map((v, i) => [head[i], v])));
+// Метка сброса (ADR-090): строки разных эпох в одном входе — смесь экспериментов. Отвергается, если явно не разрешено (--allow-multi-epoch
+// --cross-reason "причина"); шапка отчёта называет эпоху.
+const epochIds = [...new Set(rows.map((r) => r.epoch_id).filter((v) => v !== undefined && v !== ''))];
+if (epochIds.length > 1) {
+  const ci = process.argv.indexOf('--cross-reason');
+  const reason = ci > 0 ? String(process.argv[ci + 1] || '').trim() : '';
+  if (!(process.argv.includes('--allow-multi-epoch') && reason)) {
+    console.error(`ОТКАЗ: вход содержит несколько эпох сброса (${epochIds.join(', ')}); выберите одну (shadow_summary.sql -v epoch=N) или разрешите явно: --allow-multi-epoch --cross-reason "причина"`);
+    process.exit(2);
+  }
+  console.error(`ВНИМАНИЕ: смешение эпох ${epochIds.join(', ')} разрешено: ${reason}`);
+}
 const num = (v) => (v === '' || v === undefined ? NaN : Number(v));
 const fmt = (x, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : '—');
 
 const out = [];
+out.push(`Эпоха сброса: ${epochIds.length ? epochIds.join(', ') : 'не указана (вход старого формата без колонки epoch_id)'}`);
+out.push('');
 out.push(`Комиссии ${FM}/${FT} bps, полуспред ${HALF} bps, неблагоприятный отбор ${ADV} bps, κ = ${KAPPA}, γ = ${GAMMA}; затраты — USDT в час на агента; «правило» — z_lim/z_mkt = max(${FLOOR}, ${K}·комиссия).`);
 out.push('');
 out.push('| Агент | Минут | ς, bps/√мин | ς_z | Дрейф | Режимы (шум/смесь/дрейф) | Порог модели (мейкер / тейкер) | Рабочий порог | Затраты модели | Затраты правила | Правило дороже | Макс. позиция | Доля времени выше порога тейкера |');

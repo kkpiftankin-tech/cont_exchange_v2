@@ -54,7 +54,7 @@ const normFee = (fee) => ({
 // buy_fee и sell_fee — расчётная комиссия покупок и продаж интервала во второй валюте пары (SQL: стоимость × ставка по типу заявки, CALC-CE-PAIR-TRADES §2.1).
 // fee — ставки, по которым она посчитана (попадают в ответ). Возвращает DTO графика: пары (по убыванию числа исполнений, затем по имени), у пары
 // точки по возрастанию t с ценами интервала (в том числе покупки с комиссией) и накопленными от начала окна объёмами, плюс итоги пары за окно.
-function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
+function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee, sinceMs) {
   const feeInfo = normFee(fee);
   const feeKnown = feeInfo.maker_bps !== null && feeInfo.taker_bps !== null;   // ставок нет — комиссия неизвестна (null), а не нулевая
   const bucket = Number(bucketMs) > 0 ? Number(bucketMs) : bucketMsForHours(hours);
@@ -101,7 +101,8 @@ function buildPairTradesDto(rows, hours, nowMs, bucketMs, fee) {
   return {
     window_hours: hours,
     bucket_ms: bucket,
-    since_ms: Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null,
+    // Начало окна: если вызывающий усёк его по метке сброса (ADR-090), приходит готовым; иначе «сейчас минус часы».
+    since_ms: finite(sinceMs) ? Number(sinceMs) : (Number.isFinite(Number(nowMs)) ? Number(nowMs) - hours * 3600 * 1000 : null),
     first_ms: firstMs,
     fee: feeInfo,
     pairs,

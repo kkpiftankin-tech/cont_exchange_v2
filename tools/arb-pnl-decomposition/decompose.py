@@ -1,17 +1,38 @@
 """Decomposition of the CE arbitrageurs' external-hedge P&L (EXP-2026-10-22-arbitrageur-pnl).
 
-Run on the dev host:  python3 -W ignore - < tools/arb-pnl-decomposition/decompose.py
+Run on the dev host:  python3 tools/arb-pnl-decomposition/decompose.py [START_MS END_MS | --epoch current|N|all]
 Reads per-tick fills from ClickHouse default.execution_venue (cumulative filled_qty -> deltas, tick VWAP),
 order side/venue/type from PostgreSQL child_orders, own-venue mid prices from default.venue_snapshots.
 Exact identity per agent:  total = sum s*(p - mid_venue)*q      (execution edge)
                                  + sum s*(mid_venue - mid_ref)*q (cross-venue basis)
                                  + sum I_{k-1}*(ref_k - ref_{k-1}) (inventory drift: net position x price move).
-The window starts at the trade-stats reset (RESET below); change it for another period.
+By default the window is the CURRENT EPOCH (since the last position reset, ADR-090); a window that crosses a reset mark is refused
+unless --allow-cross-reset --cross-reason is given. The window start was hard-coded here before (2026-10-19 13:46:53) — a defect: it
+silently mixed experiments.
 """
 import subprocess, bisect, collections, calendar, datetime, sys
 
-# Window: since the trade-stats reset (same as the panel)
-RESET = calendar.timegm(datetime.datetime(2026, 10, 19, 13, 46, 53).timetuple()) * 1000
+# --- Метка сброса позиций (эпоха), ADR-090: окно разбора определяет tools/lib/epochs.py. Окно, пересекающее метку, отвергается, если
+# явно не разрешено (--allow-cross-reset --cross-reason "причина"); по умолчанию — текущая эпоха. Заявки, созданные до начала эпохи, к ней не относятся.
+import os, argparse
+def _bootstrap_lib():
+    here = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else None
+    for base in (os.environ.get('CE_TOOLS_LIB'), os.path.join(here, '..', 'lib') if here else None, '/home/nik/cont_exchange_v2/tools/lib', 'tools/lib'):
+        if base and os.path.exists(os.path.join(base, 'epochs.py')):
+            sys.path.insert(0, base)
+            return
+    raise SystemExit('не найдена tools/lib/epochs.py: задайте CE_TOOLS_LIB')
+_bootstrap_lib()
+import epochs as E
+try:
+    EPOCHS = E.load_epochs()
+    WINDOW = E.window_from_args(E.add_cli_args(argparse.ArgumentParser(description=__doc__.split('\n')[0])).parse_args(), EPOCHS)
+except (E.EpochsUnavailable, E.CrossesResetError, ValueError) as _e:
+    raise SystemExit('ОТКАЗ: %s' % _e)
+START, END = WINDOW.from_ms, WINDOW.to_ms
+STRICT = WINDOW.requested != 'explicit'   # окно задано эпохой: заявки, созданные до её начала, — старой эпохи (даже если дозаполнены позже)
+print('\n'.join(WINDOW.header(EPOCHS)))
+E.warn_if_beyond_ttl(START)
 MAX_STALE_MS = 120000
 
 
@@ -22,7 +43,8 @@ def sh(cmd):
 # 1) order metadata (side, venue, type) from PG
 pg = sh("docker exec -i infra-postgres-1 psql -U cex -d cex -At -F '\t' -c "
         "\"SELECT client_order_id, split_part(hedge_flow_id,'|',3), venue_id, symbol, side, order_type "
-        "FROM child_orders WHERE hedge_flow_id LIKE 'ce|band|A\\_%' AND created_at > '2026-10-19 13:46:53+00'\"")
+        # epoch-guard: window (границы START..END из tools/lib/epochs.py)
+        "FROM child_orders WHERE hedge_flow_id LIKE 'ce|band|A\\_%' AND created_at >= to_timestamp(" + str(START) + "/1000.0) AND created_at < to_timestamp(" + str(END) + "/1000.0)\"")
 meta = {}
 for line in pg.splitlines():
     p = line.split('\t')
@@ -31,8 +53,9 @@ for line in pg.splitlines():
 
 # 2) per-tick fills from ClickHouse execution reports (cumulative filled_qty -> deltas)
 ch = sh("docker exec -i infra-clickhouse-1 clickhouse-client -q \"SELECT intent_id, event_time_ms, filled_qty, average_price "
-        "FROM default.execution_venue WHERE startsWith(intent_id, 'ce|band|A_') AND event_time_ms > %d "
-        "ORDER BY intent_id, event_time_ms FORMAT TSV\"" % RESET)
+        # epoch-guard: window (границы START..END из tools/lib/epochs.py)
+        "FROM default.execution_venue WHERE startsWith(intent_id, 'ce|band|A_') AND event_time_ms >= %d AND event_time_ms <= %d "
+        "ORDER BY intent_id, event_time_ms FORMAT TSV\"" % (START, END))
 fills = []
 prev = {}
 zero_px_ticks = 0
@@ -53,6 +76,8 @@ for line in ch.splitlines():
             t0 = int(iid.rsplit('|', 1)[1])
         except Exception:
             t0 = t
+        if STRICT and t0 < START:
+            continue   # заявка создана до начала эпохи: старая эпоха, даже если дозаполнена позже (ADR-090)
         fills.append(dict(agent=m['agent'], venue=m['venue'], symbol=m['symbol'], side=m['side'], otype=m['otype'],
                           t=t, age_s=(t - t0) / 1000.0, q=d, p=px))
 
@@ -60,8 +85,8 @@ for line in ch.splitlines():
 assets = sorted(set(f['symbol'] for f in fills))
 sym_list = ",".join("'%s'" % s for s in assets)
 mid_raw = sh("docker exec -i infra-clickhouse-1 clickhouse-client -q \"SELECT venue_id, symbol, event_time_ms, mid_price "
-             "FROM default.venue_snapshots WHERE symbol IN (%s) AND event_time_ms >= %d AND mid_price > 0 "
-             "ORDER BY venue_id, symbol, event_time_ms FORMAT TSV\"" % (sym_list, RESET - 300000))
+             "FROM default.venue_snapshots WHERE symbol IN (%s) AND event_time_ms >= %d AND event_time_ms <= %d AND mid_price > 0 "
+             "ORDER BY venue_id, symbol, event_time_ms FORMAT TSV\"" % (sym_list, START - 300000, END + 60000))
 ts = collections.defaultdict(list)
 mv = collections.defaultdict(list)
 for line in mid_raw.splitlines():
@@ -151,8 +176,8 @@ for a, fl in by_agent.items():
     tot['direct'] += total_direct
 
 rows.sort(key=lambda r: r[6])
-print('window since %s UTC, fills used=%d skipped(no mid)=%d zero_px_ticks=%d' % (
-    datetime.datetime.utcfromtimestamp(RESET / 1000), tot['n'], skipped, zero_px_ticks))
+print('window %s .. %s UTC, fills used=%d skipped(no mid)=%d zero_px_ticks=%d' % (
+    datetime.datetime.utcfromtimestamp(START / 1000), datetime.datetime.utcfromtimestamp(END / 1000), tot['n'], skipped, zero_px_ticks))
 print('%-22s %5s %9s | %8s %8s %8s | %8s %8s | %8s %8s %9s' % (
     'agent', 'fills', 'gross$', 'exec', 'basis', 'invent', 'sum', 'direct', 'R_panel', 'R_placeb', 'net_inv'))
 for r in rows:

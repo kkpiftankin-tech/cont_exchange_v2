@@ -126,5 +126,29 @@ check('DTO итогов: группы и неполнота', dtoT.points[0].gro
 check('DTO итогов: окно, начало, has_data', dtoT.window_hours === 24 && dtoT.first_ms === 1000 && dtoT.since_ms === 10000000 - 24 * 3600 * 1000 && dtoT.has_data === true);
 check('DTO итогов: пустой ответ → has_data=false', buildTotalsHistoryDto('all', [], 24, 5).has_data === false);
 
+// --- ADR-090: начало окна по метке сброса и номер эпохи точек
+const epochOf = (t) => (t < 2000 ? 1 : 2);   // метка сброса между вторым и третьим замером
+const dtoTE = buildTotalsHistoryDto('all', [
+  { ts_ms: 1000, internal_r: 10, internal_u: 0, external_r: 93, external_u: 36, agents: 61 },
+  { ts_ms: 2000, internal_r: 1, internal_u: 0, external_r: 2, external_u: 3, agents: 61 },
+], 24, 10000000, 500, { sinceMs: 1500, epochOf });
+check('итоги с меткой: начало окна берётся из метки, а не now − часы', dtoTE.since_ms === 1500);
+check('итоги с меткой: каждая точка несёт эпоху', dtoTE.points[0].epoch === 1 && dtoTE.points[1].epoch === 2);
+check('итоги без метки: прежнее поведение (нет поля epoch, since_ms от now)', buildTotalsHistoryDto('all', [{ ts_ms: 1000, internal_r: 1 }], 24, 10000000).points[0].epoch === undefined
+  && buildTotalsHistoryDto('all', [], 24, 10000000).since_ms === 10000000 - 24 * 3600 * 1000);
+const dtoAE = buildPnlHistoryDto('T_BTC_binance', [
+  { ts_ms: 1000, realized_usdt: 5, unrealized_usdt: 1, surplus_inc_usdt: 2, surplus_tacts: 10, surplus_tacts_expected: 10 },
+  { ts_ms: 1500, realized_usdt: 6, unrealized_usdt: 1, surplus_inc_usdt: 3, surplus_tacts: 10, surplus_tacts_expected: 10 },
+  { ts_ms: 2500, realized_usdt: 1, unrealized_usdt: 0, surplus_inc_usdt: 4, surplus_tacts: 10, surplus_tacts_expected: 10 },
+], 24, 10000000, 500, { sinceMs: 900, epochOf });
+check('история агента с меткой: накопленная выгода s начинается заново на метке', dtoAE.points[1].s === 5 && dtoAE.points[2].s === 4);
+check('история агента с меткой: итог выгоды только за последнюю эпоху, эпохи проставлены',
+  dtoAE.surplus_total === 4 && dtoAE.points.map((p) => p.epoch).join() === '1,1,2' && dtoAE.since_ms === 900);
+const dtoAN = buildPnlHistoryDto('T_BTC_binance', [
+  { ts_ms: 1000, realized_usdt: 5, unrealized_usdt: 1, surplus_inc_usdt: 2, surplus_tacts: 10, surplus_tacts_expected: 10 },
+  { ts_ms: 2500, realized_usdt: 1, unrealized_usdt: 0, surplus_inc_usdt: 4, surplus_tacts: 10, surplus_tacts_expected: 10 },
+], 24, 10000000);
+check('история агента без метки: прежнее поведение (s копится, поля epoch нет)', dtoAN.points[1].s === 6 && dtoAN.points[0].epoch === undefined);
+
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');

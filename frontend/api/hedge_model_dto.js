@@ -88,7 +88,7 @@ function minuteBucketMs(ms) { return Math.floor(Number(ms) / 60000) * 60000; }
 // Порядок прежних 25 колонок не менялся: сырые пороги дописаны в конец, чтобы позиционные разборы выгрузок эксперта (`$N`, `iloc`) не сломались.
 const CSV_COLUMNS = ['ts', 'agent_id', 'kind', 'mode', 'position', 'in_flight', 'z_lim', 'z_mkt', 'b_m', 'b_t', 'regime', 'computed', 'applied',
   'reason', 'sz_est', 'mu_est', 'theta_est', 'peclet', 'sigma_bps', 'fee_maker_bps', 'fee_taker_bps', 'transfer_threshold', 'transfer_target',
-  'est_minutes', 'params_hash', 'b_m_raw', 'b_t_raw', 'transfer_threshold_raw', 'transfer_target_raw'];
+  'est_minutes', 'params_hash', 'b_m_raw', 'b_t_raw', 'transfer_threshold_raw', 'transfer_target_raw', 'epoch_id'];   // epoch_id — номер эпохи сброса строки (ADR-090): выгрузки разных эпох не смешивать
 
 function csvCell(v) {
   if (v === null || v === undefined) return '';

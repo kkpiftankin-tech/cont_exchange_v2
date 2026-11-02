@@ -1407,3 +1407,147 @@ CREATE TABLE IF NOT EXISTS ce_asset_liquidity (
 );
 CREATE INDEX IF NOT EXISTS ce_asset_liquidity_updated_idx
     ON ce_asset_liquidity (updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- ce_reset_epoch: метка сброса позиций (эпоха) — ADR-090, CR-F18-018. Сброс создаёт запись; все потребители истории (BFF, скрипты разбора,
+-- выгрузки) ориентируются на неё, чтобы не смешивать интервалы до и после сброса. Таблица только дописывается (триггеры запрещают UPDATE,
+-- DELETE, TRUNCATE), reset_at строго растёт, номера идут подряд; эпоха 0 виртуальная («до первой метки») и в таблице не хранится.
+-- Номер выдаёт функция ce_epoch_open (идемпотентна по request_id): её вызывают BFF, tools/reset/absolute_reset.sh и (этап Э2) ledger.
+-- Источник текста — frontend/api/epoch_schema.js (`node epoch_schema.js --print-sql`); тест epoch_schema.test.js сверяет с этим блоком.
+-- Только CREATE ... IF NOT EXISTS / CREATE OR REPLACE: на живом томе схему создаёт сам BFF (ensureEpochSchema), вручную ничего менять не нужно.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS ce_reset_epoch (
+  epoch_id       BIGINT PRIMARY KEY CHECK (epoch_id > 0),
+  prev_epoch     BIGINT UNIQUE REFERENCES ce_reset_epoch (epoch_id),
+  reset_at       TIMESTAMPTZ NOT NULL,
+  actor          TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('absolute', 'bridge', 'legacy')),
+  note           TEXT NOT NULL CHECK (length(btrim(note)) BETWEEN 1 AND 200 AND note !~ '[[:cntrl:]]'),
+  boot_id        TEXT,
+  config_version BIGINT,
+  request_id     TEXT NOT NULL UNIQUE,
+  before_state   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  initial_state  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  CHECK ((prev_epoch IS NULL) = (epoch_id = 1) AND (prev_epoch IS NULL OR prev_epoch = epoch_id - 1)));
+
+CREATE UNIQUE INDEX IF NOT EXISTS ce_reset_epoch_at ON ce_reset_epoch (reset_at);
+
+CREATE OR REPLACE FUNCTION ce_reset_epoch_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF EXISTS (SELECT 1 FROM ce_reset_epoch WHERE reset_at >= NEW.reset_at) THEN
+      RAISE EXCEPTION 'ce_reset_epoch: reset_at must strictly increase';
+    END IF;
+    IF NEW.reset_at > clock_timestamp() + interval '5 seconds' THEN
+      RAISE EXCEPTION 'ce_reset_epoch: reset_at must not be in the future';
+    END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'ce_reset_epoch is append-only (%)', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ce_reset_epoch_guard_row' AND tgrelid = 'ce_reset_epoch'::regclass) THEN
+    CREATE TRIGGER ce_reset_epoch_guard_row BEFORE INSERT OR UPDATE OR DELETE ON ce_reset_epoch
+      FOR EACH ROW EXECUTE FUNCTION ce_reset_epoch_guard();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ce_reset_epoch_guard_truncate' AND tgrelid = 'ce_reset_epoch'::regclass) THEN
+    CREATE TRIGGER ce_reset_epoch_guard_truncate BEFORE TRUNCATE ON ce_reset_epoch
+      FOR EACH STATEMENT EXECUTE FUNCTION ce_reset_epoch_guard();
+  END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION ce_epoch_open(
+  p_actor TEXT, p_kind TEXT, p_note TEXT, p_request_id TEXT,
+  p_before JSONB DEFAULT '{}'::jsonb, p_initial JSONB DEFAULT '{}'::jsonb,
+  p_boot_id TEXT DEFAULT NULL, p_config_version BIGINT DEFAULT NULL, p_reset_at TIMESTAMPTZ DEFAULT NULL)
+RETURNS ce_reset_epoch AS $$
+DECLARE
+  r ce_reset_epoch;
+  prev BIGINT;
+  last_at TIMESTAMPTZ;
+  new_at TIMESTAMPTZ;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('ce_reset_epoch'));
+  SELECT * INTO r FROM ce_reset_epoch WHERE request_id = p_request_id;
+  IF FOUND THEN
+    RETURN r;
+  END IF;
+  SELECT max(epoch_id), max(reset_at) INTO prev, last_at FROM ce_reset_epoch;
+  -- Момент по часам сервера БД, но строго позже предыдущей метки (откат часов не должен блокировать сброс навсегда).
+  new_at := COALESCE(p_reset_at, GREATEST(clock_timestamp(), COALESCE(last_at, '-infinity'::timestamptz) + interval '1 microsecond'));
+  -- Не чаще раза в минуту (кроме унаследованных эпох): поток запросов не должен плодить необратимые эпохи.
+  IF p_kind <> 'legacy' AND last_at IS NOT NULL AND new_at < last_at + interval '60 seconds' THEN
+    RAISE EXCEPTION 'ce_epoch_open: too frequent (minimum interval 60 s between resets)';
+  END IF;
+  INSERT INTO ce_reset_epoch (epoch_id, prev_epoch, reset_at, actor, kind, note, boot_id, config_version, request_id, before_state, initial_state)
+  VALUES (COALESCE(prev, 0) + 1, prev, new_at, p_actor, p_kind, p_note, p_boot_id, p_config_version,
+          p_request_id, COALESCE(p_before, '{}'::jsonb), COALESCE(p_initial, '{}'::jsonb))
+  RETURNING * INTO r;
+  RETURN r;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION ce_current_epoch() RETURNS BIGINT AS $$
+  SELECT COALESCE(max(epoch_id), 0) FROM ce_reset_epoch
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION ce_epoch_at(ts TIMESTAMPTZ) RETURNS BIGINT AS $$
+  SELECT COALESCE(max(epoch_id), 0) FROM ce_reset_epoch WHERE reset_at <= ts
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE VIEW ce_epoch_intervals AS
+  SELECT 0::BIGINT AS epoch_id, '-infinity'::TIMESTAMPTZ AS from_ts,
+         COALESCE((SELECT min(reset_at) FROM ce_reset_epoch), 'infinity'::TIMESTAMPTZ) AS to_ts
+  UNION ALL
+  SELECT epoch_id, reset_at, COALESCE(lead(reset_at) OVER (ORDER BY epoch_id), 'infinity'::TIMESTAMPTZ) FROM ce_reset_epoch;
+
+CREATE OR REPLACE FUNCTION ce_epoch_windows(p_from TIMESTAMPTZ, p_to TIMESTAMPTZ)
+RETURNS TABLE (epoch_id BIGINT, from_ts TIMESTAMPTZ, to_ts TIMESTAMPTZ) AS $$
+  SELECT w.epoch_id, GREATEST(w.from_ts, p_from), LEAST(w.to_ts, p_to)
+    FROM ce_epoch_intervals w
+   WHERE w.from_ts < p_to AND w.to_ts > p_from
+   ORDER BY w.epoch_id
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION ce_guard_window(p_from TIMESTAMPTZ, p_to TIMESTAMPTZ, p_cross_reason TEXT DEFAULT NULL) RETURNS BOOLEAN AS $$
+DECLARE
+  n INTEGER;
+BEGIN
+  SELECT count(*) INTO n FROM ce_reset_epoch WHERE reset_at > p_from AND reset_at < p_to;
+  IF n > 0 AND (p_cross_reason IS NULL OR btrim(p_cross_reason) = '') THEN
+    RAISE EXCEPTION 'окно % .. % пересекает % метк(и) сброса позиций: выберите одну эпоху или разрешите явно с причиной (cross_reason)', p_from, p_to, n;
+  END IF;
+  RETURN n > 0;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION ce_epoch_backfill_legacy() RETURNS INTEGER AS $$
+DECLARE
+  rec RECORD;
+  n INTEGER := 0;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('ce_reset_epoch'));
+  IF EXISTS (SELECT 1 FROM ce_reset_epoch) THEN
+    RETURN 0;
+  END IF;
+  FOR rec IN
+    SELECT DISTINCT x.r
+      FROM (SELECT (snapshot->>'trade_stats_reset_at')::timestamptz AS r FROM f05a_clearing_config_history
+            UNION ALL
+            SELECT trade_stats_reset_at FROM f05a_clearing_config) x
+     WHERE x.r IS NOT NULL
+     ORDER BY x.r
+  LOOP
+    PERFORM ce_epoch_open('migration', 'legacy', 'legacy: trade_stats_reset_at',
+                          'legacy-' || to_char(rec.r AT TIME ZONE 'UTC', 'YYYYMMDD"T"HH24MISSUS'),
+                          '{}'::jsonb, '{}'::jsonb, NULL, NULL, rec.r);
+    n := n + 1;
+  END LOOP;
+  RETURN n;
+END;
+$$ LANGUAGE plpgsql;

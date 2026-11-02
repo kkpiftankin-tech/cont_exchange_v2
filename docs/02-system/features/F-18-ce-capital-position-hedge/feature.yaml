@@ -78,6 +78,34 @@ capabilities:
       - frontend/api/hedge_model_dto.test.js
       - frontend/api/band_config.test.js
       - frontend/web/src/pages/VectorClearing/__tests__/HedgeModelThresholds.test.js
+  - id: CAP-F18-RESET-EPOCH
+    title: "Метка сброса позиций (эпоха): единый сброс агентов CE и обязательный анализ метки всеми потребителями истории"
+    status: {docs: complete, code: partial, runtime: dev}  # этап Э1 (BFF и tools) реализован; единый владелец позиций в ledger и абсолютный сброс ledger — этап Э2 (ADR-090, CR-F18-018)
+    acceptanceCriteria: [AC-F18v2-41, AC-F18v2-42, AC-F18v2-43]
+    adrs: [ADR-090]
+    ucs: [UC-F18-04]
+    calcs: [CALC-CE-PAIR-TRADES, CALC-CE-AGENT-PNL, CALC-CE-SYSTEM-PNL]
+    contracts: [docs/06-api/rest/epochs.md, docs/06-api/rest/reset-positions.md]
+    tables: [ce_reset_epoch, f05a_clearing_config, operator_audit_log]
+    ui: []  # кнопка «Сбросить позиции» и подпись эпохи на графике «Сделки по парам»; элемента в ui-map пока нет
+    codePaths:
+      - frontend/api/epoch.js
+      - frontend/api/epoch_schema.js
+      - frontend/api/server.js#resolveEpochWindow
+      - tools/lib/epochs.py
+      - tools/epoch-guard-checker/check.py
+      - tools/reset/absolute_reset.sh
+      - specs/domain/epoch-classes.yaml
+      - frontend/web/src/pages/VectorClearing/resetFlow.js
+    tests:
+      - frontend/api/epoch.test.js
+      - frontend/api/epoch_schema.test.js
+      - frontend/api/reset_route.test.js
+      - frontend/api/testdata/epoch_schema_check.sh
+      - tools/lib/test_epochs.py
+      - tools/epoch-guard-checker/tests/test_check.py
+      - frontend/web/src/pages/VectorClearing/__tests__/resetFlow.test.js
+      - frontend/web/src/pages/VectorClearing/__tests__/VectorClearingLive.reset.test.js
 
   - id: CAP-F18-SYSTEM-PNL
     title: Система по остаткам — прибыль по реальным остаткам биржи (T торговый + V переоценка)
@@ -292,6 +320,9 @@ acceptanceCriteria:
   - "AC-F18v2-38 (ADR-088 п. 9, CR-F18-014): эффективные пороги модели (b_м, b_т; B, b связки) — экспоненциальное среднее сырых расчётов с постоянной времени 15 минут (CE_HMODEL_SMOOTH_TAU_MS), не выше потолка CE_HMODEL_BAND_CAP и не ниже пола q_пол, с сохранением b_м ≤ b_т; сырой расчёт отдаётся отдельно (b_m_raw, b_t_raw, transfer_*_raw) и пишется в историю и CSV; при временном сбое входов (нет свежей волатильности, исчерпан бюджет) прежние пороги удерживаются до 5 минут (reason <причина>_hold), затем откат на правило."
   - "AC-F18v2-39 (ADR-088 условие 1, CR-F18-014): эффективный режим модели = меньший из потолка окружения CE_HMODEL_MODE и f05a_clearing_config.ce_hmodel_mode (не задан или не прочитан — shadow), а при сработавшем предохранителе — shadow; запись on в PG рабочий режим при потолке ниже не включает; смена режима оператором идёт через POST /api/vector-clearing/config в одной транзакции со строкой operator_audit_log (ce_hmodel_mode_change), прежнее значение читается под блокировкой строки; включение on в течение 30 минут после срабатывания предохранителя требует подтверждения; актор с зарезервированным префиксом помечается unverified:; при эффективном off блок hedge_model не отдаётся."
   - "AC-F18v2-40 (ADR-088 условие 2, CR-F18-014): автопредохранитель режима on раз за такт обходит всех агентов, которых ведёт модель: нетто-экспозиция |c+in_flight| выше max(CE_HMODEL_FUSE_POS_K, 1,5·(2b_т − b_м)) подряд дольше CE_HMODEL_FUSE_HOLD_MS ⇒ эффективный режим shadow, в PG пишется shadow и строка ce_hmodel_fuse_trip (только при реальном переходе on → shadow); отсчёт сбрасывается ниже 0,9 предела и при разрыве наблюдения, идёт и в shadow; при неудаче записи режим остаётся shadow, повтор не чаще раза в 30 секунд."
+  - "AC-F18v2-41 (ADR-090 п. 2 и 4, CR-F18-018): сброс позиций создаёт метку (эпоху) в ce_reset_epoch — номер, момент, вид, название эксперимента (обязательно, 1–200 знаков), автор, снимок состояния до сброса; номера идут подряд, метка только дописывается (UPDATE, DELETE и TRUNCATE запрещены), момент строго растёт, чаще раза в минуту и из будущего метка не создаётся. Сброс отказывает до обращения к ledger при любом сомнении (нет подтверждения, устаревший номер эпохи, повтор, чужой request_id, вне песочницы), попытка и исход попадают в аудит оператора, выборочный сброс отклоняется."
+  - "AC-F18v2-42 (ADR-090 п. 6, CR-F18-018): каждый маршрут истории BFF определяет окно единым помощником: по умолчанию окно усекается до начала эпохи, в которой лежит его конец; пересечение метки — только allow_cross_reset=true (каждая точка несёт эпоху), вся прошлая эпоха — epoch=N; в ответе блок epoch/window/reset_markers. Скрипты разбора и SQL-выжимки отвергают окно через метку без явного разрешения и причины и называют эпоху в шапке отчёта; проверка epoch-guard-checker находит чтение журналов без пометки."
+  - "AC-F18v2-43 (ADR-090 п. 6 и 8, CR-F18-018): «Сделки» панели «Живые позиции», позиция от хеджей на «Графе», выгода, последняя хедж-заявка агента и график «Сделки по парам» считаются от одного момента — начала текущей эпохи; основной вид объёма — нетто, оборот подписан «не позиция»."
 
 # UX Screens — панель наблюдаемости агентов v2 (заменяет ce_treasury_dashboard v1).
 uxScreens:

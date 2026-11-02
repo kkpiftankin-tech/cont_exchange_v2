@@ -158,5 +158,10 @@ check('lruSet: запись существующего ключа перенос
   return JSON.stringify([...m.keys()]) === JSON.stringify(['c', 'a', 'd']) && m.get('a') === 10 && m.size === 3;
 })());
 
+// --- ADR-090: начало окна, усечённое по метке сброса, приходит готовым и входит в ответ
+check('since_ms берётся из окна по метке сброса, если передан', buildPairTradesDto([], 24, 10000000, 900000, null, 777).since_ms === 777);
+check('без окна по метке since_ms — «сейчас минус часы» (прежнее поведение)', buildPairTradesDto([], 24, 10000000, 900000, null).since_ms === 10000000 - 24 * 3600 * 1000);
+check('нечисловое окно по метке игнорируется', buildPairTradesDto([], 1, 10000000, 60000, null, 'x').since_ms === 10000000 - 3600 * 1000);
+
 if (failed) { console.error(failed + ' check(s) failed'); process.exit(1); }
 console.log('all passed');

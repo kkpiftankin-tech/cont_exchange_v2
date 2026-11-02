@@ -1,3 +1,4 @@
+-- epoch-guard-file: ok(разовая правка книг от 2026-10-29 по срезу истории до инцидента; не анализ экспериментов)
 -- ОДНОРАЗОВО (инцидент 2026-10-29 12:10 UTC, см. docs/00-methodology/known-gaps.md). ПРИМЕНЁН 2026-10-29 14:26-14:27 UTC по разрешению владельца стенда.
 -- Порядок: остановить ledger (docker stop infra-ledger-1) -> выполнить этот файл, дописав в конец COMMIT; (без COMMIT транзакция откатится) ->
 --   поднять ledger (docker compose -f docker-compose.dev.yml up -d --no-build --no-deps --force-recreate ledger).

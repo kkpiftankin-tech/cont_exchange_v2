@@ -27,6 +27,8 @@ COPY ce_surplus_accum.js .
 COPY system_pnl.js .
 COPY agent_pnl_dto.js .
 COPY hedge_model_dto.js .
+COPY epoch.js .
+COPY epoch_schema.js .
 COPY data ./data
 
 EXPOSE 8090
