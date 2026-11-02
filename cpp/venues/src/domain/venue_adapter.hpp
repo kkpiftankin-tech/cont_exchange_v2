@@ -137,6 +137,26 @@ struct VenueSnapshotRequest {
   fob::common::v1::Instrument instrument;
   std::string venue_symbol;
   std::size_t depth_levels{20};
+  // ADR-077: лимит REST-запроса стакана от окна глубины по объёму. 0 — прежний путь
+  // (max(depth_levels, lob_max_levels)); >0 — запрашивать ровно столько (в пределах
+  // потолков площадки) и не давать LOB-сборщику обрезать стакан раньше.
+  std::size_t rest_depth_limit{0};
+  // Тянуть ли ленту публичных сделок (recent-trades) вместе со стаканом. true для
+  // ядрового md-цикла (CE-хеджируемые символы — нужна лента для sim-fill), false
+  // для лёгкого ticker-цикла (extra_ticker_loop), чтобы не жечь REST-бюджет на
+  // символах, которые CE не хеджирует, и не растягивать каденс CE-ленты.
+  bool include_trades{true};
+};
+
+// Этап 0 (EXP-2026-10-15-exchange-requests): время REST-запросов одного снимка, мс.
+// Диагностика, не контракт: заполняет CexWsRestAdapter, у остальных адаптеров нули.
+struct VenueFetchTimings {
+  double rest_depth_ms{0.0};
+  double rest_ticker_ms{0.0};
+  double rest_trades_ms{0.0};
+  int32_t rest_requests{0};
+  // 0 — запрошен; 1 — пропущен (кэш по CEX_REST_TICKER_REFRESH_MS); 2 — нет токена; 3 — выключен.
+  int32_t ticker_state{3};
 };
 
 // Unified raw payload expected from CEX/DEX/AMM adapters.
@@ -158,6 +178,11 @@ struct VenueRawSnapshot {
   cex::common::Decimal mid_price{0, 0};
   cex::common::Decimal spread{0, 0};
   cex::common::Decimal volume_24h{0, 0};
+  // ADR-077: суточный объём (base) для окна глубины. Заполняется только при запросе окна
+  // (rest_depth_limit>0) и только там, где общий разбор тикера не работает (OKX, Kraken);
+  // volume_24h и всё, что от него зависит (τ-потолок кривой), не затрагивается. 0 ⇒ нет.
+  cex::common::Decimal window_volume_24h{0, 0};
+  VenueFetchTimings fetch_timings;
 
   VenueFees fees;
   VenueTradingRules trading_rules;
@@ -187,6 +212,19 @@ struct VenueOrderResult {
   cex::common::Decimal fee_rate{0, 0};  // commission rate (e.g. 0.001 = 10 bps)
   int32_t slippage_bps{0};
   uint32_t latency_ms{0};
+};
+
+// ADR-082: измерение ликвидности одной пары. symbol — канонический ключ ленты адаптера (BTCUSDT, ETHBTC, ...).
+struct VenueLiquidityStat {
+  std::string symbol;
+  double tape_quote_per_s{0.0};  // оборот ленты, валюты котирования в секунду
+  int64_t tape_samples{0};       // чтений ленты в оценке (0 — оценки ещё нет)
+  int64_t tape_reads{0};         // всего чтений ленты (включая пропущенные выборки); для прогрева и обнаружения изменений
+  double fill_coef{1.0};         // коэффициент исполнения f ∈ [0, 1]; нет заявок ⇒ 1
+  double fill_weight{0.0};       // запрошенный объём заявок в f (с забыванием), базовая валюта
+  int64_t fill_orders{0};        // заявок в f
+  double fill_orders_eff{0.0};   // заявок в f с забыванием на момент снимка
+  double age_s{0.0};             // только для затравки после перезапуска: сколько секунд назад значения записаны в таблицу
 };
 
 struct VenueAdapterRuntimeConfig {
@@ -220,12 +258,47 @@ class VenueAdapter {
   virtual std::optional<VenueRawSnapshot> RequestSnapshot(
       const VenueSnapshotRequest& request) = 0;
 
+  // ADR-070: один REST-вызов глубины (до `levels` уровней) БЕЗ изменения состояния
+  // адаптера (LOB/books_), без тикера и ленты сделок. Для быстрой полосы сырого
+  // стакана; по умолчанию не поддерживается.
+  virtual std::optional<VenueRawSnapshot> RequestDepthOnly(
+      const VenueSnapshotRequest& request, std::size_t levels) {
+    (void)request;
+    (void)levels;
+    return std::nullopt;
+  }
+  // true — RequestDepthOnly ходит через общий REST-клиент адаптера, и вызывающий
+  // обязан сериализовать его с RequestSnapshot (per-venue мьютекс). false — у
+  // адаптера выделенный клиент для глубины, мьютекс не нужен.
+  virtual bool DepthOnlyUsesSharedClient() const { return true; }
+
   // Send low-level child order to a venue.
   virtual VenueOrderResult SendOrder(
       const fob::execution::v1::ExecutionIntent& intent) = 0;
 
   // Runtime tuning loaded from admin API without service restart.
   virtual bool ApplyRuntimeConfig(const VenueAdapterRuntimeConfig& config) = 0;
+
+  // F-11/F-20 (IN-0xx fair trades scheduling): возраст (мс) последнего
+  // УСПЕШНОГО REST-чтения публичной ленты сделок (recent-trades) для
+  // `venue_symbol`. -1, если адаптер не ведёт отдельный учёт ленты (DEX/AMM,
+  // sim) или символ ещё не читался — планировщик (poll_adapter) трактует
+  // -1 как "максимально устаревший" (наивысший приоритет). Используется
+  // ТОЛЬКО для справедливого распределения общего per-venue REST
+  // token-bucket между символами одной биржи — не влияет на бизнес-решения
+  // о хеджировании.
+  virtual int64_t TradesReadAgeMs(const std::string& venue_symbol) const {
+    (void)venue_symbol;
+    return -1;
+  }
+
+  // ADR-082 (шаг 0): измерения ликвидности по парам биржи — оборот ленты публичных сделок ν и коэффициент исполнения f.
+  // Пусто, если адаптер не ведёт ленту (DEX/AMM, sim). Только наблюдаемость: на торговые решения самого venues не влияет.
+  virtual std::vector<VenueLiquidityStat> LiquidityStats() const { return {}; }
+
+  // ADR-082 (шаг 1): затравить оценки ν и f сохранёнными значениями после перезапуска, чтобы они не начинались с нуля (иначе после
+  // каждой выкладки первые заявки дают шумный f, а множитель глубины агента скачет). Применяется только к ещё не тронутым оценкам.
+  virtual void SeedLiquidityStats(const std::vector<VenueLiquidityStat>& seeds) { (void)seeds; }
 };
 
 }  // namespace cex::venues::domain

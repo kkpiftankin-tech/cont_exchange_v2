@@ -8,9 +8,15 @@
 //   - Запускает Kafka consumers (batch.outputs / execution.intents /
 //     execution.venue / execution.reports).
 //
-// CLAUDE.md §17: ledger — источник истины по balances/positions.
+// cpp/ledger/CLAUDE.md: ledger — источник истины по balances/positions.
 // ============================================================================
 #include <grpcpp/grpcpp.h>
+
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 #include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
@@ -30,7 +36,7 @@ int main() {
   const std::string brokers =
       cex::common::Env::get_string("KAFKA_BROKERS", "redpanda:9092");
 
-  // Empty DSN → in-memory mode (CLAUDE.md §14: targeted state in PG для prod).
+  // Empty DSN → in-memory mode (.claude/rules/data.md: targeted state in PG для prod).
   const std::string pg_dsn =
       cex::common::Env::get_string("LEDGER_POSTGRES_DSN", "");
 
@@ -51,6 +57,8 @@ int main() {
   std::shared_ptr<cex::ledger::app::PositionAccountTxPort> position_account_tx;
   // F-06 P0-A (T-F06-070, ADR-044) — mirror reserve/release into PG `accounts`.
   std::shared_ptr<cex::ledger::app::AccountReserveTxPort> account_reserve_tx;
+  // F-18 v2 (T-F18-204/205, ADR-061 §7) — persist ce_agent_position.
+  std::shared_ptr<cex::ledger::app::AgentPositionRepositoryPort> agent_position_repo;
 
   if (!pg_dsn.empty()) {
     // ADR-045: единый пул PG-соединений на сервис (вместо нового
@@ -68,12 +76,14 @@ int main() {
     account_repo = std::make_shared<cex::ledger::infra::PostgresAccountRepository>(pg_pool);
     position_account_tx = std::make_shared<cex::ledger::infra::PostgresPositionAccountTx>(pg_pool);
     account_reserve_tx = std::make_shared<cex::ledger::infra::PostgresAccountReserveTx>(pg_pool);
+    agent_position_repo = std::make_shared<cex::ledger::infra::PostgresAgentPositionRepository>(pg_pool);
 
     cex::common::log_json("INFO", "PostgreSQL repositories initialized",
                           {{"dsn", pg_dsn},
                            {"pool_size", std::to_string(pool_size)},
                            {"hedgeflow_pnl_sink", "ready"},
-                           {"f06_positions_accounts", "ready"}});
+                           {"f06_positions_accounts", "ready"},
+                           {"ce_agent_position", "ready"}});
   } else {
     cex::common::log_json("WARN", "PostgreSQL DSN not set, persistence disabled");
   }
@@ -87,6 +97,40 @@ int main() {
   uc.SetAccountRepo(account_repo);
   uc.SetPositionAccountTx(position_account_tx);
   uc.SetAccountReserveTx(account_reserve_tx);
+  // F-18 v2 (T-F18-204/205): wiring синхронно перечитывает ce_agent_position
+  // в write-through кэш при старте — позиция агента переживает рестарт.
+  uc.SetAgentPositionRepo(agent_position_repo);
+  // F-18: DSN для живой настройки порога band от комиссии (f05a_clearing_config).
+  uc.SetPostgresDsn(pg_dsn);
+
+  // F-18 (ADR-054 §10): seed house-аккаунта ('__ce_house__') капиталом биржи из
+  // env при старте. Валюты — CE_TREASURY_ASSETS (+ CE_NUMERAIRE); сумма —
+  // CE_CAPITAL_SEED_<CCY>. Idempotent (сидит только пустой остаток).
+  {
+    const std::string numeraire = cex::common::Env::get_string("CE_NUMERAIRE", "USDT");
+    std::string csv = cex::common::Env::get_string("CE_TREASURY_ASSETS", "BTC,ETH,SOL");
+    std::vector<std::string> ccys;
+    std::string cur;
+    for (char ch : csv) {
+      if (ch == ',') { if (!cur.empty()) ccys.push_back(cur); cur.clear(); }
+      else if (!std::isspace(static_cast<unsigned char>(ch))) { cur += ch; }
+    }
+    if (!cur.empty()) ccys.push_back(cur);
+    ccys.push_back(numeraire);
+    int seeded = 0;
+    for (const auto& c : ccys) {
+      const std::string s = cex::common::Env::get_string("CE_CAPITAL_SEED_" + c, "");
+      if (s.empty()) continue;
+      try {
+        const double v = std::stod(s);
+        cex::common::Decimal amount{static_cast<std::int64_t>(std::llround(v * 1e8)), 8};
+        uc.SeedHouseBalance(c, amount);
+        ++seeded;
+      } catch (...) {}
+    }
+    cex::common::log_json("INFO", "F-18 house account seeded",
+                          {{"account", "__ce_house__"}, {"currencies", std::to_string(seeded)}});
+  }
 
   // F-06 / F6-5 (T-F06-072, ADR-046): producer топика positions.update.
   // После успешного ApplyBatchResult ledger эмиттит лёгкий invalidation-сигнал
@@ -96,6 +140,13 @@ int main() {
           cex::common::KafkaProducer(
               cex::common::KafkaConfig{.brokers = brokers, .client_id = "ledger"}));
   uc.SetPositionsUpdatePublisher(positions_update_publisher);
+
+  // Вариант 2 (ADR-061 §4): продюсер топика ce.agent.band.breach. ledger детектит
+  // пробой полосы ±q в момент применения дельты клиринга и эмитит событие → risk
+  // строит хедж-заявку в паре base/quote. Живёт всё время работы сервиса.
+  static cex::common::KafkaProducer band_breach_producer(
+      cex::common::KafkaConfig{.brokers = brokers, .client_id = "ledger-band-breach"});
+  uc.SetBandBreachProducer(&band_breach_producer);
 
   // Start Kafka consumers in background (batch.outputs, execution.intents, execution.reports, execution.venue)
   // ВАЖНО: ApplyBatchResult идempotent через idempotency_repo → safe при rebalance.

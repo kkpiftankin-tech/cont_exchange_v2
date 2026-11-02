@@ -19,7 +19,7 @@
 | 4.1 | F-15 status mismatch | `feature.yaml`: `status: in-progress-impl` + ~30 cpp/backtest paths; `feature-component-map.yaml`: `status: not-implemented`, `codePaths: []`, `primaryComponents` без `backtest-service` | ✅ ВАЛИДНО |
 | 4.2 | F-04 Kafka topic `fills` drift | `create_topics.sh`: создаёт ✓; `feature.yaml`: упомянут ✓; `topics.md`: `fills.md` помечен `(planned)`; [docs/06-api/messaging/fills.md](../../06-api/messaging/) — **НЕ существует**; `BatchOutputsProducer` пишет в `fills` ✓ | ✅ ВАЛИДНО (документация отстала от кода и инфры) |
 | 4.3 | `batch.outputs` producer/consumer schema mismatch | Producer пишет `fob::matching::v1::BatchOutputs`-wrapper (с `result` + `fills`); consumer (`ledger`) делает try-`BatchOutputs` → fallback try-`BatchResult` | ⚠️ Частично — runtime работает через fallback, но контракт двусмысленный, fragile. Аналогичная проблема для `market_data`/`observability` consumers (не проверено) |
-| 4.4 | `UserPromptSubmit` auto-archive hook | Shared `.claude/settings.json`: только `PostToolUse`; local `.claude/settings.local.json`: **тоже без `UserPromptSubmit`**. Только сам скрипт [tools/auto-archive-attachments.py](../../../tools/auto-archive-attachments.py) | ✅ ВАЛИДНО — auto-archive нигде не зарегистрирован, документация в [CLAUDE.md §0a](../../../CLAUDE.md) и [feature-development-process.md §1.1](../feature-development-process.md) обещает то, чего нет на любой машине из коробки |
+| 4.4 | `UserPromptSubmit` auto-archive hook | Shared `.claude/settings.json`: только `PostToolUse`; local `.claude/settings.local.json`: **тоже без `UserPromptSubmit`**. Только сам скрипт [tools/auto-archive-attachments.py](../../../tools/auto-archive-attachments.py) | ✅ ВАЛИДНО — auto-archive нигде не зарегистрирован, документация в [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md) и [feature-development-process.md §1.1](../feature-development-process.md) обещает то, чего нет на любой машине из коробки |
 | 4.5 | Validators проверяют только наличие файлов | `traceability-checker/check.py`: 99 строк, проверяет наличие docsPath/codePaths/protoContracts; `proto-contract-auditor`: проверяет mapping; **отсутствуют**: `feature-yaml-checker`, `kafka-contract-auditor`, `sequence-diagram-linter`, `docs-coverage-gate` | ✅ ВАЛИДНО |
 
 **Итого валидных**: 4 (4.1, 4.2, 4.4, 4.5), 2 частично (3.4, 4.3), 1 невалидно (3.1).
@@ -73,7 +73,7 @@
 
 **Замечание**: 4.2.
 
-**Проблема**: Kafka topic `fills` существует физически (в `create_topics.sh`, в producer, в Acceptance Criteria F-04), но его документация-контракт отсутствует — `topics.md` явно помечает `(planned)`. Это нарушает [CLAUDE.md §0a "Contract rule"](../../../CLAUDE.md) — "Missing contracts become TODO contract files, not unlinked names".
+**Проблема**: Kafka topic `fills` существует физически (в `create_topics.sh`, в producer, в Acceptance Criteria F-04), но его документация-контракт отсутствует — `topics.md` явно помечает `(planned)`. Это нарушает [.claude/rules/docs-as-code.md "Contract rule"](../../../.claude/rules/docs-as-code.md#contract-rule) — "Missing contracts become TODO contract files, not unlinked names".
 
 **Действие**:
 1. Создать [docs/06-api/messaging/fills.md](../../06-api/messaging/) по шаблону из [docs/06-api/messaging/batch-outputs.md](../../06-api/messaging/batch-outputs.md):
@@ -154,7 +154,7 @@
 
 **Замечание**: 4.4.
 
-**Проблема**: Документация ([CLAUDE.md §0a](../../../CLAUDE.md), [feature-development-process.md §1.1](../feature-development-process.md)) обещает что вложения в чате автоматически архивируются в `incoming-docs/`. Реальность: `tools/auto-archive-attachments.py` существует, но hook `UserPromptSubmit` нигде не зарегистрирован — ни в shared `.claude/settings.json`, ни в local `.claude/settings.local.json`. На новой машине / новой инсталляции — auto-archive не работает.
+**Проблема**: Документация ([.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md), [feature-development-process.md §1.1](../feature-development-process.md)) обещает что вложения в чате автоматически архивируются в `incoming-docs/`. Реальность: `tools/auto-archive-attachments.py` существует, но hook `UserPromptSubmit` нигде не зарегистрирован — ни в shared `.claude/settings.json`, ни в local `.claude/settings.local.json`. На новой машине / новой инсталляции — auto-archive не работает.
 
 **Действие**:
 1. Решить: shared (всем) или per-user (рекомендуется в example)?
@@ -178,7 +178,7 @@
    }
    ```
 4. Создать smoke-test `tools/auto-archive-attachments.py --self-test` который вызывается из CI (один из workflows) — убеждается что parser работает на канонических `<document>` блоках.
-5. Обновить [CLAUDE.md §0a "Auto-archive of chat attachments"](../../../CLAUDE.md):
+5. Обновить [.claude/rules/docs-as-code.md "Auto-archive of chat attachments"](../../../.claude/rules/docs-as-code.md#auto-archive-of-chat-attachments):
    - Подтвердить что hook в shared settings.json.
    - Убрать упоминание `.claude/settings.local.json` как primary location (только как override).
 6. Обновить [feature-development-process.md §1.1](../feature-development-process.md).
@@ -421,7 +421,7 @@
 
 **Acceptance criteria**:
 - [ ] 4 PM-документа существуют со всеми разделами шаблона.
-- [ ] [CLAUDE.md §0b "Stable Repository Map"](../../../CLAUDE.md) упоминает `docs/00-methodology/postmortems/`.
+- [ ] [.claude/rules/docs-as-code.md "Repository map"](../../../.claude/rules/docs-as-code.md#repository-map-docs) упоминает `docs/00-methodology/postmortems/`.
 
 **Estimated effort**: 3-4 часа.
 

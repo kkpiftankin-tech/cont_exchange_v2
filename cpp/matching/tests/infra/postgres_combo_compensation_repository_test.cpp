@@ -20,6 +20,20 @@ bool expect(bool cond, const char* msg) {
 }  // namespace
 
 int main() {
+  // Чистая часть (без БД): различение uuid ноги combo и идентификатора CE-хеджа.
+  {
+    using cex::matching::infra::IsUuidText;
+    bool pure_ok = true;
+    pure_ok = expect(IsUuidText("dddddddd-0000-0000-0000-0000000000aa"), "IsUuidText: uuid") && pure_ok;
+    pure_ok = expect(IsUuidText("DDDDDDDD-0000-0000-0000-0000000000AA"), "IsUuidText: uuid в верхнем регистре") && pure_ok;
+    pure_ok = expect(!IsUuidText(""), "IsUuidText: пусто") && pure_ok;
+    pure_ok = expect(!IsUuidText("ce|band|T_BTC_kraken|BTC|kraken|1792400514127"), "IsUuidText: идентификатор CE-хеджа") && pure_ok;
+    pure_ok = expect(!IsUuidText("dddddddd-0000-0000-0000-0000000000a"), "IsUuidText: короче 36") && pure_ok;
+    pure_ok = expect(!IsUuidText("dddddddd_0000-0000-0000-0000000000aa"), "IsUuidText: нет дефиса") && pure_ok;
+    pure_ok = expect(!IsUuidText("gggggggg-0000-0000-0000-0000000000aa"), "IsUuidText: не hex") && pure_ok;
+    if (!pure_ok) return 1;
+  }
+
   const char* dsn = std::getenv("TEST_PG_DSN");
   if (dsn == nullptr || std::string(dsn).empty()) {
     std::cout << "postgres_combo_compensation_repository_test: SKIPPED (no TEST_PG_DSN)\n";
@@ -78,6 +92,9 @@ ON CONFLICT (leg_id) DO NOTHING
     ok = expect(found.has_value() && *found == parent_id, "FindComboLegParent → parent") && ok;
     const auto missing = repo.FindComboLegParent("dddddddd-9999-9999-9999-999999999999");
     ok = expect(!missing.has_value(), "FindComboLegParent unknown → nullopt") && ok;
+    // CE-хедж (не uuid) → nullopt без исключения PG
+    const auto ce_hedge = repo.FindComboLegParent("ce|band|T_BTC_kraken|BTC|kraken|1792400514127");
+    ok = expect(!ce_hedge.has_value(), "FindComboLegParent ce|band|… → nullopt без исключения") && ok;
 
     // MVP-6: ListPending + ResolvePending (идемпотентно).
     std::string my_comp_id;

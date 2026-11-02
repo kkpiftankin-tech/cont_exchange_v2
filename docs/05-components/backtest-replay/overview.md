@@ -52,7 +52,7 @@ related:
 
 ## Participates In Use Cases
 
-- [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md)
+- [UC-F15-07](../../02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md)
 
 ## Participates In Sequence Diagrams
 

@@ -44,12 +44,19 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <iterator>
+#include <map>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <pqxx/pqxx>  // живая настройка inventory-skew из f05a_clearing_config
 
 #include "fob/execution/v1/execution.pb.h"
 
@@ -63,6 +70,11 @@
 // F-05A (T-F05A-305 1a): vector clearing (consume marketdata.vectorized).
 #include "app/vector_clearing_use_case.hpp"
 #include "domain/vector_qp_solver.hpp"
+#include "fob/treasury/v1/treasury.pb.h"   // F-18 §11: CePositionDeltaBatch
+// F-05A CE (вариант A): agent-clearing на графе узлов + money-path проекция.
+#include "domain/ce_agent_clearing.hpp"
+#include "domain/ce_graph_assembler.hpp"
+#include "domain/ce_position_projection.hpp"
 #include "infra/osqp_backend.hpp"
 #include "transport/mappers/vector_clearing_result.hpp"
 // F-05A money-path (ADR-049): hedge intents за флагом F05A_MONEY_ENABLED.
@@ -72,6 +84,7 @@
 #include "fob/venue/v1/venue.pb.h"
 #include "infra/kafka/batch_outputs_producer.hpp"
 #include "infra/kafka/execution_intents_producer.hpp"
+#include "infra/postgres/postgres_asset_liquidity_repository.hpp"  // F-18 #7 (T-F18-L02)
 
 namespace cex::matching::app {
 
@@ -375,6 +388,21 @@ MatchingLoop::MatchingLoop(
       market_data_client_(std::move(market_data_client)),
       flow_order_repository_(std::move(flow_order_repository)),
       planner_inputs_cache_(LoadVenueHealthThresholds()) {
+  postgres_dsn_ = postgres_dsn;  // для живой настройки inventory-skew из f05a_clearing_config
+  // Inventory-skew (F-18 v2): stub к ledger для чтения c_j (обратная связь
+  // позиция→цена). Адрес как у risk. Сбой канала не критичен — при недоступности
+  // позиций skew выключается (кэш пуст ⇒ смещение 0), клиринг работает как раньше.
+  try {
+    const std::string ledger_addr =
+        cex::common::Env::get_string("LEDGER_GRPC_ADDR", "ledger:50053");
+    ledger_stub_ = fob::ledger::v1::LedgerService::NewStub(
+        grpc::CreateChannel(ledger_addr, grpc::InsecureChannelCredentials()));
+    cex::common::log_json("INFO", "Matching → ledger client wired (inventory-skew)",
+                          {{"ledger_addr", ledger_addr}});
+  } catch (const std::exception& e) {
+    cex::common::log_json("WARN", "Matching ledger client init failed (skew off)",
+                          {{"error", e.what()}});
+  }
   // F-09 (T-F09-048): включаем grouped combo-цикл при заданном PG DSN.
   // Любая ошибка инициализации → grouped выключен, single-leg F-04 не затронут.
   if (!postgres_dsn.empty()) {
@@ -395,6 +423,7 @@ MatchingLoop::MatchingLoop(
                             {{"error", ex.what()}});
     }
   }
+
 }
 
 // ============================================================================
@@ -440,7 +469,7 @@ void MatchingLoop::start() {
   running_.store(true);
   consumer_.subscribe(
       {"orders.normalized", "venue.liquidity.fob", "venue.health", "execution.venue",
-       "marketdata.vectorized"});
+       "marketdata.vectorized", "ce.clearing.input"});
   t_consume_ = std::thread([this] { consume_orders_loop(); });
   t_batch_ = std::thread([this] { batch_timer_loop(); });
 }
@@ -506,6 +535,24 @@ void MatchingLoop::consume_orders_loop() {
               return;
             }
             on_vectorized_liquidity(snap.input());
+            return;
+          }
+
+          if (topic == "ce.clearing.input") {
+            fob::marketdata::v1::CeClearingInput ce_in;
+            if (!cex::common::from_bytes(payload, ce_in)) {
+              cex::common::log_json("ERROR", "Failed to parse CeClearingInput");
+              return;
+            }
+            try {
+              on_ce_clearing_input(ce_in);
+            } catch (const std::out_of_range& e) {
+              // Несогласованный вход (котировка на актив или площадку вне списков ⇒ std::out_of_range в node_index.at при сборке графа) не должен
+              // ронять процесс: иначе после перезапуска то же сообщение читается снова и matching падает по кругу (инцидент 2026-10-26).
+              // Перехватывается только этот класс исключений; прочие по-прежнему завершают процесс и сообщение читается повторно.
+              cex::common::log_json("ERROR", "CE clearing input rejected",
+                                    {{"batch_id", ce_in.batch_id()}, {"error", e.what()}});
+            }
             return;
           }
 
@@ -818,6 +865,538 @@ void MatchingLoop::on_liquidity_curve(
   });
 }
 
+namespace {
+// F-18 §11 (variant A): проекция решённого x на активы двойной записью
+// Δbase += x_i ; Δquote −= x_i·exp(λ_quote−λ_base). Только СЧИТАЕТ (matching не
+// владеет книгой) — результат уходит в ce.position.delta, ledger накапливает.
+std::map<std::string, double> ProjectXToDeltas(
+    const fob::marketdata::v1::VectorClearingInput& input,
+    const cex::matching::app::VectorClearingOutcome& outcome) {
+  std::map<std::string, double> delta;
+  const auto& solve = outcome.solve;
+  const int n = input.segments_size();
+  if (static_cast<int>(solve.x.size()) != n || solve.pi.empty()) return delta;
+  // asset → index (λ = pi по индексу basis; иначе отсортированное объединение).
+  std::map<std::string, int> idx;
+  if (input.basis().assets_size() > 0) {
+    for (const auto& e : input.basis().assets()) idx[e.asset()] = e.index();
+  } else {
+    std::set<std::string> uniq;
+    for (const auto& s : input.segments()) {
+      const std::string p = s.pair();
+      const auto sl = p.find('/');
+      if (sl != std::string::npos) { uniq.insert(p.substr(0, sl)); uniq.insert(p.substr(sl + 1)); }
+    }
+    int i = 0; for (const auto& a : uniq) idx[a] = i++;
+  }
+  std::vector<double> lam(solve.pi.size(), 0.0);
+  for (std::size_t i = 0; i < solve.pi.size(); ++i) lam[i] = static_cast<double>(solve.pi[i]);
+  auto lam_of = [&](const std::string& a, double& v) {
+    auto it = idx.find(a);
+    if (it == idx.end() || it->second < 0 || it->second >= static_cast<int>(lam.size())) return false;
+    v = lam[it->second]; return true;
+  };
+  for (int i = 0; i < n; ++i) {
+    const std::string pair = input.segments(i).pair();
+    const auto sl = pair.find('/');
+    if (sl == std::string::npos) continue;
+    const std::string base = pair.substr(0, sl), quote = pair.substr(sl + 1);
+    const double x = static_cast<double>(solve.x[i]);
+    if (!std::isfinite(x) || x == 0.0) continue;
+    delta[base] += x;
+    double lb = 0.0, lq = 0.0;
+    if (lam_of(base, lb) && lam_of(quote, lq)) {
+      const double p = std::exp(lq - lb);
+      if (std::isfinite(p)) delta[quote] += -x * p;
+    }
+  }
+  return delta;
+}
+}  // namespace
+
+// F-05A CE (вариант A, ADR-055/056/057): ce.clearing.input → граф узлов (AssembleCeGraph) →
+// клиринг (ClearCe) → money-path проекция по узлам (ProjectPositionQuantity) → эмит
+// ce.position.delta как ПЛАН (на стороне ledger ложится в committed, не в house-факт).
+// Плечи перевода/запаса — из env (капитал/риск); quote-агенты и марки/P0 — из сообщения.
+//
+// T-F18-103 (ADR-061, флаг CE_V2_GRAPH, default OFF): при OFF — путь ниже байт-в-байт
+// как раньше (AssembleCeGraph, v1). При ON — граф собирается AssembleCeGraphV2
+// (T-F18-101): только узлы asset@venue + house-столбец, без STOCK-плеч/узла-склада/марки.
+// Движок ClearCe и весь путь ПОСЛЕ сборки графа (клиринг → проекция → ce.position.delta →
+// execution.intents) общий для v1/v2 — топология подаётся на вход, остальное не дублируется.
+// Живая настройка inventory-skew из f05a_clearing_config (γ, клэмп). Кэш ~1с, чтобы
+// не бить PG каждый такт. Дефолты/override — env. Позволяет крутить обратную связь
+// с фронта без пересборки matching.
+MatchingLoop::InvSkewCfg MatchingLoop::LoadInvSkewConfig() {
+  auto env_d = [](const char* n, double def) {
+    const char* v = std::getenv(n);
+    return v ? std::atof(v) : def;
+  };
+  const double def_gamma = env_d("CE_INVENTORY_SKEW_GAMMA", 0.02);
+  const double def_clamp = env_d("CE_INVENTORY_SKEW_MAX_PM", 8.0);
+  // ADR-071: γ_A/K_A ноги арбитражёра. Деф γ_A=0 ⇒ skew арбитражёра выключен (старое
+  // поведение); K_A с запасом (глубина transfer-ребра иная). env-fallback.
+  const double def_arb_gamma = env_d("CE_ARB_INV_SKEW_GAMMA", 0.0);
+  const double def_arb_clamp = env_d("CE_ARB_INV_SKEW_MAX_PM", 50.0);
+  {
+    std::lock_guard<std::mutex> lk(inv_cfg_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    if (inv_cfg_have_ &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - inv_cfg_last_).count() < 1000)
+      return {inv_cfg_gamma_, inv_cfg_max_pm_, inv_cfg_arb_gamma_, inv_cfg_arb_max_pm_};
+  }
+  double gamma = def_gamma, clamp = def_clamp;
+  double arb_gamma = def_arb_gamma, arb_clamp = def_arb_clamp;
+  if (!postgres_dsn_.empty()) {
+    try {
+      pqxx::connection c(postgres_dsn_);
+      // ДВА раздельных запроса (ADR-071 review, config-coupling): отсутствие arb-колонок
+      // НЕ должно сбрасывать живую настройку переводчика (T_) в env-дефолты. Каждый — свой try.
+      try {
+        pqxx::work tx(c);
+        const pqxx::row r = tx.exec1(
+            "SELECT ce_inv_skew_gamma, ce_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+        gamma = r[0].as<double>();
+        clamp = r[1].as<double>();
+        tx.commit();
+      } catch (const std::exception&) { /* нет БД/строки — T_ на дефолтах/env */ }
+      try {
+        pqxx::work tx(c);
+        const pqxx::row r = tx.exec1(
+            "SELECT ce_arb_inv_skew_gamma, ce_arb_inv_skew_max_pm FROM f05a_clearing_config WHERE id=1");
+        arb_gamma = r[0].as<double>();
+        arb_clamp = r[1].as<double>();
+        tx.commit();
+      } catch (const std::exception&) { /* нет arb-колонок — arb skew off/env, T_ не затронут */ }
+    } catch (const std::exception&) { /* не удалось подключиться — всё на дефолтах/env */ }
+  }
+  std::lock_guard<std::mutex> lk(inv_cfg_mu_);
+  inv_cfg_gamma_ = gamma;
+  inv_cfg_max_pm_ = clamp;
+  inv_cfg_arb_gamma_ = arb_gamma;
+  inv_cfg_arb_max_pm_ = arb_clamp;
+  inv_cfg_last_ = std::chrono::steady_clock::now();
+  inv_cfg_have_ = true;
+  return {gamma, clamp, arb_gamma, arb_clamp};
+}
+
+// F-18 #7 scoped (T-F18-L02): throttle записи depth в ce_asset_liquidity. true ⇒ пора
+// писать (и обновляет last). Период CE_LIQ_WRITE_MS (деф 5с) — depth меняется редко.
+bool MatchingLoop::ShouldWriteLiquidity() {
+  const long long period_ms = cex::common::Env::get_int("CE_LIQ_WRITE_MS", 5000);
+  std::lock_guard<std::mutex> lk(liq_write_mu_);
+  const auto now = std::chrono::steady_clock::now();
+  if (liq_write_have_ &&
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - liq_write_last_).count() < period_ms)
+    return false;
+  liq_write_last_ = now;
+  liq_write_have_ = true;
+  return true;
+}
+
+// Inventory-skew: c_j всех агентов из ledger, кэш на CE_INVENTORY_SKEW_REFRESH_MS
+// (клиринг идёт часто — не дёргаем ledger каждый такт). Сбой RPC ⇒ прошлый кэш.
+std::map<std::string, double> MatchingLoop::FetchAgentPositionsCached() {
+  const long long refresh_ms =
+      cex::common::Env::get_int("CE_INVENTORY_SKEW_REFRESH_MS", 500);
+  {
+    std::lock_guard<std::mutex> lk(inv_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    if (inv_have_ &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - inv_last_fetch_).count() <
+            refresh_ms)
+      return inv_positions_;
+  }
+  if (!ledger_stub_) return {};
+  fob::ledger::v1::GetAgentPositionsRequest req;
+  fob::ledger::v1::GetAgentPositionsResponse resp;
+  grpc::ClientContext ctx;
+  ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
+  const grpc::Status st = ledger_stub_->GetAgentPositions(&ctx, req, &resp);
+  if (!st.ok()) {
+    cex::common::log_json("WARN", "Matching inventory-skew: GetAgentPositions failed",
+                          {{"error", st.error_message()}});
+    std::lock_guard<std::mutex> lk(inv_mu_);
+    return inv_positions_;
+  }
+  std::map<std::string, double> m;
+  for (const auto& p : resp.positions()) {
+    // Модель A7: при пробое избыток УХОДИТ из position в заявку (in_flight), поэтому
+    // position сам по себе держится у band. Истинный инвентарь агента (для inventory-
+    // skew, обратная связь позиция→цена) = position + in_flight (обе одного знака) —
+    // отправленное в заявку тоже ещё удерживается до исполнения. Иначе skew ослабевает,
+    // когда в заявках висит большой объём (follow-up F-18: skew на полное обязательство).
+    const double c = static_cast<double>(cex::common::Decimal::from_proto(p.position()));
+    const double in_flight = static_cast<double>(cex::common::Decimal::from_proto(p.in_flight()));
+    // ADR-071: ключ "agent_id|venue|asset" — двухногий арбитражёр (ADR-069) имеет ДВЕ
+    // строки с одним agent_id (ноги по venue); кросс-переводчик T_ETH_BTC — ДВЕ строки
+    // по asset (ETH и BTC) при одном venue (ADR-071 review). Оба различаем полным ключом.
+    // base = c+in_flight = I−F (нетто внутр.−подтв.внешн.).
+    m[p.agent_id() + "|" + p.venue() + "|" + p.asset()] = c + in_flight;
+  }
+  std::lock_guard<std::mutex> lk(inv_mu_);
+  inv_positions_.swap(m);
+  inv_last_fetch_ = std::chrono::steady_clock::now();
+  inv_have_ = true;
+  return inv_positions_;
+}
+
+void MatchingLoop::on_ce_clearing_input(
+    const fob::marketdata::v1::CeClearingInput& input) {
+  using cex::common::Decimal;
+  auto d2 = [](const fob::common::v1::Decimal& d) {
+    return static_cast<double>(Decimal::from_proto(d));
+  };
+  auto env_d = [](const std::string& name, double def) {
+    const char* v = std::getenv(name.c_str());
+    return v ? std::atof(v) : def;
+  };
+  auto to_dec = [](double x) {
+    return Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
+  };
+
+  const std::string numeraire =
+      input.numeraire().empty() ? std::string("USDT") : input.numeraire();
+  std::vector<std::string> assets(input.assets().begin(), input.assets().end());
+  std::vector<std::string> venues(input.venues().begin(), input.venues().end());
+
+  std::map<std::string, double> ref_price;
+  std::map<std::string, double> mark;  // марка μ узла книги — используется только v1
+  for (const auto& m : input.marks()) {
+    mark[m.asset()] = d2(m.mark());
+    if (m.has_reference_price()) ref_price[m.asset()] = d2(m.reference_price());
+  }
+  std::vector<std::string> all_assets = assets;
+  all_assets.push_back(numeraire);
+
+  // Inventory-skew (F-18 v2, обратная связь позиция→цена): эффективный якорь
+  // агента смещаем на clamp(γ·c_j) — при накоплении позиции поток разворачивается,
+  // позиции перестают дрейфовать (market-making inventory skew). γ=0 (default) ⇒
+  // off, поведение байт-в-байт как раньше. clamp ограничивает величину смещения
+  // (устойчивость: скью проходит через глубину α). c_j из ledger (владелец) —
+  // учитывает хедж-исполнения и кнопку сброса.
+  // γ/клэмп — живая настройка из f05a_clearing_config (крутится с фронта без
+  // пересборки). Дефолты/override — env. γ=0 ⇒ обратная связь выключена.
+  const auto inv_cfg = LoadInvSkewConfig();
+  const double inv_gamma = inv_cfg.gamma, inv_clamp = inv_cfg.clamp;
+  const double arb_gamma = inv_cfg.arb_gamma, arb_clamp = inv_cfg.arb_clamp;  // ADR-071
+  const std::map<std::string, double> inv_pos =
+      (inv_gamma > 0.0 || arb_gamma > 0.0) ? FetchAgentPositionsCached()
+                                           : std::map<std::string, double>{};
+
+  // ADR-072: fair ЦЕНА ПАРЫ F_0 (P_λ, IN-017) по КЛЮЧУ "base/quote" = depth-
+  // взвешенное среднее цен пары по СЫРОМУ анкеру (ДО inventory-skew); независимо от
+  // решения клиринга. num=Σ depth·P_pair, den=Σ depth. Ключ по ПАРЕ, не активу: для
+  // кросс-пары anchor — отклонение цены пары от ref[base]/ref[quote], не base/USDT.
+  std::map<std::string, double> fair_num, fair_den;
+  std::vector<domain::CeQuoteParams> quotes;
+  for (const auto& q : input.quotes()) {
+    // ADR-064: q.quote() — котируемая валюта пары (пусто ⇒ numeraire). Поле
+    // используется только v2-сборщиком (AssembleCeGraphV2); v1 его игнорирует.
+    double anchor = d2(q.anchor());
+    const double anchor_raw = anchor;   // ADR-079: якорь ДО inventory-skew (для диагностики)
+    {  // P_pair = (ref[base]/ref[quote])·exp(σ*_raw/1000), ДО skew. anchor —
+       // отклонение цены ПАРЫ: для USDT-пары base/USDT, для кросс-пары base/quote.
+       // ref[quote]=1 для numeraire. Ключ копления — пара, не актив.
+      const std::string q_quote = q.quote().empty() ? numeraire : q.quote();
+      const auto rpb = ref_price.find(q.asset());
+      const double ref_q = (q_quote == numeraire)
+                               ? 1.0
+                               : (ref_price.count(q_quote) ? ref_price.at(q_quote) : 0.0);
+      const double depth_w = d2(q.depth());
+      if (rpb != ref_price.end() && rpb->second > 0.0 && ref_q > 0.0 && depth_w > 0.0) {
+        const std::string key = q.asset() + "/" + q_quote;
+        fair_num[key] += depth_w * (rpb->second / ref_q) * std::exp(anchor / 1000.0);
+        fair_den[key] += depth_w;
+      }
+    }
+    if (inv_gamma > 0.0 && !inv_pos.empty()) {
+      // agent_id как в AssembleCeClearInputV2: номинал ⇒ T_<asset>_<venue>,
+      // кросс ⇒ T_<asset>_<quote>_<venue>.
+      const std::string quote_asset = q.quote().empty() ? numeraire : q.quote();
+      const std::string agent_id = (quote_asset == numeraire)
+          ? ("T_" + q.asset() + "_" + q.venue())
+          : ("T_" + q.asset() + "_" + quote_asset + "_" + q.venue());
+      const auto it = inv_pos.find(agent_id + "|" + q.venue() + "|" + q.asset());  // ADR-071: agent|venue|asset
+      if (it != inv_pos.end()) {
+        double skew = inv_gamma * it->second;  // ‰
+        if (skew > inv_clamp) skew = inv_clamp;
+        else if (skew < -inv_clamp) skew = -inv_clamp;
+        anchor -= skew;  // c>0 ⇒ якорь ниже ⇒ поток разворачивается (mean-reversion)
+      }
+    }
+    domain::CeQuoteParams qp{q.asset(), q.venue(), anchor, d2(q.depth()), d2(q.dead_zone()), q.quote(), {}};
+    qp.diag.has = true;                               // ADR-079: состав полки, возраст, σ, skew (клиринг их не читает)
+    qp.diag.dz_age = d2(q.dz_age());
+    qp.diag.dz_spread = d2(q.dz_spread());
+    qp.diag.dz_commission = d2(q.dz_commission());
+    qp.diag.sigma_pm = d2(q.sigma_pm());
+    qp.diag.age_ms = q.snapshot_age_ms();
+    qp.diag.anchor_raw = anchor_raw;
+    qp.diag.skew_pm = anchor_raw - anchor;
+    quotes.push_back(std::move(qp));
+  }
+
+  // F-18 #7 scoped (T-F18-L02, ADR-066 §D3): пишем depth (α_e) per (asset,venue) в
+  // ce_asset_liquidity для ликвидностной оси band (reader — ledger LoadAssetDepth).
+  // За флагом CE_LIQ_SIGNAL_ENABLED, троттлится (CE_LIQ_WRITE_MS). Best-effort —
+  // сбой БД логируется в репозитории и НЕ влияет на клиринг.
+  if (cex::common::Env::get_bool("CE_LIQ_SIGNAL_ENABLED", false) &&
+      !postgres_dsn_.empty() && ShouldWriteLiquidity()) {
+    std::vector<infra::PostgresAssetLiquidityRepository::DepthRow> rows;
+    rows.reserve(input.quotes().size());
+    for (const auto& q : input.quotes()) {
+      rows.push_back({q.asset(), q.venue(), d2(q.depth())});  // depth = α_e (тыс.USDT/‰)
+    }
+    infra::PostgresAssetLiquidityRepository(postgres_dsn_).UpsertBatch(rows);  // 1 транзакция
+  }
+
+  // CE_V2_GRAPH (default OFF): выбор сборщика графа. При OFF ветка v1 ниже —
+  // идентичный прежнему коду путь (AssembleCeGraph), регрессия не допускается.
+  const bool ce_v2 = cex::common::Env::get_bool("CE_V2_GRAPH", false);
+  // CE_AGENT_POS (T-F18-201, ADR-061 §1/ADR-063, default OFF): при OFF —
+  // эмиссия ce.position.delta байт-в-байт как раньше (per-node, ProjectPositionQuantity).
+  // При ON — per-agent строки (ProjectAgentDeltas): agent_id/agent_kind + знаковый
+  // "сырой" поток такта Δc_j=f_j вместо количества. Ledger-накопление per-agent —
+  // следующий шаг (T-F18-202); этот флаг только меняет то, что ЭМИТТИРУЕТ matching.
+  const bool ce_agent_pos = cex::common::Env::get_bool("CE_AGENT_POS", false);
+  // CE_AGENT_BAND (Вариант 2, 2026-09-17): при ON эмиссия наружу идёт ТОЛЬКО по
+  // полосе (ledger детектит пробой → risk эмитит в паре), а per-tact §A7-путь
+  // ВЫКЛЮЧАЕТСЯ (иначе двойная эмиссия + c_j не сводится, см. Issue #47).
+  const bool ce_agent_band = cex::common::Env::get_bool("CE_AGENT_BAND", false);
+
+  domain::CeClearInput graph;
+  bool house_pinned = false;  // v2: узел house реально присутствует и зафиксирован в 0
+  if (ce_v2) {
+    domain::CeAssembleConfigV2 cfg2;
+    cfg2.numeraire = numeraire;
+    cfg2.assets = assets;
+    cfg2.venues = venues;
+    cfg2.house_venue = cex::common::Env::get_string("CE_HOUSE_VENUE", "");
+    for (const auto& a : all_assets) {
+      domain::CeTransferLegParamsV2 lp;
+      lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
+      lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
+      cfg2.leg[a] = lp;
+    }
+    // Guard (T-F18-103): AssembleCeGraphV2 сама не проверяет house_venue ∈ venues —
+    // при рассинхроне конфига она молча добавила бы house как лишний узел вне
+    // торгуемых площадок (фантомный num_nodes=V·A+1). Тихо продолжать нельзя —
+    // такт пропускается целиком (ни ce.position.delta, ни execution.intents).
+    if (!domain::IsHouseVenueValid(cfg2.house_venue, cfg2.venues)) {
+      cex::common::log_json(
+          "WARN", "F-05A CE v2: house_venue misconfigured — такт пропущен",
+          {{"batch_id", input.batch_id()},
+           {"house_venue", cfg2.house_venue},
+           {"venues_count", std::to_string(cfg2.venues.size())}});
+      return;
+    }
+    // ADR-071: inv_pos (ключ agent|venue, b=c+in_flight=I−F) + γ_A/K_A — сдвиг якоря
+    // ног арбитражёра (transfer-рёбра A_*). γ_A=0 ⇒ якоря A_* = 0 (старое поведение).
+    graph = domain::AssembleCeGraphV2(cfg2, quotes, inv_pos, arb_gamma, arb_clamp);
+    house_pinned = true;
+  } else {
+    domain::CeAssembleConfig cfg;
+    cfg.numeraire = numeraire;
+    cfg.assets = assets;
+    cfg.venues = venues;
+    cfg.mark = mark;
+    for (const auto& a : all_assets) {
+      domain::CeLegParams lp;
+      lp.transfer_depth = env_d("CE_TRANSFER_ALPHA_" + a, 0.0);
+      lp.transfer_dead_zone = env_d("CE_TRANSFER_C_" + a, 0.0);
+      lp.stock_depth = env_d("CE_STOCK_ALPHA_" + a, 0.0);
+      lp.stock_dead_zone = env_d("CE_STOCK_C_" + a, 0.0);
+      cfg.leg[a] = lp;
+    }
+    graph = domain::AssembleCeGraph(cfg, quotes);
+  }
+
+  const domain::CeClearResult res = domain::ClearCe(graph);
+
+  {  // ADR-079: сохраняем решение для HTTP-диагностики «почему нет потока» (чтение, на клиринг не влияет)
+    auto snap = std::make_shared<CeSnapshotData>();
+    snap->graph = graph;
+    snap->res = res;
+    snap->meta.batch_id = input.batch_id();
+    snap->meta.event_time_ms = input.event_time_ms();
+    snap->meta.solved_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch()).count();
+    snap->meta.numeraire = numeraire;
+    snap->meta.quotes_received = input.quotes_size();
+    for (const auto& dq : input.dropped()) {
+      domain::CeDroppedInfo di;
+      di.asset = dq.asset();
+      di.venue = dq.venue();
+      di.quote = dq.quote();
+      di.reason = dq.reason();
+      di.age_ms = dq.age_ms();
+      di.depth = d2(dq.depth());
+      di.threshold = d2(dq.threshold());
+      snap->meta.dropped.push_back(std::move(di));
+    }
+    std::lock_guard<std::mutex> lk(ce_snap_mu_);
+    ce_snap_ = std::move(snap);
+  }
+
+  // F-18 v2 диагностика (env CE_CLEARING_DEBUG, default OFF): по-рёберная картина
+  // клиринга — почему поток f нулевой/ненулевой. Для КАЖДОГО ребра логируем якорь
+  // σ*, разность потенциалов x[u]−x[v], девиацию d=σ*−(x[u]−x[v]), полку dead_zone,
+  // «зазор» |d|−dead_zone (>0 ⇒ ребро активно) и поток f. Отдельно — сколько рёбер
+  // переводчиков (QUOTE) активно и максимальный |d|/dead_zone. Не меняет поведение;
+  // нужно, чтобы на живых данных отличить «переводчики корректно стоят (девиация <
+  // полки)» от «упускается исполнимая ликвидность». domain не логирует (§10.2) —
+  // поэтому здесь, в app-слое, где доступны graph.edges + res.x/res.f.
+  if (cex::common::Env::get_bool("CE_CLEARING_DEBUG", false)) {
+    int quote_active = 0, quote_total = 0;
+    double max_ratio = 0.0;
+    for (size_t i = 0; i < graph.edges.size(); ++i) {
+      const auto& e = graph.edges[i];
+      const double xu = e.u < static_cast<int>(res.x.size()) ? res.x[e.u] : 0.0;
+      const double xv = e.v < static_cast<int>(res.x.size()) ? res.x[e.v] : 0.0;
+      const double d = e.anchor - (xu - xv);
+      const double gap = std::fabs(d) - e.dead_zone;  // >0 ⇒ активно
+      const double f = i < res.f.size() ? res.f[i] : 0.0;
+      const bool is_quote = (e.leg == domain::CeLeg::kQuote);
+      if (is_quote) {
+        ++quote_total;
+        if (gap > 0.0) ++quote_active;
+        if (e.dead_zone > 1e-12)
+          max_ratio = std::fmax(max_ratio, std::fabs(d) / e.dead_zone);
+      }
+      cex::common::log_json("DEBUG", "CE clearing edge",
+          {{"batch_id", input.batch_id()},
+           {"edge", e.name},
+           {"leg", is_quote ? "QUOTE(translator)" : "TRANSFER(arbitrageur)"},
+           {"anchor_pm", std::to_string(e.anchor)},
+           {"xu_minus_xv_pm", std::to_string(xu - xv)},
+           {"deviation_pm", std::to_string(d)},
+           {"dead_zone_pm", std::to_string(e.dead_zone)},
+           {"gap_pm", std::to_string(gap)},
+           {"flow_f", std::to_string(f)}});
+    }
+    cex::common::log_json("INFO", "CE clearing edge summary",
+        {{"batch_id", input.batch_id()},
+         {"quote_edges", std::to_string(quote_total)},
+         {"quote_active", std::to_string(quote_active)},
+         {"max_dev_over_deadzone", std::to_string(max_ratio)},
+         {"max_imbalance", std::to_string(res.max_imbalance)}});
+  }
+
+  fob::treasury::v1::CePositionDeltaBatch batch;
+  batch.set_batch_id(input.batch_id());
+  batch.set_event_time_ms(input.event_time_ms());
+  int emitted = 0;
+  // T-F18-3xx (Стадия 1 наблюдаемости, ADR-061/063): per-node строки
+  // (agent_id ПУСТОЙ — LEGACY per-asset путь, ce_committed_/house,
+  // GetNodeBalances) эмиттятся ВСЕГДА, независимо от CE_AGENT_POS. Раньше
+  // при ce_agent_pos=1 этот путь полностью заменялся per-agent строками, и
+  // прежние house-позиции переставали обновляться — регрессия. Теперь
+  // house-факт всегда есть; при ON к нему ДОБАВЛЯЮТСЯ per-agent строки ниже.
+  {
+    const std::vector<domain::CeAssetVenueDelta> deltas =
+        domain::ProjectPositionQuantity(graph, res, ref_price);
+    for (const auto& d : deltas) {
+      if (std::fabs(d.delta_qty) < 1e-12) continue;
+      auto* ad = batch.add_deltas();
+      ad->set_asset(d.asset);
+      ad->set_venue(d.venue);
+      *ad->mutable_delta() = to_dec(d.delta_qty);        // АВТОРИТЕТНО: количество
+      *ad->mutable_price_used() = to_dec(d.price_used);
+      *ad->mutable_delta_value() = to_dec(d.delta_value);
+      ++emitted;
+    }
+  }
+  if (ce_agent_pos) {
+    // T-F18-201/3xx: ДОПОЛНИТЕЛЬНО per-agent строки (agent_id НЕПУСТОЙ).
+    // delta = Δc_j = f_j такта (ЗНАКОВАЯ — знак = направление агента);
+    // agent_id/agent_kind несут идентичность агента (переводчик/арбитражёр).
+    // price_used/delta_value (поля 4/5) для этого пути не считаются — они
+    // per-node диагностика v1 (заполнена в блоке выше). Ledger разводит
+    // строки по непустому agent_id (ce_agent_position) — двойного счёта
+    // между per-node (house) и per-agent (ce_agent_position) нет: это разные
+    // книги учёта одного и того же такта клиринга.
+    const std::vector<domain::CeAgentDelta> agent_deltas =
+        domain::ProjectAgentDeltas(graph, res, ref_price);
+    for (const auto& d : agent_deltas) {
+      auto* ad = batch.add_deltas();
+      ad->set_agent_id(d.agent_id);
+      ad->set_agent_kind(d.agent_kind == domain::CeAgentKind::kTranslator
+                              ? fob::treasury::v1::AGENT_KIND_TRANSLATOR
+                              : fob::treasury::v1::AGENT_KIND_ARBITRAGEUR);
+      ad->set_asset(d.asset);
+      ad->set_venue(d.venue);
+      *ad->mutable_delta() = to_dec(d.delta);
+      // Пары X/Y: price_used = ЦЕНА ПАРЫ P(base)/P(quote) (лимит), base_price =
+      // P(base) USDT (объём), quote = котируемая (номинал ⇒ "USDT"). → ledger →
+      // breach-событие → risk строит заявку в паре base/quote.
+      if (d.price_used > 0.0) *ad->mutable_price_used() = to_dec(d.price_used);
+      if (d.base_price > 0.0) *ad->mutable_base_price() = to_dec(d.base_price);
+      if (!d.quote.empty()) ad->set_quote(d.quote);
+      // ADR-072 §A: fair ЦЕНА ПАРЫ F_0 (P_λ, ДО skew) по ключу "base/quote" — только
+      // переводчик. Ledger строит клэмпленный лимит L∈[F_0±m] (сдвиг не за границу
+      // прибыли). Пусто ⇒ ledger фолбэкает на price_used (прежнее поведение).
+      if (d.agent_kind == domain::CeAgentKind::kTranslator) {
+        const std::string fkey = d.asset + "/" + (d.quote.empty() ? numeraire : d.quote);
+        const auto nf = fair_num.find(fkey);
+        const auto df = fair_den.find(fkey);
+        if (nf != fair_num.end() && df != fair_den.end() && df->second > 0.0)
+          *ad->mutable_fair_price() = to_dec(nf->second / df->second);
+      }
+      ++emitted;
+    }
+  }
+  std::map<std::string, std::string> ce_log_fields{
+      {"batch_id", input.batch_id()},
+      {"quotes", std::to_string(input.quotes_size())},
+      {"deltas", std::to_string(emitted)},
+      {"converged", res.converged ? "1" : "0"},
+      {"imbalance", std::to_string(res.max_imbalance)},
+      {"ce_v2_graph", ce_v2 ? "1" : "0"},
+      {"ce_agent_pos", ce_agent_pos ? "1" : "0"}};
+  // Э1 (T-F18-103): house-потенциал уже есть в CeClearResult.x (последний узел
+  // при v2, пин π=0) — наружу пока прокидываем через диагностику лога; полноценная
+  // эмиссия наружу (для признания прибыли) — Э4 (T-F18-402), отдельная таска.
+  if (house_pinned && !res.x.empty())
+    ce_log_fields["house_potential"] = std::to_string(res.x.back());
+  cex::common::log_json("INFO", "F-05A CE ce.position.delta (plan)", ce_log_fields);
+  if (emitted > 0)
+    producer_.produce("ce.position.delta", input.batch_id(), cex::common::to_bytes(batch));
+
+  // §A7: внешние заявки = потоки клиринга (QUOTE-ноги) → execution.intents.
+  // Сторона/объём/цена целиком из клиринга (НЕ отдельный NOP-хедж). intent_id
+  // детерминирован (batch|ce|asset@venue) → идемпотентно у venues/ledger.
+  // §A7 per-tact эмиссия ВЫКЛЮЧЕНА под band-моделью (Вариант 2): наружу выходит
+  // только полоса (ledger→risk), иначе двойная эмиссия и c_j не сводится (Issue #47).
+  if (!ce_agent_band) {
+    const domain::CeOrders orders = domain::ProjectOrders(graph, res, ref_price);
+    int intents_emitted = 0;
+    for (const auto& o : orders.venue_orders) {
+      fob::execution::v1::ExecutionIntent it;
+      it.set_intent_id(input.batch_id() + "|ce|" + o.asset + "@" + o.venue);
+      it.set_batch_id(input.batch_id());
+      it.set_reason("ce_agent_clearing");
+      it.set_source(fob::execution::v1::HEDGE_SOURCE_AUTO_BATCH);
+      it.set_venue(o.venue);
+      auto* inst = it.mutable_instrument();
+      inst->set_symbol(o.asset + "/" + numeraire);
+      inst->set_base(o.asset);
+      inst->set_quote(numeraire);
+      it.set_venue_symbol(o.asset + "/" + numeraire);
+      it.set_side(o.side == "SELL" ? fob::common::v1::SIDE_SELL : fob::common::v1::SIDE_BUY);
+      *it.mutable_target_qty() = to_dec(o.qty);
+      *it.mutable_limit_price() = to_dec(o.price);
+      if (producer_.produce("execution.intents", it.intent_id(), cex::common::to_bytes(it)))
+        ++intents_emitted;
+    }
+    if (intents_emitted > 0)
+      cex::common::log_json("INFO", "F-05A CE execution.intents (заявки из клиринга)",
+                            {{"batch_id", input.batch_id()},
+                             {"venue_orders", std::to_string(intents_emitted)},
+                             {"transfers", std::to_string(orders.transfers.size())}});
+  }
+}
+
 // F-05A (T-F05A-305 1a): решить векторный клиринг для входа и опубликовать
 // диагностику в matching.vector_clearing. НИКАКИХ денег: не эмитит
 // FillEvent/ExecutionGroup и не трогает ledger. Солвер-стек — локальный
@@ -826,7 +1405,10 @@ void MatchingLoop::on_vectorized_liquidity(
     const fob::marketdata::v1::VectorClearingInput& input) {
   try {
     infra::OsqpBackend backend;
-    domain::VectorQpSolver solver(backend, domain::QpParams{}, /*tol=*/1e-9);
+    // ADR-052: academic двусторонний режим за флагом (default off = F1-путь).
+    const bool two_sided = cex::common::Env::get_bool("F05A_TWO_SIDED_ENABLED", false);
+    domain::VectorQpSolver solver(backend, domain::QpParams{}, /*tol=*/1e-9,
+                                  /*scale=*/12, two_sided);
     VectorClearingUseCase uc(solver, domain::SurplusPolicy::kRejectIfResidual, 1e-9);
     const VectorClearingOutcome outcome = uc.Clear(input);
 
@@ -837,6 +1419,34 @@ void MatchingLoop::on_vectorized_liquidity(
                            cex::common::to_bytes(result))) {
       cex::common::log_json("WARN", "Failed to produce matching.vector_clearing",
                             {{"batch_id", batch_id}});
+    }
+
+    // F-18 §11: старый asset-level путь Δpos → ce.position.delta. ОТКЛЮЧЁН при
+    // CE_AGENTS_ENABLED — тогда единственный источник ce.position.delta это
+    // on_ce_clearing_input (вариант A, per-leg по цене узла), иначе двойной счёт.
+    const char* ce_on = std::getenv("CE_AGENTS_ENABLED");
+    const bool ce_agents_mode = ce_on && std::atoi(ce_on) != 0;
+    if (!ce_agents_mode && outcome.solve.status != domain::VectorSolveStatus::kFailed) {
+      const std::map<std::string, double> deltas = ProjectXToDeltas(input, outcome);
+      fob::treasury::v1::CePositionDeltaBatch dpb;
+      dpb.set_batch_id(batch_id);
+      dpb.set_event_time_ms(std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+      for (const auto& [asset, d] : deltas) {
+        if (std::fabs(d) < 1e-12) continue;
+        auto* ad = dpb.add_deltas();
+        ad->set_asset(asset);
+        cex::common::Decimal dec{static_cast<std::int64_t>(std::llround(d * 1e8)), 8};
+        *ad->mutable_delta() = dec.to_proto();
+      }
+      cex::common::log_json("INFO", "F-18 ce.position.delta",
+                            {{"batch_id", batch_id},
+                             {"solver_status", std::to_string(static_cast<int>(outcome.solve.status))},
+                             {"num_deltas", std::to_string(dpb.deltas_size())},
+                             {"segments", std::to_string(input.segments_size())}});
+      if (dpb.deltas_size() > 0) {
+        producer_.produce("ce.position.delta", batch_id, cex::common::to_bytes(dpb));
+      }
     }
     cex::common::log_json(
         "INFO", "F-05A vector clearing",
@@ -854,7 +1464,8 @@ void MatchingLoop::on_vectorized_liquidity(
     // F-05A MONEY-PATH (ADR-049): за флагом F05A_MONEY_ENABLED (default off),
     // ТОЛЬКО converged (kProceedNoSurplus). Эмитим ExecutionIntent (F-12 hedge)
     // против исходных external-уровней — не user-проводки, не ledger напрямую.
-    if (outcome.surplus.action == domain::SurplusAction::kProceedNoSurplus &&
+    if (!ce_agents_mode &&
+        outcome.surplus.action == domain::SurplusAction::kProceedNoSurplus &&
         cex::common::Env::get_bool("F05A_MONEY_ENABLED", false)) {
       auto intents = BuildHedgeIntents(input, outcome);
       if (!intents.empty()) {
@@ -1850,6 +2461,17 @@ std::optional<MatchingLoop::OrderSnapshot> MatchingLoop::snapshot_order(
     return std::nullopt;
   }
   return it->second;
+}
+
+
+std::string MatchingLoop::last_ce_clearing_snapshot_json() const {
+  std::shared_ptr<const CeSnapshotData> snap;
+  {
+    std::lock_guard<std::mutex> lk(ce_snap_mu_);
+    snap = ce_snap_;
+  }
+  if (!snap) return {};
+  return domain::BuildCeClearingSnapshotJson(snap->graph, snap->res, snap->meta);
 }
 
 }  // namespace cex::matching::app

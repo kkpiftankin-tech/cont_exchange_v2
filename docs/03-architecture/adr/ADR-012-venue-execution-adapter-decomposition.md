@@ -89,7 +89,7 @@ related:
 
 - Failure isolation слабая: ошибка в EVC может уронить Adapter.
 - Скейлинг общий: Adapter и EVC скалируются вместе.
-- Нарушение CLAUDE.md §10.3 «venues не принимает бизнес-решения о хеджировании, а исполняет ExecutionIntent» — Adapter принимает бизнес-решения (overfill, reconciliation, retry). Acceptable trade-off для MVP с явной модульной границей.
+- Нарушение [.claude/rules/cpp.md](../../../.claude/rules/cpp.md) «venues не принимает бизнес-решения о хеджировании, а исполняет ExecutionIntent» — Adapter принимает бизнес-решения (overfill, reconciliation, retry). Acceptable trade-off для MVP с явной модульной границей.
 
 ### Обратимость
 

@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F09-02
+title: Grouped matching внутри batch cycle
 level: sea
+feature: F-09
+system-sequence: sequences/SEQ-UC-F09-02-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F09-UC-F09-02-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F09-02. Grouped matching внутри batch cycle
 

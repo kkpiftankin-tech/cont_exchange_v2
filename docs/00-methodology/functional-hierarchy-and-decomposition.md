@@ -430,6 +430,6 @@ L2 Comp Seq ──expands-step─────► L1 service seq #step-N
 - [sequence-diagram-rules.md](sequence-diagram-rules.md) — обновлён с
   level annotations.
 - [artifact-templates.md](artifact-templates.md) — обновлён `level:` field.
-- [CLAUDE.md §0c, §26a](../../CLAUDE.md) — обновлены с level mapping.
+- [.claude/rules/docs-as-code.md](../../.claude/rules/docs-as-code.md) и [.claude/rules/sequences.md](../../.claude/rules/sequences.md) — обновлены с level mapping.
 - [feature-to-uc.md](../traceability/feature-to-uc.md) — новая матрица.
 - [uc-to-sequences.md](../traceability/uc-to-sequences.md) — новая матрица.

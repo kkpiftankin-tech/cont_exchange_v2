@@ -49,8 +49,10 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "cex/common/time.hpp"
+#include "cex/common/uuid.hpp"
 
 namespace cex::venues::infra {
 
@@ -60,6 +62,19 @@ using json = nlohmann::json;
 
 std::string BoolText(const bool value) {
   return value ? "true" : "false";
+}
+
+// ADR-060: канонический ключ символа для ленты сделок — без разделителей (/ - _ пробел),
+// верхний регистр. Гарантирует совпадение ключа хранения (parse_rest_trades) и матчинга
+// (ApplyRealTradeFillLocked) независимо от формата символа венью (BTC/USDT, BTC-USDT, ...).
+std::string canon_trade_key(std::string s) {
+  s.erase(std::remove_if(s.begin(), s.end(), [](const unsigned char c) {
+            return c == '/' || c == '-' || c == '_' || std::isspace(c) != 0;
+          }),
+          s.end());
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](const unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return s;
 }
 
 std::string DecimalText(const cex::common::Decimal& value) {
@@ -317,6 +332,57 @@ std::string coinbase_side_text(const fob::common::v1::Side side) {
   return "buy";
 }
 
+// --- Kraken / OKX профили и форматирование символов -------------------------
+bool venue_matches(const std::string& venue_id, const std::string& rest_base_url,
+                   const std::string& ws_url, const char* needle) {
+  auto lower = [](std::string v) {
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return v;
+  };
+  return lower(venue_id).find(needle) != std::string::npos ||
+         lower(rest_base_url).find(needle) != std::string::npos ||
+         lower(ws_url).find(needle) != std::string::npos;
+}
+bool is_kraken_profile(const std::string& v, const std::string& r, const std::string& w) {
+  return venue_matches(v, r, w, "kraken");
+}
+bool is_okx_profile(const std::string& v, const std::string& r, const std::string& w) {
+  return venue_matches(v, r, w, "okx");
+}
+
+// "BTCUSDT"/"BTC/USDT" → {base, quote} по известным котировкам.
+std::pair<std::string, std::string> split_base_quote(std::string symbol) {
+  symbol.erase(std::remove(symbol.begin(), symbol.end(), '/'), symbol.end());
+  symbol.erase(std::remove_if(symbol.begin(), symbol.end(),
+                              [](unsigned char c) { return std::isspace(c) != 0; }),
+               symbol.end());
+  static constexpr std::array<const char*, 8> kQuotes = {
+      "USDT", "USDC", "BUSD", "DAI", "USD", "BTC", "ETH", "EUR"};
+  for (const auto* q : kQuotes) {
+    const std::string qs = q;
+    if (symbol.size() > qs.size() &&
+        symbol.compare(symbol.size() - qs.size(), qs.size(), qs) == 0) {
+      return {symbol.substr(0, symbol.size() - qs.size()), qs};
+    }
+  }
+  return {symbol, std::string()};
+}
+
+// Kraken: BTC→XBT, слитно (XBTUSDT). OKX: BASE-QUOTE (BTC-USDT).
+std::string kraken_pair_from_symbol(const std::string& symbol) {
+  auto bq = split_base_quote(symbol);
+  if (bq.second.empty()) return symbol;
+  if (bq.first == "BTC") bq.first = "XBT";
+  if (bq.second == "BTC") bq.second = "XBT";
+  return bq.first + bq.second;
+}
+std::string okx_inst_from_symbol(const std::string& symbol) {
+  auto bq = split_base_quote(symbol);
+  if (bq.second.empty()) return symbol;
+  return bq.first + "-" + bq.second;
+}
+
 fob::execution::v1::ExecutionReportStatus ParseOrderStatus(const std::string& status) {
   std::string normalized = status;
   std::transform(normalized.begin(), normalized.end(), normalized.begin(),
@@ -339,6 +405,10 @@ fob::execution::v1::ExecutionReportStatus ParseOrderStatus(const std::string& st
 
 }  // namespace
 
+CurlCexRestClient::~CurlCexRestClient() {
+  for (void* handle : idle_handles_) curl_easy_cleanup(static_cast<CURL*>(handle));
+}
+
 bool CurlCexRestClient::Get(const std::string& url,
                             const std::vector<std::string>& headers,
                             const uint32_t timeout_ms,
@@ -348,7 +418,23 @@ bool CurlCexRestClient::Get(const std::string& url,
   response_body->clear();
   *http_code = 0;
 
-  CURL* curl = curl_easy_init();
+  // Этап 1 (EXP-2026-10-15-exchange-requests): при reuse_connections handle берётся из пула
+  // целиком (одновременно им пользуется один вызов) и возвращается после успешного запроса —
+  // живое соединение (keep-alive) и DNS-кэш переживают curl_easy_reset. Выключено ⇒ как прежде:
+  // новый handle на каждый запрос.
+  CURL* curl = nullptr;
+  if (options_.reuse_connections) {
+    std::lock_guard<std::mutex> lock(pool_mu_);
+    if (!idle_handles_.empty()) {
+      curl = static_cast<CURL*>(idle_handles_.back());
+      idle_handles_.pop_back();
+    }
+  }
+  if (curl == nullptr) {
+    curl = curl_easy_init();
+  } else {
+    curl_easy_reset(curl);  // сбрасывает опции, но не живые соединения и не DNS-кэш
+  }
   if (curl == nullptr) return false;
 
   struct curl_slist* header_list = nullptr;
@@ -358,12 +444,28 @@ bool CurlCexRestClient::Get(const std::string& url,
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+  // Coinbase Exchange отвечает 400 «User-Agent header is required», когда заголовка нет, а libcurl
+  // как библиотека его не ставит (в отличие от консольного curl). Раньше это давало ≈60 % снимков
+  // Coinbase и открытый предохранитель; всем биржам заголовок безвреден. Только GET: Post не менялся.
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "cont-exchange-venues/1.0");
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_body);
   if (header_list != nullptr) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+  }
+  if (options_.ipv4_only) {
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, static_cast<long>(CURL_IPRESOLVE_V4));
+  }
+  if (options_.connect_timeout_ms > 0) {
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(options_.connect_timeout_ms));
+  }
+  if (options_.reuse_connections) {
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
   }
 
   const CURLcode rc = curl_easy_perform(curl);
@@ -372,7 +474,17 @@ bool CurlCexRestClient::Get(const std::string& url,
   if (header_list != nullptr) {
     curl_slist_free_all(header_list);
   }
-  curl_easy_cleanup(curl);
+  // Успешный запрос — handle (с живым соединением) обратно в пул; ошибка — соединение могло
+  // оборваться, handle выбрасываем.
+  if (options_.reuse_connections && rc == CURLE_OK) {
+    constexpr std::size_t kMaxIdleHandles = 8;
+    std::lock_guard<std::mutex> lock(pool_mu_);
+    if (idle_handles_.size() < kMaxIdleHandles) {
+      idle_handles_.push_back(curl);
+      curl = nullptr;
+    }
+  }
+  if (curl != nullptr) curl_easy_cleanup(curl);
   return rc == CURLE_OK;
 }
 
@@ -447,9 +559,16 @@ CexWsRestAdapter::CexWsRestAdapter(
       rest_client_(std::move(rest_client)),
       ws_session_(std::move(ws_session)),
       now_fn_(std::move(now_fn)) {
+  if (rest_client_ == nullptr) {
+    rest_client_ = std::make_unique<CurlCexRestClient>(RestClientOptions());
+  }
   rest_bucket_.capacity = std::max(1.0, cfg_.rest_burst);
   rest_bucket_.tokens = rest_bucket_.capacity;
   rest_bucket_.refill_per_sec = std::max(0.1, cfg_.rest_requests_per_sec);
+
+  depth_bucket_.capacity = std::max(1.0, cfg_.depth_only_burst);
+  depth_bucket_.tokens = depth_bucket_.capacity;
+  depth_bucket_.refill_per_sec = std::max(0.1, cfg_.depth_only_requests_per_sec);
 
   ws_bucket_.capacity = std::max(1.0, cfg_.ws_burst);
   ws_bucket_.tokens = ws_bucket_.capacity;
@@ -837,37 +956,40 @@ domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
   domain::VenueConnectionStatus status = domain::VenueConnectionStatus::kDisconnected;
   uint32_t latency_ms = 0;
   uint32_t stale_ms = 0;
+
+  // WS pong-timeout роняет WS-флаг, но НЕ фиксирует статус: реальный статус
+  // определяем ниже по свежести стаканов.
   if (connected_) {
     const auto since_pong = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - last_pong_at_).count();
-
     if (since_pong > static_cast<int64_t>(cfg_.heartbeat_pong_timeout_ms)) {
       connected_ = false;
       record_external_error_locked(now, "heartbeat_pong_timeout");
-      status = domain::VenueConnectionStatus::kDisconnected;
-    } else {
-      bool stale = true;
-      int64_t freshest_age_ms = std::numeric_limits<int64_t>::max();
-      for (const auto& [symbol, state] : books_) {
-        (void)symbol;
-        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - state.last_market_event).count();
-        freshest_age_ms = std::min(freshest_age_ms, age_ms);
-        if (age_ms <= static_cast<int64_t>(cfg_.stale_threshold_ms)) {
-          stale = false;
-          break;
-        }
-      }
-      if (freshest_age_ms != std::numeric_limits<int64_t>::max()) {
-        latency_ms = static_cast<uint32_t>(std::max<int64_t>(0, freshest_age_ms));
-        stale_ms = latency_ms;
-      }
-      status = stale ? domain::VenueConnectionStatus::kStale
-                     : domain::VenueConnectionStatus::kConnected;
-      if (books_.empty()) {
-        status = domain::VenueConnectionStatus::kConnected;
-      }
     }
+  }
+
+  // Статус по свежести данных, а не только по WS. books_ наполняются и
+  // WS market-событиями, и REST-снапшотами (parse_rest_snapshot_locked
+  // выставляет last_market_event). Это чинит REST-polling венью без WS
+  // (coinbase/kraken/okx): пока REST-стаканы свежие — venue connected, а не
+  // disconnected. WS-only режим сохраняет прежнее поведение (свежий WS-фид).
+  int64_t freshest_age_ms = std::numeric_limits<int64_t>::max();
+  for (const auto& [symbol, state] : books_) {
+    (void)symbol;
+    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - state.last_market_event).count();
+    freshest_age_ms = std::min(freshest_age_ms, age_ms);
+  }
+  const bool have_book = freshest_age_ms != std::numeric_limits<int64_t>::max();
+  if (have_book) {
+    latency_ms = static_cast<uint32_t>(std::max<int64_t>(0, freshest_age_ms));
+    stale_ms = latency_ms;
+    status = (freshest_age_ms <= static_cast<int64_t>(cfg_.stale_threshold_ms))
+                 ? domain::VenueConnectionStatus::kConnected
+                 : domain::VenueConnectionStatus::kStale;
+  } else if (connected_) {
+    // WS поднят, но событий/снапшотов ещё не было — считаем connected.
+    status = domain::VenueConnectionStatus::kConnected;
   }
 
   uint64_t max_sequence = 0;
@@ -902,66 +1024,194 @@ domain::VenueHeartbeat CexWsRestAdapter::Heartbeat() {
 /// Запрашивает полный snapshot order book через REST. Используется на
 /// initial connect и при skew detection. nullopt при failure (circuit
 /// breaker может блокировать вызов).
+CexWsRestAdapter::FetchOutcome CexWsRestAdapter::FetchSnapshot(
+    const domain::VenueSnapshotRequest& request) {
+  FetchOutcome outcome;
+  outcome.fresh = RequestSnapshotImpl(request, &outcome);
+  // Пустая книга — не данные: планировщик получает её как негодную, а не как свежую.
+  if (outcome.fresh.has_value() && outcome.fresh->status != domain::VenueConnectionStatus::kConnected) {
+    outcome.fresh.reset();
+    outcome.cls = domain::FetchClass::kBadData;
+  }
+  return outcome;
+}
+
 std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
     const domain::VenueSnapshotRequest& request) {
-  const SteadyClock::time_point now = now_fn_();
+  return RequestSnapshotImpl(request, nullptr);
+}
+
+std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshotImpl(
+    const domain::VenueSnapshotRequest& request, FetchOutcome* outcome) {
+  // outcome != nullptr — режим планировщика (ADR-078): политику сбоев и бюджет запросов ведёт он.
+  const bool managed = outcome != nullptr;
+  SteadyClock::time_point now = now_fn_();
   domain::VenueSnapshotRequest normalized = normalize_request(request);
   std::string body;
   long http_code = 0;
 
-  {
+  if (!managed) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!circuit_allows_external_call_locked(now, "snapshot")) {
       return snapshot_from_state_locked(
           normalized, domain::VenueConnectionStatus::kDisconnected);
     }
-    if (!consume_rest_token_locked(now)) {
+    // Без ожидания (деф) — прежний путь: токен берётся здесь же, под тем же локом.
+    if (cfg_.rest_token_wait_ms == 0 && !consume_rest_token_locked(now)) {
       ++consecutive_errors_;
       cex::common::log_json("WARN", "CEX snapshot request rate-limited",
                             {{"venue", cfg_.venue_id}});
       return std::nullopt;
     }
   }
+  if (!managed && cfg_.rest_token_wait_ms > 0 && !acquire_rest_token(&now)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++consecutive_errors_;
+    cex::common::log_json("WARN", "CEX snapshot request rate-limited",
+                          {{"venue", cfg_.venue_id}});
+    return std::nullopt;
+  }
 
+  // Этап 0: время каждого REST-запроса снимка (реальные часы, не now_fn_).
+  using StageClock = std::chrono::steady_clock;
+  const auto ms_since = [](const StageClock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(StageClock::now() - t0).count();
+  };
+  domain::VenueFetchTimings timings;
+  // В режиме планировщика запросы снимка идут с коротким дедлайном (повторы укладываются в тик).
+  const uint32_t snapshot_timeout_ms =
+      (managed && cfg_.rest_snapshot_timeout_ms > 0) ? cfg_.rest_snapshot_timeout_ms : cfg_.rest_timeout_ms;
+  auto t_stage = StageClock::now();
   const bool ok = rest_client_->Get(
       rest_depth_url(normalized),
       auth_headers(),
-      cfg_.rest_timeout_ms,
+      snapshot_timeout_ms,
       &body,
       &http_code);
+  timings.rest_depth_ms = ms_since(t_stage);
+  timings.rest_requests = 1;
 
   if (ok && http_code >= 200 && http_code < 300) {
     std::string ticker_body;
     long ticker_http_code = 0;
     bool ticker_ok = false;
+    bool ticker_attempted = false;  // этап 1: попытка (даже неудачная) отсчитывает троттлинг
     if (cfg_.rest_ticker_volume_enabled) {
       bool can_fetch_ticker = false;
+      bool ticker_due = true;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        can_fetch_ticker = consume_rest_token_locked(now);
+        // Этап 1: суточный объём меняется медленно — не чаще раза в rest_ticker_refresh_ms на пару.
+        if (cfg_.rest_ticker_refresh_ms > 0) {
+          const auto st = books_.find(symbol_key_from_request(normalized));
+          if (st != books_.end() && st->second.ticker_fetched &&
+              now - st->second.last_ticker_fetch <
+                  std::chrono::milliseconds(cfg_.rest_ticker_refresh_ms)) {
+            ticker_due = false;
+          }
+        }
+        if (ticker_due && managed) {
+          can_fetch_ticker = true;  // бюджет ведёт планировщик (затраты видны в rest_requests)
+        } else if (ticker_due && cfg_.rest_token_wait_ms == 0) {
+          can_fetch_ticker = consume_rest_token_locked(now);
+        }
       }
+      if (ticker_due && !managed && cfg_.rest_token_wait_ms > 0) can_fetch_ticker = acquire_rest_token(&now);
+      timings.ticker_state = !ticker_due ? 1 : (can_fetch_ticker ? 0 : 2);
+      ticker_attempted = can_fetch_ticker;
       if (can_fetch_ticker) {
+        t_stage = StageClock::now();
         ticker_ok = rest_client_->Get(
             rest_ticker_url(normalized),
             auth_headers(),
-            cfg_.rest_timeout_ms,
+            snapshot_timeout_ms,
             &ticker_body,
             &ticker_http_code);
+        timings.rest_ticker_ms = ms_since(t_stage);
+        ++timings.rest_requests;
       }
     }
 
-    std::lock_guard<std::mutex> lock(mu_);
+    // ADR-060: реальная лента исполненных публичных сделок (REST recent-trades) —
+    // для реалистичной симуляции исполнения. Тот же рабочий REST-канал, что и стакан.
+    std::string trades_body;
+    long trades_http_code = 0;
+    bool trades_ok = false;
+    int64_t trades_req_ms = 0, trades_resp_ms = 0;  // wall-clock времена запроса/ответа ленты (UI)
+    const auto wall_ms = [] {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    if (cfg_.sim_match_real_trades && normalized.include_trades) {
+      bool can_fetch_trades = false;
+      if (managed) {
+        can_fetch_trades = true;  // бюджет ведёт планировщик
+      } else if (cfg_.rest_token_wait_ms == 0) {
+        std::lock_guard<std::mutex> lock(mu_);
+        can_fetch_trades = consume_rest_token_locked(now);
+      } else {
+        can_fetch_trades = acquire_rest_token(&now);
+      }
+      if (can_fetch_trades) {
+        trades_req_ms = wall_ms();
+        t_stage = StageClock::now();
+        trades_ok = rest_client_->Get(rest_trades_url(normalized), auth_headers(),
+                                      snapshot_timeout_ms, &trades_body, &trades_http_code);
+        timings.rest_trades_ms = ms_since(t_stage);
+        ++timings.rest_requests;
+        trades_resp_ms = wall_ms();
+      }
+    }
+    if (managed) {
+      const auto limited = [](const long code) { return code == 429 || code == 418; };
+      outcome->side_rate_limited = limited(ticker_http_code) || limited(trades_http_code);
+    }
+
+    // unique_lock (не lock_guard): follow-up отчёты resting-заявок публикуются
+    // ВНЕ mu_ — освобождаем лок перед блокирующим Kafka/PG (code-review T-F18-803).
+    std::unique_lock<std::mutex> lock(mu_);
+    std::vector<FollowUpReport> followups;
     auto parsed = parse_rest_snapshot_locked(body, normalized, now);
     if (parsed.has_value()) {
+      parsed->fetch_timings = timings;
+      if (ticker_attempted) {
+        // У OKX/Kraken без окна ADR-077 тикер по пути Binance отвечает 404 — без отметки о
+        // попытке троттлинг не сработал бы и запрос шёл бы на каждом снимке.
+        if (auto st = books_.find(parsed->venue_symbol); st != books_.end()) {
+          st->second.last_ticker_fetch = now;
+          st->second.ticker_fetched = true;
+        }
+      }
       if (ticker_ok && ticker_http_code >= 200 && ticker_http_code < 300) {
         (void)apply_rest_ticker_volume_locked(ticker_body, normalized, now);
         if (auto state_it = books_.find(parsed->venue_symbol);
             state_it != books_.end()) {
           parsed->volume_24h = state_it->second.volume_24h;
+          parsed->window_volume_24h = state_it->second.window_volume_24h;  // ADR-077
         }
       }
+      if (trades_ok && trades_http_code >= 200 && trades_http_code < 300) {
+        parse_rest_trades_locked(trades_body, parsed->venue_symbol, now);
+        // Wall-clock времена REST-чтения ленты для UI-разбора (запрос/ответ/задержка).
+        if (auto ts_it = books_.find(canon_trade_key(parsed->venue_symbol));
+            ts_it != books_.end()) {
+          ts_it->second.last_trades_request_ms = trades_req_ms;
+          ts_it->second.last_trades_response_ms = trades_resp_ms;
+        }
+      }
+      // F-18 #5/ADR-067 (T-F18-803): доматчиваем резидентные (GTC) мейкер-лимиты
+      // band-хеджа этого символа против НОВЫХ сделок ленты, только что обновлённой
+      // parse_rest_trades_locked выше. Вызываем безусловно (не только при
+      // trades_ok), чтобы дедлайн-эскалация (EXPIRED) сработала и без новых сделок.
+      progress_resting_orders_locked(parsed->venue_symbol, now, &followups);
       last_pong_at_ = now;
-      record_external_success_locked();
+      if (managed) {
+        consecutive_errors_ = 0;  // предохранитель адаптера не используется
+        outcome->cls = domain::FetchClass::kOk;
+        outcome->http_code = http_code;
+      } else {
+        record_external_success_locked();
+      }
       cex::common::log_json("INFO", "Fetched raw CEX snapshot",
                             {{"service", "venues"},
                              {"component", "external_venues_connector"},
@@ -985,9 +1235,22 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
                              {"ticker_http_code", std::to_string(ticker_http_code)},
                              {"source_file",
                               "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+      // Публикуем follow-up отчёты resting-заявок ВНЕ mu_ (блокирующий Kafka/PG).
+      lock.unlock();
+      if (report_sink_ != nullptr) {
+        for (auto& f : followups) {
+          report_sink_->PublishFollowUpReport(f.first, f.second);
+        }
+      }
       return parsed;
     }
-    record_external_error_locked(now, "snapshot_parse_failed");
+    if (managed) {
+      ++consecutive_errors_;
+      outcome->cls = domain::FetchClass::kBadData;
+      outcome->http_code = http_code;
+    } else {
+      record_external_error_locked(now, "snapshot_parse_failed");
+    }
     cex::common::log_json("WARN", "CEX snapshot parse failed",
                           {{"venue", cfg_.venue_id},
                            {"http_code", std::to_string(http_code)}});
@@ -997,6 +1260,25 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
                            {"http_code", std::to_string(http_code)}});
   }
 
+  if (managed) {
+    // Класс отказа для лестницы сбоев: нет ответа / 5xx — сеть или биржа; 429 и 418 — лимит; прочие 4xx — запрос.
+    if (outcome->cls != domain::FetchClass::kBadData) {
+      outcome->http_code = http_code;
+      if (!ok) {
+        outcome->cls = domain::FetchClass::kTransient;
+      } else if (http_code == 429 || http_code == 418) {
+        outcome->cls = domain::FetchClass::kRateLimited;
+      } else if (http_code >= 500) {
+        outcome->cls = domain::FetchClass::kTransient;
+      } else {
+        outcome->cls = domain::FetchClass::kClientError;
+      }
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    ++consecutive_errors_;
+    return std::nullopt;  // книгу из кэша не подменяем: последнюю хорошую держит планировщик
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     record_external_error_locked(now, "snapshot_request_failed");
@@ -1004,10 +1286,143 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestSnapshot(
         normalized,
         connected_ ? domain::VenueConnectionStatus::kStale
                    : domain::VenueConnectionStatus::kDisconnected);
-    if (from_cache.has_value()) return from_cache;
+    if (from_cache.has_value()) {
+      from_cache->fetch_timings = timings;  // этап 0: видно, сколько ждали отказавший запрос
+      return from_cache;
+    }
   }
 
   return std::nullopt;
+}
+
+namespace {
+// Извлечение bids/asks из тела REST depth: Binance/Coinbase — top-level; Kraken —
+// result.{pair}; OKX — data[0]. Формат уровня [price, qty, ...] у всех совместим с
+// ParseLevelArray. Чистая функция, без состояния адаптера.
+void ExtractRestBookLevels(const json& root, const bool kraken, const bool okx,
+                           json* bids_json, json* asks_json) {
+  if (kraken) {
+    const json result = root.value("result", json::object());
+    if (result.is_object() && !result.empty() && result.begin().value().is_object()) {
+      const json& pair = result.begin().value();  // первый (единственный) ключ пары
+      *bids_json = pair.value("bids", json::array());
+      *asks_json = pair.value("asks", json::array());
+    }
+  } else if (okx) {
+    const json data = root.value("data", json::array());
+    if (data.is_array() && !data.empty() && data[0].is_object()) {
+      *bids_json = data[0].value("bids", json::array());
+      *asks_json = data[0].value("asks", json::array());
+    }
+  } else {
+    *bids_json = root.value("bids", json::array());
+    *asks_json = root.value("asks", json::array());
+  }
+}
+
+// ADR-077: суточный объём (base) из тикера OKX/Kraken для окна глубины. Kraken: result.{pair}.v[1]
+// (объём за 24 ч, v[0] — за сегодня); OKX: data[0].vol24h (spot: base). Нет данных ⇒ "0".
+std::string ExtractWindowVolumeText(const json& root, const bool kraken, const bool okx) {
+  if (!root.is_object()) return "0";
+  if (kraken) {
+    const json result = root.value("result", json::object());
+    if (result.is_object() && !result.empty() && result.begin().value().is_object()) {
+      const json v = result.begin().value().value("v", json::array());
+      if (v.is_array() && v.size() >= 2) return JsonToString(v[1]);
+    }
+  } else if (okx) {
+    const json data = root.value("data", json::array());
+    if (data.is_array() && !data.empty() && data[0].is_object()) {
+      return JsonToString(data[0].value("vol24h", json("0")));
+    }
+  }
+  return "0";
+}
+}  // namespace
+
+// ADR-070: один REST-вызов глубины (до `levels` уровней) без записи в состояние
+// адаптера (books_/LOB), без тикера и ленты сделок. Тот же circuit breaker и
+// REST-лимитер, что у RequestSnapshot. nullopt — отказ/ошибка (кэш не отдаём).
+std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::RequestDepthOnly(
+    const domain::VenueSnapshotRequest& request, const std::size_t levels) {
+  const SteadyClock::time_point now = now_fn_();
+  domain::VenueSnapshotRequest normalized = normalize_request(request);
+  normalized.depth_levels = std::max<std::size_t>(1, levels);
+  {
+    // Изоляция от основного пути (ревью ADR-070): свой token bucket и БЕЗ записи в
+    // circuit breaker. Здесь только читаем состояние: если breaker открыт — молчим
+    // (без перехода в half-open), иначе тратим токен собственного бюджета.
+    std::lock_guard<std::mutex> lock(mu_);
+    if (cfg_.circuit_breaker_enabled && circuit_state_ == CircuitBreakerState::kOpen) {
+      return std::nullopt;
+    }
+    if (!consume_token(&depth_bucket_, 1.0, now)) return std::nullopt;
+  }
+
+  std::string body;
+  long http_code = 0;
+  ICexRestClient* client = depth_rest_client_ ? depth_rest_client_.get() : rest_client_.get();
+  const bool ok = client->Get(rest_depth_url(normalized), auth_headers(),
+                              cfg_.rest_timeout_ms, &body, &http_code);
+  if (!ok || http_code < 200 || http_code >= 300) {
+    // 1 раз в секунду на пару × N бирж — логируем первый отказ и каждый 30-й.
+    if (depth_only_failures_.fetch_add(1, std::memory_order_relaxed) % 30 == 0) {
+      cex::common::log_json("WARN", "CEX depth-only REST request failed",
+                            {{"venue", cfg_.venue_id}, {"http_code", std::to_string(http_code)}});
+    }
+    return std::nullopt;
+  }
+
+  const json root = json::parse(body, nullptr, false);
+  json bids_json = json::array();
+  json asks_json = json::array();
+  // value() бросает type_error на не-объекте — проверяем форму до разбора.
+  if (!root.is_discarded() && root.is_object()) {
+    ExtractRestBookLevels(
+        root, is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url),
+        is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url), &bids_json,
+        &asks_json);
+  }
+  std::vector<domain::VenueBookLevel> bids;
+  std::vector<domain::VenueBookLevel> asks;
+  if (bids_json.is_array() && asks_json.is_array()) {
+    ParseLevelArray(bids_json, cfg_.market_price_scale, cfg_.market_qty_scale, &bids, true);
+    ParseLevelArray(asks_json, cfg_.market_price_scale, cfg_.market_qty_scale, &asks, false);
+  }
+  if (bids.empty() || asks.empty()) {
+    if (depth_only_failures_.fetch_add(1, std::memory_order_relaxed) % 30 == 0) {
+      cex::common::log_json("WARN", "CEX depth-only parse produced empty book",
+                            {{"venue", cfg_.venue_id}});
+    }
+    return std::nullopt;
+  }
+  // Coinbase level=2 отдаёт книгу целиком (без параметра глубины) — обрезаем до `levels`.
+  if (bids.size() > normalized.depth_levels) bids.resize(normalized.depth_levels);
+  if (asks.size() > normalized.depth_levels) asks.resize(normalized.depth_levels);
+
+  domain::VenueRawSnapshot snapshot;
+  snapshot.venue_id = cfg_.venue_id;
+  snapshot.venue_type = domain::VenueType::kCex;
+  snapshot.instrument = normalize_instrument(normalized.instrument);
+  snapshot.venue_symbol = symbol_key_from_request(normalized);
+  snapshot.timestamp = cex::common::now_ts();
+  snapshot.sequence = is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)
+                          ? root.value("sequence", 0ULL)
+                          : root.value("lastUpdateId", 0ULL);
+  snapshot.status = domain::VenueConnectionStatus::kConnected;
+  snapshot.fees.maker = cfg_.maker_fee;
+  snapshot.fees.taker = cfg_.taker_fee;
+  snapshot.trading_rules.tick_size = cfg_.tick_size;
+  snapshot.trading_rules.lot_size = cfg_.lot_size;
+  snapshot.volume_24h = cex::common::Decimal{0, cfg_.market_qty_scale};
+  snapshot.bids = std::move(bids);
+  snapshot.asks = std::move(asks);
+  snapshot.best_bid = snapshot.bids.front().price;
+  snapshot.best_ask = snapshot.asks.front().price;
+  snapshot.mid_price = cex::common::Decimal{
+      (snapshot.best_bid.units + snapshot.best_ask.units) / 2, snapshot.best_bid.scale};
+  snapshot.spread = cex::common::Decimal::sub(snapshot.best_ask, snapshot.best_bid);
+  return snapshot;
 }
 
 domain::VenueOrderResult CexWsRestAdapter::SendOrder(
@@ -1026,6 +1441,11 @@ domain::VenueOrderResult CexWsRestAdapter::SendOrder(
     }
     if (cfg_.simulate_orders) {
       out = MakeSimulatedOrderResult(cfg_, intent);
+      // Реалистичное исполнение: перезаписываем наивный филл (по limit_price)
+      // матчингом против ленты реальных публичных сделок символа.
+      if (cfg_.sim_match_real_trades) {
+        ApplyRealTradeFillLocked(intent, &out, now);
+      }
       record_external_success_locked();
       cex::common::log_json("INFO", "Sent CEX venue order command",
                             {{"service", "venues"},
@@ -1233,6 +1653,79 @@ bool CexWsRestAdapter::ApplyRuntimeConfig(
   return true;
 }
 
+// F-11/F-20 (IN-0xx fair trades scheduling): возраст последнего успешного
+// REST-чтения ленты трейдов символа — для справедливого распределения
+// общего per-venue rest_bucket_ между символами (poll_adapter в
+// venues_loop.cpp). Ключ совпадает с тем, что пишет parse_rest_trades_locked
+// (canon_trade_key), а не с "сырым" книжным ключом books_[snapshot.venue_symbol] —
+// они могут расходиться для venue с разделителями в символе (BTC-USDT и т.п.).
+int64_t CexWsRestAdapter::TradesReadAgeMs(const std::string& venue_symbol) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto it = books_.find(canon_trade_key(venue_symbol));
+  if (it == books_.end() || it->second.last_trades_read.time_since_epoch().count() == 0) {
+    return -1;  // ещё не читали — планировщик трактует как максимальный приоритет
+  }
+  const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now_fn_() - it->second.last_trades_read);
+  return std::max<int64_t>(0, age.count());
+}
+
+// ADR-082 (шаг 1): затравка после перезапуска. Сохранённые значения старше часа для ν не берём (рынок успел смениться); f и число
+// заявок приводим к текущему моменту забыванием за время простоя. Трогаем только нетронутые оценки: если чтения ленты или заявки уже
+// были, свежие данные важнее сохранённых.
+void CexWsRestAdapter::apply_liquidity_seed_locked(SymbolBookState& state, const domain::VenueLiquidityStat& seed,
+                                                   const SteadyClock::time_point now) {
+  const double tape_seed_max_age_s = static_cast<double>(cex::common::Env::get_int("CE_TAPE_SEED_MAX_AGE_S", 3600));
+  const double age_s = std::max(0.0, seed.age_s);
+  if (!state.tape.initialized && state.tape.reads == 0 && seed.tape_samples > 0 && age_s <= tape_seed_max_age_s) {
+    state.tape.Seed(seed.tape_quote_per_s, seed.tape_samples);
+  }
+  if (state.fill.orders == 0 && state.fill.den <= 0.0 && seed.fill_orders > 0 && seed.fill_weight > 0.0) {
+    const double tau = static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800));
+    const double d = tau > 0.0 ? std::exp(-age_s / tau) : 1.0;
+    const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+    const double den = seed.fill_weight * d;
+    state.fill.Seed(seed.fill_coef * den, den, seed.fill_orders_eff * d, seed.fill_orders, now_s);
+  }
+}
+
+void CexWsRestAdapter::SeedLiquidityStats(const std::vector<domain::VenueLiquidityStat>& seeds) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const SteadyClock::time_point now = now_fn_();
+  for (const auto& seed : seeds) {
+    const std::string key = canon_trade_key(seed.symbol);
+    const auto it = books_.find(key);
+    if (it != books_.end()) {
+      apply_liquidity_seed_locked(it->second, seed, now);
+    } else {
+      liq_seeds_[key] = seed;
+    }
+  }
+}
+
+// ADR-082 (шаг 0): снимок измерений ликвидности по парам. Пары без единого измерения (ни чтения ленты, ни заявок) пропускаем.
+std::vector<domain::VenueLiquidityStat> CexWsRestAdapter::LiquidityStats() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const double now_s = std::chrono::duration<double>(now_fn_().time_since_epoch()).count();
+  const double fill_tau_s = static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800));
+  std::vector<domain::VenueLiquidityStat> out;
+  out.reserve(books_.size());
+  for (const auto& [symbol, st] : books_) {
+    if (st.tape.samples == 0 && st.fill.orders == 0) continue;
+    domain::VenueLiquidityStat row;
+    row.symbol = symbol;
+    row.tape_quote_per_s = st.tape.rate_per_s;
+    row.tape_samples = st.tape.samples;
+    row.tape_reads = st.tape.reads;
+    row.fill_coef = st.fill.Value();
+    row.fill_weight = st.fill.WeightAt(now_s, fill_tau_s);
+    row.fill_orders = st.fill.orders;
+    row.fill_orders_eff = st.fill.OrdersEff(now_s, fill_tau_s);
+    out.push_back(std::move(row));
+  }
+  return out;
+}
+
 bool CexWsRestAdapter::OnWsTextMessage(const std::string& payload) {
   const SteadyClock::time_point now = now_fn_();
   std::lock_guard<std::mutex> lock(mu_);
@@ -1266,6 +1759,23 @@ void CexWsRestAdapter::OnWsPong() {
 
 bool CexWsRestAdapter::consume_rest_token_locked(const SteadyClock::time_point now) {
   return consume_token(&rest_bucket_, 1.0, now);
+}
+
+bool CexWsRestAdapter::acquire_rest_token(SteadyClock::time_point* now) {
+  double wait_ms = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (consume_rest_token_locked(*now)) return true;
+    if (cfg_.rest_token_wait_ms == 0) return false;
+    // consume_token только что дозаполнил ведро до *now: считаем время до накопления одного токена.
+    const double deficit = 1.0 - rest_bucket_.tokens;
+    wait_ms = deficit / std::max(0.1, rest_bucket_.refill_per_sec) * 1000.0 + 1.0;
+    if (wait_ms > static_cast<double>(cfg_.rest_token_wait_ms)) return false;  // дольше допустимого
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>(wait_ms * 1000.0)));
+  *now = now_fn_();
+  std::lock_guard<std::mutex> lock(mu_);
+  return consume_rest_token_locked(*now);
 }
 
 bool CexWsRestAdapter::consume_ws_token_locked(const SteadyClock::time_point now) {
@@ -1456,6 +1966,8 @@ void CexWsRestAdapter::sync_state_from_lob_locked(SymbolBookState* state) {
   state->sequence = state->lob.LastUpdateId();
   state->bids = state->lob.bids();
   state->asks = state->lob.asks();
+  ++state->book_generation;               // CR-F18-017: учёт взятого рыночными sim-заявками объёма относится к прежнему стакану
+  state->book_updated_at = now_fn_();
 }
 
 void CexWsRestAdapter::push_pending_diff_locked(
@@ -1533,6 +2045,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::snapshot_from_state_lo
   snapshot.timestamp = cex::common::now_ts();
   snapshot.sequence = it->second.sequence;
   snapshot.volume_24h = it->second.volume_24h;
+  snapshot.window_volume_24h = it->second.window_volume_24h;  // ADR-077 (0 ⇒ нет данных)
 
   snapshot.fees.maker = cfg_.maker_fee;
   snapshot.fees.taker = cfg_.taker_fee;
@@ -1575,8 +2088,11 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded()) return std::nullopt;
 
-  const json bids_json = root.value("bids", json::array());
-  const json asks_json = root.value("asks", json::array());
+  json bids_json = json::array();
+  json asks_json = json::array();
+  ExtractRestBookLevels(
+      root, is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url),
+      is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url), &bids_json, &asks_json);
   if (!bids_json.is_array() || !asks_json.is_array()) return std::nullopt;
 
   std::vector<domain::VenueBookLevel> bids;
@@ -1602,7 +2118,9 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   snapshot.trading_rules.lot_size = cfg_.lot_size;
 
   SymbolBookState& state = books_[snapshot.venue_symbol];
-  state.lob.ConfigureMaxLevels(std::max<uint32_t>(1, cfg_.lob_max_levels));
+  // ADR-077: при окне по объёму LOB-сборщик не должен резать стакан по lob_max_levels.
+  state.lob.ConfigureMaxLevels(std::max<std::size_t>(
+      std::max<uint32_t>(1, cfg_.lob_max_levels), request.rest_depth_limit));
   if (state.volume_24h.scale != cfg_.market_qty_scale) {
     state.volume_24h = cex::common::Decimal{state.volume_24h.units, cfg_.market_qty_scale};
   }
@@ -1621,6 +2139,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
     snapshot.bids.clear();
     snapshot.asks.clear();
     snapshot.volume_24h = state.volume_24h;
+    snapshot.window_volume_24h = state.window_volume_24h;
     return snapshot;
   }
 
@@ -1667,6 +2186,7 @@ std::optional<domain::VenueRawSnapshot> CexWsRestAdapter::parse_rest_snapshot_lo
   };
   snapshot.spread = cex::common::Decimal::sub(snapshot.best_ask, snapshot.best_bid);
   snapshot.volume_24h = state.volume_24h;
+  snapshot.window_volume_24h = state.window_volume_24h;  // ADR-077 (0, если окно не запрашивалось)
   state.last_market_event = now;
 
   return snapshot;
@@ -1678,6 +2198,22 @@ bool CexWsRestAdapter::apply_rest_ticker_volume_locked(
     const SteadyClock::time_point now) {
   const json root = json::parse(body, nullptr, false);
   if (root.is_discarded() || !root.is_object()) return false;
+
+  // ADR-077: для OKX/Kraken при запросе окна объём идёт в отдельное поле — volume_24h
+  // (и τ-потолок кривой) остаются как до ADR.
+  const bool win_kraken = is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url);
+  const bool win_okx = is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url);
+  if (request.rest_depth_limit > 0 && (win_kraken || win_okx)) {
+    int64_t window_units = 0;
+    if (!parse_decimal_to_scale(ExtractWindowVolumeText(root, win_kraken, win_okx),
+                                cfg_.market_qty_scale, &window_units) ||
+        window_units < 0) {
+      return false;
+    }
+    books_[symbol_key_from_request(request)].window_volume_24h =
+        cex::common::Decimal{window_units, cfg_.market_qty_scale};
+    return true;
+  }
 
   const std::string volume_text = ExtractBaseVolumeText(root);
   int64_t volume_units = 0;
@@ -1861,6 +2397,32 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
         cex::common::Decimal{qty_units, cfg_.market_qty_scale});
   }
   state.last_market_event = now;
+
+  // Реалистичная симуляция исполнения: кладём реальный трейд (price+qty) в ленту,
+  // против которой матчатся sim-заявки. Цена — "p" (binance) / "price" (coinbase/okx).
+  if (cfg_.sim_match_real_trades && qty_units > 0) {
+    const std::string price_text = JsonToString(
+        data.value("p", data.value("price", json("0"))));
+    int64_t price_units = 0;
+    if (parse_decimal_to_scale(price_text, cfg_.market_price_scale, &price_units) &&
+        price_units > 0) {
+      const TradePrint tp{cex::common::Decimal{price_units, cfg_.market_price_scale},
+                          cex::common::Decimal{qty_units, cfg_.market_qty_scale}, now};
+      state.recent_trades.push_back(tp);
+      // Ценовой контекст (#3): без прунинга по времени, только по ёмкости.
+      state.context_trades.push_back(tp);
+      while (state.context_trades.size() > 60) state.context_trades.pop_front();
+      // Эвикт по окну (= N·период чтения) и по ёмкости (лента — недавнее time-and-sales).
+      const auto window = effective_trade_window_locked(state);
+      while (!state.recent_trades.empty() &&
+             (now - state.recent_trades.front().ts) > window) {
+        state.recent_trades.pop_front();
+      }
+      while (state.recent_trades.size() > cfg_.sim_trade_buf_cap) {
+        state.recent_trades.pop_front();
+      }
+    }
+  }
   cex::common::log_json("INFO", "Consumed raw CEX trade",
                         {{"service", "venues"},
                          {"component", "external_venues_connector"},
@@ -1876,6 +2438,554 @@ bool CexWsRestAdapter::apply_ws_trade_event_locked(
                          {"source_file",
                           "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
   return true;
+}
+
+// CR-F18-017 / ADR-060 (поправка): рыночная sim-заявка исполняется проходом по видимой стороне стакана — BUY берёт asks от лучшей
+// цены вверх, SELL берёт bids вниз; цена исполнения — VWAP пройденных уровней (Decimal). Объём, взятый с уровня, хранится до
+// обновления стакана символа, поэтому два хеджа подряд не расходуют один уровень. Граница допуска по цене — double (только
+// решение «брать уровень или нет»); объём, цена и оборот — Decimal.
+bool CexWsRestAdapter::MatchMarketAgainstBookLocked(SymbolBookState* state, const bool is_sell,
+                                                    const cex::common::Decimal& target,
+                                                    const SteadyClock::time_point now,
+                                                    cex::common::Decimal* filled,
+                                                    cex::common::Decimal* notional,
+                                                    int64_t* book_age_ms) {
+  using cex::common::Decimal;
+  if (state == nullptr || filled == nullptr || notional == nullptr) return false;
+  const auto& side = is_sell ? state->bids : state->asks;
+  if (side.empty() || state->book_generation == 0) return false;   // стакана ещё не было
+  // Стакан сброшен или не собран (пересечённый/отфильтрованный снимок оставляет прежние bids/asks, а lob сбрасывает) — как и
+  // остальной адаптер (snapshot_from_state_locked), считаем непригодным: исполнять по устаревшим уровням нельзя.
+  if (state->needs_reinit || state->is_empty_book || !state->lob.IsInitialized()) return false;
+  const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - state->book_updated_at).count();
+  if (book_age_ms != nullptr) *book_age_ms = static_cast<int64_t>(age_ms);
+  if (age_ms > static_cast<long long>(cfg_.sim_market_book_max_age_ms)) return false;   // стакан устарел ⇒ путь по ленте
+  const double best_d = static_cast<double>(side.front().price);
+  if (!(best_d > 0.0)) return false;
+
+  // Учёт взятого объёма действителен для одного поколения стакана (см. SymbolBookState::book_taken_generation).
+  if (state->book_taken_generation != state->book_generation || state->bid_taken.size() != state->bids.size() ||
+      state->ask_taken.size() != state->asks.size()) {
+    state->bid_taken.assign(state->bids.size(), Decimal{0, cfg_.market_qty_scale});
+    state->ask_taken.assign(state->asks.size(), Decimal{0, cfg_.market_qty_scale});
+    state->book_taken_generation = state->book_generation;
+  }
+  auto& taken = is_sell ? state->bid_taken : state->ask_taken;
+
+  const Decimal zero_q{0, cfg_.market_qty_scale};
+  Decimal want = target;
+  for (std::size_t i = 0; i < side.size(); ++i) {
+    if (Decimal::cmp(want, zero_q) <= 0) break;
+    const auto& level = side[i];
+    if (level.price.units <= 0 || Decimal::cmp(level.qty, zero_q) <= 0) continue;
+    // Отклонение уровня от лучшей цены, б.п.: BUY — выше, SELL — ниже. Дальше предела заявка не идёт (далёкие тонкие уровни).
+    const double level_d = static_cast<double>(level.price);
+    const double slip_bps = (is_sell ? (best_d - level_d) : (level_d - best_d)) / best_d * 1e4;
+    if (slip_bps > cfg_.sim_market_book_max_slip_bps) break;
+    const Decimal avail = Decimal::sub(level.qty, taken[i]);
+    if (Decimal::cmp(avail, zero_q) <= 0) continue;
+    const Decimal take = Decimal::cmp(avail, want) <= 0 ? avail : want;
+    *filled = Decimal::add(*filled, take);
+    *notional = Decimal::add(*notional, Decimal::mul(take, level.price));
+    taken[i] = Decimal::add(taken[i], take);
+    want = Decimal::sub(want, take);
+  }
+  return true;
+}
+
+void CexWsRestAdapter::ApplyRealTradeFillLocked(
+    const fob::execution::v1::ExecutionIntent& intent,
+    domain::VenueOrderResult* out,
+    const SteadyClock::time_point now) {
+  using cex::common::Decimal;
+  // Уже отклонённые venue-reject заявки не трогаем.
+  if (out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED) return;
+
+  const Decimal target = intent.has_target_qty()
+      ? Decimal::from_proto(intent.target_qty()) : Decimal{0, cfg_.market_qty_scale};
+  const Decimal limit = intent.has_limit_price()
+      ? Decimal::from_proto(intent.limit_price()) : Decimal{0, cfg_.market_price_scale};
+  const bool is_sell = intent.side() == fob::common::v1::SIDE_SELL;
+  const Decimal zero_q{0, cfg_.market_qty_scale};
+  // Рыночная заявка (band-хедж CE помечен EXEC_STRATEGY_MARKET / IOC / HIGH) —
+  // агрессивная: забирает любую доступную свежую ликвидность независимо от limit
+  // (SELL берёт любой bid, BUY — любой ask). Пассивный лимит на off-market цене
+  // (pair_price выше рынка) иначе никогда не бьётся → позиция не дренится (F-18).
+  // Price-impact (k·v) всё равно начисляется, т.е. агрессия несёт свою издержку.
+  const bool marketable =
+      intent.strategy() == fob::execution::v1::EXEC_STRATEGY_MARKET;
+  // IOC/single-shot: неисполненный остаток отменяется сразу (не «висит»). Band-хедж
+  // помечен TIF_IOC — при неполном исполнении отчёт ДОЛЖЕН быть терминальным
+  // (EXPIRED), иначе ledger не освободит зарезервированный in_flight (утечка in_flight
+  // растёт выше позиции и подавляет новые пробои → позиция не дренится, F-18).
+  const bool single_shot =
+      marketable || intent.tif() == fob::common::v1::TIF_IOC;
+  // Пересечение по цене: для marketable — любая сделка; иначе жёсткий лимит.
+  const auto crosses_price = [&](const cex::common::Decimal& price) -> bool {
+    if (marketable) return true;
+    return is_sell ? Decimal::cmp(price, limit) >= 0
+                   : Decimal::cmp(price, limit) <= 0;
+  };
+
+  // Ключ ленты сделок: канонизируем (без /-_ пробелов, верхний регистр), чтобы совпал
+  // с ключом из parse_rest_trades_locked независимо от формата символа венью.
+  std::string key = intent.venue_symbol();
+  if (key.empty()) {
+    const auto& inst = intent.instrument();
+    key = (!inst.base().empty() && !inst.quote().empty())
+              ? inst.base() + inst.quote() : inst.symbol();
+  }
+  key = canon_trade_key(key);
+
+  Decimal filled{0, cfg_.market_qty_scale};
+  Decimal notional{0, cfg_.market_price_scale + cfg_.market_qty_scale};
+  auto it = books_.find(key);
+  std::size_t window_trades = 0;
+  // Диагностика (ADR-060): захватываем причину и рассматриваемые публичные сделки
+  // для вкладки Clearing. considered — снимок ленты ДО потребления (loop мутирует
+  // tr.qty), чтобы показать реальные публичные исполнения, против которых матчим.
+  std::vector<app::ConsideredTrade> considered;
+  std::string diag_reason;
+  const bool have_book = (it != books_.end());
+  if (limit.units == 0 && !marketable) {
+    diag_reason = "no_limit_price";  // ← симулятор пропускает матчинг (баг band-заявок)
+  } else if (target.units <= 0) {
+    diag_reason = "no_target_qty";
+  } else if (!have_book) {
+    diag_reason = "no_trade_feed";
+  }
+  // ADR-074 / ADR-072 §B (этап 3 F-18-remediation, ОБРАТИМО флагом): forward-only
+  // исполнение — матчить ТОЛЬКО принты с биржевым временем ПОСЛЕ момента эмиссии
+  // (+задержка), иначе хедж исполняется о сделки минутной давности (причина 1, на dev
+  // 230–352с устаревания = бесплатный опцион). Момент эмиссии зашит в intent_id band-
+  // хеджа последним полем (ce|band|<agent>|<asset>|<venue>|<ms>). Деф off = прежнее
+  // поведение (ноль изменений). Принты с неизвестным биржевым временем (exchange_ms=0,
+  // напр. coinbase) при forward-only НЕ матчатся (нельзя подтвердить, что они «вперёд»).
+  const bool forward_only = cex::common::Env::get_bool("CE_SIM_FORWARD_ONLY", false);
+  const int64_t fwd_delay_ms = cex::common::Env::get_int("CE_SIM_FILL_DELAY_MS", 0);
+  int64_t emit_ms = 0;
+  if (forward_only) {
+    const std::string& iid = intent.intent_id();
+    const auto bar = iid.rfind('|');
+    if (bar != std::string::npos) {
+      try { emit_ms = std::stoll(iid.substr(bar + 1)); } catch (...) { emit_ms = 0; }
+    }
+  }
+  // true ⇒ принт допустим к матчингу. off или нет метки эмиссии ⇒ не фильтруем.
+  const auto forward_ok = [&](const auto& tr) -> bool {
+    if (!forward_only || emit_ms <= 0) return true;
+    return tr.exchange_ms > 0 && tr.exchange_ms >= emit_ms + fwd_delay_ms;
+  };
+
+  // CR-F18-017 / ADR-060 (поправка): рыночная заявка — проходом по стакану (CE_SIM_MARKET_BOOK_FILL). Стакан пуст или старше
+  // порога ⇒ book_used=false и заявка идёт прежним путём по ленте. Лента при book_used не потребляется.
+  bool book_used = false;
+  int64_t book_age_ms = -1;   // возраст стакана при исполнении, мс (-1 — путь по стакану не пробовали); в журнал
+  if (marketable && cfg_.sim_market_book_fill && have_book && target.units > 0) {
+    book_used = MatchMarketAgainstBookLocked(&it->second, is_sell, target, now, &filled, &notional, &book_age_ms);
+  }
+
+  if (!book_used && have_book && (limit.units != 0 || marketable) && target.units > 0) {
+    const auto window = effective_trade_window_locked(it->second);
+    while (!it->second.recent_trades.empty() &&
+           (now - it->second.recent_trades.front().ts) > window) {
+      it->second.recent_trades.pop_front();
+    }
+    window_trades = it->second.recent_trades.size();
+    // cross_count — по ОКНУ матчинга. «Пересекает» = цена кроссит лимит И остался
+    // непотреблённый объём (qty>0): ровно то, что потребит цикл ниже. Так reason
+    // согласован с фактом: cross_count>0 ⟺ fill>0 ⟺ filled/partial;
+    // cross_count==0 ⟺ none_cross_limit.
+    std::size_t cross_count = 0;
+    for (const auto& tr : it->second.recent_trades) {
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0
+                         && forward_ok(tr);  // forward-only: устаревшие принты не в счёт
+      if (cross) ++cross_count;
+    }
+    // considered — РОВНО множество матчинга (ADR-060): свежее окно recent_trades,
+    // тот же список, что потребляет цикл ниже, снимок ДО потребления. Инвариант
+    // наблюдаемости: публичная сделка, показанная как пересекающая (crosses=true),
+    // реально исполнила бы хедж ⇒ fill ⇒ выравнивание позиции. Без рассинхрона с
+    // «ценовым контекстом по счёту» (устаревшие сделки больше не показываются как
+    // «исполнила бы»). crosses = цена кроссит лимит (SELL: price≥limit; BUY:
+    // price≤limit) И qty>0.
+    // Возраст (A): от БИРЖЕВОГО времени сделки (exchange_ms) — насколько сделка реально
+    // стара, независимо от каденса чтения REST. Fallback на read-time (now−tr.ts), если
+    // биржевое время неизвестно (coinbase ISO / WS-путь).
+    const int64_t sys_now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    considered.reserve(std::min<std::size_t>(it->second.recent_trades.size(), 100));
+    for (const auto& tr : it->second.recent_trades) {
+      if (considered.size() >= 100) break;
+      const bool cross = crosses_price(tr.price) && Decimal::cmp(tr.qty, zero_q) > 0
+                         && forward_ok(tr);  // forward-only: crosses только если «вперёд»
+      app::ConsideredTrade ct;
+      ct.price = DecimalText(tr.price);
+      ct.qty = DecimalText(tr.qty);
+      ct.age_ms = (tr.exchange_ms > 0)
+          ? std::max<int64_t>(0, sys_now_ms - tr.exchange_ms)   // биржевое время (A), снимок
+          : std::chrono::duration_cast<std::chrono::milliseconds>(now - tr.ts).count();  // fallback: read-time
+      ct.exchange_ms = tr.exchange_ms;  // абсолют — фронт пересчитывает возраст живьём
+      ct.crosses = cross;
+      considered.push_back(std::move(ct));
+    }
+    // Матчим против пересёкших реальных сделок (FIFO ленты), потребляя объём.
+    // SELL@P исполняется сделками price>=P; BUY@P — сделками price<=P.
+    for (auto& tr : it->second.recent_trades) {
+      if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
+      if (!crosses_price(tr.price)) continue;
+      if (!forward_ok(tr)) continue;  // forward-only: не матчим принты старше эмиссии
+      const Decimal want = Decimal::sub(target, filled);
+      if (Decimal::cmp(want, zero_q) <= 0) break;
+      const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
+      filled = Decimal::add(filled, take);
+      notional = Decimal::add(notional, Decimal::mul(take, tr.price));
+      tr.qty = Decimal::sub(tr.qty, take);  // потребляем реальный объём (дефицит → partial)
+    }
+    if (diag_reason.empty()) {
+      if (window_trades == 0) diag_reason = "no_trades_in_window";
+      else if (cross_count == 0) diag_reason = "none_cross_limit";
+    }
+  }
+
+  out->accepted = true;
+  out->filled_qty = filled;
+  out->remaining_qty = Decimal::sub(target, filled);
+  // Temporary price-impact (влияние CE-заявки на рынок): p_exec = S + k·v,
+  // v = filled/Δt — скорость CE-исполнения, Δt — интервал с прошлого CE-fill.
+  double impact_base_vwap = 0.0, impact_shift = 0.0, impact_cost = 0.0;
+  double impact_v = 0.0, impact_dt = 0.0;
+  bool has_impact = false;
+  if (Decimal::cmp(filled, zero_q) <= 0) {
+    // Нет пересечения со свежей лентой. IOC/market ⇒ отменяется сразу (EXPIRED,
+    // терминальный — ledger освободит in_flight); обычный лимит ⇒ «висит» (NEW).
+    out->status = single_shot
+                      ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                      : fob::execution::v1::EXECUTION_REPORT_STATUS_NEW;
+    out->average_price = Decimal{0, cfg_.market_price_scale};
+  } else {
+    const Decimal base_vwap = Decimal::div(notional, filled, cfg_.market_price_scale);
+    out->average_price = base_vwap;
+    // Полное ⇒ FILLED. Частичное: IOC/market ⇒ EXPIRED (остаток отменён, терминально
+    // → освобождение in_flight); обычный лимит ⇒ PARTIALLY_FILLED (остаток «висит»).
+    out->status = (Decimal::cmp(out->remaining_qty, zero_q) <= 0)
+                      ? fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED
+                      : (single_shot
+                             ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                             : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED);
+    // ADR-067 п.4 (T-F18-803 багфикс): price-impact — только для marketable
+    // (тейкер/агрессивный сброс). Пассивный резидентный лимит (мейкер-зона)
+    // своим появлением/частичным исполнением рынок не двигает (физически
+    // некорректно было начислять импакт на любой fill, включая пассивный).
+    if (cfg_.sim_price_impact_k > 0.0 && have_book && marketable) {
+      auto& st = it->second;
+      double dt_sec = cfg_.sim_price_impact_default_dt_sec;  // первый fill символа
+      if (st.last_ce_fill_at.time_since_epoch().count() != 0)
+        dt_sec = std::chrono::duration<double>(now - st.last_ce_fill_at).count();
+      if (dt_sec < cfg_.sim_price_impact_min_dt_sec) dt_sec = cfg_.sim_price_impact_min_dt_sec;
+      const double filled_d = static_cast<double>(filled);
+      const double v_signed = (is_sell ? -filled_d : filled_d) / dt_sec;   // лот/с, знак стороны
+      // k выводим из РЕАЛЬНОГО стакана (спец §3): k ~ τ/ρ, ρ — плотность стакана
+      // (лот на единицу цены) = Σqty верхних уровней / их ценовой диапазон. Глубокий
+      // стакан (большой ρ) ⇒ малый k ⇒ малый импакт (физически: малый хедж не двигает
+      // глубокий рынок); тонкий ⇒ большой k. Это согласует импакт между активами
+      // (BTC/SOL) — плоский k давал ~0 для дорогого BTC и завышал дешёвый SOL.
+      // CE_PRICE_IMPACT_K — безразмерный множитель поверх τ/ρ. ρ=0 ⇒ плоский k (fallback).
+      double rho = 0.0;
+      {
+        const std::size_t kMaxLvl = 10;
+        double qty_sum = 0.0, p_min = 0.0, p_max = 0.0; bool first = true;
+        const auto scan = [&](const std::vector<domain::VenueBookLevel>& side) {
+          std::size_t n = 0;
+          for (const auto& lv : side) {
+            if (n++ >= kMaxLvl) break;
+            const double p = static_cast<double>(lv.price);
+            const double q = static_cast<double>(lv.qty);
+            if (p <= 0.0 || q <= 0.0) continue;
+            qty_sum += q;
+            if (first) { p_min = p_max = p; first = false; }
+            else { p_min = std::min(p_min, p); p_max = std::max(p_max, p); }
+          }
+        };
+        scan(st.bids); scan(st.asks);
+        const double span = p_max - p_min;
+        if (span > 0.0 && qty_sum > 0.0) rho = qty_sum / span;  // лот/цена
+      }
+      const double k_eff = (rho > 0.0)
+          ? cfg_.sim_price_impact_k * (cfg_.sim_impact_tau_sec / rho)   // физический k=τ/ρ
+          : cfg_.sim_price_impact_k;                                    // fallback: плоский
+      const double shift = k_eff * v_signed;                           // сдвиг цены k·v
+      impact_base_vwap = static_cast<double>(base_vwap);
+      impact_v = v_signed;
+      impact_dt = dt_sec;
+      impact_shift = shift;
+      impact_cost = std::fabs(shift) * filled_d;  // = k·|v|·filled = k·v²·Δt (≥0)
+      has_impact = true;
+      // p_exec = S + k·v (для BUY выше, для SELL ниже — всегда хуже для агента).
+      const double scale_mul = std::pow(10.0, static_cast<double>(cfg_.market_price_scale));
+      const double p_exec = impact_base_vwap + shift;
+      if (p_exec > 0.0)
+        out->average_price = Decimal{static_cast<int64_t>(std::llround(p_exec * scale_mul)),
+                                     cfg_.market_price_scale};
+      st.last_ce_fill_at = now;
+    }
+  }
+
+  // F-18 #5/ADR-067 (T-F18-803): мейкер-зона band-хеджа (EXEC_STRATEGY_LIMIT +
+  // TIF_GTC) не терминализуется за один read-цикл, если не исполнена целиком —
+  // регистрируем/обновляем резидентную заявку, чтобы доматчить её на следующих
+  // снапшотах (progress_resting_orders_locked). marketable (тейкер, MARKET) и
+  // TIF_IOC уже терминальны выше (single_shot) и сюда не попадают.
+  bool registered_resting = false;
+  if (!marketable && intent.tif() == fob::common::v1::TIF_GTC &&
+      (out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_NEW ||
+       out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED)) {
+    registered_resting = true;
+    RestingBandOrder& entry = resting_band_orders_[intent.intent_id()];
+    entry.intent = intent;
+    entry.canon_key = key;
+    entry.target = target;
+    // Повторная регистрация того же intent_id (напр. redelivery) не должна
+    // откатить уже накопленный прогресс — берём max, не перезаписываем.
+    entry.cumulative_filled = Decimal::cmp(filled, entry.cumulative_filled) > 0
+        ? filled : entry.cumulative_filled;
+    const int64_t timeout_ms = intent.timeout_ms() > 0 ? intent.timeout_ms() : 30000;
+    entry.deadline = now + std::chrono::milliseconds(timeout_ms);
+  }
+
+  // ADR-082: коэффициент исполнения f — доля исполненного объёма от запрошенного по хедж-заявкам пары. Заявку, ушедшую в
+  // резидентные (GTC), учтёт progress_resting_orders_locked на терминальном исходе (иначе f занижен: доисполнение не видно).
+  // Учитываются только заявки, реально сопоставленные с лентой (есть лента, есть цена или рыночная, есть объём): отказ по
+  // входным данным f не характеризует.
+  if (!registered_resting && have_book && (limit.units != 0 || marketable) && target.units > 0) {
+    record_hedge_fill_locked(key, intent.intent_id(), filled, target, now);
+  }
+
+  cex::common::log_json("INFO", "Sim fill vs real trades",
+                        {{"service", "venues"},
+                         {"venue", cfg_.venue_id},
+                         {"symbol", key},
+                         {"intent_id", intent.intent_id()},
+                         {"side", is_sell ? "SELL" : "BUY"},
+                         {"limit", DecimalText(limit)},
+                         {"target", DecimalText(target)},
+                         {"filled", DecimalText(filled)},
+                         {"avg_price", DecimalText(out->average_price)},
+                         {"status", std::to_string(static_cast<int>(out->status))},
+                         {"trades_in_window", std::to_string(window_trades)},
+                         {"fill_source", book_used ? "book" : "tape"},
+                         {"book_age_ms", std::to_string(book_age_ms)},
+                         {"source_file",
+                          "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+
+  // Диагностика симуляции fill → PG (venue_fill_diagnostics) для вкладки Clearing.
+  if (diag_sink_ != nullptr) {
+    const bool filled_any = Decimal::cmp(filled, zero_q) > 0;
+    const bool fully = filled_any && Decimal::cmp(out->remaining_qty, zero_q) <= 0;
+    if (book_used) diag_reason = filled_any ? (fully ? "filled" : "partial_book_depth") : "none_book_depth";
+    else if (filled_any) diag_reason = fully ? "filled" : "partial_window_volume";
+    else if (diag_reason.empty()) diag_reason = "none_cross_limit";
+    const char* status_txt =
+        out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED ? "FILLED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED ? "PARTIALLY_FILLED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_REJECTED ? "REJECTED"
+        : out->status == fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED ? "EXPIRED"
+        : "NEW";
+    app::FillDiagnostic diag;
+    diag.intent_id = intent.intent_id();
+    diag.hedge_flow_id = intent.hedge_flow_id();
+    diag.batch_id = intent.batch_id();
+    diag.venue = cfg_.venue_id;
+    diag.symbol = key;
+    diag.side = is_sell ? "SELL" : "BUY";
+    diag.limit_price = DecimalText(limit);
+    diag.target_qty = DecimalText(target);
+    diag.filled_qty = DecimalText(filled);
+    diag.avg_price = DecimalText(out->average_price);   // p_exec (с импактом, если вкл)
+    diag.status = status_txt;
+    diag.reason = diag_reason;
+    diag.window_trades = static_cast<int>(window_trades);
+    if (have_book) {  // времена REST-чтения ленты этого символа (UI-разбор времён)
+      diag.read_request_ms = it->second.last_trades_request_ms;
+      diag.read_response_ms = it->second.last_trades_response_ms;
+    }
+    if (has_impact) {
+      diag.base_vwap = std::to_string(impact_base_vwap);   // S — цена до импакта
+      diag.impact_shift = std::to_string(impact_shift);    // k·v
+      diag.impact_cost = std::to_string(impact_cost);      // k·v²·Δt
+      diag.impact_v = impact_v;
+      diag.impact_dt_sec = impact_dt;
+    }
+    diag.considered_trades = std::move(considered);
+    try { diag_sink_->WriteFillDiagnostic(diag); } catch (...) { /* диагностика не критична */ }
+  }
+}
+
+// ============================================================================
+// progress_resting_orders_locked — F-18 #5/ADR-067 (T-F18-803).
+//
+// Доматчивает резидентные (GTC) мейкер-лимиты band-хеджа символа venue_symbol
+// против НОВЫХ (ещё не потреблённых) сделок его ленты recent_trades — тем же
+// consume-циклом (crosses_price + мутация tr.qty), что и в
+// ApplyRealTradeFillLocked, чтобы не переучитывать уже потреблённый объём.
+//
+// Вызывается из RequestSnapshot ПОСЛЕ parse_rest_trades_locked (mu_ удержан).
+//
+// filled_qty follow-up отчёта — КУМУЛЯТИВНЫЙ (не delta): ledger
+// (execution_states_[execution_state_key]) сам вычисляет delta_qty как
+// filled_qty − prev.filled_qty (ledger_uc.cpp apply_execution_report_locked).
+// venue_order_id ДЕТЕРМИНИРОВАН (simulated_order_id_prefix+client_order_id,
+// как в MakeSimulatedOrderResult) — execution_state_key стабилен между тиками,
+// иначе каждый follow-up создал бы новую FSM-запись и ledger задвоил бы fill.
+// ============================================================================
+void CexWsRestAdapter::progress_resting_orders_locked(
+    const std::string& venue_symbol, const SteadyClock::time_point now,
+    std::vector<FollowUpReport>* out_followups) {
+  using cex::common::Decimal;
+  if (resting_band_orders_.empty()) return;
+
+  const std::string canon = canon_trade_key(venue_symbol);
+  auto book_it = books_.find(canon);
+
+  for (auto it = resting_band_orders_.begin(); it != resting_band_orders_.end();) {
+    RestingBandOrder& entry = it->second;
+    if (entry.canon_key != canon) {
+      ++it;
+      continue;
+    }
+
+    const auto& intent = entry.intent;
+    const bool is_sell = intent.side() == fob::common::v1::SIDE_SELL;
+    const Decimal limit = intent.has_limit_price()
+        ? Decimal::from_proto(intent.limit_price())
+        : Decimal{0, cfg_.market_price_scale};
+    const Decimal zero_q{0, cfg_.market_qty_scale};
+    // Тот же crosses_price, что в ApplyRealTradeFillLocked (пассивный лимит:
+    // SELL исполняют сделки price>=limit, BUY — price<=limit).
+    const auto crosses_price = [&](const Decimal& price) -> bool {
+      return is_sell ? Decimal::cmp(price, limit) >= 0
+                     : Decimal::cmp(price, limit) <= 0;
+    };
+
+    const Decimal remaining = Decimal::sub(entry.target, entry.cumulative_filled);
+    Decimal tick_filled{0, cfg_.market_qty_scale};
+    Decimal tick_notional{0, cfg_.market_price_scale + cfg_.market_qty_scale};
+    if (book_it != books_.end() && Decimal::cmp(remaining, zero_q) > 0) {
+      // Тот же consume-цикл, что ApplyRealTradeFillLocked: мутирует tr.qty
+      // (потребляет реальный объём) — НЕ переучитывать уже потреблённое.
+      for (auto& tr : book_it->second.recent_trades) {
+        if (Decimal::cmp(tr.qty, zero_q) <= 0) continue;
+        if (!crosses_price(tr.price)) continue;
+        const Decimal want = Decimal::sub(remaining, tick_filled);
+        if (Decimal::cmp(want, zero_q) <= 0) break;
+        const Decimal take = Decimal::cmp(tr.qty, want) <= 0 ? tr.qty : want;
+        tick_filled = Decimal::add(tick_filled, take);
+        tick_notional = Decimal::add(tick_notional, Decimal::mul(take, tr.price));
+        tr.qty = Decimal::sub(tr.qty, take);
+      }
+    }
+    if (Decimal::cmp(tick_filled, zero_q) > 0) {
+      entry.cumulative_filled = Decimal::add(entry.cumulative_filled, tick_filled);
+    }
+
+    const bool target_reached = Decimal::cmp(entry.cumulative_filled, entry.target) >= 0;
+    const bool deadline_passed = now >= entry.deadline;
+    const bool terminal = target_reached || deadline_passed;
+    const bool has_new_fill = Decimal::cmp(tick_filled, zero_q) > 0;
+
+    if (has_new_fill || terminal) {
+      fob::execution::v1::ExecutionReport report;
+      auto* meta = report.mutable_meta();
+      meta->set_event_id(cex::common::uuid_v4());
+      *meta->mutable_ts_event() = cex::common::now_ts();
+      meta->set_source("venues");
+      meta->set_correlation_id(intent.meta().correlation_id().empty()
+                                    ? intent.intent_id()
+                                    : intent.meta().correlation_id());
+      meta->set_partition_key(intent.intent_id());
+
+      report.set_report_id(cex::common::uuid_v4());
+      report.set_intent_id(intent.intent_id());
+      report.set_hedge_flow_id(intent.hedge_flow_id());
+      report.set_venue(cfg_.venue_id);
+      *report.mutable_instrument() = intent.instrument();
+      report.set_venue_symbol(intent.venue_symbol());
+      // Стабильный venue_order_id (см. MakeSimulatedOrderResult) — иначе
+      // execution_state_key(report) в ledger меняется каждый тик и filled_qty
+      // (кумулятивный) читается как новый ордер ⇒ двойной fill.
+      report.set_venue_order_id(
+          cfg_.simulated_order_id_prefix +
+          (intent.client_order_id().empty() ? intent.intent_id()
+                                             : intent.client_order_id()));
+      report.set_client_order_id(intent.client_order_id());
+      report.set_side(intent.side());
+
+      const Decimal remaining_after =
+          Decimal::sub(entry.target, entry.cumulative_filled);
+      *report.mutable_filled_qty() = entry.cumulative_filled.to_proto();
+      *report.mutable_remaining_qty() =
+          (Decimal::cmp(remaining_after, zero_q) > 0 ? remaining_after : zero_q).to_proto();
+      if (has_new_fill) {
+        // Тик-локальный VWAP (ADR-067: "average_price тик-локальный vwap ок") —
+        // ledger использует average_price только для delta-инкремента этого тика.
+        *report.mutable_average_price() =
+            Decimal::div(tick_notional, tick_filled, cfg_.market_price_scale).to_proto();
+      }
+      report.set_status(
+          target_reached ? fob::execution::v1::EXECUTION_REPORT_STATUS_FILLED
+          : deadline_passed ? fob::execution::v1::EXECUTION_REPORT_STATUS_EXPIRED
+                             : fob::execution::v1::EXECUTION_REPORT_STATUS_PARTIALLY_FILLED);
+
+      cex::common::log_json(
+          "INFO", "Resting band-hedge follow-up fill",
+          {{"service", "venues"},
+           {"venue", cfg_.venue_id},
+           {"symbol", canon},
+           {"intent_id", intent.intent_id()},
+           {"tick_filled", DecimalText(tick_filled)},
+           {"cumulative_filled", DecimalText(entry.cumulative_filled)},
+           {"target", DecimalText(entry.target)},
+           {"status", std::to_string(static_cast<int>(report.status()))},
+           {"terminal", BoolText(terminal)},
+           {"source_file", "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
+
+      // Собираем для публикации ВНЕ mu_ (code-review: блокирующий Kafka/PG под
+      // локом застопорил бы SendOrder/RequestSnapshot всех символов адаптера).
+      if (out_followups) out_followups->emplace_back(intent, report);
+    }
+
+    // ADR-082: терминальный исход резидентной заявки — единственный момент, когда известен итоговый объём для f.
+    if (terminal) {
+      record_hedge_fill_locked(entry.canon_key, intent.intent_id(), entry.cumulative_filled, entry.target, now);
+    }
+    it = terminal ? resting_band_orders_.erase(it) : std::next(it);
+  }
+}
+
+// ADR-082 (шаг 0): учесть терминальный исход хедж-заявки в коэффициенте исполнения f пары. Под mu_. Один intent_id учитывается
+// не более одного раза (повторная доставка не удваивает вес); неизвестная лента или нулевой объём — не учитываем.
+void CexWsRestAdapter::record_hedge_fill_locked(const std::string& canon_key, const std::string& intent_id,
+                                                const cex::common::Decimal& filled,
+                                                const cex::common::Decimal& target,
+                                                const SteadyClock::time_point now) {
+  if (target.units <= 0) return;
+  const auto book = books_.find(canon_key);
+  if (book == books_.end()) return;
+  // Прогрев: пока лента пары прочитана меньше CE_FILL_COEF_WARMUP_SAMPLES раз после старта, буфер сделок пуст или неполон и заявка
+  // не находит объёма по причине холодного старта, а не тонкой биржи. Такие заявки в f не входят (иначе после каждой выкладки
+  // venues f занижен, а множитель глубины агента режет и толстые биржи). Сама заявка исполняется как обычно.
+  if (book->second.tape.reads < cex::common::Env::get_int("CE_FILL_COEF_WARMUP_SAMPLES", 3)) return;
+  if (!intent_id.empty()) {
+    if (!fill_counted_ids_.insert(intent_id).second) return;  // уже учтена
+    fill_counted_order_.push_back(intent_id);
+    while (fill_counted_order_.size() > kFillCountedCap) {
+      fill_counted_ids_.erase(fill_counted_order_.front());
+      fill_counted_order_.pop_front();
+    }
+  }
+  const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+  book->second.fill.Add(static_cast<double>(filled), static_cast<double>(target), now_s,
+                        static_cast<double>(cex::common::Env::get_int("CE_FILL_COEF_TAU_S", 1800)));
 }
 
 bool CexWsRestAdapter::apply_ws_ticker_event_locked(
@@ -1933,17 +3043,34 @@ std::vector<std::string> CexWsRestAdapter::auth_headers() const {
 
 std::string CexWsRestAdapter::rest_depth_url(
     const domain::VenueSnapshotRequest& request) const {
+  const std::string sym = symbol_key_from_request(request);
+  // ADR-077: окно по объёму задаёт лимит явно; иначе прежняя формула.
+  const std::size_t levels = request.rest_depth_limit > 0
+      ? request.rest_depth_limit
+      : std::max<std::size_t>(
+            request.depth_levels,
+            static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
   if (is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
     std::ostringstream oss;
     oss << cfg_.rest_base_url
-        << "/products/" << coinbase_product_id_from_symbol(symbol_key_from_request(request))
+        << "/products/" << coinbase_product_id_from_symbol(sym)
         << "/book?level=2";
     return oss.str();
   }
+  if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    std::ostringstream oss;
+    oss << cfg_.rest_base_url << "/0/public/Depth?pair=" << kraken_pair_from_symbol(sym)
+        << "&count=" << std::min<std::size_t>(levels, 500);  // Kraken Depth: максимум 500
+    return oss.str();
+  }
+  if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    std::ostringstream oss;
+    oss << cfg_.rest_base_url << "/api/v5/market/books?instId=" << okx_inst_from_symbol(sym)
+        << "&sz=" << std::min<std::size_t>(levels, 400);  // OKX books: максимум 400
+    return oss.str();
+  }
 
-  const std::size_t requested_levels = std::max<std::size_t>(
-      request.depth_levels,
-      static_cast<std::size_t>(std::max<uint32_t>(1, cfg_.lob_max_levels)));
+  const std::size_t requested_levels = levels;
   std::ostringstream oss;
   oss << cfg_.rest_base_url
       << "/api/v3/depth?symbol=" << symbol_key_from_request(request)
@@ -1960,6 +3087,22 @@ std::string CexWsRestAdapter::rest_ticker_url(
         << "/stats";
     return oss.str();
   }
+  // ADR-077: у OKX и Kraken путь Binance даёт 404 (объём всегда 0). Настоящий тикер берём
+  // ТОЛЬКО при запросе окна глубины — без окна запрос и поведение прежние.
+  if (request.rest_depth_limit > 0) {
+    if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+      std::ostringstream oss;
+      oss << cfg_.rest_base_url << "/api/v5/market/ticker?instId="
+          << okx_inst_from_symbol(symbol_key_from_request(request));
+      return oss.str();
+    }
+    if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+      std::ostringstream oss;
+      oss << cfg_.rest_base_url << "/0/public/Ticker?pair="
+          << kraken_pair_from_symbol(symbol_key_from_request(request));
+      return oss.str();
+    }
+  }
 
   std::ostringstream oss;
   oss << cfg_.rest_base_url
@@ -1972,6 +3115,182 @@ std::string CexWsRestAdapter::rest_order_url() const {
     return cfg_.rest_base_url + "/orders";
   }
   return cfg_.rest_base_url + "/api/v3/order";
+}
+
+// ADR-060: URL REST recent-trades (лента реально исполненных публичных сделок).
+std::string CexWsRestAdapter::rest_trades_url(
+    const domain::VenueSnapshotRequest& request) const {
+  const std::string sym = symbol_key_from_request(request);
+  std::ostringstream oss;
+  if (is_coinbase_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/products/"
+        << coinbase_product_id_from_symbol(sym) << "/trades?limit=100";
+  } else if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/0/public/Trades?pair="
+        << kraken_pair_from_symbol(sym) << "&count=100";
+  } else if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    oss << cfg_.rest_base_url << "/api/v5/market/trades?instId="
+        << okx_inst_from_symbol(sym) << "&limit=100";
+  } else {
+    oss << cfg_.rest_base_url << "/api/v3/trades?symbol=" << sym << "&limit=100";
+  }
+  return oss.str();
+}
+
+// Окно устаревания сделок = N·(измеренный период чтения ленты). До измерения —
+// фолбэк cfg_.sim_trade_window_ms; не меньше фолбэка; потолок 10 мин.
+std::chrono::milliseconds CexWsRestAdapter::effective_trade_window_locked(
+    const SymbolBookState& st) const {
+  double win = static_cast<double>(cfg_.sim_trade_window_ms);
+  if (st.read_interval_ms > 0.0) {
+    const double periods = std::max<uint32_t>(1u, cfg_.sim_trade_stale_periods);
+    win = std::max(win, periods * st.read_interval_ms);
+  }
+  if (win > 600000.0) win = 600000.0;
+  return std::chrono::milliseconds(static_cast<int64_t>(win));
+}
+
+// ADR-060: разбор REST recent-trades (per-venue формат) → recent_trades символа.
+// Дедуп по last_trade_key; пуш только новее уже принятого; эвикт по окну/ёмкости.
+void CexWsRestAdapter::parse_rest_trades_locked(
+    const std::string& body,
+    const std::string& venue_symbol,
+    const SteadyClock::time_point now) {
+  const json root = json::parse(body, nullptr, false);
+  if (root.is_discarded()) return;
+
+  // Собираем нормализованные (key, price_text, qty_text, exch_ms) по формату биржи.
+  // exch_ms — БИРЖЕВОЕ время сделки (Unix ms) для возраста в UI (A); 0 = неизвестно.
+  struct Row { int64_t key; std::string price; std::string qty; int64_t exch_ms; };
+  std::vector<Row> rows;
+  const auto num_str = [](const json& v) -> std::string {
+    if (v.is_string()) return v.get<std::string>();
+    if (v.is_number()) { std::ostringstream o; o << std::fixed << v.get<double>(); return o.str(); }
+    return "";
+  };
+  const auto to_key = [](const json& v) -> int64_t {
+    if (v.is_number_integer()) return v.get<int64_t>();
+    if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+    if (v.is_string()) { try { return std::stoll(v.get<std::string>()); } catch (...) { return 0; } }
+    return 0;
+  };
+  // Unix ms из числа (ms) или строки (ms). Секунды kraken → ×1000 отдельно.
+  const auto to_ms = [](const json& v) -> int64_t {
+    if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+    if (v.is_string()) { try { return static_cast<int64_t>(std::stod(v.get<std::string>())); } catch (...) { return 0; } }
+    return 0;
+  };
+
+  if (is_okx_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    if (root.contains("data") && root["data"].is_array())
+      for (const auto& t : root["data"])
+        rows.push_back({to_key(t.value("tradeId", t.value("ts", json(0)))),
+                        num_str(t.value("px", json())), num_str(t.value("sz", json())),
+                        to_ms(t.value("ts", json(0)))});  // okx ts — ms (строка)
+  } else if (is_kraken_profile(cfg_.venue_id, cfg_.rest_base_url, cfg_.ws_url)) {
+    if (root.contains("result") && root["result"].is_object())
+      for (auto it = root["result"].begin(); it != root["result"].end(); ++it) {
+        if (it.key() == "last" || !it.value().is_array()) continue;
+        for (const auto& t : it.value())
+          if (t.is_array() && t.size() >= 3) {
+            const int64_t ms = static_cast<int64_t>(t[2].is_number() ? t[2].get<double>() * 1000.0 : 0);
+            rows.push_back({ms, num_str(t[0]), num_str(t[1]), ms});  // kraken t[2] — сек → ms
+          }
+      }
+  } else if (root.is_array()) {  // binance / coinbase — массив объектов
+    for (const auto& t : root) {
+      const bool coinbase = t.contains("trade_id") || t.contains("size");
+      rows.push_back({to_key(t.value(coinbase ? "trade_id" : "id", json(0))),
+                      num_str(t.value("price", json())),
+                      num_str(t.value(coinbase ? "size" : "qty", json())),
+                      coinbase ? 0 : to_ms(t.value("time", json(0)))});  // binance time — ms; coinbase ISO ⇒ 0
+    }
+  }
+
+  // Ключ канонизируем идентично матчеру ApplyRealTradeFillLocked (совпадение ключей).
+  SymbolBookState& state = books_[canon_trade_key(venue_symbol)];
+  if (!liq_seeds_.empty()) {
+    const auto seed = liq_seeds_.find(canon_trade_key(venue_symbol));
+    if (seed != liq_seeds_.end()) {
+      apply_liquidity_seed_locked(state, seed->second, now);
+      liq_seeds_.erase(seed);
+    }
+  }
+  // Мерим ФАКТИЧЕСКИЙ период чтения ленты (интервал между вызовами, EMA): окно
+  // устаревания = N·период (см. effective_trade_window_locked). Вызов = один читок.
+  double tape_dt_s = 0.0;  // ADR-082: интервал с прошлого чтения; 0 ⇒ первое чтение (в нём вся история, не приращение)
+  if (state.last_trades_read.time_since_epoch().count() != 0) {
+    const double dt_ms =
+        std::chrono::duration<double, std::milli>(now - state.last_trades_read).count();
+    if (dt_ms > 0.0)
+      state.read_interval_ms = (state.read_interval_ms > 0.0)
+                                   ? 0.6 * state.read_interval_ms + 0.4 * dt_ms
+                                   : dt_ms;
+    tape_dt_s = dt_ms / 1000.0;
+  }
+  state.last_trades_read = now;
+  int64_t max_key = state.last_trade_key;
+  int accepted = 0;
+  double tape_batch_quote = 0.0;  // ADR-082: объём НОВЫХ сделок этого чтения в валюте котирования (метрика, double)
+  std::vector<std::pair<int64_t, double>> tape_rows;  // (биржевое время мс, объём в валюте котирования) принятых сделок
+  for (const auto& r : rows) {
+    if (r.key != 0 && r.key <= state.last_trade_key) continue;  // уже видели
+    int64_t price_u = 0, qty_u = 0;
+    if (!parse_decimal_to_scale(r.price, cfg_.market_price_scale, &price_u) || price_u <= 0) continue;
+    if (!parse_decimal_to_scale(r.qty, cfg_.market_qty_scale, &qty_u) || qty_u <= 0) continue;
+    const TradePrint tp{cex::common::Decimal{price_u, cfg_.market_price_scale},
+                        cex::common::Decimal{qty_u, cfg_.market_qty_scale}, now, r.exch_ms};
+    state.recent_trades.push_back(tp);
+    state.context_trades.push_back(tp);  // ценовой контекст (#3), без time-прунинга
+    const double row_quote = static_cast<double>(tp.price) * static_cast<double>(tp.qty);
+    tape_batch_quote += row_quote;
+    tape_rows.emplace_back(r.exch_ms, row_quote);
+    if (r.key > max_key) max_key = r.key;
+    ++accepted;
+  }
+  state.last_trade_key = max_key;
+  // ADR-082: оборот ленты ν. Пустое чтение — выборка 0 (оценка затухает на тихой бирже); первое чтение выборки не даёт.
+  // Если выдача упёрлась в лимит запроса (все строки новые, их ровно столько, сколько можно получить), между чтениями часть
+  // сделок не видна и «объём / время между чтениями» занижает оборот в разы. Тогда скорость берётся по охваченному интервалу
+  // биржевого времени: сделки после самой старой строки, делённые на её разницу с самой новой (для потока сделок это несмещённая
+  // оценка). Если биржевого времени в строках нет (Coinbase), выборку пропускаем: она была бы смещена вниз.
+  if (tape_dt_s > 0.0) {
+    ++state.tape.reads;
+    const double tape_tau = static_cast<double>(cex::common::Env::get_int("CE_TAPE_EWMA_TAU_S", 900));
+    const bool saturated = rows.size() >= kTradesRequestLimit && accepted == static_cast<int>(rows.size());
+    if (!saturated) {
+      state.tape.Update(tape_batch_quote, tape_dt_s, tape_tau);
+    } else {
+      int64_t min_ms = 0, max_ms = 0;
+      for (const auto& [ms, q] : tape_rows) {
+        (void)q;
+        if (ms <= 0) continue;
+        if (min_ms == 0 || ms < min_ms) min_ms = ms;
+        if (ms > max_ms) max_ms = ms;
+      }
+      if (max_ms > min_ms) {
+        double after_oldest = 0.0;
+        for (const auto& [ms, q] : tape_rows) {
+          if (ms > min_ms) after_oldest += q;
+        }
+        state.tape.UpdateRate(after_oldest / (static_cast<double>(max_ms - min_ms) / 1000.0), tape_dt_s, tape_tau);
+      }
+    }
+  }
+  while (state.context_trades.size() > 60) state.context_trades.pop_front();
+  // Эвикт по окну (= N·период чтения) и ёмкости.
+  const auto window = effective_trade_window_locked(state);
+  while (!state.recent_trades.empty() && (now - state.recent_trades.front().ts) > window)
+    state.recent_trades.pop_front();
+  while (state.recent_trades.size() > cfg_.sim_trade_buf_cap)
+    state.recent_trades.pop_front();
+  if (accepted > 0)
+    cex::common::log_json("INFO", "Fetched real recent trades",
+                          {{"service", "venues"}, {"venue", cfg_.venue_id},
+                           {"symbol", venue_symbol},
+                           {"new_trades", std::to_string(accepted)},
+                           {"buf", std::to_string(state.recent_trades.size())},
+                           {"source_file", "cpp/venues/src/infra/cex_ws_rest_adapter.cpp"}});
 }
 
 }  // namespace cex::venues::infra

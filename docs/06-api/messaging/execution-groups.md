@@ -50,7 +50,7 @@ enum GroupStatus {
 
 ```proto
 // Диагностика группового решателя (аналог BatchSolverDiagnostics для группы).
-// double допустим для solver diagnostics (CLAUDE.md §9).
+// double допустим для solver diagnostics ([.claude/rules/data.md](../../../.claude/rules/data.md)).
 message GroupSolverDiagnostics {
   // Время решения групповой задачи, мс.
   uint32 group_solve_time_ms       = 1;
@@ -94,7 +94,7 @@ message LegResult {
 // Kafka envelope топика execution.groups.
 // Partition key = parentOrderId.
 message ExecutionGroup {
-  // EventMeta обязателен (CLAUDE.md §7, partition_key = parentOrderId).
+  // EventMeta обязателен ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md), partition_key = parentOrderId).
   fob.common.v1.EventMeta meta              = 1;
 
   // Уникальный идентификатор группы исполнения (idempotency key для consumers).

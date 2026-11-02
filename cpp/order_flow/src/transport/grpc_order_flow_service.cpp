@@ -5,7 +5,7 @@
 // CreateComboOrderUseCase + CancelComboOrderUseCase (F-09).
 //
 // Не содержит бизнес-логики — только marshalling proto ↔ use cases
-// (CLAUDE.md §10 layering).
+// (.claude/rules/cpp.md layering).
 //
 // Combo methods (CreateComboOrder/CancelComboOrder) требуют PG repository
 // (combo_orders + combo_legs + combo_constraints + grouped_links + status_log).

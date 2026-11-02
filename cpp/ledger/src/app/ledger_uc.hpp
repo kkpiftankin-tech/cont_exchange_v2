@@ -1,19 +1,37 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
+#include <deque>
+#include <functional>
+#include <map>
+#include <set>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <unordered_set>
 #include <vector>
 
 #include "cex/common/decimal.hpp"
+#include "cex/common/uuid.hpp"   // boot_id_ (ADR-084)
+#include "app/agent_pnl_book.hpp"   // ADR-087: книга агента по справедливой цене (модель C′)
 #include "app/persistence_ports.hpp"
+#include "domain/hedge_threshold_model.hpp"   // ADR-088: модель порогов хеджа (первый domain-каталог ledger)
 #include "fob/ledger/v1/ledger.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/matching/v1/execution_group.pb.h"
 #include "fob/execution/v1/execution.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // AgentBandBreach (Вариант 2)
+
+namespace cex::common { class KafkaProducer; }  // fwd: только указатель в члене
+
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+namespace pqxx { class connection; }  // fwd: переиспользуемое poll-соединение (T-F18-706)
+#endif
 
 namespace cex::ledger::app {
 
@@ -40,6 +58,26 @@ class LedgerUseCases {
     std::chrono::system_clock::time_point updated_at;
   };
 
+  // F-18 v2 (T-F18-201/202, ADR-061 §1/§7): один элемент per-agent дельты
+  // такта (f_j), извлечённый консюмером kafka_consumers.cpp из AssetDelta
+  // {agent_id, agent_kind, asset, venue, delta} при непустом agent_id.
+  // agent_kind — строка ("translator" | "arbitrageur"), может быть пустой
+  // (тогда сохранённый ранее kind в позиции не перетирается).
+  struct AgentDelta {
+    std::string agent_id;
+    std::string agent_kind;
+    std::string asset;
+    std::string venue;
+    cex::common::Decimal delta{0, 0};  // f_j, ЗНАКОВАЯ (ADR-061 A6)
+    // Пары X/Y (Вариант 2): price_used = ЦЕНА ПАРЫ P(base)/P(quote) (лимит заявки);
+    // base_price = P(base) USDT (конверсия стоимость→объём); quote = котируемая
+    // (номинал ⇒ "USDT"; арбитражёр ⇒ пусто). Идут в breach-событие для risk.
+    cex::common::Decimal price_used{0, 0};
+    cex::common::Decimal base_price{0, 0};
+    cex::common::Decimal fair_price{0, 0};  // ADR-072: F_0 = цена пары ДО skew (граница прибыли); 0 ⇒ нет
+    std::string quote;
+  };
+
   // Hedge PnL record structure
   struct HedgePnlRecord {
     std::string hedge_id;
@@ -64,6 +102,132 @@ class LedgerUseCases {
                  std::shared_ptr<PositionsRepositoryPort> positions_repo,
                  std::shared_ptr<LedgerEntriesRepositoryPort> entries_repo,
                  std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo);
+
+  // = default в .cpp (там pqxx::connection полный — для деструкции poll_conn_, T-F18-706).
+  ~LedgerUseCases();
+
+  // F-18 D1+#7 (ADR-066): множитель динамического порога band по волатильности.
+  // scale = clamp((σ_ref²/σ²)/γ, vr_min, vr_max). Клэмпится ИТОГОВЫЙ scale (не только
+  // ratio) — γ-канал (общее поле capital-cap) не должен вывести порог за диапазон
+  // (domain-review HIGH). σ≤0 ⇒ 1.0 (нет масштаба). Pure/static — юнит-тестируема.
+  static double VolScaleFactor(double sigma, double sigma_ref, double gamma,
+                               double vr_min, double vr_max);
+
+  // F-18 #7 scoped (ADR-066 §D3, T-F18-L03): ликвидностный множитель порога band.
+  // LiqScale=clamp((depth/depth_ref)^p, lr_min, lr_max), p=0.5 (по IN-017 Q∝√Λ):
+  // глубже стакан ⇒ ШИРЕ band (можно держать больший запас). depth≤0 ⇒ 1.0 (нет
+  // масштаба, нейтрально). Pure/static — юнит-тестируема (ce_band_liq_scale_test).
+  static double LiqScaleFactor(double depth, double depth_ref, double p,
+                               double lr_min, double lr_max);
+
+  // F-18 #7 scoped (T-F18-L03/L04): композиция двух осей масштаба порога band в ОДИН
+  // множитель с финальным клэмпом (инвариант LIQ-2): clamp(vol_scale·liq_scale, tr_min,
+  // tr_max). Обе оси нейтральны (1.0) ⇒ total=1.0 (LIQ-3). Pure/static — юнит-тестируема.
+  static double BandTotalScale(double vol_scale, double liq_scale,
+                               double tr_min, double tr_max);
+
+  // ADR-081: ручная ширина полосы хеджа. true и *out_lim/*out_mkt, только если режим включён и значения
+  // допустимы: kBandManualMin ≤ lim ≤ mkt ≤ kBandManualMax (тыс. USDT). Иначе false — ширина считается расчётом
+  // (плоская от комиссии или по волатильности). Нижняя граница (100 USDT) не даёт хеджировать пыль каждые 3 с,
+  // верхняя (≈ весь USDT-капитал, CE_CAPITAL_SEED_USDT = 1 000 000) — фактически отключить хедж.
+  // Pure/static — юнит-тестируема (ce_band_manual_test).
+  static constexpr double kBandManualMin = 0.1;
+  static constexpr double kBandManualMax = 1000.0;
+  static bool ResolveManualBand(bool manual_on, double q_lim, double q_mkt,
+                                double* out_lim, double* out_mkt);
+
+  // Пауза между выходами агента на внешнюю биржу с экспоненциальным ростом при неисполненных заявках: base · 2^серия, но не
+  // больше max. Без роста (возврат к base): max ≤ base, серия ≤ 0 или base ≤ 0. Нужна против петли «остаток вернулся в позицию
+  // → через паузу отправлен снова», когда лимит не пересекается лентой сделок (Kraken в симуляции: 283 из 348 заявок за 10 минут
+  // у одного агента). Pure/static — юнит-тестируема (ce_band_manual_test).
+  static long long BandHedgeCooldownMs(long long base_ms, long long max_ms, int fail_streak);
+
+  // ADR-082 (шаг 2): потолок размера хедж-заявки по обороту ленты публичных сделок биржи. Q ≤ π·ν·T_ord: ν — оборот ленты в USDT
+  // в секунду, π — доля оборота, которую готовы занять, T_ord — время жизни заявки (с). Результат в тыс. USDT; ν ≤ 0, π ≤ 0, T_ord ≤ 0
+  // или нечисловой вход ⇒ 0 (ограничения нет). Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double TapeCapK(double nu_usdt_per_s, double pi, double t_ord_s);
+  // Объём заявки (тыс. USDT) после ограничения. cap_k ≤ 0 или нечисловой (потолка нет) ⇒ весь избыток. Потолок не ниже min_k (пыль:
+  // заявку мельче min_k отдельно не отправляем). Если после заявки остаётся меньше min_k (остаток слишком мал для отдельной заявки),
+  // отдаётся весь избыток. Результат в (0, excess_k] при excess_k > 0. Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double CappedOrderSizeK(double excess_k, double cap_k, double min_k);
+  // Бюджет ленты на новую заявку (тыс. USDT): доля оборота за время жизни заявки за вычетом уже живых заявок по той же бирже и паре,
+  // но не ниже min_k (иначе при занятой ленте агент не отправлял бы ничего). Pure/static — юнит-тестируема (ce_order_cap_test).
+  static double TapeBudgetK(double cap_total_k, double live_k, double min_k);
+
+  // ADR-082 (шаг 2): источник оборота ленты ν биржи по паре. true и *nu_quote_per_s (валюта котирования пары в секунду), *samples
+  // (чтений ленты в оценке), *age_ms (возраст измерения), если данные есть. Пусто (деф.) ⇒ PG venue_liquidity_stats; тест подставляет свой.
+  using TapeSource = std::function<bool(const std::string& venue, const std::string& symbol, double* nu_quote_per_s,
+                                        long long* samples, long long* age_ms)>;
+  void SetVenueTapeSource(TapeSource source) { tape_source_ = std::move(source); }
+
+  // ADR-088: источник волатильности курса пары для модели порогов хеджа. По умолчанию (пусто) — ce_asset_volatility в PG
+  // (LoadAssetSigma). Подмена нужна тестам без БД. Сигнатура как у LoadAssetSigma: (символ пары, σ за √с, число отсчётов,
+  // возраст строки, мс) → есть ли значение.
+  using SigmaSource = std::function<bool(const std::string&, double*, long long*, long long*)>;
+  void SetHedgeSigmaSource(SigmaSource source) { sigma_source_ = std::move(source); }
+
+  // ADR-088 (условие 1): режим модели порогов в Postgres. Источник возвращает 0 (off), 1 (shadow), 2 (on) или −1 (не задан / не прочитан).
+  // По умолчанию (пусто) — f05a_clearing_config.ce_hmodel_mode; подмена нужна тестам без БД. Эффективный режим = меньший из «потолка
+  // окружения» CE_HMODEL_MODE и значения из PG; −1 считается shadow, поэтому on требует согласия и окружения, и PG.
+  using HedgeModePgSource = std::function<int()>;
+  void SetHedgeModePgSource(HedgeModePgSource source) { hmodel_pg_source_ = std::move(source); }
+  // ADR-088 (условие 2): приёмник срабатывания автопредохранителя. Вызывается один раз при срабатывании: (агент, экспозиция |c|+in_flight,
+  // предел, длительность превышения, мс) → удалось ли записать shadow в PG и строку в журнал оператора. По умолчанию (пусто) пишет сам ledger.
+  using HedgeFuseSink = std::function<bool(const std::string& agent, double exposure_k, double limit_k, long long over_ms)>;
+  void SetHedgeFuseSink(HedgeFuseSink sink) { hmodel_fuse_sink_ = std::move(sink); }
+  // Сбросить кэш настроек модели (тесты меняют окружение и источники внутри одного объекта).
+  void InvalidateHedgeModelCfg() {
+    std::lock_guard<std::mutex> lk(mu_);
+    hmodel_cfg_have_ = false;
+    hmodel_pg_have_ = false;
+  }
+
+  // ADR-080 (уточнение 2026-10-20): плата за перевод актива между биржами, б.п. стоимости позиции (1 ‰ = 10 б.п.).
+  // Входит в порог выхода на внешнюю биржу ТОЛЬКО у арбитражёра (у переводчика перевода между биржами нет). Берётся из env
+  // CE_TRANSFER_FEE_BPS_<АКТИВ> (число от 0 до 1000; не задано / пусто / не число / NaN / inf / отрицательно / больше 1000 ⇒ по умолчанию 2,5 б.п. (0,25 ‰ — прежний тариф перевоза
+  // базового документа) для активов и 0,5 б.п. (0,05 ‰) для нумерария. Pure по окружению — юнит-тестируема.
+  static double TransferFeeBps(const std::string& asset, const std::string& numeraire);
+
+  // ADR-080: плоская ширина порога выхода. z_lim = max(пол, k·(clim + плата за перевод)·rt), z_mkt = max(z_lim, k·(cmkt + плата
+  // за перевод)·rt); комиссии и плата в б.п., k в тыс. USDT на б.п. Плата за перевод 0 (переводчик) даёт прежние формулы.
+  // Pure/static — юнит-тестируема (ce_band_manual_test).
+  static void FlatBandWidth(double k_band, double clim_bps, double cmkt_bps, double transfer_bps, double rt,
+                            double q_floor, double* z_lim, double* z_mkt);
+
+  // ADR-081: множитель порога выхода арбитражёров. Арбитражёр держит позицию, нейтральную по активу (длинная нога на одной
+  // бирже, короткая на другой): рыночного риска нет, и базовый документ задаёт ему более широкую полосу, чем переводчику (30
+  // против 18). Допустимо kArbScaleMin ≤ множитель ≤ kArbScaleMax; иначе 1 (без изменения). Pure/static — юнит-тестируема.
+  static constexpr double kArbScaleMin = 0.1;
+  static constexpr double kArbScaleMax = 20.0;
+  static double ResolveArbScale(double v);
+  // Применяет множитель к уже посчитанной ширине арбитражёра: z_lim = max(пол, z_lim·m), z_mkt = max(z_lim, z_mkt·m).
+  // z_mkt может быть nullptr (нумерарий — одна граница).
+  static void ApplyArbScale(double scale, double q_floor, double* z_lim, double* z_mkt);
+
+  // ADR-081: зона исполнения хеджа. Агрессивный тейкер, если |позиция| > Z̄mkt; пассивный мейкер между Z̄lim и Z̄mkt.
+  // Без привязки к комиссии (fee_linked=false, k_band=0) прежнее поведение — всегда агрессив, КРОМЕ ручной ширины:
+  // там Z̄mkt задан оператором и мейкерная зона сохраняется. Pure/static — юнит-тестируема.
+  static bool IsAggressiveBandZone(bool fee_linked, bool manual, double abs_position, double z_mkt);
+
+  // ADR-084: физический перевод связки между биржами.
+  // Порог перевода Z̄_A = max(пол, k_band·c_tr), тыс. USDT; c_tr — плата за перевод в б.п. (рыночных комиссий нет). Это тот же вид, что
+  // у Z̄lim = c_lim/Γ в «Кривых» §6.4, с k_band переводчика вместо 1/Γ_A связки (калибровка MVP). k_band ≤ 0 или нечисло ⇒ только пол.
+  // Pure/static — юнит-тестируема (ce_link_transfer_test).
+  static double TransferThresholdK(double k_band, double transfer_bps, double q_floor);
+  // Сумма перевода X, тыс. USDT: min(c_dst − Z_targ, |c_src|). 0 (перевода нет), если нога назначения не положительна, нога источника не
+  // отрицательна, X ≤ 0 или X < min_x. Pure/static, Decimal без double.
+  static cex::common::Decimal TransferAmountK(const cex::common::Decimal& c_dst, const cex::common::Decimal& c_src,
+                                              const cex::common::Decimal& z_targ, const cex::common::Decimal& min_x);
+  // Штуки актива, уходящие с источника: X·1000/P, округление ВНИЗ до 8 знаков (не больше, чем покрывает сумма). 0 при P ≤ 0 или X ≤ 0.
+  static cex::common::Decimal TransferUnits(const cex::common::Decimal& x_k, const cex::common::Decimal& price);
+  // Результат постановки перевода в очередь.
+  enum class TransferResult { kQueued, kDuplicate, kInvalid };
+  // ADR-057/084: заявка на перевод актива между узлами. Идемпотентна по transfer_id. Ставит перевод в очередь; исполнение (списание с
+  // from_venue, приход на to_venue за вычетом платы CE_TRANSFER_SIM_FEE_BPS) — через CE_TRANSFER_ETA_BATCHES тактов клиринга.
+  TransferResult ApplyNodeTransfer(const fob::ledger::v1::ApplyNodeTransferRequest& req);
+  // Диагностика и тесты: число переводов в очереди; накопленный остаток паритета связки (штуки актива, double — метрика, не учёт).
+  size_t PendingTransferCount();
+  double LinkParityResidual(const std::string& agent_id, const std::string& asset);
 
   // Existing methods
   fob::ledger::v1::GetBalancesResponse GetBalances(const fob::ledger::v1::GetBalancesRequest& req);
@@ -98,6 +262,15 @@ class LedgerUseCases {
   void SetHedgeEntriesRepo(std::shared_ptr<HedgeLedgerEntriesRepositoryPort> repo) {
     hedge_entries_repo_ = std::move(repo);
   }
+  // F-18 v2 (T-F18-204/205, ADR-061 §7): PG-репозиторий позиций CE-агентов.
+  // Optional — nullptr оставляет write-through кэш (agent_positions_)
+  // единственным хранилищем (in-memory dev-режим, как и остальные ledger
+  // repos). При установке репозитория кэш СРАЗУ синхронно перечитывается из
+  // PG (LoadAgentPositionsFromRepo) — позиция агента переживает рестарт.
+  void SetAgentPositionRepo(std::shared_ptr<AgentPositionRepositoryPort> repo) {
+    agent_position_repo_ = std::move(repo);
+    LoadAgentPositionsFromRepo();
+  }
   // F-12 / IN-009 DoD-6 (PR-F12-3c): sink that accumulates hedge_pnl/fee
   // deltas into PG `hedgeflows` row. Optional — nullptr is valid.
   void SetHedgeflowPnlSink(std::shared_ptr<HedgeflowPnlSinkPort> sink) {
@@ -110,6 +283,12 @@ class LedgerUseCases {
   void SetPositionsUpdatePublisher(std::shared_ptr<PositionsUpdatePublisherPort> publisher) {
     positions_update_publisher_ = std::move(publisher);
   }
+  // Вариант 2 (ADR-061 §4): продюсер топика ce.agent.band.breach (не владеет).
+  // При null — событие пробоя не эмитится (band-эмиссия отключена).
+  void SetBandBreachProducer(cex::common::KafkaProducer* p) { band_breach_producer_ = p; }
+  // Живая настройка порога band от комиссии внешних бирж (F-18): DSN к
+  // f05a_clearing_config (ce_taker_fee_bps, ce_band_fee_k). Пусто ⇒ env/дефолты.
+  void SetPostgresDsn(std::string dsn) { postgres_dsn_ = std::move(dsn); }
   void SeedBalance(const std::string& user_id,
                    const std::string& currency,
                    const cex::common::Decimal& available,
@@ -165,7 +344,95 @@ class LedgerUseCases {
   fob::ledger::v1::GetHedgePnLResponse GetHedgePnL(
       const fob::ledger::v1::GetHedgePnLRequest& req);
 
+  // F-18 (ADR-054 §10): валютный вектор биржи (house-аккаунт + Σ venue_balances +
+  // Σ клиентских обязательств) — вход для расчёта NOP в risk и для UI.
+  static constexpr const char* kHouseAccountId = "__ce_house__";
+  fob::ledger::v1::GetExchangeBalancesResponse GetExchangeBalances(
+      const fob::ledger::v1::GetExchangeBalancesRequest& req);
+
+  // ADR-057 уровень узла: разрез позиции по (asset, venue) — сколько актива лежит на
+  // каждой внешней бирже + узел CE-house (__ce_house__, собственный капитал). Для
+  // визуальной проверки корректности позиции. qty из venue_balances_/house.
+  fob::ledger::v1::GetNodeBalancesResponse GetNodeBalances(
+      const fob::ledger::v1::GetNodeBalancesRequest& req);
+  // Seed остатка house-аккаунта при старте (idempotent — только если пусто).
+  void SeedHouseBalance(const std::string& currency, const cex::common::Decimal& amount);
+
+  // F-18 §11: история позиции биржи по клирингам (старая → Δ → новая).
+  fob::ledger::v1::GetExchangeNopHistoryResponse
+  GetExchangeNopHistory(const fob::ledger::v1::GetExchangeNopHistoryRequest& req);
+
+  // F-18 §11 (variant A): применить Δpos от вектор-клиринга (из ce.position.delta)
+  // к house-остаткам и снять снапшот NOP старая→Δ→новая по batch_id (идемпотентно).
+  //
+  // F-18 v2 (T-F18-202, ADR-061): агентские дельты — ОТДЕЛЬНЫЙ параметр (не
+  // смешивается с node_deltas), т.к. это разные пути: node_deltas двигают
+  // ce_committed_ (per-asset, legacy — БЕЗ изменений, обратная совместимость),
+  // agent_deltas накапливают per-agent знаковую позицию c←c+f (agent_positions_
+  // + PG, если репозиторий wired). Данные о том, какой путь активен, приходят
+  // от вызывающей стороны (kafka_consumers.cpp: agent_id непуст → agent-путь) —
+  // без отдельного флага здесь. Единая идемпотентность по batch_id на ВЕСЬ
+  // вызов (pos_delta_applied_) — оба пути одного батча гвардируются один раз.
+  void ApplyPositionDelta(
+      const std::string& batch_id, long long ts_ms,
+      const std::vector<std::pair<std::string, cex::common::Decimal>>& node_deltas,
+      const std::vector<AgentDelta>& agent_deltas = {});
+
+  // F-18 v2 (T-F18-203, ADR-061 §7): текущие знаковые позиции CE-агентов.
+  // Читает write-through кэш (agent_positions_) под mu_ — без похода в PG на
+  // каждый RPC. Фильтры (agent_ids/assets/venues) опциональны; пусто = все.
+  fob::ledger::v1::GetAgentPositionsResponse GetAgentPositions(
+      const fob::ledger::v1::GetAgentPositionsRequest& req);
+
+  // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): per-agent дельты
+  // ОДНОГО такта клиринга (batch_id) — ДО → Δ → ПОСЛЕ. В отличие от
+  // GetAgentPositions (текущая накопленная позиция без привязки к такту),
+  // проецирует ring-историю agent_delta_history_ по batch_id. Пустой список,
+  // если такт не эмитировал agent_deltas (клиринг без потока) — честно, без
+  // фейков.
+  fob::ledger::v1::GetAgentPositionDeltasResponse GetAgentPositionDeltas(
+      const fob::ledger::v1::GetAgentPositionDeltasRequest& req);
+
+  // F-18 v2 (кнопка «сброс позиций» на вкладке Clearing): обнуляет c_j и in_flight
+  // агентов (agent_ids пусто ⇒ ВСЕ) и очищает band-хеджи. Реальный сброс состояния
+  // владельца (in-memory кэш + PG-репозиторий, если подключён), чтобы наблюдать
+  // расхождение позиций с нуля. Возвращает число сброшенных агентов.
+  fob::ledger::v1::ResetAgentPositionsResponse ResetAgentPositions(
+      const fob::ledger::v1::ResetAgentPositionsRequest& req);
+
+  // ADR-087 (CALC-CE-AGENT-PNL): заработок агентов — внутренняя биржа, внешние биржи, итого; R, U и R+U в USDT.
+  // Read-only: книги и суммы под mu_ только читаются, состояние не меняется.
+  fob::ledger::v1::GetAgentPnlResponse GetAgentPnl(const fob::ledger::v1::GetAgentPnlRequest& req);
+
+  // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): ЧИСТАЯ математика закрытого
+  // учёта — вынесена из состояния для юнит-тестируемости. mtm = Σ_ccy nop·mid
+  // (валюты без мида пропускаются, см. skipped); wc_max/wc_nodes — узловой баланс
+  // по node_sum; cif_sum = Σ|c+in_flight|. baseline/pnl считает вызывающий.
+  struct SystemInvariants {
+    cex::common::Decimal mtm{0, 0};
+    int valued{0};
+    int skipped{0};
+    cex::common::Decimal wc_max{0, 0};
+    int wc_nodes{0};
+    cex::common::Decimal cif_sum{0, 0};
+  };
+  static SystemInvariants ComputeSystemInvariants(
+      const std::map<std::string, cex::common::Decimal>& nop,
+      const std::map<std::string, cex::common::Decimal>& mid_usd,
+      const std::map<std::pair<std::string, std::string>, cex::common::Decimal>& node_sum,
+      const std::vector<cex::common::Decimal>& cif_values,
+      double wc_eps);
+
  private:
+  // F-18 §11: NOP биржи по валюте (assets − client) — под удержанным mu_.
+  std::map<std::string, cex::common::Decimal> ComputeExchangeNopLocked() const;
+  // Снапшот позиции по одному клирингу.
+  struct BatchNopSnap {
+    std::string batch_id;
+    long long ts_ms{0};
+    std::map<std::string, std::pair<cex::common::Decimal, cex::common::Decimal>> nop;  // ccy -> {before, after}
+  };
+
   struct Balance {
     cex::common::Decimal available;
     cex::common::Decimal reserved;
@@ -195,10 +462,421 @@ class LedgerUseCases {
   using HedgePnlMap = std::unordered_map<std::string, std::vector<HedgePnlRecord>>; // venue -> records
 
   mutable std::mutex mu_;
+  // F-18: живая настройка порога band от комиссии. DSN + TTL-кэш (~1с), чтобы не
+  // бить PG на каждый пробой. Возвращает {fee_bps, k_band} (см. LoadBandFeeConfig).
+  std::string postgres_dsn_;
+  std::mutex band_cfg_mu_;
+  double band_cfg_clim_bps_ = 0.0;   // мейкер-комиссия (пассивная зона), bps
+  double band_cfg_cmkt_bps_ = 0.0;   // тейкер+½спред (агрессивная зона), bps
+  double band_cfg_k_ = 0.0;          // 1/Γ — калибровка порога (k-USDT на bps)
+  double band_cfg_gamma_ = 1.0;      // риск-неприятие γ (Γ=γσ²τ, ADR-066 D1)
+  double band_cfg_q_floor_ = 5.0;    // пол порога (k-USDT)
+  bool band_cfg_gamma_mode_ = false; // vol-масштаб порога вкл (ADR-066 D1)
+  double band_cfg_sigma_ref_ = 0.0005;    // σ-якорь VolScaleFactor
+  double band_cfg_vr_min_ = 0.1;     // клэмп vol-масштаба (мин)
+  double band_cfg_vr_max_ = 10.0;    // клэмп vol-масштаба (макс)
+  bool band_cfg_manual_ = false;      // ADR-081: ручная ширина полосы включена и допустима
+  double band_cfg_manual_lim_ = 0.0;  // Z̄lim вручную (k-USDT)
+  double band_cfg_manual_mkt_ = 0.0;  // Z̄mkt вручную (k-USDT)
+  double band_cfg_arb_scale_ = 1.0;   // множитель порога арбитражёров (ADR-081)
+  bool band_cfg_manual_bad_logged_ = false;  // предупреждение о недопустимых значениях уже выдано
+  std::chrono::steady_clock::time_point band_cfg_last_{};
+  bool band_cfg_have_ = false;
+
+  // F-18 D1+#7 (T-F18-703): кэш σ per symbol из ce_asset_volatility (TTL ~1с).
+  struct SigmaEntry {
+    double sigma = 0.0;
+    long long samples = 0;
+    long long age_ms = 0;  // возраст строки на момент чтения (staleness)
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex sigma_mu_;
+  std::map<std::string, SigmaEntry> sigma_cache_;
+
+  // ADR-088: настройки модели порогов хеджа (окружение ledger, TTL 1 с) и кэш решений по округлённым входам. Всё под mu_.
+  struct HedgeModelCfg {
+    int mode{0};                          // ЭФФЕКТИВНЫЙ режим: 0 off, 1 shadow, 2 on = min(потолок окружения, значение PG, предохранитель)
+    int mode_ceiling{0};                  // потолок окружения CE_HMODEL_MODE (0/1/2)
+    double smooth_tau_ms{900000.0};       // постоянная времени сглаживания порогов, мс (0 — без сглаживания); CE_HMODEL_SMOOTH_TAU_MS
+    double smooth_gap_ms{3600000.0};      // пропуск расчёта дольше — сглаживание начинается с сырого значения (4 τ, не меньше 30 мин)
+    double fuse_pos_k{54.0};              // автопредохранитель: нижний предел экспозиции |c+in_flight|, тыс. USDT (0 — выключен); CE_HMODEL_FUSE_POS_K
+    double fuse_mult{1.5};                // предел агента = max(fuse_pos_k, fuse_mult·(худшая позиция по самой модели)); 0 — только fuse_pos_k; CE_HMODEL_FUSE_MULT
+    long long fuse_hold_ms{600000};       // сколько превышение должно держаться подряд до срабатывания; CE_HMODEL_FUSE_HOLD_MS
+    domain::hedge_model::ModelSettings s; // γ, s/2, a, κ, θ, границы режимов
+    double sz_default{2.0};               // шум потока переводчика, пока оценка не накоплена, тыс. USDT/√мин
+    double sz_link_default{2.0};          // то же для связки
+    double sz_floor{0.05};                // нижняя граница оценки шума
+    long long est_min_minutes{60};        // минут оценки до её использования
+    long long est_gap_reset_min{30};      // пропуск дольше — оценка начинается заново
+    double est_lambda{1.0 / 60.0};        // вес новой минуты в экспоненциальном среднем
+    double transfer_k_default{2.0};       // плата сети за перевод, USDT (общая; по активу — CE_HMODEL_TRANSFER_K_USDT_<АКТИВ>)
+    double transfer_pct_bps{0.0};         // процент от суммы перевода, bps
+    double basis_sigma_bps{0.7};          // волатильность базиса, bps за √мин
+    double capital_pct{10.0};             // стоимость капитала, % годовых
+    double transfer_min{0.0};             // время перевода, мин
+    double cap{1000.0};                   // верхняя граница порога, тыс. USDT (как у ручной ширины)
+    double sigma_scale{1.0};              // поправка волатильности (объединённый поток бирж завышает σ, OQ-F18v2-24)
+    double sigma_stale_ms{120000.0};
+    long long sigma_min_samples{20};
+    int max_solves_per_tact{4};           // сколько новых численных расчётов за такт (остальные ждут следующего)
+    double mu_z{2.0};                     // отсечка шума оценки дрейфа: берётся |μ̂| − mu_z·SE (0 — без отсечки)
+    long long budget_hold_ms{300000};     // при исчерпанном бюджете расчётов держим прежние пороги не дольше этого срока (иначе on откатился бы на старое правило)
+    std::map<std::string, double> half_spread_bps;   // полуспред по книге: ключ "площадка|СИМВОЛ" ("*|СИМВОЛ" — любая площадка), bps
+    std::uint32_t hash{0};                // версия набора настроек (в историю)
+  };
+  HedgeModelCfg hmodel_cfg_;
+  std::chrono::steady_clock::time_point hmodel_cfg_last_{};
+  bool hmodel_cfg_have_{false};
+  bool hmodel_mode_bad_logged_{false};
+  HedgeModePgSource hmodel_pg_source_;
+  HedgeFuseSink hmodel_fuse_sink_;
+  int hmodel_pg_mode_{-1};                                        // последнее прочитанное значение режима из PG (−1 — не задан / ошибка)
+  std::chrono::steady_clock::time_point hmodel_pg_last_{};
+  bool hmodel_pg_have_{false};
+  bool hmodel_fuse_latched_{false};                               // предохранитель сработал: режим принудительно shadow, пока PG не перестанет говорить on
+  bool hmodel_fuse_write_pending_{false};                         // запись shadow в PG не удалась — повторять
+  bool hmodel_pg_unset_logged_{false};
+  bool hmodel_pg_armed_logged_{false};                            // предупреждение «PG = on при потолке окружения ниже» выдано
+  std::chrono::steady_clock::time_point hmodel_fuse_try_last_{};  // последняя попытка записи срабатывания в PG (повтор не чаще fuse_retry)
+  std::string hmodel_fuse_agent_;                                 // кто сработал
+  double hmodel_fuse_exposure_k_{0.0};
+  double hmodel_fuse_limit_k_{0.0};
+  long long hmodel_fuse_over_ms_{0};
+  int ReadHedgeModePgModeLocked();                                // 0/1/2/−1; TTL 5 с
+  bool WriteHedgeFuseTripToPg(const std::string& agent, double exposure_k, double limit_k, long long over_ms);
+  std::unordered_map<std::string, domain::hedge_model::TranslatorBand> hmodel_tr_cache_;
+  std::unordered_map<std::string, domain::hedge_model::LinkBand> hmodel_lk_cache_;
+  int hmodel_solves_left_{0};
+  SigmaSource sigma_source_;
+  const HedgeModelCfg& LoadHedgeModelCfgLocked();
+
+  // ADR-082 (шаг 2): кэш оборота ленты ν по (venue|symbol) из venue_liquidity_stats (writer — venues), TTL 5 с.
+  struct TapeEntry {
+    double nu_quote_per_s = 0.0;
+    long long samples = 0;
+    long long age_ms = 0;  // возраст измерения на момент чтения
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex tape_mu_;
+  std::map<std::string, TapeEntry> tape_cache_;
+  TapeSource tape_source_;
+
+  // F-18 #7 scoped (T-F18-L03): кэш глубины стакана depth per (asset,venue) для
+  // ликвидностной оси band (паттерн SigmaEntry; depth — конфиг, без samples-guard).
+  struct DepthEntry {
+    double depth = 0.0;
+    long long age_ms = 0;  // возраст строки на момент чтения (staleness)
+    std::chrono::steady_clock::time_point fetched{};
+    bool have = false;
+  };
+  std::mutex depth_mu_;
+  std::map<std::string, DepthEntry> depth_cache_;
+  std::map<std::string, DepthEntry> depth_total_cache_;  // ADR-069: Λ per asset (TTL ~1с)
+
+  // T-F18-706: переиспользуемое соединение для poll'ов LoadBandFeeConfig/LoadAssetSigma
+  // (раньше открывали свежее pqxx::connection на каждый cache-miss под mu_ батча —
+  // паттерн T-F18-601). poll_conn() (пере)создаёт под poll_conn_mu_; caller держит
+  // мьютекс на время запроса и reset'ит соединение при broken_connection.
+#ifdef CEX_LEDGER_HAS_LIBPQXX
+  std::mutex poll_conn_mu_;
+  std::unique_ptr<pqxx::connection> poll_conn_;
+  pqxx::connection& poll_conn();  // требует захваченный poll_conn_mu_
+#endif
   std::unordered_map<std::string, UserBalances> balances_; // user -> currency -> balance
   std::unordered_map<std::string, UserPositions> positions_; // user -> instrument -> position
   std::unordered_map<std::string, Reservation> reservations_; // reservation_id -> reservation
   VenueMap venue_balances_; // venue -> currency -> balance
+  std::deque<BatchNopSnap> nop_history_; // F-18 §11: последние N клирингов (old/Δ/new)
+  std::unordered_set<std::string> pos_delta_applied_; // F-18 §11: idempotency по batch_id
+  // ADR-057 §money-path (поправка 3): ce.position.delta — это ПЛАН, копится в committed
+  // (in-flight), НЕ в house-факт. house двигают только подтверждения (execution.venue).
+  // Стоячая позиция (GetExchangeBalances) = факт; снапшот Clearing = факт + committed (план).
+  std::map<std::string, cex::common::Decimal> ce_committed_;
+  // F-18 v2 (T-F18-202, ADR-061 §7): write-through кэш позиций CE-агентов,
+  // ключ (agent_id, asset, venue). Источник истины при wired
+  // agent_position_repo_ — PG; кэш держится синхронным на каждый ApplyDelta
+  // и перечитывается целиком при SetAgentPositionRepo (рестарт-safe чтение).
+  // Без репозитория (dev/in-memory) кэш САМ источник истины, как остальные
+  // ledger-таблицы в этом режиме.
+  // ADR-088 (CALC-CE-HEDGE-THRESHOLD-MODEL): состояние модели порогов хеджа по агенту. Только память процесса, не персистится:
+  // после рестарта ledger расчёт и оценки потока начинаются заново (est_minutes = 0 ⇒ шум по умолчанию). Числа — double:
+  // пороги и оценки, не проводки; в Decimal они переводятся на границе (dec6) при применении и в ответе GetAgentPositions.
+  struct HedgeModelState {
+    std::string mode;                 // "" — модель не считалась; "shadow" | "on"
+    bool computed{false};             // пороги посчитаны (допустимые входы)
+    bool applied{false};              // режим on: пороги применены к заявке в последней проверке
+    bool maker_zone{false};
+    int regime{0};                    // 0 noise, 1 mixed, 2 drift
+    double b_m{0}, b_t{0};            // ЭФФЕКТИВНЫЕ пороги модели: после ограничений (пол, потолок) и сглаживания; именно они идут в заявки (on), тыс. USDT
+    double b_m_raw{0}, b_t_raw{0};    // сырой расчёт этого такта (до сглаживания), тыс. USDT — для эксперта и истории
+    double transfer_big_raw{0}, transfer_small_raw{0};   // сырые B и b связки (до сглаживания)
+    bool sm_valid{false};             // сглаженные значения инициализированы
+    long long sm_ms{0};               // момент последнего шага сглаживания
+    long long fuse_over_since_ms{0};  // с какого момента экспозиция выше предела предохранителя подряд (0 — не выше)
+    long long fuse_last_ms{0};        // когда предохранитель в последний раз наблюдал агента (разрыв наблюдения сбрасывает отсчёт)
+    bool eligible{false};             // пороги модели могли бы вести этого агента (посчитаны, ручной ширины нет): предохранитель следит за ним и в shadow
+    double sz_est{0}, mu_est{0}, theta_est{0}, peclet{0};
+    double sigma_bps{0}, fee_maker_bps{0}, fee_taker_bps{0};
+    bool has_transfer{false};         // связка: посчитаны порог и цель перевода
+    double transfer_big{0}, transfer_small{0};   // B и b, тыс. USDT
+    long long est_minutes{0};
+    long long computed_at_ms{0};
+    long long last_ok_ms{0};          // когда пороги последний раз посчитаны успешно (для удержания при исчерпанном бюджете)
+    std::uint32_t params_hash{0};
+    std::string reason;               // почему не посчитано
+    // Оценка шума и дрейфа потока: минутные приращения позиции от клиринга (хедж-сделки, переводы и сброс в них не входят)
+    // и их экспоненциально взвешенные моменты с экспозицией x = c + in_flight: дрейф μ = m_y + θ·m_x, шум √Var(Δc + θ·x). CALC §3.6, ADR-088.
+    long long bucket_ms{0};
+    double bucket_acc{0};             // Σ приращений позиции от клиринга в текущей минуте, тыс. USDT
+    double bucket_x{0};               // экспозиция c + in_flight на начало текущей минуты, знаковая
+    bool bucket_x_set{false};
+    long long minutes{0};             // закрытых минут в оценке
+    double mx{0}, my{0}, vxx{0}, cxy{0}, vyy{0};
+  };
+
+  struct AgentPositionState {
+    std::string agent_kind;
+    cex::common::Decimal position{0, 0};   // c_j, ЗНАКОВАЯ
+    cex::common::Decimal in_flight{0, 0};  // committed (Э3+), знаковая
+    cex::common::Decimal last_price{0, 0}; // ЦЕНА ПАРЫ P(base)/P(quote) последней дельты (СО skew)
+    cex::common::Decimal base_price{0, 0}; // P(base) USDT (для объёма заявки)
+    cex::common::Decimal fair_price{0, 0}; // ADR-072: F_0 = цена пары ДО skew (граница прибыли); 0 ⇒ нет
+    cex::common::Decimal realized_vs_fair{0, 0}; // ADR-072 §C: накопл. заработок на внешних сделках vs F_0 (quote), SELL:(avg−F_0)·q / BUY:(F_0−avg)·q
+    // ЕДИНСТВЕННЫЙ источник порога (per-currency, vol/liq-масштаб) — вычислен в
+    // detect_and_emit_band_breach_locked и сохранён сюда; GetAgentPositions отдаёт
+    // их на фронт (BFF НЕ пересчитывает). k-USDT. 0 до первого расчёта.
+    cex::common::Decimal z_lim{0, 0};   // Z̄lim — порог входа в хедж (maker)
+    cex::common::Decimal z_mkt{0, 0};   // Z̄mkt — порог тейкер-сброса
+    std::string quote;                     // котируемая валюта пары (номинал ⇒ "USDT")
+    std::string last_batch_id;
+    long long updated_at_ms{0};
+    long long last_price_ms{0};      // t последней дельты с ценой (last_price/base_price): перепроверка остатка (ADR-082) не эмитит по устаревшей цене
+    long long last_band_emit_ms{0};  // t последнего band-пробоя — cooldown против флуда эмиссии
+    int band_fail_streak{0};         // заявок подряд, завершённых без единого исполнения (растит паузу, сбрасывается любым исполнением)
+    cex::common::Decimal transfer_moved{0, 0};  // ADR-084: Σ сдвигов позиции переводом (приход +X, уход −X), тыс. USDT; монитор W·c: (W·c)_n + moved_n = 0
+    // ADR-087 (CALC-CE-AGENT-PNL): число хедж-исполнений ноги с запуска ledger.
+    std::uint32_t ext_fills{0};
+    HedgeModelState hmodel;   // ADR-088
+  };
+  using AgentPositionKey = std::tuple<std::string, std::string, std::string>;  // agent_id, asset, venue
+  std::map<AgentPositionKey, AgentPositionState> agent_positions_;
+  // ADR-088: оценка шума и дрейфа потока по минутным приращениям позиции от клиринга. exposure_before — c + in_flight ДО этой дельты.
+  void hmodel_flow_observe_locked(AgentPositionState& st, double delta_k, double exposure_before_k, long long ts_ms, const HedgeModelCfg& hc);
+  // ADR-088: расчёт и сохранение модельных порогов агента в st.hmodel (режимы shadow и on). Не меняет позицию и заявки.
+  void hmodel_update_locked(const AgentPositionKey& key, AgentPositionState& st, const HedgeModelCfg& hc, long long ts_ms);
+  // ADR-088, условие 2: автопредохранитель режима on. Раз за такт обходит ВСЕХ агентов, которых ведёт модель (не только получивших дельту):
+  // экспозиция |c+in_flight| выше предела агента подряд дольше срока ⇒ shadow, запись в PG и аудит.
+  void hmodel_fuse_sweep_locked(const HedgeModelCfg& hc, long long ts_ms);
+  // ADR-087 (модель C′): книга агента по справедливой цене — по одной на агента (у связки обе ноги в одной книге). Под mu_.
+  struct AgentBook {
+    FairBook book;
+    std::string kind;            // "translator" | "arbitrageur"
+    std::string quote;           // валюта котировки значений книги ("" — не известна до первой сделки после рестарта)
+    std::string last_batch_id;   // последний учтённый такт (повторная доставка не удваивает книгу)
+    long long since_ms{0};       // начало накопления
+  };
+  std::map<std::string, AgentBook> agent_books_;
+  // Справедливая цена актива в USDT (F_0 пары, до сдвига якоря) по последнему такту, где её прислал переводчик этого актива.
+  // Нужна связке: у неё собственной F_0 нет, а её сделки и хеджи оцениваются по справедливой цене пары. Под mu_.
+  struct FairUsdt {
+    cex::common::Decimal price{0, 0};
+    long long ms{0};
+  };
+  std::map<std::string, FairUsdt> fair_usdt_by_asset_;
+  // Справедливая цена пары в валюте котировки ("актив|котировка") по последней дельте ЛЮБОГО переводчика этой пары: F_0 общая для пары, поэтому
+  // метка U и цена хеджа переводчика не устаревают вместе с его собственным потоком (GTC-хедж исполняется спустя минуты, пока поток в мёртвой зоне).
+  std::map<std::string, FairUsdt> pair_fair_;
+  // Свежесть справедливой цены: CE_AGENT_PNL_FAIR_MAX_AGE_MS (деф. 30000, ≤ 0 — без ограничения). Протухшая цена не используется для оценки
+  // сделок и остатка связки: сумма выгод перестала бы быть нулевой, а U показывал бы остаток по давней цене.
+  static bool FairFresh(long long fair_ms, long long now_ms);
+  cex::common::Decimal pair_fair_locked(const std::string& asset, const std::string& quote, long long now_ms) const;  // Диагностика нулевой суммы внутренней биржи: за такт Σ (F − p)·dL по всем сделкам обязана быть нулём (у сделки покупатель и
+  // продавец дают противоположные величины). Нарушения считаются, в журнал пишутся не каждое. Под mu_.
+  std::uint64_t int_zero_sum_violations_{0};
+  // Учёт заработка готов, когда книги загружены из репозитория (или репозитория нет). Пока нет — книги не обновляются и не пишутся
+  // (иначе пересев по текущей позиции перезаписал бы сохранённые), GetAgentPnl отдаёт «нет данных»; повторная загрузка раз в
+  // CE_AGENT_PNL_RETRY_MS (деф. 30 с). Под mu_.
+  bool pnl_ready_{true};
+  long long pnl_retry_ms_{0};
+  void retry_pnl_load_locked(long long ts_ms);
+  void load_books_locked(const std::vector<AgentPnlBookRow>& rows);  // заменить книги состоянием из репозитория
+  // Сумма и оборот выгоды внутренней биржи за такт в USDT (диагностика нулевой суммы).
+  struct TactEdge {
+    cex::common::Decimal sum{0, 0};
+    cex::common::Decimal gross{0, 0};
+    std::uint32_t skipped{0};   // ноги, не вошедшие в книгу (нет цен): сумма выгод за такт тогда неполная
+    std::uint32_t no_fair{0};   // ноги без справедливой цены (F_0 := цена сделки, выгода 0)
+  };
+  // Вход сделки внутренней биржи по дельте клиринга (ApplyPositionDelta); помечает книгу изменённой. tact_fair — F_0 активов этого
+  // такта в USDT (из дельт переводчиков), tact_edge — накопитель диагностики.
+  void book_on_delta_locked(const AgentDelta& ad, const AgentPositionState& st, const cex::common::Decimal& c_total_before,
+                            const std::string& batch_id, long long ts_ms, const std::map<std::string, cex::common::Decimal>& tact_fair,
+                            std::set<std::string>& seen_this_call, std::set<std::string>& dirty, TactEdge& tact_edge);
+  // F_0 актива в USDT для оценки сделок и хеджей связки: из того же такта, иначе последняя известная; 0 — не известна.
+  cex::common::Decimal link_fair_usdt_locked(const std::string& asset, const std::map<std::string, cex::common::Decimal>* tact_fair,
+                                             long long now_ms) const;
+  // Записать изменённые книги одним пакетом (если подключён репозиторий).
+  void save_dirty_books_locked(const std::set<std::string>& dirty);
+  // ADR-082 (шаг 2): агенты, у которых потолок по ленте оставил остаток над порогом. Проверка пробоя вызывается только по дельтам
+  // позиции агента, поэтому без перепроверки остаток мог бы зависнуть (агент без новых дельт). ApplyPositionDelta перепроверяет
+  // этих агентов на каждом такте; запись снимается, когда остаток ушёл или позиция вернулась в полосу. Под mu_.
+  std::set<AgentPositionKey> cap_pending_;
+  // Сумма находящихся в полёте заявок (|in_flight|, тыс. USDT) по бирже и паре (котируемая; пусто = нумерарий). Под mu_.
+  double LiveInFlightK(const std::string& asset, const std::string& venue, const std::string& quote) const;
+
+  // F-18 remediation этап 1 (CALC-CE-SYSTEM-PNL): диагностика «закрытого учёта» —
+  // P&L системы = MTM реальных остатков (venue_balances_+house) минус baseline K_0,
+  // инвариант W·c=0 (Σ позиций агентов по узлу), c+in_flight=I−F. ТОЛЬКО structured
+  // log, бизнес-поведение не трогает. Вызывается раз в CE_SYSTEM_PNL_LOG_EVERY батчей
+  // из ApplyPositionDelta под mu_. baseline фиксируется на первом замере и на сбросе.
+  void ComputeAndLogSystemInvariantsLocked();
+  std::uint64_t system_inv_batch_counter_{0};
+  cex::common::Decimal system_mtm_baseline_{0, 0};  // K_0 (USDT), MTM на старте/сбросе
+  bool system_mtm_baseline_set_{false};
+  // F-18 v2 · Э3/Э4 (ADR-061 §4): учёт хедж-заявок агента «в пути». Ключ —
+  // hedge_flow_id ("ce|band|<agent_id>|<asset>|<venue>"). Позволяет: (1) на
+  // эмиссии пометить in_flight и не слать избыток повторно; (2) по исполнению
+  // уменьшать позицию и in_flight на фактический объём; (3) по терминальному
+  // статусу освободить неисполненный остаток in_flight (позицию не трогая).
+  struct AgentBandHedge {
+    AgentPositionKey key;
+    cex::common::Decimal sent_value{0, 0};    // отправлено, k-USDT, ЗНАКОВАЯ (знак позиции)
+    cex::common::Decimal filled_value{0, 0};  // исполнено, k-USDT, ЗНАКОВАЯ
+    // F-18 #6 (T-F18-804): РАСЧЁТНАЯ комиссия зоны, зафиксированная на ЭМИССИИ (не
+    // real venue fee — та всегда taker). maker=пассивный лимит (clim), иначе тейкер
+    // (cmkt). fee_bps_snapshot — bps на момент эмиссии (устраняет гонку live-реконфига
+    // clim/cmkt между эмиссией и fill). band_fee_estimated — накопленная оценка (quote).
+    bool maker{false};
+    cex::common::Decimal fee_bps_snapshot{0, 0};
+    cex::common::Decimal band_fee_estimated{0, 0};
+    // F-18 #8 (ADR-068, observation-only): признание прибыли по факту (§A8.2).
+    // house_realized_pnl — накопленная прибыль дома к МАРКЕ (mid клиринга, решение
+    // владельца): Σ fq·(марка−px_факт)/1000·sgn. plan_fact_gap — накопленный разрыв
+    // план/факт (качество исполнения): Σ fq·(марка−px_факт)/1000.
+    // МАРКА = st.last_price (mid клиринга, цена пары последней CE-дельты).
+    // ЕДИНИЦЫ: k-USDT ТОЛЬКО для quote==нумерарий (USDT). Для кросс-пар (quote!=USDT)
+    // признание ПРОПУСКАЕТСЯ (WARN) — mark/px в валюте пары, не USDT (см. apply_agent_
+    // band_report_locked, память ledger-band-fill-crosspair-value). Конверсия — addendum ADR-068.
+    // ОТДЕЛЬНЫ от band_fee_estimated и от calculate_hedge_pnl. sgn провизорный (знак
+    // сокращаемой позиции) — открытый вопрос ADR-068; за observation-only баланс не двигаем.
+    cex::common::Decimal house_realized_pnl{0, 0};
+    cex::common::Decimal plan_fact_gap{0, 0};
+  };
+  std::map<std::string, AgentBandHedge> band_hedges_;
+  // ADR-084: очередь смоделированных переводов связки. Остатки бирж и очередь живут в памяти ledger и обнуляются вместе при перезапуске.
+  struct PendingTransfer {
+    std::string transfer_id, agent_id, asset, from_venue, to_venue;
+    cex::common::Decimal qty{0, 0};      // штуки актива, уходят с источника
+    cex::common::Decimal fee_qty{0, 0};  // удержанная плата (штуки), приход = qty − fee_qty
+    cex::common::Decimal x_k{0, 0};      // сумма перевода, тыс. USDT (для связки; 0 у прямой заявки ApplyNodeTransfer)
+    std::uint64_t due_tact{0};           // исполнить, когда tact_seq_ достиг этого значения
+    long long queued_ms{0};
+  };
+  std::deque<PendingTransfer> pending_transfers_;
+  std::unordered_set<std::string> transfer_ids_seen_;   // идемпотентность по transfer_id (ограничено, как pos_delta_applied_)
+  std::uint64_t tact_seq_{0};                            // номер такта клиринга (+1 на каждый новый batch_id)
+  std::map<std::string, double> link_parity_residual_;   // "agent|asset" → Σ r (штуки), диагностика остатка паритета (ADR-083 п.1)
+  std::string boot_id_ = cex::common::uuid_v4();         // идентификатор запуска: остатки бирж в памяти обнуляются при перезапуске
+  TransferResult queue_transfer_locked(const PendingTransfer& t_in);
+  void settle_due_transfers_locked(long long ts_ms);
+  // Порог перевода связки (тыс. USDT) по текущей конфигурации; записывает его в z_lim/z_mkt позиции для отображения.
+  double link_transfer_threshold_locked(const std::string& asset, AgentPositionState& st);
+  // Если нога назначения связки вышла за порог — поставить перевод в очередь и сдвинуть обе ноги к нулю на X.
+  void maybe_queue_link_transfer_locked(const AgentPositionKey& key, const std::string& batch_id, long long ts_ms);
+  // Вариант 2 (2026-09-17): продюсер топика ce.agent.band.breach. Не владеет.
+  // При null событие пробоя не эмитится (band выключен / нет продюсера).
+  cex::common::KafkaProducer* band_breach_producer_{nullptr};
+  // Вариант 2: детект пробоя полосы в момент применения дельты (позиция устоялась).
+  // Для переводчика с |c|−|in_flight| > q: помечает in_flight += избыток (guard от
+  // переэмиссии) и эмитит AgentBandBreach (risk строит заявку в паре). Вызывается
+  // под mu_ из ApplyPositionDelta для КАЖДОГО затронутого агента.
+  // Утечка in_flight: отправленное в заявки хранится в БД, а карта живых заявок band_hedges_ — только в памяти. После перезапуска
+  // ledger (и при потерянных отчётах) терминального отчёта по такой заявке не будет, и in_flight остаётся навсегда (T_SOL_kraken:
+  // 0,55 тыс. USDT с 19 октября). Осиротевшим считается in_flight без живой заявки агента, если за этот процесс эмиссии не было
+  // (last_band_emit_ms == 0) либо с последней эмиссии прошло больше CE_BAND_ORPHAN_INFLIGHT_MS (по умолчанию 300000; 0 — выкл.).
+  // Такой остаток возвращается в позицию (как неисполненный остаток по таймауту, A7) и снова хеджируется. Требует захваченный mu_.
+  bool has_active_band_hedge_locked(const AgentPositionKey& key) const;
+  void reclaim_orphan_in_flight_locked(const AgentPositionKey& key, AgentPositionState& st, long long ts_ms, const char* reason);
+
+  void detect_and_emit_band_breach_locked(const AgentPositionKey& key,
+                                          AgentPositionState& st,
+                                          const std::string& batch_id,
+                                          long long ts_ms);
+  // F-18: трёхзонное правило хеджа от комиссии (Кривые §6.4). Возвращает
+  // {clim_bps, cmkt_bps, k_band}: clim=мейкер (пассив), cmkt=тейкер+½спред (агрессив),
+  // k_band=1/Γ. Пороги Z̄lim=k_band·clim·rt, Z̄mkt=k_band·cmkt·rt (ADR-069: rt=1 на ногу).
+  // Из f05a_clearing_config (TTL-кэш ~1с; при отсутствии DSN/колонок — env/дефолты).
+  // Фаза 2 (наведение порядка): ВСЕ ключевые ручки порога — из f05a_clearing_config
+  // (одно место), env — fallback. q_floor (пол), gamma_mode (vol-масштаб вкл),
+  // sigma_ref/vol_ratio_min/max (параметры VolScaleFactor, ADR-066).
+  struct BandFeeCfg {
+    double clim_bps; double cmkt_bps; double k_band; double gamma;
+    double q_floor; bool gamma_mode; double sigma_ref; double vol_ratio_min; double vol_ratio_max;
+    // ADR-081: ручная ширина полосы (manual=true только при допустимых значениях, см. ResolveManualBand)
+    bool manual; double manual_q_lim; double manual_q_mkt;
+    // ADR-081: множитель порога арбитражёров (1 — без изменения); у переводчиков не применяется
+    double arb_scale;
+  };
+  BandFeeCfg LoadBandFeeConfig();
+
+  // F-18 D1+#7 (T-F18-703): σ волатильности символа из ce_asset_volatility (writer —
+  // market_data, T-F18-702). Возвращает true + *out_sigma/*out_samples/*out_age_ms при
+  // наличии строки. TTL-кэш ~1с per symbol (как band_cfg). Пустой DSN/нет строки → false.
+  bool LoadAssetSigma(const std::string& symbol, double* out_sigma,
+                      long long* out_samples, long long* out_age_ms);
+  // ADR-082 (шаг 2): оборот ленты ν биржи по паре из venue_liquidity_stats (writer — venues). Зеркало LoadAssetSigma: TTL-кэш,
+  // переиспользуемое соединение; staleness и минимум чтений проверяет вызывающий. Нет строки / пустой DSN / ошибка PG ⇒ false
+  // (ограничения размера нет). Если задан tape_source_, берёт данные из него.
+  bool LoadVenueTape(const std::string& venue, const std::string& symbol, double* out_nu_quote_per_s,
+                     long long* out_samples, long long* out_age_ms);
+  // F-18 #7 scoped (T-F18-L03): читает depth (α_e) из ce_asset_liquidity по (asset,venue)
+  // (writer — matching, T-F18-L02). Возвращает true + *out_depth/*out_age_ms при наличии
+  // строки. TTL-кэш ~1с per (asset|venue). Пустой DSN/нет строки → false (ledger → LiqScale=1.0).
+  bool LoadAssetDepth(const std::string& asset, const std::string& venue,
+                      double* out_depth, long long* out_age_ms);
+  // ADR-069: суммарная ликвидность актива по сети Λ = Σ_v depth(asset,v) из
+  // ce_asset_liquidity (все площадки актива). Для веса ноги арбитражёра
+  // ω_i = λ_i/Λ (IN-017 §6 / «Кривые» §5). true + *out_total при наличии строк;
+  // пустой DSN/нет строк → false (вызывающий → ω=1, регрессия). TTL-кэш ~1с per asset.
+  // stale_ms: строки старше порога В СУММУ НЕ входят (зеркало per-venue staleness-гарда
+  // LoadAssetDepth) — иначе зависшая площадка вечно раздувает Λ и занижает ω для живых.
+  bool LoadAssetDepthTotal(const std::string& asset, long long stale_ms, double* out_total);
+  // Регистрирует band-заявку в band_hedges_ по её intent_id (RememberExecutionIntent)
+  // для последующего дренажа по исполнению. in_flight НЕ трогает (уже помечен при
+  // пробое — detect_and_emit_band_breach_locked). Вызывается под mu_.
+  void register_band_hedge_locked(const fob::execution::v1::ExecutionIntent& intent);
+  // По band-report уменьшает position/in_flight на incr-исполнение и освобождает
+  // остаток in_flight по терминальному статусу. Вызывается под mu_ из
+  // apply_execution_report_locked. Возвращает true, если это band-заявка.
+  bool apply_agent_band_report_locked(const fob::execution::v1::ExecutionIntent& intent,
+                                      const fob::execution::v1::ExecutionReport& report,
+                                      const cex::common::Decimal& incr_filled_qty,
+                                      const cex::common::Decimal& average_price,
+                                      bool terminal);
+  // F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): ring-история
+  // per-agent дельт ПО ТАКТАМ клиринга (в отличие от agent_positions_ выше,
+  // которая хранит только ТЕКУЩУЮ накопленную позицию без привязки к такту).
+  // Один элемент = один batch_id, содержит ДО/Δ/ПОСЛЕ по каждой (agent_id,
+  // asset, venue), затронутой этим тактом. Пишется ТОЛЬКО когда agent_deltas
+  // этого вызова непуст (пустые такты не раздувают ring). Идемпотентность —
+  // общий guard pos_delta_applied_ на весь ApplyPositionDelta (см. там же).
+  struct AgentDeltaRecord {
+    std::string agent_id;
+    std::string agent_kind;
+    std::string asset;
+    std::string venue;
+    cex::common::Decimal position_before{0, 0};
+    cex::common::Decimal delta{0, 0};
+    cex::common::Decimal position_after{0, 0};
+  };
+  struct BatchAgentDeltaSnap {
+    std::string batch_id;
+    long long ts_ms{0};
+    std::vector<AgentDeltaRecord> records;
+  };
+  static constexpr size_t kAgentDeltaHistoryCap = 300;  // последние N тактов (FIFO)
+  std::deque<BatchAgentDeltaSnap> agent_delta_history_;
   HedgePnlMap hedge_pnl_records_; // venue -> list of hedge records
   std::unordered_map<std::string, cex::common::Decimal> hedge_pnl_summary_; // venue:currency -> total PnL
   std::unordered_map<std::string, fob::execution::v1::ExecutionIntent> execution_intents_; // intent_id -> plan
@@ -220,6 +898,8 @@ class LedgerUseCases {
   std::shared_ptr<HedgeLedgerEntriesRepositoryPort> hedge_entries_repo_;
   // F-12 / IN-009 DoD-6 (PR-F12-3c) — optional PG sink for hedge_pnl/fee.
   std::shared_ptr<HedgeflowPnlSinkPort> hedgeflow_pnl_sink_;
+  // F-18 v2 (T-F18-204/205) — optional PG repo for `ce_agent_position`.
+  std::shared_ptr<AgentPositionRepositoryPort> agent_position_repo_;
   // F-06 / F6-5 (T-F06-072, ADR-046) — optional positions.update publisher.
   std::shared_ptr<PositionsUpdatePublisherPort> positions_update_publisher_;
 
@@ -251,6 +931,12 @@ class LedgerUseCases {
       const cex::common::Decimal& qty);
 
   bool apply_execution_report_locked(const fob::execution::v1::ExecutionReport& report);
+
+  // F-18 v2 (T-F18-205): читает agent_position_repo_->GetPositions({},{},{})
+  // целиком и перезаписывает agent_positions_ под mu_. No-op без репозитория
+  // (nullptr) — вызывается из SetAgentPositionRepo(), поэтому вызов "пустого"
+  // репозитория безопасен и ничего не делает.
+  void LoadAgentPositionsFromRepo();
 };
 
 }  // namespace cex::ledger::app

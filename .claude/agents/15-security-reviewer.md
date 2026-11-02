@@ -1,10 +1,11 @@
 ---
 name: security-reviewer
-description: Use this agent to review authentication, authorization, secret handling, replay attack safety, audit trail completeness, money invariant violations, dangerous tool usage, KYC/AML implications, and operator control safety for cont_exchange_v2.0. Read-only — cannot Edit/Write.
+description: Reviews authentication, authorization, secrets, replay safety, audit trail, operator controls, KYC/AML implications. Use proactively when a change touches auth, permissions, secrets, operator actions (kill-switch, manual override), or audit logging (mandatory trigger in .claude/rules/agent-routing.md). Not for general code quality. Returns only exploitable or compliance-relevant findings with file:line.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 model: sonnet
 permissionMode: plan
+maxTurns: 30
 color: red
 ---
 

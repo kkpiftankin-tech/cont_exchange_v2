@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F12-03
+title: Partial Fill + Retry
 level: sea
+feature: F-12
+system-sequence: sequences/SEQ-UC-F12-03-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F12-03-error-scenarios-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F12-03. Partial Fill + Retry
 

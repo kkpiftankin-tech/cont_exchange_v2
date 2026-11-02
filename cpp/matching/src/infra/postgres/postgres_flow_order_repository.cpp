@@ -11,7 +11,7 @@
 //   Write-path: UpdateFilledVolumes(deltas, batch_time)
 //
 // Ключевые исторические фиксы (см. file header'ы decimal_conversion.cpp и
-// CLAUDE.md §15):
+// cpp/matching/CLAUDE.md):
 //   * PR-F02-002 — fix NUMERIC overflow при чтении p_low/p_high/q_max
 //     (NUMERIC(38,18) → trailing-zero strip в ParsePgNumeric).
 //   * PR-F02-005 — fix solver NaN для SELL заявок из PG: matching domain

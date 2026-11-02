@@ -60,12 +60,26 @@ void ClickHouseVectorSegmentStorage::EnsureSchema() {
     << "source_order_id String,"
     << "pair LowCardinality(String),"
     << "side LowCardinality(String),"
+    << "seg_index UInt32,"  // F-05A ADR-050: позиция сегмента в x (для x[i]↔segment)
     << "w_json String,"
     << "p_high Decimal128(18),"
     << "d_hl Decimal128(18),"
     << "q_rate Decimal128(18),"
     << "q_max Decimal128(18),"
     << "effective_price Decimal128(18),"
+    << "anchor Decimal128(18),"   // ADR-052: mid (двусторонний сегмент)
+    << "slope Decimal128(18),"    // ADR-052: наклон кривой m
+    << "q_min Decimal128(18),"    // ADR-052: x_min = −Q_bid
+    << "alpha_ext Decimal128(18)," // ADR-053 safe-translator диагностика
+    << "alpha_t Decimal128(18),"
+    << "beta_t Decimal128(18),"
+    << "theta Decimal128(18),"
+    << "translator_model LowCardinality(String),"
+    << "beta_tangent Decimal128(18),"   // §6.2 M1 диагностика (СЫРОЙ β_T)
+    << "beta_lsq Decimal128(18),"       // §6.2 M2
+    << "beta_profit Decimal128(18),"    // §6.2 M3
+    << "beta_minorant Decimal128(18),"  // §6.2 M4
+    << "selected_slope_method UInt8,"   // §6.2 выбранный для клиринга (1..4)
     << "event_time_ms Int64,"
     << "ingested_at DateTime DEFAULT now()"
     << ") ENGINE = ReplacingMergeTree(event_time_ms) "
@@ -76,6 +90,72 @@ void ClickHouseVectorSegmentStorage::EnsureSchema() {
     cex::common::log_json("WARN", "vector_flow_segments_history EnsureSchema failed",
                           {{"error", e.what()}});
   }
+  // F-05A ADR-050: миграция существующей таблицы (CREATE IF NOT EXISTS её не трогает).
+  try {
+    client_.Execute(::clickhouse::Query(
+        "ALTER TABLE " + database_ + "." + table_ +
+        " ADD COLUMN IF NOT EXISTS seg_index UInt32 AFTER side"));
+  } catch (const std::exception& e) {
+    cex::common::log_json("WARN", "vector_flow_segments_history add seg_index failed",
+                          {{"error", e.what()}});
+  }
+  // ADR-052: колонки двустороннего сегмента (миграция существующей таблицы).
+  for (const char* col : {"anchor Decimal128(18)", "slope Decimal128(18)",
+                          "q_min Decimal128(18)"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ +
+          " ADD COLUMN IF NOT EXISTS " + col + " AFTER effective_price"));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history add two-sided col failed",
+                            {{"error", e.what()}});
+    }
+  }
+  // ADR-053: колонки safe-translator (миграция существующей таблицы).
+  for (const char* col : {"alpha_ext Decimal128(18)", "alpha_t Decimal128(18)",
+                          "beta_t Decimal128(18)", "theta Decimal128(18)",
+                          "translator_model LowCardinality(String)"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ +
+          " ADD COLUMN IF NOT EXISTS " + col + " AFTER q_min"));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history add safe-translator col failed",
+                            {{"error", e.what()}});
+    }
+  }
+  // §6.2: колонки диагностики 4 способов наклона (миграция существующей таблицы).
+  for (const char* col : {"beta_tangent Decimal128(18)", "beta_lsq Decimal128(18)",
+                          "beta_profit Decimal128(18)", "beta_minorant Decimal128(18)",
+                          "selected_slope_method UInt8"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ +
+          " ADD COLUMN IF NOT EXISTS " + col + " AFTER translator_model"));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history add slope-methods col failed",
+                            {{"error", e.what()}});
+    }
+  }
+  // Perf+retention (2026-10-05): запрос кривой фильтрует (venue_id,pair) ORDER BY
+  // event_time, а ключ таблицы — (batch_id,segment_id) ⇒ скан. Проекция по
+  // (venue_id,pair,event_time_ms) делает его мгновенным; TTL 2д не даёт таблице расти
+  // (была 8.5M строк → скан кривой ~секунды, вкладка Clearing тормозила). Идемпотентно,
+  // best-effort; MATERIALIZE на существующей БД делается разово вручную (на свежей —
+  // проекция заполняется по мере вставки). ReplacingMergeTree+проекция требует rebuild-режима.
+  for (const char* stmt : {
+         "MODIFY SETTING deduplicate_merge_projection_mode='rebuild'",
+         "ADD PROJECTION IF NOT EXISTS proj_venue_pair "
+         "(SELECT * ORDER BY (venue_id, pair, event_time_ms))",
+         "MODIFY TTL ingested_at + INTERVAL 2 DAY"}) {
+    try {
+      client_.Execute(::clickhouse::Query(
+          "ALTER TABLE " + database_ + "." + table_ + " " + stmt));
+    } catch (const std::exception& e) {
+      cex::common::log_json("WARN", "vector_flow_segments_history perf/retention migration failed",
+                            {{"stmt", stmt}, {"error", e.what()}});
+    }
+  }
 }
 
 void ClickHouseVectorSegmentStorage::SaveSegments(
@@ -85,7 +165,8 @@ void ClickHouseVectorSegmentStorage::SaveSegments(
 
   std::ostringstream q;
   q << "INSERT INTO " << database_ << "." << table_ << " FORMAT JSONEachRow\n";
-  for (const auto& s : result.segments) {
+  for (std::size_t i = 0; i < result.segments.size(); ++i) {
+    const auto& s = result.segments[i];
     q << "{"
       << "\"segment_id\":\"" << JsonEscape(s.segment_id) << "\","
       << "\"batch_id\":\"" << JsonEscape(batch_id) << "\","
@@ -93,12 +174,26 @@ void ClickHouseVectorSegmentStorage::SaveSegments(
       << "\"source_order_id\":\"" << JsonEscape(s.source_order_id) << "\","
       << "\"pair\":\"" << JsonEscape(s.pair) << "\","
       << "\"side\":\"" << domain::ToString(s.side) << "\","
+      << "\"seg_index\":" << i << ","
       << "\"w_json\":\"" << JsonEscape(WJson(s.w)) << "\","
       << "\"p_high\":" << s.p_high.to_string() << ","
       << "\"d_hl\":" << s.d_hl.to_string() << ","
       << "\"q_rate\":" << s.q_rate.to_string() << ","
       << "\"q_max\":" << s.q_max.to_string() << ","
       << "\"effective_price\":" << s.effective_price.to_string() << ","
+      << "\"anchor\":" << s.anchor.to_string() << ","
+      << "\"slope\":" << s.slope.to_string() << ","
+      << "\"q_min\":" << s.q_min.to_string() << ","
+      << "\"alpha_ext\":" << s.alpha_ext.to_string() << ","
+      << "\"alpha_t\":" << s.alpha_t.to_string() << ","
+      << "\"beta_t\":" << s.beta_t.to_string() << ","
+      << "\"theta\":" << s.theta.to_string() << ","
+      << "\"translator_model\":\"" << JsonEscape(s.translator_model) << "\","
+      << "\"beta_tangent\":" << s.beta_tangent.to_string() << ","
+      << "\"beta_lsq\":" << s.beta_lsq.to_string() << ","
+      << "\"beta_profit\":" << s.beta_profit.to_string() << ","
+      << "\"beta_minorant\":" << s.beta_minorant.to_string() << ","
+      << "\"selected_slope_method\":" << s.selected_slope_method << ","
       << "\"event_time_ms\":" << event_ts_ms
       << "}\n";
   }

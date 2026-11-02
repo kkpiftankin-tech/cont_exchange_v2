@@ -40,6 +40,7 @@ bool approx(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= 
 // Позволяет тестировать сборку/residual/квантование независимо от OSQP.
 struct FakeBackend final : public d::IQpBackend {
   Eigen::VectorXd x_out;
+  Eigen::VectorXd y_out;  ///< дуальные (первые N — pi); пусто ⇒ pi не извлекается
   d::QpBackendStatus status_out{d::QpBackendStatus::kSolved};
   std::uint32_t iters{7};
   int calls{0};
@@ -48,6 +49,7 @@ struct FakeBackend final : public d::IQpBackend {
     ++calls;
     d::QpSolution s;
     s.x = x_out;
+    s.y = y_out;
     s.status = status_out;
     s.iterations = iters;
     return s;
@@ -195,6 +197,37 @@ void TestDeterminism() {
   expect(same, "determinism: same input ⇒ identical result (AC-F05A-011)");
 }
 
+// --- 8) pi (клиринговые цены) извлекаются из первых N дуальных -------------
+void TestPiExtraction() {
+  std::vector<d::VectorSegment> segs = {
+      MakeSeg("s0", {1.0, -2.0}, 4.0, 8.0),
+      MakeSeg("s1", {-1.0, 3.0}, 6.0, 3.0),
+  };
+  FakeBackend be;
+  be.x_out = Eigen::Vector2d(1.0, 1.0);
+  // y длины N+I=4: первые N=2 — pi по активам, остальные — box-дуальные.
+  Eigen::VectorXd y(4);
+  y << 80234.5, 1.0, 0.0, 0.0;
+  be.y_out = y;
+
+  d::VectorQpSolver solver(be, d::QpParams{}, 1e-9, /*scale=*/12);
+  d::VectorClearingResult r = solver.Solve(segs, /*num_assets=*/2);
+
+  expect(r.pi.size() == 2, "pi: длина = num_assets (N=2)");
+  // pi квантован scale=12: units = round(value * 1e12).
+  expect(r.pi.size() == 2 && r.pi[0].units == 80234500000000000LL,
+         "pi: pi[0] = quantize(80234.5)");
+  expect(r.pi.size() == 2 && r.pi[1].units == 1000000000000LL,
+         "pi: pi[1] = quantize(1.0)");
+
+  // Fake без y ⇒ pi пустой (guard, без мусора).
+  FakeBackend be2;
+  be2.x_out = Eigen::Vector2d(1.0, 1.0);
+  d::VectorQpSolver solver2(be2, d::QpParams{}, 1e-9);
+  d::VectorClearingResult r2 = solver2.Solve(segs, 2);
+  expect(r2.pi.empty(), "pi: пусто, если backend не вернул дуальные");
+}
+
 // --- 7) Пустая задача -----------------------------------------------------
 void TestEmpty() {
   FakeBackend be;
@@ -213,6 +246,7 @@ int main() {
   TestQuantize();
   TestSolveFailed();
   TestDeterminism();
+  TestPiExtraction();
   TestEmpty();
 
   if (g_failures == 0) {

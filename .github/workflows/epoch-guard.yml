@@ -1,0 +1,48 @@
+name: epoch-guard
+
+# Анализ метки сброса позиций (ADR-090, CR-F18-018): каждая таблица классифицирована в specs/domain/epoch-classes.yaml, а прямое чтение журналов
+# (класс B) помечено `epoch-guard:`. До этапа Э3 проверка только печатает отчёт и не блокирует слияние; на Э3 шаг переводится на --strict.
+# Тесты инструментов запускаются всегда и блокируют слияние.
+
+on:
+  pull_request:
+    paths:
+      - "frontend/api/**"
+      - "tools/**"
+      - "specs/domain/epoch-classes.yaml"
+      - "infra/postgres/**"
+      - "infra/clickhouse/**"
+      - ".github/workflows/epoch-guard.yml"
+
+jobs:
+  epoch-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python tools
+        run: pip install pyyaml
+
+      - name: Tests of the epoch tools (library, checker)
+        run: |
+          python tools/lib/test_epochs.py
+          python tools/epoch-guard-checker/tests/test_check.py
+
+      - name: Tests of BFF epoch modules
+        working-directory: frontend/api
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node epoch.test.js
+          node epoch_schema.test.js
+          node reset_route.test.js
+
+      - name: Epoch guard report (report-only until stage E3)
+        run: python tools/epoch-guard-checker/check.py

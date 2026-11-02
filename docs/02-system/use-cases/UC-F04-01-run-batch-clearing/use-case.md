@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F04-01
+title: Выполнить цикл batch clearing
 level: sea
+feature: F-04
+system-sequence: sequences/SEQ-UC-F04-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F04-UC-F04-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F04-01. Выполнить цикл batch clearing
 

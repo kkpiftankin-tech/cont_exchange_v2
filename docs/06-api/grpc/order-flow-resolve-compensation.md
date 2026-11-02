@@ -54,7 +54,7 @@ operator → order_flow.ResolveCompensation
 ## Money / invariants / auth
 
 - Деньги идут ТОЛЬКО через `CreateFlowOrder` pipeline — никакого прямого мутирования
-  ledger (CLAUDE.md §17). Реверс-FlowOrder ре-валидируется штатным `validate_order`.
+  ledger ([cpp/ledger/CLAUDE.md](../../../cpp/ledger/CLAUDE.md)). Реверс-FlowOrder ре-валидируется штатным `validate_order`.
 - Объём реверса — `combo_order_legs.filled_cum` на момент resolution (ADR-039 §3), не
   устаревший `internal_filled_qty`-снимок.
 - Band/rate реверса берутся из исходной ноги (диапазон ценоинвариантен к стороне).

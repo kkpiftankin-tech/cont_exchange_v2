@@ -1,6 +1,6 @@
 .venues-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   --venue-border: rgba(167, 74, 255, 0.3);
   --venue-text: #f6f2ff;
   --venue-input-bg: rgba(13, 9, 25, 0.9);

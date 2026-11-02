@@ -15,7 +15,7 @@ System Context Sequence (L0 ☁️)
 
 ## Feature
 
-- [F-05A. Vectorized External Liquidity](../../../features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- [F-05A. Vectorized External Liquidity](../../../features/F-05A-vectorized-external-liquidity/README.md)
 
 ## Use Case
 

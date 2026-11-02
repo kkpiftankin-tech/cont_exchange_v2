@@ -15,8 +15,13 @@ namespace {
 cex::common::Decimal QuantizeW(double value, std::int32_t scale) {
   if (!std::isfinite(value)) return cex::common::Decimal{0, scale};
   const double factor = std::pow(10.0, static_cast<double>(scale));
-  return cex::common::Decimal{static_cast<std::int64_t>(std::llround(value * factor)),
-                              scale};
+  double scaled = std::round(value * factor);
+  // Защита от переполнения int64 (иначе static_cast — UB → INT64_MIN → битый
+  // Decimal::to_string, см. curve_to_levels.cpp). Сатурируем в диапазон int64.
+  constexpr double kMax = 9.22e18, kMin = -9.22e18;
+  if (scaled > kMax) scaled = kMax;
+  else if (scaled < kMin) scaled = kMin;
+  return cex::common::Decimal{static_cast<std::int64_t>(scaled), scale};
 }
 
 mv1::VectorLevelSide MapSide(domain::LevelSide side) {
@@ -72,6 +77,16 @@ mv1::VectorizedLiquiditySnapshot ToVectorizedSnapshot(
     *ps->mutable_q_rate() = s.q_rate.to_proto();
     *ps->mutable_q_max() = s.q_max.to_proto();
     *ps->mutable_remaining_quantity() = s.q_max.to_proto();
+    // ADR-052 (academic двусторонний): anchor/slope/q_min. Пусты в F1/per-side.
+    *ps->mutable_anchor() = s.anchor.to_proto();
+    *ps->mutable_slope() = s.slope.to_proto();
+    *ps->mutable_q_min() = s.q_min.to_proto();
+    // ADR-053 safe-translator диагностика.
+    *ps->mutable_alpha_ext() = s.alpha_ext.to_proto();
+    *ps->mutable_alpha_t() = s.alpha_t.to_proto();
+    *ps->mutable_beta_t() = s.beta_t.to_proto();
+    *ps->mutable_theta() = s.theta.to_proto();
+    ps->set_translator_model(s.translator_model);
     SetTs(ps->mutable_source_timestamp(), s.source_timestamp_ms);
   }
 

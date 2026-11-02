@@ -213,7 +213,7 @@ message MultiLegConstraint {
 
   // Коэффициенты линейной комбинации по символу.
   // Пример для spread: {"BTC/USDT": 1.0, "ETH/USDT": -15.0}.
-  // double допустим для solver coefficients (CLAUDE.md §9 — research/solver use only).
+  // double допустим для solver coefficients (.claude/rules/data.md — research/solver use only).
   map<string, double> coefficients = 4;
 
   // Нижняя допустимая граница значения комбинации. Decimal для финансовых границ.

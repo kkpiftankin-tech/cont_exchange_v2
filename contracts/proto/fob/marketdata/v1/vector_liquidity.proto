@@ -66,6 +66,77 @@ message AssetBasis {
   google.protobuf.Timestamp created_at = 4;
 }
 
+// ADR-056 — базис узлов «валюта@площадка» (+ узлы собственной книги asset@__book__).
+// Заменяет AssetBasis в режиме CE-агентов. Ключ узла — "ASSET@VENUE" (формат
+// зафиксирован в ADR-056, чтобы BFF мог парсить); "__book__" = собственная книга.
+message NodeBasis {
+  message Node {
+    int32 index = 1;
+    string key = 2;       // "BTC@Binance" | "USDT@OKX" | "BTC@__book__"
+    string asset = 3;     // "BTC"
+    string venue = 4;     // "Binance" | "__book__"
+    bool is_book = 5;     // true ⇒ узел собственной книги (свободный, несёт марку μ)
+  }
+  string basis_id = 1;
+  repeated Node nodes = 2;
+  int32 num_nodes = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// ADR-055/056 (вариант A) — CE clearing input: market_data строит book-derived
+// переводчиков (agent_builder §A1) и эмитит их + марки в topic ce.clearing.input.
+// matching добавляет плечи перевода/запаса из капитал/риск-конфига (AssembleCeGraph)
+// и решает клиринг (ce_agent_clearing). Значения ‰/α — Decimal (единый стиль proto).
+message CeQuoteAgent {
+  string asset = 1;                     // tradeable (base), "BTC"
+  string venue = 2;                     // "Binance"
+  fob.common.v1.Decimal anchor = 3;     // σ* = mid_pm, ‰
+  fob.common.v1.Decimal depth = 4;      // α (глубина минорант×θ)
+  fob.common.v1.Decimal dead_zone = 5;  // c, ‰
+  // ADR-064: котируемая валюта пары (quote). Аддитивное поле — пусто ⇒
+  // трактуется как numeraire (прежнее поведение, регрессия при CE_CROSS_PAIRS=0).
+  // Непусто для прямых кросс-пар (напр. "BTC" для пары ETH/BTC): ребро
+  // переводчика соединяет asset@venue ↔ quote@venue напрямую, минуя numeraire.
+  string quote = 6;
+  // ADR-079 (аддитивно, диагностика «почему нет потока»; клиринг эти поля НЕ читает): из чего сложена полка c
+  // и какой возраст/волатильность дали age-член. c = dz_commission + dz_spread + dz_age.
+  fob.common.v1.Decimal dz_age = 7;         // age-полка ADR-075 k·σ·√возраст, ‰
+  fob.common.v1.Decimal dz_spread = 8;      // член «множитель·½спреда» (ADR-065/077), ‰
+  fob.common.v1.Decimal dz_commission = 9;  // комиссия в полке (CE_COMMISSION_IN_POLKA; обычно 0), ‰
+  int64 snapshot_age_ms = 10;               // возраст кривой на закрытии окна, мс (0 ⇒ неизвестен)
+  fob.common.v1.Decimal sigma_pm = 11;      // σ пары, ‰/√с (0 ⇒ нет оценки)
+}
+
+// ADR-079: котировка, НЕ попавшая в клиринг, и причина. Аддитивно: без неё «пары нет в решении» не отличить
+// от «пара отброшена». reason: "stale" (кривая старше порога устаревания), "thin_depth" (глубина < доли от
+// наибольшей по паре, CE_MIN_DEPTH_RATIO), "invalid_depth" (нулевая глубина).
+message CeDroppedQuote {
+  string asset = 1;
+  string venue = 2;
+  string quote = 3;                      // пусто ⇒ numeraire
+  string reason = 4;
+  int64 age_ms = 5;                      // возраст кривой, мс (0 ⇒ неизвестен)
+  fob.common.v1.Decimal depth = 6;       // α отброшенной котировки (0 ⇒ неизвестна)
+  fob.common.v1.Decimal threshold = 7;   // порог причины: для stale — предел возраста, мс; для thin_depth — минимальная глубина
+}
+message CeAssetMark {
+  string asset = 1;
+  fob.common.v1.Decimal mark = 2;            // μ_a, ‰ (numeraire ⇒ 0)
+  fob.common.v1.Decimal reference_price = 3; // P0_a, абсолют (USDT/актив): база для цены
+                                             // узла P_node = P0·exp(x/1000). ADR-057 §money-path.
+}
+message CeClearingInput {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;                  // окно такта ("w|<ts>")
+  int64 event_time_ms = 3;
+  string numeraire = 4;                 // "USDT"
+  repeated string assets = 5;           // tradeable (без numeraire), стабильный порядок
+  repeated string venues = 6;           // стабильный порядок
+  repeated CeQuoteAgent quotes = 7;     // по одному на (asset,venue) с двусторонней книгой
+  repeated CeAssetMark marks = 8;       // марки узлов книги μ_a
+  repeated CeDroppedQuote dropped = 9;  // ADR-079: отброшенные котировки и причины (диагностика)
+}
+
 // Flow-сегмент: один столбец W (вектор активов) + границы/поток.
 message VectorFlowSegment {
   string segment_id = 1;
@@ -81,6 +152,41 @@ message VectorFlowSegment {
   fob.common.v1.Decimal q_max = 11;
   fob.common.v1.Decimal remaining_quantity = 12;
   google.protobuf.Timestamp source_timestamp = 13;
+  // ADR-052: нижняя граница знакового потока (x_min = −Q_bid) для двустороннего
+  // сегмента венью (academic). 0 ⇒ односторонний (0≤x≤q_max, F1/ADR-051).
+  fob.common.v1.Decimal q_min = 14;
+  // ADR-052 (academic двусторонний): anchor a = mid венью (линейный член цели),
+  // slope m = наклон кривой (P=diag(m)). Заполняются только в two-sided режиме.
+  fob.common.v1.Decimal anchor = 15;
+  fob.common.v1.Decimal slope = 16;
+  // ADR-053 safe-translator (диагностика; наклон уже свёрнут в slope). Additive,
+  // consumers могут игнорировать. Чтобы UI показывал ровно то, что клирится.
+  fob.common.v1.Decimal alpha_ext = 17;   // min_k D_k/|δ_k| (quote за bps, обе стороны)
+  fob.common.v1.Decimal alpha_t = 18;     // θ·ψ·α_ext (после haircut)
+  fob.common.v1.Decimal beta_t = 19;      // линейный наклон mid²/(10⁴·α_T) = mid·slope
+  fob.common.v1.Decimal theta = 20;       // safe-share (F05A_SAFE_SHARE, 0..1)
+  string translator_model = 21;           // "safe_vwap" | "log_endpoint"
+  // ADR-055 — привязка сегмента к агенту (ребру графа узлов). Заполняются только в
+  // режиме CE-агентов. anchor(15)=σ*, slope(16)=m уже используются.
+  string agent_id = 22;
+  fob.common.v1.Decimal dead_zone = 23;   // c, ‰ (мёртвая зона внутри кривой)
+  fob.common.v1.Decimal alpha = 24;       // α, глубина агента (тыс. USDT на ‰)
+  // §6.2 «Кривые котирования»: наклон снят всеми 4 способами (диагностика/display).
+  // selected_slope_method указывает, какой из них свёрнут в slope(16)/alpha_ext(17)/
+  // beta_t(19) для клиринга. Только MINORANT §6.3-safe (см. SlopeMethodKind).
+  repeated SegmentSlopeEstimate slope_methods = 25;
+  fob.common.v1.SlopeMethodKind selected_slope_method = 26;
+}
+
+// §6.2: одна оценка наклона одним способом. α_ext считается по стороне книги
+// (bid/ask), combined = как реально свёрнуто в клиринг (текущая семантика
+// min(a_bid,a_ask)). Все — Decimal, т.к. beta_t напрямую формирует P=diag(slope).
+message SegmentSlopeEstimate {
+  fob.common.v1.SlopeMethodKind method = 1;
+  fob.common.v1.Decimal alpha_ext_bid = 2;
+  fob.common.v1.Decimal alpha_ext_ask = 3;
+  fob.common.v1.Decimal alpha_ext = 4;    // combined (идёт в (6.2) ограничитель)
+  fob.common.v1.Decimal beta_t = 5;       // mid²/(10⁴·α_T) для этого способа (диагностика)
 }
 
 // Вход vector clearing: W/pH/dHL/q/D и source_map выводятся из segments.

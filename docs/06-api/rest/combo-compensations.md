@@ -39,7 +39,7 @@ gRPC backing: `matching.CompensationService/ListPendingCompensations`
 }
 ```
 - `internalFilledQty` — строка из proto `Decimal` (`units*10^-scale`), отрендеренная
-  BFF в каноническую строку. Никакого float (CLAUDE.md §9).
+  BFF в каноническую строку. Никакого float ([.claude/rules/data.md](../../../.claude/rules/data.md)).
 - Пустой список — нормальное состояние (нет pending).
 
 **5xx** — gRPC недоступен/ошибка: `{ "error": { "code", "message" } }`.

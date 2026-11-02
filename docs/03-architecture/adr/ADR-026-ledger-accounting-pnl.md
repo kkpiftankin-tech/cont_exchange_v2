@@ -18,7 +18,7 @@ related:
 ## Контекст
 
 Ledger — критический компонент: source of truth по balances/positions
-(CLAUDE.md §17). ADR-009/011 касаются replay/backtest-изоляции, но общего
+([cpp/ledger/CLAUDE.md](../../../cpp/ledger/CLAUDE.md)). ADR-009/011 касаются replay/backtest-изоляции, но общего
 ADR по самому ledger-учёту нет. Правила (no double-apply, idempotency,
 no float money) разбросаны по §17 и коду.
 

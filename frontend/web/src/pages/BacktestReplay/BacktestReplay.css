@@ -1,6 +1,6 @@
 .replay-page {
   min-height: 100vh;
-  min-width: 100vw;
+  min-width: 100%;
   color: #f7fbff;
   background: linear-gradient(180deg, #0a0514 0%, #150B23 52%, #08040f 100%);
   display: flex;

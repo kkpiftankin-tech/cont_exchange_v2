@@ -38,7 +38,7 @@ gRPC backing: `matching.CompensationService/ListPendingCompensations`.
 ```json
 { "compensations": [ {"compensationId","parentOrderId","legId","reason","internalFilledQty"} ], "generatedAt": "ISO8601" }
 ```
-`internalFilledQty` — строка (Decimal). Рендерить as-is, без float (CLAUDE.md §9). Информационный снимок; реальный объём реверса считается из `combo_order_legs.filled_cum` (ADR-039 §3).
+`internalFilledQty` — строка (Decimal). Рендерить as-is, без float ([.claude/rules/data.md](../../../.claude/rules/data.md)). Информационный снимок; реальный объём реверса считается из `combo_order_legs.filled_cum` (ADR-039 §3).
 
 ### POST `/api/v1/combo-compensations/{compensationId}/resolve`
 gRPC backing: `order_flow.OrderFlowService/ResolveCompensation`.

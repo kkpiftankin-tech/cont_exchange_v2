@@ -36,7 +36,7 @@ ledger публикует **новый Kafka-топик `positions.update`** п�
 `ApplyBatchResult` (после `COMMIT` транзакции по `accounts`/`positions`):
 
 - **key = `user_id`** — push маршрутизируется и партиционируется по пользователю
-  (CLAUDE.md §13).
+  ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md)).
 - **payload — лёгкий invalidation-сигнал**, а не полный снимок:
   `{ user_id, batch_id, ts }`. Это «позиции этого пользователя устарели, перечитай».
 - gateway (ws-gateway) **консьюмит** `positions.update` и на каждый сигнал
@@ -56,7 +56,7 @@ ledger на один батч эмиттит по одному сообщени�
   батча.
 - **Расширить `FillEvent`/`batch.outputs` полем `user_id`.** Breaking-изменение
   контракта `BatchResult`, затрагивает matching, ledger, risk, backtest,
-  observability и его replay-parity (CLAUDE.md §15, [ADR-042](ADR-042-unified-batch-read-layer.md)).
+  observability и его replay-parity ([cpp/matching/CLAUDE.md](../../../cpp/matching/CLAUDE.md), [ADR-042](ADR-042-unified-batch-read-layer.md)).
   Несоразмерно задаче UI-инвалидации. Отклонено.
 - **Сигнал публикует risk** (после `RiskSnapshot`). risk уже знает затронутых
   пользователей. Но обновление позиций/балансов первично делает ledger; привязка

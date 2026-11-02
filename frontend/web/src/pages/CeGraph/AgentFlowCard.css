@@ -1,0 +1,25 @@
+.ac-card { background: #101821; border: 1px solid #1c2733; border-radius: 8px; padding: 8px 10px 6px; min-width: 0; animation: ac-in .5s ease-out; }
+@keyframes ac-in { 0% { box-shadow: 0 0 0 2px #4a7bd0; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.ac-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 0 2px 2px; }
+.ac-id { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+.ac-kind { color: #8aa; font-size: 12px; flex: 1; min-width: 0; }
+.ac-x { background: #1a2531; color: #9fb3c4; border: 1px solid #223140; border-radius: 4px; width: 24px; height: 24px; line-height: 1; font-size: 16px; cursor: pointer; padding: 0; }
+.ac-x:hover { color: #fff; border-color: #4a7bd0; }
+.ac-svg { width: 100%; height: auto; display: block; font-family: inherit; }
+.ac-box { fill: #0b0f14; stroke: #223140; stroke-width: 1.4; }
+.ac-node-ce .ac-box { fill: #12203a; stroke: #4a7bd0; stroke-width: 1.6; }
+.ac-node-ag .ac-box { stroke-width: 2; }
+.ac-t1 { fill: #e8eef4; font-weight: 600; }
+.ac-t2 { fill: #8aa; }
+.ac-t3 { fill: #9fb3c4; font-family: ui-monospace, Menlo, monospace; }
+.ac-lbl { font-size: 12px; fill: #e8eef4; paint-order: stroke; stroke: #101821; stroke-width: 4px; stroke-linejoin: round; }
+.ac-lbl2 { font-size: 11px; fill: #8aa; paint-order: stroke; stroke: #101821; stroke-width: 4px; stroke-linejoin: round; font-family: ui-monospace, Menlo, monospace; }
+.ac-low { fill: #e0b060; }
+.ac-v { font-weight: 700; }
+.ac-idle { stroke: #3a4a5a; stroke-width: 1.4; stroke-dasharray: 3 4; }
+.ac-beads { stroke: rgba(255, 255, 255, .8); stroke-linecap: round; stroke-dasharray: 1.5 11; animation: ac-beads 1s linear infinite; }
+@keyframes ac-beads { to { stroke-dashoffset: -25; } }
+@media (prefers-reduced-motion: reduce) { .ac-beads { animation: none; } .ac-card { animation: none; } }
+.ac-foot { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: #8aa; padding: 0 2px; }
+.ac-foot b { color: #dfe6ee; }
+.ac-warn { color: #e0b060; }

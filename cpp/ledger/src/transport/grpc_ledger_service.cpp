@@ -2,7 +2,7 @@
 // grpc_ledger_service.cpp — gRPC transport layer для LedgerService.
 //
 // Тонкий wrapper над LedgerUseCases (app/ledger_uc.cpp). Бизнес-логика
-// (idempotency, FSM, balance invariants — CLAUDE.md §17) живёт в UC.
+// (idempotency, FSM, balance invariants — cpp/ledger/CLAUDE.md) живёт в UC.
 //
 // Группы методов:
 //   * User balances:    GetBalances / ReserveFunds / ReleaseFunds
@@ -26,6 +26,73 @@ grpc::Status GrpcLedgerService::GetBalances(
     const fob::ledger::v1::GetBalancesRequest* request,
     fob::ledger::v1::GetBalancesResponse* response) {
   *response = uc_->GetBalances(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetExchangeBalances(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetExchangeBalancesRequest* request,
+    fob::ledger::v1::GetExchangeBalancesResponse* response) {
+  *response = uc_->GetExchangeBalances(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetNodeBalances(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetNodeBalancesRequest* request,
+    fob::ledger::v1::GetNodeBalancesResponse* response) {
+  *response = uc_->GetNodeBalances(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::ApplyNodeTransfer(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::ApplyNodeTransferRequest* request,
+    google::protobuf::Empty* /*response*/) {
+  // Повтор с тем же transfer_id — успех без эффекта (идемпотентность контракта); некорректная заявка — INVALID_ARGUMENT.
+  if (uc_->ApplyNodeTransfer(*request) == app::LedgerUseCases::TransferResult::kInvalid)
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "transfer_id, asset, from_venue, to_venue обязательны; from_venue != to_venue; qty > 0");
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetAgentPositions(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetAgentPositionsRequest* request,
+    fob::ledger::v1::GetAgentPositionsResponse* response) {
+  *response = uc_->GetAgentPositions(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetAgentPnl(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetAgentPnlRequest* request,
+    fob::ledger::v1::GetAgentPnlResponse* response) {
+  *response = uc_->GetAgentPnl(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetAgentPositionDeltas(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::GetAgentPositionDeltasRequest* request,
+    fob::ledger::v1::GetAgentPositionDeltasResponse* response) {
+  *response = uc_->GetAgentPositionDeltas(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::ResetAgentPositions(
+    grpc::ServerContext* /*context*/,
+    const fob::ledger::v1::ResetAgentPositionsRequest* request,
+    fob::ledger::v1::ResetAgentPositionsResponse* response) {
+  *response = uc_->ResetAgentPositions(*request);
+  return grpc::Status::OK;
+}
+
+grpc::Status GrpcLedgerService::GetExchangeNopHistory(
+    grpc::ServerContext*,
+    const fob::ledger::v1::GetExchangeNopHistoryRequest* request,
+    fob::ledger::v1::GetExchangeNopHistoryResponse* response) {
+  *response = uc_->GetExchangeNopHistory(*request);
   return grpc::Status::OK;
 }
 

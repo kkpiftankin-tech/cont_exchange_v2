@@ -51,7 +51,7 @@ surplus, diagnostics) по `execution_group_id` / `batch_id`.
 
 ## Used In
 
-- Feature: [F-05A](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use cases: [UC-F05A-01](../../02-system/use-cases/UC-F05A-01-vectorize-external-orderbook/use-case.md), [UC-F05A-02](../../02-system/use-cases/UC-F05A-02-vector-clearing/use-case.md), [UC-F05A-03](../../02-system/use-cases/UC-F05A-03-display-vector-liquidity/use-case.md)
 - Sequences: [SEQ-F05A-UC-F05A-01-services](../../05-components/sequences/SEQ-F05A-UC-F05A-01-services.md), [SEQ-F05A-UC-F05A-03-services](../../05-components/sequences/SEQ-F05A-UC-F05A-03-services.md)
 - Kafka: [marketdata.vectorized](../messaging/marketdata-vectorized.md) (envelope `VectorizedLiquiditySnapshot`)

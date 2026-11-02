@@ -1,9 +1,13 @@
 feature:
   id: F-15
   name: Backtest / Replay
-  status: in-progress-impl
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-impl
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-CLEAR-002  # детерминированность (replay)
 
 description: >
   Backtest и shadow-replay исторических батчей через тот же solver, risk

@@ -11,7 +11,7 @@
 //   две функции — ParsePgNumeric() (текст → Decimal) и ToPgNumeric()
 //   (Decimal → текст для exec_params).
 //
-// Финансовая дисциплина проекта (см. CLAUDE.md §9):
+// Финансовая дисциплина проекта (см. .claude/rules/data.md):
 //   Никаких double/float для money. Decimal — единственно допустимый тип
 //   для денег в ledger / risk / matching settlement. Эта функция — критическая
 //   точка перехода: ошибка здесь = молчаливая порча балансов.

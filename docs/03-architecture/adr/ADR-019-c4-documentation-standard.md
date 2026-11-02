@@ -31,7 +31,7 @@ event-driven архитектуру, но не задаёт стандарт о�
 - **C3 — Components**: внутренние компоненты сервисов; для `cpp/venues` — connector, normalizer, curve-builder, execution-adapter; health-routing — в `cpp/venue_health` (`component-map.md`, см. [ADR-014](ADR-014-venues-binary-vs-components.md)).
 - **C4 — Code**: диаграммы уровня кода только для критических модулей (solver, LOB→FOB, ledger), по необходимости.
 
-Service-level и system-level sequence-диаграммы (CLAUDE.md §26a) обязаны
+Service-level и system-level sequence-диаграммы ([.claude/rules/sequences.md](../../../.claude/rules/sequences.md)) обязаны
 ссылаться на C4-компоненты соответствующего уровня.
 
 ## Альтернативы

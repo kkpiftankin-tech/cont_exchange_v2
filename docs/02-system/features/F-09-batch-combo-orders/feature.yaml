@@ -1,9 +1,13 @@
 feature:
   id: F-09
   name: Batch, Combo and Multi-leg Orders
-  status: implemented
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: complete, code: done, runtime: dev}  # было: implemented
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-ORDER-001  # поддержка типов заявок (портфельные/комбо)
 
 description: >
   Заявки, в которых пользовательский торговый intent относится не к одному

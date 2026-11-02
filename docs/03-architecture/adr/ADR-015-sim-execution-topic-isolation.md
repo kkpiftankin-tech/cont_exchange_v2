@@ -84,7 +84,7 @@ Sim-специфичные consumers подписываются на `sim.execut
 
 Промежуточный вариант (publish в `execution.venue` И
 `sim.execution.venue`) — как делает боевой dual-publish
-`execution.venue`/`execution.reports` (CLAUDE.md §7.3) — здесь
+`execution.venue`/`execution.reports` ([.claude/rules/contracts.md](../../../.claude/rules/contracts.md)) — здесь
 **не подходит**: цель того dual-publish была backward-compat для
 boevых consumers при миграции имени топика. Для sim же цель прямо
 противоположная — НЕ дать боевым consumers увидеть sim. Дублирование

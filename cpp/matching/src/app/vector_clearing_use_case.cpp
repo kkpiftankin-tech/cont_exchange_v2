@@ -28,6 +28,10 @@ std::vector<domain::VectorSegment> VectorClearingUseCase::MapSegments(
     }
     seg.d_hl = ToDouble(ps.d_hl());
     seg.q_max = ToDouble(ps.q_max());
+    // ADR-052 (academic двусторонний): anchor/slope/q_min. Пусты в F1-режиме.
+    seg.anchor = ToDouble(ps.anchor());
+    seg.slope = ToDouble(ps.slope());
+    seg.q_min = ToDouble(ps.q_min());
     out.push_back(std::move(seg));
   }
   return out;

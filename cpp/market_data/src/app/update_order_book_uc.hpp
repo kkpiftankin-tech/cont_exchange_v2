@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,16 @@ class UpdateOrderBookUseCase {
   void OnBatchResult(const fob::matching::v1::BatchResult& result);
   void OnVenueSnapshot(const fob::venue::v1::VenueSnapshot& snapshot);
 
+  // ADR-053: последние сырые снапшоты венью (ключ venue_id|symbol) — источник
+  // safe-translator (векторизация из сырого стакана, а не FOB-кривой). Возвращаем
+  // КОПИЮ под локом: OnVenueSnapshot (consumer-поток) пишет, FlushVectorWindow
+  // (timer-поток) читает.
+  std::unordered_map<std::string, fob::venue::v1::VenueSnapshot>
+  SnapshotsCopy() const {
+    std::lock_guard<std::mutex> lk(snapshots_mu_);
+    return latest_venue_snapshots_;
+  }
+
  private:
   static std::string VenueSymbolKey(const fob::venue::v1::VenueSnapshot& snapshot);
   static bool IsSnapshotAggregatable(const fob::venue::v1::VenueSnapshot& snapshot);
@@ -32,6 +43,7 @@ class UpdateOrderBookUseCase {
   domain::IOrderBookStorage* storage_;
   domain::IOrderBookPublisher* publisher_;
   uint64_t venue_aggregate_nonce_{0};
+  mutable std::mutex snapshots_mu_;  // защищает latest_venue_snapshots_ (ADR-053)
   std::unordered_map<std::string, fob::venue::v1::VenueSnapshot> latest_venue_snapshots_;
   
   // Cache last published BBO to avoid spamming

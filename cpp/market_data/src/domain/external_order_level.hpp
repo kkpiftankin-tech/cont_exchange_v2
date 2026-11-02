@@ -32,6 +32,9 @@ struct ExternalOrderLevel {
   cex::common::Decimal quantity{};           ///< объём в base units
   cex::common::Decimal remaining_quantity{}; ///< остаток base units (если задан)
   cex::common::Decimal effective_price{};    ///< P_eff, если посчитан upstream; 0 ⇒ derive
+  cex::common::Decimal d_hl_override{};      ///< ADR-051: если units>0, d_hl сегмента =
+                                             ///< это значение (реальный наклон кривой),
+                                             ///< иначе d_hl = dhl_fraction·P_eff (policy)
 
   // Буферы для P_eff (в bps). Не деньги — коэффициенты корректировки цены.
   double fees_bps{0.0};

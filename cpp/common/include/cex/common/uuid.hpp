@@ -2,7 +2,7 @@
 // ============================================================================
 // uuid.hpp — генератор UUID v4 для correlation ids, event_id, batch_id, etc.
 //
-// CAVEAT (см. CLAUDE.md §22 security): текущая реализация — НЕ криптографически
+// CAVEAT (см. CLAUDE.md §1 security): текущая реализация — НЕ криптографически
 // стойкая (использует std::mt19937 или аналог). Достаточно для:
 //   - correlation_id в EventMeta;
 //   - batch_id, event_id, reservation_id и подобных internal-IDs;

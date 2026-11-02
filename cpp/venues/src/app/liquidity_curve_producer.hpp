@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <array>
+#include <map>
 #include <optional>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -193,6 +196,8 @@ class LiquidityCurveProducer {
   struct PublishOptions {
     std::optional<std::string> requested_level;
     std::optional<bool> synthetic_enabled;
+    // ADR-077: дополнительные теги кривой (depth_window.*); пустой — поведение прежнее.
+    std::map<std::string, std::string> extra_tags;
   };
 
   LiquidityCurveProducer(IMessagePublisher* publisher,
@@ -321,5 +326,49 @@ class LiquidityCurveProducer {
   std::unordered_map<std::string, ImpactModelParams> impact_params_by_side_;
   std::unordered_map<std::string, DegradationState> degradation_state_by_symbol_;
 };
+
+// §6.2 «Кривые котирования»: наклон α_ext, снятый одним способом (в quote за bps).
+struct SideAlphas {
+  double tangent = std::numeric_limits<double>::infinity();   // M1 D_1/δ_1
+  double lsq = std::numeric_limits<double>::infinity();       // M2 МНК на полосе
+  double profit = std::numeric_limits<double>::infinity();    // M3 подгонка по выгоде
+  double minorant = std::numeric_limits<double>::infinity();  // M4 min_k D_k/δ_k
+  double depth = 0.0;                                         // Σ q стороны
+};
+
+// Чистое ядро 4 способов §6.2 на кумулятивной кривой глубины (δ_k bps>0 возр.,
+// D_k кумул. notional возр., D_{-1}=0). Отделено от снятия из стакана для
+// юнит-теста против числового примера §6.2 (100/80.26/60.98/83.33). См. ADR-053.
+SideAlphas AlphasFromCumulative(const std::vector<double>& delta,
+                                const std::vector<double>& cum_notional);
+
+// ADR-070 (дополнение): результат расчёта 4 способов §6.2 по снимку «по запросу» (без
+// ограничения 20 уровнями и не в цикле). Те же формулы, что в SetSafeTranslator.
+struct SlopeMethodsResult {
+  struct Method {
+    int kind = 0;           // 1=M1 касательная, 2=M2 МНК, 3=M3 по выгоде, 4=M4 минорант
+    double alpha_bid = 0.0;  // α_ext по стороне bid (quote за bps)
+    double alpha_ask = 0.0;  // α_ext по стороне ask
+    double alpha_ext = 0.0;  // min(bid, ask) — «тончайшая сторона»
+    double beta_raw = 0.0;   // mid²/(10⁴·α_ext), θ=1 (прямая P(q)=mid+β·q)
+  };
+  double mid = 0.0;
+  double depth_bid = 0.0;  // Σ q стороны bid, вошедшая в расчёт (base)
+  double depth_ask = 0.0;
+  std::array<Method, 4> methods{};
+};
+
+// nullopt — пустая сторона или нет mid. max_levels_per_side=0 — без ограничения глубины
+// (все уровни снимка); иначе берутся N лучших уровней каждой стороны.
+std::optional<SlopeMethodsResult> ComputeSlopeMethods(
+    const fob::venue::v1::VenueSnapshot& snapshot, std::size_t max_levels_per_side = 0);
+
+// §6.2: runtime-выбор способа снятия наклона α_ext, идущего в клиринг
+// (1=TANGENT, 2=LSQ_BAND, 3=PROFIT_AREA, 4=MINORANT). venues_loop поллит
+// f05a_clearing_config.slope_method и вызывает сеттер (как venue_stale_ms).
+// Дефолт = 4 (минорант, §6.3-safe); env F05A_SLOPE_METHOD задаёт начальное
+// значение. Меняет клиринговые цены ⇒ owner-controlled.
+void SetClearingSlopeMethod(int method);
+int GetClearingSlopeMethod();
 
 }  // namespace cex::venues::app

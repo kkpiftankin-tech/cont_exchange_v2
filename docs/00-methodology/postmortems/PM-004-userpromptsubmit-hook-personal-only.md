@@ -10,7 +10,7 @@
 
 ## Symptoms
 
-[CLAUDE.md §0a "Auto-archive of chat attachments"](../../../CLAUDE.md) гласит:
+[.claude/rules/docs-as-code.md "Auto-archive of chat attachments"](../../../.claude/rules/docs-as-code.md#auto-archive-of-chat-attachments) гласит:
 
 > A `UserPromptSubmit` hook ([tools/auto-archive-attachments.py](../../../tools/auto-archive-attachments.py)) парсит `<document>` блоки в каждом пользовательском промте и сохраняет их в `incoming-docs/YYYY-MM-DD-<slug>-<sha8>.md` **до** того, как ассистент увидит сообщение.
 
@@ -25,7 +25,7 @@
 ## Root cause
 
 1. **Hook был изначально зарегистрирован в `.claude/settings.local.json`** (per-user, gitignored), потом этот файл был перезаписан пользовательскими `permissions.allow` правилами и hook затёрся. Никто не заметил, потому что у того, кто перезаписывал, файл копировался без блока hook.
-2. **Документация описывала желаемое поведение, не текущее.** [CLAUDE.md §0a](../../../CLAUDE.md) и [feature-development-process.md §1.1](../feature-development-process.md) обещали, что hook работает "из коробки" — но это утверждение никогда не верифицировалось.
+2. **Документация описывала желаемое поведение, не текущее.** [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md) и [feature-development-process.md §1.1](../feature-development-process.md) обещали, что hook работает "из коробки" — но это утверждение никогда не верифицировалось.
 3. **Не было smoke-test'а на наличие/работу hook'а в CI.** Любая регрессия не ловилась.
 
 ## Fix
@@ -35,7 +35,7 @@
 | Перенести `UserPromptSubmit` hook в `.claude/settings.json` (shared, committed) | [AUDIT-001 T-AUDIT-004](../audits/AUDIT-001-feature-development-process.md), 2026-06-08 |
 | Добавить `--self-test` режим в [`tools/auto-archive-attachments.py`](../../../tools/auto-archive-attachments.py) — smoke-проверка regex parser без I/O | T-AUDIT-004 |
 | Добавить `make hooks-check` target в [Makefile](../../../Makefile) | [T-AUDIT-009](../audits/AUDIT-001-feature-development-process.md), 2026-06-08 |
-| Обновить CLAUDE.md §0a — указать точную локацию (shared settings.json) + smoke-test команду | T-AUDIT-004 |
+| Обновить [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md) — указать точную локацию (shared settings.json) + smoke-test команду | T-AUDIT-004 |
 | Создать [`.claude/settings.example.json`](../../../.claude/settings.example.json) — пример для personal overrides | [T-AUDIT-005](../audits/AUDIT-001-feature-development-process.md), 2026-06-08 |
 | Подключить `make hooks-check` в CI (governance.yml) | [T-AUDIT-008](../audits/AUDIT-001-feature-development-process.md) (Phase 2) |
 
@@ -49,7 +49,7 @@
 ## Related
 
 - AUDIT-001 T-AUDIT-004, T-AUDIT-005, T-AUDIT-008, T-AUDIT-009.
-- [CLAUDE.md §0a](../../../CLAUDE.md) — обновлён, теперь корректно описывает реальность.
+- [.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md) — обновлён, теперь корректно описывает реальность.
 - [feature-development-process.md §1.1](../feature-development-process.md) — обновлён.
 - [README §8 "Claude Code settings"](../../../README.md) — добавлен setup раздел.
 

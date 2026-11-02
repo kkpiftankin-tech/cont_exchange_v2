@@ -17,7 +17,7 @@
 //
 // Дисциплина:
 //   * Insert делается ON CONFLICT DO NOTHING — идемпотентность по order_id
-//     (см. CLAUDE.md §8.2 инвариант 11: команды должны быть идемпотентными).
+//     (см. docs/04-domain/core-concepts-and-invariants.md инвариант 11: команды должны быть идемпотентными).
 //   * Транзакция — pqxx::work — оборачивает оба INSERT'а: либо оба, либо
 //     ничего (atomicity для writer + reader контракта).
 //   * Decimal проходит через канонический to_string() — никаких double.

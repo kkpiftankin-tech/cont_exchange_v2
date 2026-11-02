@@ -1,0 +1,189 @@
+# Эталонный набор для tools/route/eval.py (IN-019 §6.5, Этап 5, пилот).
+# 20 реплик по коммитам F-18 с 2026-09-15 (git log --since=2026-09-15 --
+# cpp/ledger cpp/matching docs/02-system/features/F-18-ce-capital-position-hedge).
+# 12 из 20 — "по экрану" (ссылаются на наблюдение в UI), т.е. ≥ требуемых 10.
+#
+# Приёмка IN-019 Этап 5: якорь ≥18/20, верхняя точка ≥16/20, класс ≥16/20.
+# top/class — эвристика route.py (TOP_POINT_BY_TYPE), НЕ полный алгоритм
+# §3.5 (тот требует живого контекста/владельца, не построен в этом заходе).
+
+cases:
+  - id: G-01
+    source_commit: "39b31f33 (базис отделён от открытой позиции)"
+    screen: true
+    text: "Что значит число в колонке «базис» у арбитражёра на панели Живые позиции?"
+    expected_type: ask
+    expected_anchor: UI-VC-POS-BASIS
+    expected_top: Р4  # §3.4 ask: уровень, где величина определена (CALC), не сам экран
+    expected_class: S
+
+  - id: G-02
+    source_commit: "6fa63ee5 (ADR-083 система по остаткам)"
+    screen: true
+    text: "Откуда цифра в блоке Система по остаткам?"
+    expected_type: ask
+    expected_anchor: UI-VC-SYSTEM-PNL
+    expected_top: Р4  # §3.4 ask: уровень, где величина определена (CALC)
+    expected_class: S
+
+  - id: G-03
+    source_commit: "39b31f33 (fix: базис отделён от открытой позиции)"
+    screen: true
+    text: "Базис арбитражёра не совпадает с открытой позицией на экране"
+    expected_type: fix
+    expected_anchor: UI-VC-POS-BASIS
+    expected_top: Р8
+    expected_class: S
+
+  - id: G-04
+    source_commit: "b88c7302 (ширина полосы хеджа, ADR-081)"
+    screen: true
+    text: "Ширина полосы хеджа должна считаться иначе — по волатильности, а не только от комиссии"
+    expected_type: change
+    expected_anchor: UI-VC-BAND-MODE
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-05
+    source_commit: "b88c7302 (ADR-081, без объяснения режима от комиссии)"
+    screen: true
+    text: "На экране Клиринг показан режим ширины полосы хеджа от комиссии, но этот режим нигде не описан"
+    expected_type: refine
+    expected_anchor: UI-VC-BAND-MODE
+    expected_top: Р8
+    expected_class: M
+
+  - id: G-06
+    source_commit: "f2122eee (заработок переводчика считать vs fair)"
+    screen: false
+    text: "Хедж арбитражёра срабатывает в убыток относительно fair-цены"
+    expected_type: fix
+    expected_anchor: CALC-CE-TRANSLATOR-PNL
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-07
+    source_commit: "e9cfdf19 (CALC-CE-TRANSLATOR-PNL vs-fair)"
+    screen: false
+    text: "Прибыль переводчика нужно считать иначе — относительно fair-цены, а не клиринговой"
+    expected_type: change
+    expected_anchor: CALC-CE-TRANSLATOR-PNL
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-08
+    source_commit: "54ca3650 (множитель порога выхода арбитражёров)"
+    screen: true
+    text: "Добавь на экран Клиринг колонку с множителем порога выхода арбитражёров"
+    expected_type: extend
+    expected_anchor: UI-VC-BAND-MODE
+    expected_top: Р8
+    expected_class: M
+
+  - id: G-09
+    source_commit: "824cdbb6 (ADR-082 измерение ликвидности бирж)"
+    screen: false
+    text: "Добавь обратную связь ликвидности бирж в глубину агента"
+    expected_type: extend
+    expected_anchor: CALC-VENUE-LIQUIDITY-STATS
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-10
+    source_commit: "a410d00f / 39b31f33 (заработок арбитражёра)"
+    screen: true
+    text: "Почему в Живых позициях заработок арбитражёра показывает 0?"
+    expected_type: ask
+    expected_anchor: UI-VC-POS-BASIS
+    expected_top: Р4  # §3.4 ask: уровень, где величина определена (CALC)
+    expected_class: S
+
+  - id: G-11
+    source_commit: "n/a — новая роль, нет в реестре"
+    screen: false
+    text: "Нужна совсем новая виртуальная роль маркетмейкера третьего типа, которой сейчас нет"
+    expected_type: new
+    expected_anchor: null
+    expected_top: Р1
+    expected_class: XL
+
+  - id: G-12
+    source_commit: "6fa63ee5 (ADR-083 блок Система по остаткам)"
+    screen: true
+    text: "Расскажи, как работает блок Система по остаткам"
+    expected_type: describe
+    expected_anchor: UI-VC-SYSTEM-PNL
+    expected_top: Р2
+    expected_class: S
+
+  - id: G-13
+    source_commit: "bd179da5 (арбитражёр без рыночного хеджа за флагом, этап 2)"
+    screen: false
+    text: "Попробуй проверить гипотезу — а что если отключить рыночный хедж арбитража совсем"
+    expected_type: spike
+    expected_anchor: null
+    expected_top: null
+    expected_class: spike
+
+  - id: G-14
+    source_commit: "1480a01f (панель Живые позиции синхронизирована с вкладкой Граф)"
+    screen: true
+    text: "Вкладка Граф не совпадает с панелью Живые позиции по заработку арбитражёров"
+    expected_type: fix
+    expected_anchor: UI-VC-POS-BASIS
+    expected_top: Р8
+    expected_class: M
+
+  - id: G-15
+    source_commit: "b52968dd/f141342f (порог band единый источник в ledger)"
+    screen: false
+    text: "Порог ширины полосы хеджа должен быть единым источником в ledger, а не дублироваться в BFF"
+    expected_type: change
+    expected_anchor: CALC-CE-SKEW-BAND-CALIBRATION
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-16
+    source_commit: "n/a — F-05A depth window выключен, нет UI"
+    screen: true
+    text: "Добавь на экран Клиринг график глубины стакана"
+    expected_type: extend
+    expected_anchor: CALC-F05A-DEPTH-WINDOW
+    expected_top: Р4
+    expected_class: L
+
+  - id: G-17
+    source_commit: "6fa63ee5 (ADR-084 физический перевод связки)"
+    screen: false
+    text: "Объясни, как арбитражёр переводит остаток между биржами"
+    expected_type: describe
+    expected_anchor: CALC-CE-LINK-TRANSFER
+    expected_top: Р2
+    expected_class: S
+
+  - id: G-18
+    source_commit: "54ca3650 (ADR-081, множитель порога)"
+    screen: true
+    text: "На экране Клиринг множитель порога выхода арбитражёров нигде не описан"
+    expected_type: refine
+    expected_anchor: UI-VC-BAND-MODE
+    expected_top: Р8
+    expected_class: M
+
+  - id: G-19
+    source_commit: "6eb98f2d (сброс позиций обнуляет накопленный заработок)"
+    screen: false
+    text: "После сброса позиций накопленный заработок не обнулился"
+    expected_type: fix
+    expected_anchor: CALC-CE-TRANSLATOR-PNL
+    expected_top: Р4
+    expected_class: M
+
+  - id: G-20
+    source_commit: "596b1706 (ADR-066 порог band, пол и опорная сигма)"
+    screen: false
+    text: "Что значит пол и опорная сигма в настройках динамического порога полосы хеджа?"
+    expected_type: ask
+    expected_anchor: CALC-CE-SKEW-BAND-CALIBRATION
+    expected_top: Р4
+    expected_class: S

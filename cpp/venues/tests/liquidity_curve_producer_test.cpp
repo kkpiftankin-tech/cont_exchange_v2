@@ -68,10 +68,12 @@ struct FakePublisher final : public IMessagePublisher {
   };
 
   std::vector<Message> messages;
+  bool fail{false};  // true ⇒ Publish возвращает false (симуляция ошибки публикации)
 
   bool Publish(const std::string& topic,
                const std::string& key,
                const std::string& payload) override {
+    if (fail) return false;  // не записываем сообщение при провале
     messages.push_back({topic, key, payload});
     return true;
   }
@@ -1231,7 +1233,10 @@ bool TestStaleDegradesToL1WithLowerConfidence() {
   return pass;
 }
 
-bool TestExecutionErrorsDegradeToL1ThenOff() {
+// F-11 (расцепление 2026-10-01): провалы ХЕДЖА (REJECTED/EXPIRED ExecutionReport)
+// НЕ должны гасить КРИВУЮ ликвидности — чтение публичного стакана не зависит от
+// исполнимости хеджа. (Прежде execution-ошибки душили кривую: 21 стакан→7 кривых.)
+bool TestExecutionErrorsDoNotDegradeCurve() {
   FakePublisher publisher;
   LiquidityCurveProducerConfig cfg;
   cfg.level = "L3";
@@ -1243,28 +1248,52 @@ bool TestExecutionErrorsDegradeToL1ThenOff() {
 
   LiquidityCurveProducer producer(&publisher, cfg);
   const auto intent = MakeIntent(fob::common::v1::SIDE_BUY, 2);
-  producer.ObserveExecution(intent, MakeRejectedReport());
-  producer.ObserveExecution(intent, MakeRejectedReport());
+  // 4 подряд провала хеджа (> порога max_consecutive_errors_off=3).
+  for (int i = 0; i < 4; ++i) producer.ObserveExecution(intent, MakeRejectedReport());
 
-  const bool degraded_ok = producer.Publish(MakeSnapshot());
-  if (!Check(degraded_ok, "two execution errors should degrade but still publish")) return false;
-
-  fob::venue::v1::VenueLiquidityCurve degraded_curve;
-  if (!Check(cex::common::from_bytes(publisher.messages.back().payload, degraded_curve),
-             "error-degraded curve parse")) {
-    return false;
-  }
-
+  const std::size_t before = publisher.messages.size();
+  const bool ok = producer.Publish(MakeSnapshot());
   bool pass = true;
-  pass = Check(degraded_curve.level() == "L1",
-               "two consecutive errors must degrade L3 to L1") && pass;
+  pass = Check(ok, "execution errors must NOT block curve publish") && pass;
+  pass = Check(publisher.messages.size() > before, "curve must still be published") && pass;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  if (Check(cex::common::from_bytes(publisher.messages.back().payload, curve), "curve parse")) {
+    pass = Check(curve.level() == "L3",
+                 "execution errors must NOT downgrade curve level (stays L3)") && pass;
+  } else {
+    pass = false;
+  }
+  return pass;
+}
 
-  producer.ObserveExecution(intent, MakeRejectedReport());
-  const std::size_t before_off_messages = publisher.messages.size();
+// Ошибки ПУБЛИКАЦИИ кривой (Kafka publish кривой провалился) инкрементят
+// consecutive_publish_errors и ПО-ПРЕЖНЕМУ деградируют кривую до OFF после порога.
+// Покрывает ветку operational_errors >= max_consecutive_errors_off через publish-путь.
+// (Синтетик-путь для этого не годится: успешная публикация кривой сбрасывает счётчик
+// в 0 до того, как провал синтетика его поднимет — счётчик не копится.)
+bool TestPublishErrorsDegradeToOff() {
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.level = "L3";
+  cfg.l3_impact.enabled = true;
+  cfg.degradation.min_l3_confidence = 0.0;
+  cfg.degradation.min_l2_confidence = 0.0;
+  cfg.degradation.min_l1_confidence = 0.0;
+  cfg.degradation.max_consecutive_errors_off = 3;
+
+  LiquidityCurveProducer producer(&publisher, cfg);
+  bool pass = true;
+  // 3 подряд провала публикации кривой → consecutive_publish_errors достигает 3.
+  publisher.fail = true;
+  for (int i = 0; i < 3; ++i) producer.Publish(MakeSnapshot());
+  // Публикация снова работает, но счётчик=3 ⇒ OFF-гейт срабатывает ДО построения:
+  // ни одной записи, несмотря на рабочий publisher.
+  publisher.fail = false;
+  const std::size_t before_off = publisher.messages.size();  // ожидаем 0
   const bool off_ok = producer.Publish(MakeSnapshot());
-  pass = Check(!off_ok, "three consecutive errors must degrade to OFF") && pass;
-  pass = Check(publisher.messages.size() == before_off_messages,
-               "OFF must not publish a new curve") && pass;
+  pass = Check(!off_ok, "three publish errors must degrade curve to OFF") && pass;
+  pass = Check(publisher.messages.size() == before_off,
+               "OFF must not publish a new curve (gate fires before build)") && pass;
   return pass;
 }
 
@@ -1524,9 +1553,171 @@ bool TestRejectsEmptyBook() {
 
 }  // namespace
 
+// F-05A #2 (ADR-053 §Addendum): cliff-книга — тонкий near-touch + глубокий far-уровень.
+// Глобальный α_ext=min(D/δ) даёт плоский β_T; windowing (секанс VWAP на Q_char) — круче.
+fob::venue::v1::VenueSnapshot MakeCliffSnapshot() {
+  fob::venue::v1::VenueSnapshot snap;
+  snap.mutable_meta()->set_event_id("snapshot-cliff");
+  snap.mutable_meta()->set_partition_key("binance|BTC/USDT");
+  snap.set_venue_id("binance");
+  snap.mutable_instrument()->set_symbol("BTC/USDT");
+  snap.mutable_instrument()->set_base("BTC");
+  snap.mutable_instrument()->set_quote("USDT");
+  *snap.mutable_best_bid() = Dec(100, 0);
+  *snap.mutable_best_ask() = Dec(101, 0);
+  *snap.mutable_mid_price() = Dec(1005, 1);
+  *snap.mutable_tick_size() = Dec(1, 0);
+  *snap.mutable_lot_size() = Dec(1, 0);
+  // Валидная для продюсера книга (проходит quality-gates): тонкий near + обрыв в глубину.
+  *snap.add_bid_prices() = Dec(100, 0);  *snap.add_bid_quantities() = Dec(5, 1);
+  *snap.add_bid_prices() = Dec(999, 1);  *snap.add_bid_quantities() = Dec(5, 1);
+  *snap.add_bid_prices() = Dec(85, 0);   *snap.add_bid_quantities() = Dec(80, 0);
+  *snap.add_ask_prices() = Dec(101, 0);  *snap.add_ask_quantities() = Dec(5, 1);
+  *snap.add_ask_prices() = Dec(1011, 1); *snap.add_ask_quantities() = Dec(5, 1);
+  *snap.add_ask_prices() = Dec(115, 0);  *snap.add_ask_quantities() = Dec(80, 0);
+  return snap;
+}
+
+double BetaTFor(const fob::venue::v1::VenueSnapshot& snap) {
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.topic = "venue.liquidity.fob";
+  LiquidityCurveProducer producer(&publisher, cfg);
+  if (!producer.Publish(snap) || publisher.messages.empty()) return -1.0;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  if (!cex::common::from_bytes(publisher.messages.back().payload, curve)) return -1.0;
+  return curve.safe_translator().beta_t();
+}
+
+// §6.2 «Кривые котирования»: 4 способа снятия наклона сверены с ПЕЧАТНЫМ числовым
+// примером дока (grounded, не ад-хок). mid=60000, кумул. (δ‰,D тыс.USDT) =
+// (1,100)(3,250)(6,500). Док: касательная=100, МНК≈80, минорант=83.3; M3 числа не
+// даёт (ждём D_n²/(2·Σδ·ΔD)=250000/4100≈60.98).
+bool TestSlopeMethodsGroundExample() {
+  const std::vector<double> delta = {1.0, 3.0, 6.0};
+  const std::vector<double> cum_notional = {100.0, 250.0, 500.0};
+  const auto a = cex::venues::app::AlphasFromCumulative(delta, cum_notional);
+  bool pass = true;
+  pass = Check(std::fabs(a.tangent - 100.0) < 1e-6, "M1 касательная = 100 (§6.2)") && pass;
+  pass = Check(std::fabs(a.lsq - 3050.0 / 38.0) < 1e-6, "M2 МНК = 80.263 (§6.2 ≈80)") && pass;
+  pass = Check(std::fabs(a.minorant - 500.0 / 6.0) < 1e-6, "M4 минорант = 83.333 (§6.2)") && pass;
+  pass = Check(std::fabs(a.profit - 250000.0 / 4100.0) < 1e-6, "M3 подгонка = 60.976") && pass;
+  // §6.2: касательная оптимистична (≥ минoranта), минорант ≥ МНК ≥ M3 на выпуклой книге.
+  pass = Check(a.tangent >= a.minorant && a.minorant >= a.lsq && a.lsq >= a.profit,
+               "§6.2 упорядоченность способов на выпуклой книге") && pass;
+  // Вырожденная полоса M2 (все δ_k совпадают ⇒ знаменатель OLS≈0): lsq НЕ должен остаться
+  // +inf (иначе near-zero clearing slope), фолбэк на минорант (code-review money-path).
+  const auto degen = cex::venues::app::AlphasFromCumulative({5.0, 5.0}, {100.0, 200.0});
+  pass = Check(std::isfinite(degen.lsq) && degen.lsq > 0.0,
+               "M2 вырожденная полоса → фолбэк на минорант (не +inf)") && pass;
+  pass = Check(degen.lsq == degen.minorant, "M2 фолбэк = минорант при den≈0") && pass;
+  // Один уровень: M2 деградирует в касательную.
+  const auto one = cex::venues::app::AlphasFromCumulative({3.0}, {90.0});
+  pass = Check(std::isfinite(one.lsq) && one.lsq == one.tangent, "M2 один уровень = касательная") && pass;
+  return pass;
+}
+
+// ADR-070 (дополнение): ComputeSlopeMethods — те же 4 способа §6.2 по произвольному снимку.
+// Ожидания пересчитаны независимо от продакшн-кода (δ_k=10⁴|ln(VWAP_k/mid)|, D_k=Σp·q).
+bool TestComputeSlopeMethodsOnDemand() {
+  const auto snap = MakeSnapshot();  // mid=100.5; bid (100,2)(99,3); ask (101,2)(102,4)
+  const double mid = 100.5;
+  auto side = [&](const std::vector<std::pair<double, double>>& lv) {
+    std::vector<double> delta, D;
+    double cq = 0.0, cn = 0.0;
+    for (const auto& [p, q] : lv) {
+      cq += q; cn += p * q;
+      delta.push_back(10000.0 * std::fabs(std::log((cn / cq) / mid)));
+      D.push_back(cn);
+    }
+    return cex::venues::app::AlphasFromCumulative(delta, D);
+  };
+  const auto eb = side({{100, 2}, {99, 3}});
+  const auto ea = side({{101, 2}, {102, 4}});
+
+  const auto r = cex::venues::app::ComputeSlopeMethods(snap);
+  bool pass = Check(r.has_value(), "ComputeSlopeMethods: есть результат");
+  if (!pass) return false;
+  pass = Check(std::fabs(r->mid - mid) < 1e-9, "mid = mid_price снимка") && pass;
+  pass = Check(std::fabs(r->depth_bid - 5.0) < 1e-9 && std::fabs(r->depth_ask - 6.0) < 1e-9,
+               "depth = Σ q стороны (все уровни, без лимита 20)") && pass;
+  const double bid_alpha[4] = {eb.tangent, eb.lsq, eb.profit, eb.minorant};
+  const double ask_alpha[4] = {ea.tangent, ea.lsq, ea.profit, ea.minorant};
+  for (int i = 0; i < 4; ++i) {
+    const auto& m = r->methods[static_cast<std::size_t>(i)];
+    const double cmb = std::min(bid_alpha[i], ask_alpha[i]);
+    pass = Check(m.kind == i + 1, "номер способа M1..M4") && pass;
+    pass = Check(std::fabs(m.alpha_bid - bid_alpha[i]) < 1e-9, "α bid по способу") && pass;
+    pass = Check(std::fabs(m.alpha_ask - ask_alpha[i]) < 1e-9, "α ask по способу") && pass;
+    pass = Check(std::fabs(m.alpha_ext - cmb) < 1e-9, "α_ext = min(bid, ask)") && pass;
+    pass = Check(std::fabs(m.beta_raw - (mid * mid) / (10000.0 * cmb)) < 1e-9 * (1.0 + m.beta_raw),
+                 "β_raw = mid²/(10⁴·α_ext)") && pass;
+  }
+  // Лимит уровней: берутся N ЛУЧШИХ уровней стороны; с одним уровнем M4 = M1 = D_1/δ_1.
+  const auto r1 = cex::venues::app::ComputeSlopeMethods(snap, 1);
+  pass = Check(r1.has_value() && std::fabs(r1->depth_bid - 2.0) < 1e-9 &&
+                   std::fabs(r1->depth_ask - 2.0) < 1e-9,
+               "levels=1: depth = лучший уровень") && pass;
+  if (r1.has_value()) {
+    pass = Check(std::fabs(r1->methods[3].alpha_bid - r1->methods[0].alpha_bid) < 1e-9,
+                 "levels=1: минорант = касательная") && pass;
+  }
+  // Пустая сторона → нет результата.
+  auto empty = snap;
+  empty.clear_ask_prices();
+  empty.clear_ask_quantities();
+  pass = Check(!cex::venues::app::ComputeSlopeMethods(empty).has_value(), "пустая сторона → nullopt") && pass;
+  return pass;
+}
+
+// §6.2: runtime-выбор способа для клиринга. Дефолт (минорант) = прежнее поведение
+// байт-в-байт; выбор другого способа детерминированно меняет β_t; обратим.
+bool TestSlopeMethodSelection() {
+  const auto snap = MakeCliffSnapshot();
+  using cex::venues::app::SetClearingSlopeMethod;
+  SetClearingSlopeMethod(4);
+  const double b4 = BetaTFor(snap);
+  const double b4b = BetaTFor(snap);
+  SetClearingSlopeMethod(1); const double b1 = BetaTFor(snap);
+  SetClearingSlopeMethod(2); const double b2 = BetaTFor(snap);
+  SetClearingSlopeMethod(3); const double b3 = BetaTFor(snap);
+  SetClearingSlopeMethod(4); const double b4c = BetaTFor(snap);  // обратимость
+  bool pass = true;
+  pass = Check(b4 > 0.0, "select: минорант β_t > 0") && pass;
+  pass = Check(b4 == b4b, "select: детерминизм") && pass;
+  pass = Check(b4 == b4c, "select: возврат к минoranту байт-в-байт (обратимость)") && pass;
+  pass = Check(b1 > 0.0 && b2 > 0.0 && b3 > 0.0, "select: все способы дают β_t > 0") && pass;
+  pass = Check(b1 != b4 || b2 != b4 || b3 != b4, "select: способы дают разный наклон") && pass;
+  return pass;
+}
+
+// §6.2: контракт safe_translator несёт все 4 диагностики + выбранный способ.
+bool TestSlopeMethodsContract() {
+  const auto snap = MakeCliffSnapshot();
+  FakePublisher publisher;
+  LiquidityCurveProducerConfig cfg;
+  cfg.topic = "venue.liquidity.fob";
+  LiquidityCurveProducer producer(&publisher, cfg);
+  cex::venues::app::SetClearingSlopeMethod(2);  // выбираем МНК
+  bool pass = true;
+  pass = Check(producer.Publish(snap) && !publisher.messages.empty(), "contract: опубликовано") && pass;
+  fob::venue::v1::VenueLiquidityCurve curve;
+  pass = Check(cex::common::from_bytes(publisher.messages.back().payload, curve), "contract: декод") && pass;
+  const auto& st = curve.safe_translator();
+  pass = Check(st.slope_methods_size() == 4, "contract: 4 способа в диагностике") && pass;
+  pass = Check(st.selected_method() == fob::common::v1::SLOPE_METHOD_LSQ_BAND,
+               "contract: выбранный способ = M2 (LSQ)") && pass;
+  cex::venues::app::SetClearingSlopeMethod(4);  // вернуть §6.3-safe дефолт
+  return pass;
+}
+
 int main() {
   bool ok = true;
   ok = TestPublishesRegularizedCurve() && ok;
+  ok = TestSlopeMethodsGroundExample() && ok;
+  ok = TestComputeSlopeMethodsOnDemand() && ok;
+  ok = TestSlopeMethodSelection() && ok;
+  ok = TestSlopeMethodsContract() && ok;
   ok = TestPublishesL2ForHighPriceSnapshot() && ok;
   ok = TestLiveLikeHighScaleSnapshotRetainsL2() && ok;
   ok = TestLiveLikeHighScaleSnapshotCanBuildL3() && ok;
@@ -1545,7 +1736,8 @@ int main() {
   ok = TestQualityGatingDisableSkipsPublish() && ok;
   ok = TestQualityDegradesL3ToL2() && ok;
   ok = TestStaleDegradesToL1WithLowerConfidence() && ok;
-  ok = TestExecutionErrorsDegradeToL1ThenOff() && ok;
+  ok = TestExecutionErrorsDoNotDegradeCurve() && ok;
+  ok = TestPublishErrorsDegradeToOff() && ok;
   ok = TestPublishOptionsOverrideLevelAndSyntheticOutput() && ok;
   ok = TestPublishesSyntheticFlowOrdersAndStoresRows() && ok;
   ok = TestVolume24hCapsSyntheticSpeed() && ok;

@@ -3,6 +3,7 @@ syntax = "proto3";
 package fob.observability.v1;
 
 import "google/protobuf/timestamp.proto";
+
 import "fob/common/v1/common.proto";
 
 message MetricPoint {
@@ -22,11 +23,47 @@ message LogEvent {
   // Kafka topic: logs
   fob.common.v1.EventMeta meta = 1;
 
-  enum Level { LEVEL_UNSPECIFIED = 0; DEBUG = 1; INFO = 2; WARN = 3; ERROR = 4; }
+  enum Level {LEVEL_UNSPECIFIED = 0; DEBUG = 1; INFO = 2; WARN = 3; ERROR = 4;}
   Level level = 2;
 
   string message = 3;
   map<string, string> fields = 4;
 
   google.protobuf.Timestamp timestamp = 5;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARNING = 2;
+  SEVERITY_ERROR = 3;
+  SEVERITY_CRITICAL = 4;
+};
+
+enum AlertStatus {
+  ALERT_STATUS_UNSPECIFIED = 0;
+  ALERT_STATUS_FIRING = 1;
+  ALERT_STATUS_RESOLVED = 2;
+};
+
+enum AlertCode {
+  ALERT_CODE_UNSPECIFIED = 0;
+  ALERT_CODE_LOW_VENUE_HEALTH_SCORE = 1;
+  ALERT_CODE_CIRCUIT_BREAKER_OPEN = 2;
+  ALERT_CODE_LOW_LIQUIDITY_CURVE_CONFIDENCE = 3;
+};
+
+message Alert {
+  fob.common.v1.EventMeta meta = 1;
+
+  string id = 2;
+
+  AlertCode code = 3;
+  string message = 4;
+
+  Severity severity = 5;
+
+  AlertStatus status = 6;
+
+  google.protobuf.Timestamp timestamp = 7;
 }

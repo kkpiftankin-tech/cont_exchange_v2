@@ -23,7 +23,7 @@
 
 | UC | Имя | L0 sequence ☁️ | L1 sequence 🌊 |
 | --- | --- | --- | --- |
-| [UC-F11-01](../../use-cases/UC-F11-01-ingest-external-marketdata/use-case.md) | Ingest External Marketdata | [SEQ-UC-F11-01-system](../../use-cases/UC-F11-01-ingest-external-marketdata/sequences/SEQ-UC-F11-01-system.md) | [SEQ-F11-UC-F11-01-services](../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md) |
+| [UC-F11-06 (legacy)](../../use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md) | Ingest External Marketdata (DEPRECATED, см. п. ниже) | [SEQ-UC-F11-06-system](../../use-cases/UC-F11-06-ingest-external-marketdata-legacy/sequences/SEQ-UC-F11-06-system.md) | N/A (исторический артефакт) |
 | [UC-F11-01](../../use-cases/UC-F11-01-onboard-venue/use-case.md) | Onboard Venue | [SEQ-UC-F11-01-system](../../use-cases/UC-F11-01-onboard-venue/sequences/SEQ-UC-F11-01-system.md) | [SEQ-F11-UC-F11-01-services](../../../05-components/sequences/SEQ-F11-UC-F11-01-services.md) |
 | [UC-F11-02](../../use-cases/UC-F11-02-publish-snapshot/use-case.md) | Publish Snapshot | [SEQ-UC-F11-02-system](../../use-cases/UC-F11-02-publish-snapshot/sequences/SEQ-UC-F11-02-system.md) | [SEQ-F11-02-publish-snapshot-services](../../../05-components/sequences/SEQ-F11-02-publish-snapshot-services.md) |
 | [UC-F11-03](../../use-cases/UC-F11-03-build-liquidity-curve/use-case.md) | Build Liquidity Curve | [SEQ-UC-F11-03-system](../../use-cases/UC-F11-03-build-liquidity-curve/sequences/SEQ-UC-F11-03-system.md) | [SEQ-F11-03-build-curve-services](../../../05-components/sequences/SEQ-F11-03-build-curve-services.md) |
@@ -135,7 +135,7 @@ $$
 | [UC-F11-03. Build VenueLiquidityCurve](../../use-cases/UC-F11-03-build-liquidity-curve/use-case.md)                               | LOB → FOB (L1/L2/L3) → venue.liquidity.fob (+ venue.synthetic)          |
 | [UC-F11-04. Venue health degradation](../../use-cases/UC-F11-04-venue-health-degradation/use-case.md)                             | Stale / circuit breaker open / fallback                                 |
 | [UC-F11-05. Execute hedge on venue](../../use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md)                                 | (cross-link F-12) Adapter принимает ExecutionIntent                     |
-| [UC-F11-01-ingest-external-marketdata](../../use-cases/UC-F11-01-ingest-external-marketdata/use-case.md)                          | (legacy stub) — заменён UC-F11-02; оставлен для совместимости ссылок     |
+| [UC-F11-06-ingest-external-marketdata-legacy](../../use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md)            | (legacy stub, до 2026-10-27 ошибочно делил номер с UC-F11-01) — заменён UC-F11-02; оставлен для совместимости ссылок |
 
 ## Sequence Diagrams
 

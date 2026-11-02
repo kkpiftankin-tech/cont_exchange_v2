@@ -6,7 +6,7 @@
 # =============================================================================
 
 .PHONY: help docs-lint validate-yaml validate-traceability validate-proto-map \
-        docs-code-drift validate-docs generate-code-map all
+        docs-code-drift validate-docs generate-code-map all registry consistency ui-map
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,9 @@ help:
 	@echo "  validate-docs         — все валидации сразу"
 	@echo "  generate-code-map     — обновить docs/generated/code-map.md"
 	@echo "  docs-lint             — markdown lint (TODO)"
+	@echo "  registry               — пересобрать specs/registry/registry.yaml (Этап 2, ADR-086)"
+	@echo "  consistency             — tools/consistency/check.py C-01..C-17 (Этап 2, сужен — README)"
+	@echo "  ui-map                  — tools/ui-map/scan.py, отчёт без --write (Этап 3, пилот 1 экрана)"
 
 docs-lint:
 	@echo "TODO: integrate markdownlint or vale"
@@ -50,5 +53,14 @@ generate-code-map:
 
 validate-docs: validate-yaml validate-traceability validate-proto-map
 	@echo "All validations passed."
+
+registry:
+	@python3 tools/registry/build.py --write
+
+consistency: registry
+	@python3 tools/consistency/check.py
+
+ui-map:
+	@python3 tools/ui-map/scan.py
 
 all: validate-docs generate-code-map

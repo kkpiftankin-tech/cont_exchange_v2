@@ -6,7 +6,7 @@
 // risk-namespace вместо вынесения в common, чтобы держать F-06 focused PR
 // (тот же подход duplication, что у ParseDecimalString в risk_uc.cpp).
 //
-// КРИТИЧНО (CLAUDE.md §9): ошибка здесь = молчаливая порча margin/collateral.
+// КРИТИЧНО (.claude/rules/data.md): ошибка здесь = молчаливая порча margin/collateral.
 // ============================================================================
 
 #include "infra/postgres/decimal_conversion.hpp"

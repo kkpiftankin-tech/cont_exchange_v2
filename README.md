@@ -125,7 +125,7 @@ The repository ships with shared `.claude/settings.json` (committed) — it regi
 that work out of the box for every contributor:
 
 - `UserPromptSubmit` → `tools/auto-archive-attachments.py` (auto-archives chat attachments
-  to `incoming-docs/`; see [CLAUDE.md §0a](CLAUDE.md));
+  to `incoming-docs/`; see [.claude/rules/docs-as-code.md](.claude/rules/docs-as-code.md));
 - `PostToolUse` → `scripts/hooks/post_edit_hint.sh` (post-edit reminders).
 
 For personal preferences (rsync to dev host, pre-approved bash commands, extra hooks),

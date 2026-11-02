@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F06-01
+title: Показать позиции / PnL / маржу
 level: sea
+feature: F-06
+system-sequence: sequences/SEQ-UC-F06-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F06-UC-F06-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F06-01. Показать позиции / PnL / маржу
 

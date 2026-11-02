@@ -31,14 +31,14 @@ LLM как участника разработки. Без правил раст
 - **Никаких прямых коммитов в `main`**: весь LLM-вывод проходит через PR и
   human review.
 - **No secrets**: LLM не вносит и не запрашивает секреты в репозиторий
-  (CLAUDE.md §22); секреты не попадают в Kafka/доки.
+  ([CLAUDE.md §1](../../../CLAUDE.md)); секреты не попадают в Kafka/доки.
 - **Docs-before-code**: LLM создаёт/обновляет документацию и
-  implementation-tasks **до** кода (CLAUDE.md §0a, [ADR-018](ADR-018-design-traceability-chain.md)).
+  implementation-tasks **до** кода ([.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md), [ADR-018](ADR-018-design-traceability-chain.md)).
 - **Drift review**: расхождение код/доки прогоняется через drift-policy
   ([ADR-008](ADR-008-code-doc-drift-policy.md)); LLM предлагает doc-update,
   финальное решение — человек.
 - **Immutable incoming**: входящие документы архивируются в `incoming-docs/`
-  и неизменяемы (CLAUDE.md §0a).
+  и неизменяемы ([.claude/rules/docs-as-code.md](../../../.claude/rules/docs-as-code.md)).
 - **Reports/prompt-library** (рекомендация): повторно используемые промпты и
   отчёты об ingestion/impl/drift хранятся в репозитории, чтобы процесс был
   воспроизводим и аудируем.

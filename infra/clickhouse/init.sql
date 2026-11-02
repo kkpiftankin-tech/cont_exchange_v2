@@ -1,3 +1,5 @@
+-- Срок хранения ВСЕХ аналитических таблиц временно 7 дней (решение владельца 2026-10-22), см. docs/07-data/clickhouse-retention.md.
+-- Вернуть длинный срок: поменять INTERVAL в TTL ниже и применить на живой базе ALTER TABLE ... MODIFY TTL.
 -- F-04 Batch Clearing: ClickHouse OLAP schema.
 --
 -- Mirrors the DDL emitted by ClickHouseBatchStorage::EnsureSchema in
@@ -34,7 +36,9 @@ CREATE TABLE IF NOT EXISTS batchresults (
   fills_count             UInt32,
   ingested_at             DateTime DEFAULT now()
 ) ENGINE = MergeTree
-ORDER BY (event_time_ms, batch_id);
+ORDER BY (event_time_ms, batch_id)
+-- Хранение 7 дней (docs/07-data/clickhouse-retention.md).
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- fills: one row per FillEvent (a single order may have multiple rows in one
@@ -61,7 +65,9 @@ CREATE TABLE IF NOT EXISTS fills (
   curve_id           String,
   ingested_at        DateTime DEFAULT now()
 ) ENGINE = MergeTree
-ORDER BY (event_time_ms, batch_id, order_id);
+ORDER BY (event_time_ms, batch_id, order_id)
+-- Хранение 7 дней (docs/07-data/clickhouse-retention.md).
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- F-12 Execution Hedge: execution_reports analytics table.
@@ -76,7 +82,7 @@ ORDER BY (event_time_ms, batch_id, order_id);
 --   `backtest_execution_reports` per BACKTEST_CLICKHOUSE_EXECUTION_VENUE_TABLE
 --   (kept analogous to BUG-2 part 2 fix in IN-007).
 --
--- Retention: TTL set on event_time_ms - keep 90 days of execution history,
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- per F-12 non-functional requirement (Section 2.1, "Хранение execution reports
 -- в ClickHouse с retention ≥ 90 дней").
 -- ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ CREATE TABLE IF NOT EXISTS execution_reports (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
 ORDER BY (symbol, venue_id, event_time_ms, report_id)
-TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 7 DAY;
 
 -- Projection for HedgeFlow Monitor drill-down: queries by hedge_flow_id are
 -- O(N) without this projection because primary key starts with symbol.
@@ -122,7 +128,7 @@ ALTER TABLE execution_reports
 --   fills (extended)        → grouped_leg_fills
 --   computed / MV           → grouped_quality_metrics
 --   backtest.execution.groups → grouped_replay_results
--- Monetary / qty fields: Decimal128(18) per CLAUDE.md §9.
+-- Monetary / qty fields: Decimal128(18) per .claude/rules/data.md.
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
@@ -130,7 +136,7 @@ ALTER TABLE execution_reports
 -- Source topic: execution.groups (producer: matching, key: parentOrderId).
 -- ReplacingMergeTree deduplicates by (parent_order_id, execution_group_id,
 -- event_time_ms) on compaction — idempotent re-ingestion safe.
--- Retention: 365 days (audit trail; same class as fills).
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS grouped_execution_events (
     execution_group_id   String,
@@ -154,13 +160,13 @@ CREATE TABLE IF NOT EXISTS grouped_execution_events (
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (parent_order_id, execution_group_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- grouped_leg_fills: per-leg fill with group context.
 -- Source: extended fills topic (fields parentOrderId/executionGroupId/legId).
 -- ReplacingMergeTree for idempotent re-ingestion.
--- Retention: 365 days.
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS grouped_leg_fills (
     fill_id              String,
@@ -183,14 +189,14 @@ CREATE TABLE IF NOT EXISTS grouped_leg_fills (
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (execution_group_id, leg_id, fill_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- grouped_quality_metrics: quality aggregates per ExecutionGroup.
 -- Populated via a Materialized View from grouped_execution_events +
 -- grouped_leg_fills (combined VWAP, IS, ratio deviation).
 -- ReplacingMergeTree for idempotent compaction.
--- Retention: 365 days.
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS grouped_quality_metrics (
     execution_group_id        String,
@@ -215,13 +221,13 @@ CREATE TABLE IF NOT EXISTS grouped_quality_metrics (
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (parent_order_id, execution_group_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- grouped_ratio_deviation: per-leg per-batch ratio/weight deviation history.
 -- Used to identify binding legs (AC-F09-002) and for risk/quality analytics.
 -- MergeTree (no dedup needed; each (group, leg, time) triple is unique).
--- Retention: 180 days (shorter than events; deviation is less critical).
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS grouped_ratio_deviation (
     execution_group_id    String,
@@ -242,7 +248,7 @@ CREATE TABLE IF NOT EXISTS grouped_ratio_deviation (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (parent_order_id, event_time_ms, leg_id)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- grouped_replay_results: F-15 backtest/replay results for multi-leg orders.
@@ -251,7 +257,7 @@ TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
 -- Replay determinism: same replay_session_id + parent_order_id + group =>
 -- same execution_scale (AC-F09-010).
 -- ReplacingMergeTree for idempotent replay re-runs.
--- Retention: 90 days (replay data is transient vs live audit trail).
+-- Retention: 7 дней (временно для всех аналитических таблиц, решение владельца 2026-10-22).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS grouped_replay_results (
     replay_session_id    String,
@@ -276,7 +282,7 @@ CREATE TABLE IF NOT EXISTS grouped_replay_results (
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (replay_session_id, parent_order_id, execution_group_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 90 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- ===========================================================================
 -- F-20 Live Venue Simulator (PR-F20-4). OLAP history for sim execution +
@@ -322,7 +328,7 @@ CREATE TABLE IF NOT EXISTS sim_execution_reports (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
 ORDER BY (sim_session_id, symbol, venue_id, event_time_ms, report_id)
-TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 7 DAY;
 
 -- sim_divergence_log: SHADOW-mode comparison of LIVE vs SIM execution for
 -- the same clientOrderId. Written by the Divergence Service after it pairs
@@ -352,7 +358,7 @@ CREATE TABLE IF NOT EXISTS sim_divergence_log (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(toDateTime(event_time_ms / 1000))
 ORDER BY (sim_session_id, event_time_ms, client_order_id)
-TTL toDateTime(event_time_ms / 1000) + INTERVAL 90 DAY;
+TTL toDateTime(event_time_ms / 1000) + INTERVAL 7 DAY;
 
 -- ---------------------------------------------------------------------------
 -- F-05 Live Market Data: marketdata_snapshots
@@ -379,7 +385,7 @@ CREATE TABLE IF NOT EXISTS marketdata_snapshots (
   timestamp         DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
 ORDER BY (asset, timestamp)
-TTL toDateTime(timestamp) + INTERVAL 90 DAY
+TTL toDateTime(timestamp) + INTERVAL 7 DAY
 SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------------
@@ -397,7 +403,7 @@ CREATE TABLE IF NOT EXISTS effective_spreads (
   timestamp             DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
 ORDER BY (asset, timestamp)
-TTL toDateTime(timestamp) + INTERVAL 365 DAY
+TTL toDateTime(timestamp) + INTERVAL 7 DAY
 SETTINGS index_granularity = 8192;
 -- F-09 / ADR-042: единый read-слой батчей (одномерные + многоногие combo).
 --
@@ -480,7 +486,8 @@ CREATE TABLE IF NOT EXISTS vector_clearing_results (
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (execution_group_id, batch_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+-- Хранение 7 дней (решение владельца 2026-10-21: история клиринга старше недели не нужна), см. docs/07-data/clickhouse-retention.md.
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- Surplus / EXCHANGE_PNL события (ADR-044). Один surplus-актив на строку.
 CREATE TABLE IF NOT EXISTS surplus_events (
@@ -495,7 +502,7 @@ CREATE TABLE IF NOT EXISTS surplus_events (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (execution_group_id, asset, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 365 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;
 
 -- История vectorized flow segments (столбцы W) для audit / replay.
 CREATE TABLE IF NOT EXISTS vector_flow_segments_history (
@@ -505,16 +512,25 @@ CREATE TABLE IF NOT EXISTS vector_flow_segments_history (
     source_order_id     String,
     pair                LowCardinality(String),
     side                LowCardinality(String),  -- bid|ask
+    seg_index           UInt32,     -- F-05A ADR-050: позиция сегмента в x (x[i]↔segment)
     w_json              String,     -- JSON: вектор коэффициентов
     p_high              Decimal128(18),
     d_hl                Decimal128(18),
     q_rate              Decimal128(18),
     q_max               Decimal128(18),
     effective_price     Decimal128(18),
+    anchor              Decimal128(18),  -- ADR-052: mid (двусторонний сегмент)
+    slope               Decimal128(18),  -- ADR-052: наклон кривой m
+    q_min               Decimal128(18),  -- ADR-052: x_min = −Q_bid
+    alpha_ext           Decimal128(18),  -- ADR-053 safe-translator: min_k D_k/|δ_k|
+    alpha_t             Decimal128(18),  -- ADR-053: θ·ψ·α_ext (после haircut)
+    beta_t              Decimal128(18),  -- ADR-053: линейный наклон mid·slope
+    theta               Decimal128(18),  -- ADR-053: safe-share (0..1)
+    translator_model    LowCardinality(String),  -- "safe_vwap" | "log_endpoint"
     event_time_ms       Int64,
     ingested_at         DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(event_time_ms)
 PARTITION BY toYYYYMMDD(toDateTime(intDiv(event_time_ms, 1000)))
 ORDER BY (batch_id, segment_id, event_time_ms)
-TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 180 DAY;
+TTL toDateTime(intDiv(event_time_ms, 1000)) + INTERVAL 7 DAY;

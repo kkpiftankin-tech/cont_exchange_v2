@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import NavBar from "../../components/NavBar";
 import MarketChart from '../../components/MarketChart';
 import MarketDataWidget from '../../components/MarketDataWidget';
+import RawOrderBook from '../../components/RawOrderBook';
 import { useNavigate } from 'react-router-dom';
 import { isAuthenticated, logout } from '../../api/authService';
 import {
@@ -16,6 +17,8 @@ import { useTranslation } from 'react-i18next';
 import useInterval from '../../hooks/useInterval';
 
 const MAIN_REFRESH_INTERVAL_MS = 5000;
+// Торговая форма/виджет/баланс скрыты: на странице только сырой стакан. Вернуть: REACT_APP_SHOW_TRADE_FORM=1
+const SHOW_TRADE_FORM = process.env.REACT_APP_SHOW_TRADE_FORM === '1';
 
 const Main = () => {
   const { t } = useTranslation();
@@ -321,6 +324,7 @@ const Main = () => {
     <div className="main-container">
       <NavBar />
 
+      {SHOW_TRADE_FORM && (<>
       {/* F-05: Live Market Data виджет с переключателем актива.
           Вынесен НАД .content (которая flex-row), чтобы не сжимать график/панель.
           Фиксированная ширина карточки — иначе на широком экране колонки
@@ -346,7 +350,11 @@ const Main = () => {
         </div>
         <MarketDataWidget asset={selectedAsset} />
       </div>
+      </>)}
 
+      <RawOrderBook />
+
+      {SHOW_TRADE_FORM && (<>
       <div className="content">
         <div className="chart-section">
           <MarketChart />
@@ -486,6 +494,7 @@ const Main = () => {
         </div>
       </div>
 
+
       <div className="balance-section">
         {/* F-09: карточки по ВСЕМ активам из ledger (USDT/BTC/ETH/… от combo-ног),
             а не только захардкоженные USDT+BTC. USDT первым, BTC вторым, прочие — по алфавиту.
@@ -522,6 +531,7 @@ const Main = () => {
             );
           })}
       </div>
+      </>)}
 
       {showWithdrawModal && (
         <div className="modal-overlay">

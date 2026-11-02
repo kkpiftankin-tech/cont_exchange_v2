@@ -7,9 +7,12 @@
 #include "fob/execution/v1/execution.pb.h"
 #include "fob/matching/v1/batch.pb.h"
 #include "fob/venue/v1/venue.pb.h"
+#include "fob/treasury/v1/treasury.pb.h"  // Вариант 2: AgentBandBreach
 #include "infra/risk_alerts_publisher.hpp"
 #include "infra/risk_snapshot_repository.hpp"
 #include "cex/common/decimal.hpp"
+#include "cex/common/kafka.hpp"             // F-18: producer execution.intents
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // F-18: клиент к ledger (валютный вектор)
 
 namespace cex::risk::app {
 
@@ -23,6 +26,37 @@ public:
   void SetSnapshotRepository(infra::RiskSnapshotRepository* repo) {
     snapshot_repo_ = repo;
   }
+
+  // F-18 (ADR-054 §10): stub к ledger для чтения валютного вектора биржи.
+  void SetLedgerStub(fob::ledger::v1::LedgerService::StubInterface* stub) {
+    ledger_stub_ = stub;
+  }
+
+  // F-18: NOP биржи по валюте + размер хеджа (читает ledger.GetExchangeBalances).
+  fob::risk::v1::GetExchangeNOPResponse
+  GetExchangeNOP(const fob::risk::v1::GetExchangeNOPRequest &req);
+
+  // F-18 Phase E02: продюсер для execution.intents (эмиссия net-хеджа).
+  void SetIntentsProducer(cex::common::KafkaProducer *p) { intents_producer_ = p; }
+  // Периодический драйвер: при CE_NET_HEDGE_ENABLED считает NOP и публикует
+  // ExecutionIntent для armed-валют (излишек→SELL, дефицит→BUY), с cooldown-
+  // защитой от переэмиссии. Вызывается из фонового таймера (risk main).
+  void EmitNetHedges();
+
+  // F-18 v2 · Э3 (T-F18-303, ADR-061 §4): при CE_AGENT_BAND публикует хедж
+  // per-АГЕНТ (не по агрегатному NOP-порогу): читает ledger.GetAgentPositions,
+  // для переводчика с |c|>q эмитит ExecutionIntent на избыток (|c|−q) в сторону
+  // реализации накопленного потока (c>0 ⇒ SELL, c<0 ⇒ BUY), помечая in_flight
+  // через hedge_flow_id "ce|band|<agent_id>|<asset>|<venue>". Арбитражёров
+  // пропускает (их перевоз — Э5/CE_TRANSFER_AGENT). Вызывается из того же
+  // фонового таймера, что и EmitNetHedges.
+  void EmitAgentBandHedges();
+
+  // Вариант 2 (2026-09-17): по событию пробоя полосы (ce.agent.band.breach от
+  // ledger) строит ExecutionIntent в ПАРЕ base/quote (qty = excess·1000/base_price,
+  // limit = pair_price) и публикует в execution.intents. Заменяет опрос
+  // EmitAgentBandHedges: анализ позиции/порог — в ledger, эмиссия — здесь.
+  void EmitBandHedgeFromBreach(const fob::treasury::v1::AgentBandBreach& breach);
 
   fob::risk::v1::PreTradeCheckResponse
   CheckNewOrder(const fob::risk::v1::PreTradeCheckRequest &req);
@@ -92,6 +126,10 @@ private:
 
   infra::RiskAlertsPublisher publisher_;
   infra::RiskSnapshotRepository *snapshot_repo_{nullptr};  // optional, not owned
+  fob::ledger::v1::LedgerService::StubInterface *ledger_stub_{nullptr};  // F-18, not owned
+  cex::common::KafkaProducer *intents_producer_{nullptr};  // F-18 Phase E02, not owned
+  std::mutex hedge_mu_;                                     // защищает hedge_cooldown_
+  std::unordered_map<std::string, long long> hedge_cooldown_;  // ccy -> last emit epoch-ms
 };
 
 } // namespace cex::risk::app

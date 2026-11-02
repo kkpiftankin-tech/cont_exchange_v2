@@ -1,9 +1,13 @@
 feature:
   id: F-14
   name: Deposit & Withdraw
-  status: not-implemented
+  lifecycle: planned  # planned | active | deprecated
+  status: {docs: partial, code: none, runtime: none}  # было: not-implemented
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-LEDGER-003  # депозиты и выводы
 
 description: >
   Обработка депозитов и выводов средств: on-chain переводы (для крипты),

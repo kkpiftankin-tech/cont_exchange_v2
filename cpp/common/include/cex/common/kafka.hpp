@@ -7,7 +7,7 @@
 //   librdkafka конфигурации. Все Kafka-flow проекта (Producer / Consumer)
 //   проходят через эти классы.
 //
-// Конвенции (CLAUDE.md §13):
+// Конвенции (.claude/rules/contracts.md):
 //   - At-least-once + idempotent consumer (enable_auto_commit=false +
 //     manual commitSync после успешной обработки).
 //   - Key — meaningful: order_id / symbol / batch_id / intent_id.
@@ -61,7 +61,7 @@ class KafkaProducer {
 };
 
 /// Configuration для KafkaConsumer.
-/// enable_auto_commit=false — обязательно для at-least-once (CLAUDE.md §13).
+/// enable_auto_commit=false — обязательно для at-least-once (.claude/rules/contracts.md).
 /// auto_offset_reset="earliest" — для replay/audit; "latest" если хотите
 /// игнорировать прошлые messages при cold-start.
 struct KafkaConsumerConfig {

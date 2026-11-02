@@ -1,0 +1,112 @@
+# Реестр классов хранилищ относительно метки сброса позиций (эпохи) — ADR-090 п. 6, CR-F18-018.
+# Каждая действующая таблица Postgres/ClickHouse относится к одному классу; по классу видно, как потребитель истории обязан обращаться с меткой.
+# Проверяет tools/epoch-guard-checker/check.py: неклассифицированная таблица и прямое чтение таблицы класса A/B без пометки `epoch-guard:`
+# вне помощников — нарушение (до этапа Э3 проверка только печатает отчёт). Чтение класса A (текущее состояние) защиты не требует.
+epochRegistry:
+  version: 1
+  adr: ADR-090
+  classes:
+    A: >-
+      состояние — текущие накопленные значения; абсолютный сброс обнуляет его целиком (читать можно, окно «до сброса» не существует)
+    B: >-
+      журнал событий и рядов, связанный с позициями агентов CE; не стирается, читается с нижней границей по эпохе
+      (BFF — помощник epochWindowFor, скрипты — tools/lib/epochs.py, SQL — ce_epoch_at / ce_guard_window)
+    C: >-
+      рынок — не зависит от позиций, эпоха не нужна; при соединении с таблицей класса B окно режется по B
+    E: сама метка сброса (ce_reset_epoch) и её функции
+    N: >-
+      не связана с позициями агентов CE: конфигурации, аудит оператора, пользователи, контур клиентских FlowOrder, комбинированные заявки,
+      replay/backtest; читается по времени независимо от эпох
+  tables:
+    postgres:
+      # --- состояние (A)
+      ce_agent_position: { class: A }
+      ce_agent_pnl_book: { class: A }
+      ce_system_pnl_baseline: { class: A, note: "база прибыли системы; ключ — момент эпохи (reset_ms)" }
+      # --- журналы, связанные с позициями (B)
+      child_orders: { class: B, time_column: created_at, link: time, note: "граница эпохи — момент создания заявки (ADR-090 п. 5)" }
+      hedgeflows: { class: B, time_column: created_at, link: time, note: "кумулятивный PnL хеджа по hedge_flow_id; старый контур F-12" }
+      venue_fill_diagnostics: { class: B, time_column: created_at, link: time }
+      execution_reports_raw: { class: B, time_column: created_at, link: time }
+      ce_agent_pnl_history: { class: B, time_column: ts, link: time, epoch_column_planned: Э2 }
+      ce_pnl_totals_history: { class: B, time_column: ts, link: time, epoch_column_planned: Э2 }
+      ce_agent_band_history: { class: B, time_column: ts, link: time, epoch_column_planned: Э2 }
+      ce_system_pnl_history: { class: B, time_column: ts, link: time, epoch_column_planned: Э2 }
+      vector_flow_segments: { class: B, time_column: created_at, link: time, note: "клиринг после сброса идёт в другом режиме (inventory-skew зависит от c_j)" }
+      # --- рынок (C)
+      ce_asset_volatility: { class: C }
+      ce_asset_liquidity: { class: C }
+      venue_liquidity_stats: { class: C }
+      venue_order_levels: { class: C }
+      # --- метка (E)
+      ce_reset_epoch: { class: E }
+      ce_ledger_boot: { class: E, note: "запуски ledger (граница для анализа: остатки площадок обнуляются при перезапуске)" }
+      # --- не связаны с позициями CE (N)
+      accounts: { class: N }
+      hedge_ledger_entries: { class: N, note: "проводки клиентского контура ledger" }
+      ledger_entries: { class: N }
+      ledger_positions: { class: N }
+      processed_batches: { class: N, note: "идемпотентность клиентских батчей ledger" }
+      asset_basis: { class: N }
+      batch_orders: { class: N }
+      combo_compensations: { class: N }
+      combo_constraints: { class: N }
+      combo_order_legs: { class: N }
+      combo_orders: { class: N }
+      conditional_links: { class: N }
+      execution_groups: { class: N }
+      f05a_clearing_config: { class: N, note: "конфигурация клиринга; её версия записывается в метку (config_version)" }
+      f05a_clearing_config_history: { class: N, note: "журнал версий конфигурации" }
+      flow_order_legs: { class: N }
+      flow_orders: { class: N }
+      group_state_transitions: { class: N }
+      marketdata_config: { class: N }
+      operator_audit_log: { class: N, note: "аудит операторских действий: читается по времени независимо от эпох" }
+      positions: { class: N }
+      replay_agentlogs: { class: N }
+      replay_audit_runs: { class: N }
+      replay_compare_cache: { class: N }
+      replay_fee_models: { class: N }
+      replay_reward_configs: { class: N }
+      replay_risk_limits: { class: N }
+      replay_sessions: { class: N }
+      replay_solver_configs: { class: N }
+      replay_summaries: { class: N }
+      risk_limits: { class: N }
+      risk_snapshots: { class: N }
+      sim_hedge_pnl: { class: N }
+      sim_positions: { class: N }
+      sim_sessions: { class: N }
+      solver_config: { class: N }
+      synthetic_orders: { class: N }
+      users_roles: { class: N }
+      roles: { class: N }
+      permissions: { class: N }
+      role_permissions: { class: N }
+      audit_log: { class: N }
+      vectorization_runs: { class: N }
+      venue_config: { class: N }
+    clickhouse:
+      # --- журналы, связанные с позициями (B)
+      execution_venue: { class: B, time_column: event_time_ms, link: time, ddl: external }
+      execution_reports: { class: B, time_column: event_time_ms, link: time }
+      sim_execution_reports: { class: B, time_column: event_time_ms, link: time }
+      vector_clearing_results: { class: B, time_column: event_time_ms, link: time }
+      vector_flow_segments_history: { class: B, time_column: event_time_ms, link: time }
+      surplus_events: { class: B, time_column: event_time_ms, link: time }
+      batchresults: { class: B, time_column: event_time_ms, link: time }
+      hedge_pnl_agg: { class: B, time_column: event_time_ms, link: time, ddl: external }
+      # --- рынок (C)
+      marketdata_snapshots: { class: C }
+      venue_snapshots: { class: C, ddl: external }
+      liquidity_curves: { class: C, ddl: external }
+      effective_spreads: { class: C }
+      # --- не связаны (N)
+      fills: { class: N, note: "исполнения клиентских FlowOrder" }
+      combo_groups_pg: { class: N }
+      grouped_execution_events: { class: N }
+      grouped_leg_fills: { class: N }
+      grouped_quality_metrics: { class: N }
+      grouped_ratio_deviation: { class: N }
+      grouped_replay_results: { class: N }
+      sim_divergence_log: { class: N }

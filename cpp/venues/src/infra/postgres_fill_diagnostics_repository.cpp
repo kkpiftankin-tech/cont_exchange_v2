@@ -1,0 +1,213 @@
+#include "infra/postgres_fill_diagnostics_repository.hpp"
+
+#include <chrono>
+#include <deque>
+#include <exception>
+#include <string>
+#include <utility>
+
+#include <nlohmann/json.hpp>
+
+#include "cex/common/log.hpp"
+
+#ifdef CEX_VENUES_HAS_LIBPQXX
+#include <pqxx/pqxx>
+#endif
+
+namespace cex::venues::infra {
+
+PostgresFillDiagnosticsRepository::PostgresFillDiagnosticsRepository(
+    std::string connection_string)
+    : connection_string_(std::move(connection_string)) {
+  worker_ = std::thread([this]() { worker_loop(); });
+}
+
+PostgresFillDiagnosticsRepository::~PostgresFillDiagnosticsRepository() {
+  running_.store(false);
+  cv_.notify_all();
+  if (worker_.joinable()) worker_.join();
+}
+
+bool PostgresFillDiagnosticsRepository::EnsureSchema() {
+#ifdef CEX_VENUES_HAS_LIBPQXX
+  try {
+    pqxx::connection connection(connection_string_);
+    pqxx::work tx(connection);
+    tx.exec(R"SQL(
+CREATE TABLE IF NOT EXISTS venue_fill_diagnostics (
+  intent_id         TEXT PRIMARY KEY,
+  hedge_flow_id     TEXT,
+  batch_id          TEXT,
+  venue             TEXT NOT NULL,
+  symbol            TEXT NOT NULL,
+  side              TEXT NOT NULL,
+  limit_price       NUMERIC(38, 18),
+  target_qty        NUMERIC(38, 18),
+  filled_qty        NUMERIC(38, 18) NOT NULL DEFAULT 0,
+  avg_price         NUMERIC(38, 18),
+  status            TEXT NOT NULL,
+  reason            TEXT NOT NULL,
+  window_trades     INTEGER NOT NULL DEFAULT 0,
+  considered_trades JSONB,
+  base_vwap         NUMERIC(38, 18),   -- S: цена до price-impact
+  impact_shift      NUMERIC(38, 18),   -- k·v: сдвиг цены от собственной торговли
+  impact_cost       NUMERIC(38, 18),   -- k·v²·Δt: издержки импакта
+  impact_v          DOUBLE PRECISION,  -- скорость исполнения v=filled/Δt (знаковая)
+  impact_dt_sec     DOUBLE PRECISION,  -- Δt интервала (с)
+  read_request_ms   BIGINT,            -- t запроса REST-ленты (Unix ms) — UI-разбор времён
+  read_response_ms  BIGINT,            -- t ответа REST-ленты (Unix ms)
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+)SQL");
+    // Миграция для существующей таблицы (price-impact/времена чтения добавлены позже).
+    tx.exec("ALTER TABLE venue_fill_diagnostics "
+            "ADD COLUMN IF NOT EXISTS base_vwap NUMERIC(38,18), "
+            "ADD COLUMN IF NOT EXISTS impact_shift NUMERIC(38,18), "
+            "ADD COLUMN IF NOT EXISTS impact_cost NUMERIC(38,18), "
+            "ADD COLUMN IF NOT EXISTS impact_v DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS impact_dt_sec DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS read_request_ms BIGINT, "
+            "ADD COLUMN IF NOT EXISTS read_response_ms BIGINT");
+    tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_batch "
+            "ON venue_fill_diagnostics (batch_id)");
+    tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_hedge "
+            "ON venue_fill_diagnostics (hedge_flow_id)");
+    tx.exec("CREATE INDEX IF NOT EXISTS idx_venue_fill_diag_created "
+            "ON venue_fill_diagnostics (created_at DESC)");
+    // BFF drill-down («загрузка детали»): последняя заявка агента по
+    // split_part(hedge_flow_id,'|',3)=agent_id. Functional index делает запрос
+    // equality-index-scan (0.3мс) вместо seqscan 494MB/599K строк (0.7с+). Perf-fix
+    // вкладки Clearing (2026-10-05): без него деталь спиннила.
+    tx.exec("CREATE INDEX IF NOT EXISTS idx_vfd_agent_created "
+            "ON venue_fill_diagnostics (split_part(hedge_flow_id,'|',3), created_at DESC)");
+    tx.commit();
+    return true;
+  } catch (const std::exception& ex) {
+    cex::common::log_json("WARN", "venue_fill_diagnostics EnsureSchema failed",
+                          {{"error", ex.what()}});
+    return false;
+  }
+#else
+  return false;
+#endif
+}
+
+// Неблокирующая постановка в очередь: горячий путь адаптера не ждёт PG.
+void PostgresFillDiagnosticsRepository::WriteFillDiagnostic(
+    const app::FillDiagnostic& diag) {
+  if (diag.intent_id.empty()) return;
+  {
+    std::lock_guard<std::mutex> lg(mu_);
+    if (queue_.size() >= kMaxQueue) {
+      queue_.pop_front();          // drop-oldest — диагностика best-effort
+      dropped_.fetch_add(1);
+    }
+    queue_.push_back(diag);
+  }
+  cv_.notify_one();
+}
+
+// Фоновый писатель: дренирует очередь батчами и пишет в PG вне горячего пути.
+void PostgresFillDiagnosticsRepository::worker_loop() {
+  while (running_.load()) {
+    std::deque<app::FillDiagnostic> batch;
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      cv_.wait_for(lk, std::chrono::milliseconds(200),
+                   [this] { return !queue_.empty() || !running_.load(); });
+      batch.swap(queue_);
+    }
+    for (const auto& diag : batch) write_one(diag);
+    if (const auto d = dropped_.exchange(0); d > 0)
+      cex::common::log_json("WARN", "venue_fill_diagnostics dropped (queue full)",
+                            {{"dropped", std::to_string(d)}});
+  }
+  // финальный слив остатка при остановке
+  std::deque<app::FillDiagnostic> tail;
+  { std::lock_guard<std::mutex> lg(mu_); tail.swap(queue_); }
+  for (const auto& diag : tail) write_one(diag);
+}
+
+void PostgresFillDiagnosticsRepository::write_one(const app::FillDiagnostic& diag) {
+#ifdef CEX_VENUES_HAS_LIBPQXX
+  if (diag.intent_id.empty()) return;
+  // considered_trades → JSON-массив: цены/объёмы строками (без потери точности).
+  // Строим ДО соединения — сериализация не нуждается в PG.
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& t : diag.considered_trades) {
+    arr.push_back({{"price", t.price},
+                   {"qty", t.qty},
+                   {"age_ms", t.age_ms},
+                   {"exchange_ms", t.exchange_ms},  // абсолют — фронт считает возраст живьём
+                   {"crosses", t.crosses}});
+  }
+  const std::string considered_json = arr.dump();
+
+  // T-F18-602: переиспользуем долгоживущее conn_ (только этот воркер-тред) вместо
+  // открытия соединения на каждую запись; reconnect РОВНО один раз по broken_connection.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+   try {
+    if (!conn_ || !conn_->is_open()) {
+      conn_ = std::make_unique<pqxx::connection>(connection_string_);
+    }
+    pqxx::work tx(*conn_);
+    // NULLIF($n,'')::NUMERIC — этот билд pqxx не линкует nullable-параметры.
+    tx.exec_params(
+        R"SQL(
+INSERT INTO venue_fill_diagnostics (
+  intent_id, hedge_flow_id, batch_id, venue, symbol, side,
+  limit_price, target_qty, filled_qty, avg_price,
+  status, reason, window_trades, considered_trades,
+  base_vwap, impact_shift, impact_cost, impact_v, impact_dt_sec,
+  read_request_ms, read_response_ms
+) VALUES (
+  $1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6,
+  NULLIF($7, '')::NUMERIC, NULLIF($8, '')::NUMERIC,
+  NULLIF($9, '')::NUMERIC, NULLIF($10, '')::NUMERIC,
+  $11, $12, $13, NULLIF($14, '')::JSONB,
+  NULLIF($15, '')::NUMERIC, NULLIF($16, '')::NUMERIC, NULLIF($17, '')::NUMERIC, $18, $19,
+  NULLIF($20::bigint,0), NULLIF($21::bigint,0))
+ON CONFLICT (intent_id) DO UPDATE SET
+  filled_qty        = excluded.filled_qty,
+  avg_price         = excluded.avg_price,
+  status            = excluded.status,
+  reason            = excluded.reason,
+  window_trades     = excluded.window_trades,
+  considered_trades = excluded.considered_trades,
+  base_vwap         = excluded.base_vwap,
+  impact_shift      = excluded.impact_shift,
+  impact_cost       = excluded.impact_cost,
+  impact_v          = excluded.impact_v,
+  impact_dt_sec     = excluded.impact_dt_sec,
+  read_request_ms   = excluded.read_request_ms,
+  read_response_ms  = excluded.read_response_ms,
+  created_at        = now()
+)SQL",
+        diag.intent_id, diag.hedge_flow_id, diag.batch_id, diag.venue,
+        diag.symbol, diag.side, diag.limit_price, diag.target_qty,
+        diag.filled_qty, diag.avg_price, diag.status, diag.reason,
+        diag.window_trades, considered_json,
+        diag.base_vwap, diag.impact_shift, diag.impact_cost,
+        diag.impact_v, diag.impact_dt_sec,
+        diag.read_request_ms, diag.read_response_ms);
+    tx.commit();
+    return;
+   } catch (const pqxx::broken_connection&) {
+    conn_.reset();               // уронить — пересоздадим на повторе
+    if (attempt == 0) continue;  // один прозрачный reconnect
+    cex::common::log_json("WARN", "venue_fill_diagnostics write failed",
+                          {{"intent_id", diag.intent_id},
+                           {"error", "broken_connection"}});
+    return;
+   } catch (const std::exception& ex) {
+    cex::common::log_json("WARN", "venue_fill_diagnostics write failed",
+                          {{"intent_id", diag.intent_id}, {"error", ex.what()}});
+    return;
+   }
+  }
+#else
+  (void)diag;
+#endif
+}
+
+}  // namespace cex::venues::infra

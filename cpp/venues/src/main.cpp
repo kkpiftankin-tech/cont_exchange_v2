@@ -18,10 +18,14 @@
 #include "cex/common/log.hpp"
 #include "cex/common/decimal.hpp"
 
+#include "app/async_snapshot_storage.hpp"
+#include "app/liquidity_curve_producer.hpp"
 #include "app/venues_loop.hpp"
 #include "app/sim_session_manager.hpp"
 #include "infra/postgres_child_order_repository.hpp"
 #include "infra/postgres_hedgeflow_repository.hpp"
+#include "infra/postgres_fill_diagnostics_repository.hpp"
+#include "infra/postgres_liquidity_stats_repository.hpp"
 #include "infra/postgres_sim_session_repository.hpp"
 #include "infra/postgres_venue_config_repository.hpp"
 #include "infra/sim_session_pg_codec.hpp"
@@ -61,9 +65,33 @@ int main() {
     cex::common::log_json("WARN", "Venues ClickHouse schema initialization failed");
   }
 
+  // ADR-070: глубокие снимки быстрой полосы — отдельная таблица с коротким TTL (часы).
+  cex::venues::infra::SnapshotClickHouseConfig live_cfg = ch_cfg;
+  live_cfg.table = cex::common::Env::get_string("VENUES_CLICKHOUSE_LIVE_BOOK_TABLE", "venue_book_live");
+  live_cfg.retention_hours = std::max(1, cex::common::Env::get_int("VENUES_CLICKHOUSE_LIVE_BOOK_RETENTION_HOURS", 2));
+  cex::venues::infra::SnapshotClickHouseWriter live_book_storage(live_cfg);
+  // Live-таблица нужна и динамическому режиму (аренды панели), и статическому списку.
+  const bool live_book_enabled =
+      cex::common::Env::get_bool("VENUES_FAST_DEPTH_DYNAMIC", true) ||
+      !cex::common::Env::get_string("VENUES_FAST_DEPTH_VENUE", "").empty();
+  if (live_book_enabled && !live_book_storage.EnsureSchema()) {
+    cex::common::log_json("WARN", "Venues live-book ClickHouse schema initialization failed");
+  }
+
   cex::common::log_json("INFO", "Venues starting", {{"brokers", brokers}});
 
-  cex::venues::app::VenuesLoop loop(brokers, &snapshot_storage);
+  // ADR-078 этап 2б: запись снимков в ClickHouse не задерживает ни опрос, ни расчёт (ограниченная очередь, при
+  // переполнении отбрасывается старое). Включается VENUES_STORAGE_ASYNC=1 (деф 0 — запись синхронно, как раньше).
+  std::unique_ptr<cex::venues::app::AsyncSnapshotStorage> async_storage;
+  cex::venues::app::ISnapshotStorage* loop_storage = &snapshot_storage;
+  if (cex::common::Env::get_bool("VENUES_STORAGE_ASYNC", false)) {
+    const auto cap = static_cast<std::size_t>(std::max(10, cex::common::Env::get_int("VENUES_STORAGE_QUEUE", 2000)));
+    async_storage = std::make_unique<cex::venues::app::AsyncSnapshotStorage>(&snapshot_storage, cap);
+    loop_storage = async_storage.get();
+    cex::common::log_json("INFO", "Snapshot storage async (ADR-078 2b) enabled", {{"queue", std::to_string(cap)}});
+  }
+  cex::venues::app::VenuesLoop loop(brokers, loop_storage);
+  if (live_book_enabled) loop.SetLiveBookStorage(&live_book_storage);
   loop.start();
 
   const auto venues_postgres_dsn = cex::common::Env::try_get_string("VENUES_POSTGRES_DSN");
@@ -136,6 +164,38 @@ int main() {
                           "F-12 PG repositories attached",
                           {{"hedgeflow_repo", "ready"},
                            {"child_order_repo", "ready"}});
+  }
+
+  // ADR-060 / F-18 — приёмник диагностики sim-fill (venue_fill_diagnostics):
+  // почему симулятор исполнил / не исполнил хедж-заявку (для вкладки Clearing).
+  // Держим unique_ptr на всё время жизни loop; nullptr-путь безопасен.
+  std::unique_ptr<cex::venues::infra::PostgresFillDiagnosticsRepository>
+      fill_diag_repo;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    fill_diag_repo =
+        std::make_unique<cex::venues::infra::PostgresFillDiagnosticsRepository>(
+            *venues_postgres_dsn);
+    if (!fill_diag_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure venue_fill_diagnostics schema");
+    }
+    loop.SetFillDiagnosticsSink(fill_diag_repo.get());
+  }
+
+  // ADR-082 (шаг 0) — слой измерения ликвидности бирж: оборот ленты ν и коэффициент исполнения f по парам пишутся раз в
+  // CE_LIQ_STATS_PUBLISH_MS в venue_liquidity_stats. Только наблюдаемость (на торговлю venues не влияет). Объявлен после loop ⇒
+  // разрушается раньше loop (поток-писатель останавливается до уничтожения адаптеров, которых он опрашивает).
+  std::unique_ptr<cex::venues::infra::PostgresLiquidityStatsRepository> liquidity_stats_repo;
+  if (venues_postgres_dsn.has_value() && !venues_postgres_dsn->empty()) {
+    liquidity_stats_repo =
+        std::make_unique<cex::venues::infra::PostgresLiquidityStatsRepository>(
+            *venues_postgres_dsn, [&loop]() { return loop.CollectLiquidityStats(); },
+            cex::common::Env::get_int("CE_LIQ_STATS_PUBLISH_MS", 10000));
+    if (!liquidity_stats_repo->EnsureSchema()) {
+      cex::common::log_json("WARN", "Failed to ensure venue_liquidity_stats schema");
+    }
+    // ADR-082 (шаг 1): оценки ν и f не начинаются с нуля после перезапуска. Первая запись репозитория — через CE_LIQ_STATS_PUBLISH_MS,
+    // поэтому затравка успевает до неё.
+    loop.SeedLiquidityStats(liquidity_stats_repo->LoadAll());
   }
 
   // F-20 DoD-3 — SimSession Manager. PG persistence (sim_sessions) + a
@@ -400,6 +460,60 @@ int main() {
     out["last_curve_effective_level"] = metrics.last_curve_effective_level;
     out["last_curve_degradation_reason"] = metrics.last_curve_degradation_reason;
     out["last_curve_quality_action"] = metrics.last_curve_quality_action;
+    // Этап 0 (EXP-2026-10-15-exchange-requests): где уходит время цикла опроса.
+    out["cycle_ms"] = metrics.last_cycle_ms;
+    out["cycle_ms_ema"] = metrics.cycle_ms_ema;
+    out["cycle_pairs"] = metrics.cycle_pairs;
+    out["cycle_end_ms"] = metrics.cycle_end_wall_ms;
+    if (metrics.poll_active) {
+      // ADR-078: состояние опроса под управлением планировщика
+      auto& po = out["poll"];
+      po["mode"] = "scheduler";
+      po["period_s"] = metrics.poll_period_s;
+      po["scale"] = metrics.poll_scale;
+      po["paused"] = metrics.poll_paused;
+      po["ok"] = metrics.poll_ok;
+      po["retries"] = metrics.poll_retries;
+      po["failures"] = metrics.poll_failures;
+      po["missed_ticks"] = metrics.poll_missed;
+      po["quarantines"] = metrics.poll_quarantines;
+      po["venue_pauses"] = metrics.poll_venue_pauses;
+      po["rate_limited"] = metrics.poll_rate_limited;
+      if (metrics.publish_async) {
+        po["publish_submitted"] = metrics.publish_submitted;
+        po["publish_executed"] = metrics.publish_executed;
+        po["publish_coalesced"] = metrics.publish_coalesced;   // вытеснено более свежей книгой
+        po["publish_pending"] = static_cast<std::uint64_t>(metrics.publish_pending);
+      }
+      for (const auto& [symbol, p] : metrics.poll_pairs) {
+        auto& pp = po["pairs"][symbol];
+        pp["health"] = p.health;  // 0 свежая, 1 стареющая, 2 устаревшая, 3 недоступна
+        if (p.age_s >= 0.0) pp["age_s"] = p.age_s;
+        pp["fails"] = p.fails;
+        pp["quarantine_s"] = p.quarantine_s;
+        pp["period_s"] = p.period_s;
+        if (p.sigma_pm >= 0.0) pp["sigma_pm"] = p.sigma_pm;          // ‰/√с, оценка по потоку mid биржи
+        if (p.valid_age_s >= 0.0) pp["valid_age_s"] = p.valid_age_s;  // срок годности данных по допуску ε_soft
+      }
+    }
+    for (const auto& [symbol, st] : metrics.stages) {
+      auto& o = out["stages"][symbol];
+      o["lock_wait_ms"] = st.lock_wait_ms;
+      o["fetch_ms"] = st.fetch_ms;
+      // Разбивка REST известна только если снимок получен; иначе ключей нет (в UI — прочерк, не ноль).
+      if (st.rest_valid) {
+        o["rest_depth_ms"] = st.rest_depth_ms;
+        o["rest_ticker_ms"] = st.rest_ticker_ms;
+        o["rest_trades_ms"] = st.rest_trades_ms;
+        o["rest_requests"] = st.rest_requests;
+        o["ticker_state"] = st.ticker_state;
+      }
+      o["raw_publish_ms"] = st.raw_publish_ms;
+      o["snapshot_ms"] = st.snapshot_ms;
+      o["curve_ms"] = st.curve_ms;
+      o["total_ms"] = st.total_ms;
+      if (st.recv_wall_ms > 0) o["recv_ms"] = st.recv_wall_ms;
+    }
     return out;
   };
 
@@ -1046,6 +1160,124 @@ int main() {
           out["items"][i] = snapshot_to_json(rows[i]);
         }
         out["count"] = rows.size();
+        return crow::response(200, out);
+      });
+  // ADR-070 (дополнение, динамический режим): аренда глубокого опроса стакана. Панель
+  // «Торговля» раз в ~10 с шлёт набор (venue, symbol) и срок; без сигналов аренда истекает
+  // сама. venue="*" — все CEX. Потолок одновременных пар — VENUES_FAST_DEPTH_MAX_WATCH.
+  CROW_ROUTE(admin, "/api/v1/depth-watch").methods(crow::HTTPMethod::Post)(
+      [&loop](const crow::request& req) {
+        auto bad = [](const char* code) {
+          crow::json::wvalue err;
+          err["error"] = code;
+          return crow::response(400, err);
+        };
+        // Порт admin доступен напрямую (не только через BFF): типы проверяем явно,
+        // crow бросает runtime_error на .s()/.i() не того типа.
+        try {
+          const auto body = crow::json::load(req.body);
+          if (!body || body.t() != crow::json::type::Object || !body.has("items") ||
+              body["items"].t() != crow::json::type::List) {
+            return bad("items_required");
+          }
+          std::vector<cex::venues::app::DepthWatchRegistry::Item> items;
+          for (const auto& it : body["items"]) {
+            if (it.t() != crow::json::type::Object || !it.has("venue") || !it.has("symbol")) continue;
+            if (it["venue"].t() != crow::json::type::String ||
+                it["symbol"].t() != crow::json::type::String) continue;
+            items.emplace_back(std::string(it["venue"].s()), std::string(it["symbol"].s()));
+            if (items.size() >= 64) break;  // защита от раздутого запроса
+          }
+          double ttl = 30000.0;
+          if (body.has("ttl_ms") && body["ttl_ms"].t() == crow::json::type::Number) {
+            ttl = body["ttl_ms"].d();
+          }
+          if (!(ttl >= 0.0)) ttl = 0.0;          // отрицательное/NaN → минимум (клэмп реестра)
+          if (ttl > 3600000.0) ttl = 3600000.0;  // до приведения к int64 (иначе UB)
+          const auto out = loop.WatchDepth(items, static_cast<int64_t>(ttl));
+          crow::json::wvalue res;
+          res["accepted"] = out.touch.accepted;
+          res["rejected_over_cap"] = out.touch.rejected;
+          res["rejected_invalid"] = out.rejected_invalid;
+          res["active"] = out.touch.active;
+          res["ttl_ms"] = out.touch.ttl_ms;
+          res["max_items"] = loop.DepthWatchMaxItems();
+          return crow::response(200, res);
+        } catch (...) {
+          return bad("bad_request");
+        }
+      });
+  CROW_ROUTE(admin, "/api/v1/depth-watch").methods(crow::HTTPMethod::Get)(
+      [&loop]() {
+        crow::json::wvalue res;
+        res["max_items"] = loop.DepthWatchMaxItems();
+        const auto act = loop.ActiveDepthWatch();
+        res["active_count"] = act.size();
+        for (std::size_t i = 0; i < act.size(); ++i) {
+          res["active"][i]["venue"] = act[i].venue;
+          res["active"][i]["symbol"] = act[i].symbol;
+          res["active"][i]["remaining_ms"] = act[i].remaining_ms;
+        }
+        return crow::response(200, res);
+      });
+  // ADR-070 (дополнение): кривые ликвидности (4 способа §6.2) ПО ЗАПРОСУ по последнему
+  // глубокому снимку быстрой полосы. Те же формулы, что клиринг (ComputeSlopeMethods ==
+  // SetSafeTranslator), но без ограничения 20 уровнями и не в цикле. ?levels=N — взять N
+  // лучших уровней стороны (0/не задано — все).
+  CROW_ROUTE(admin, "/api/v1/venues/<string>/slope-curves").methods(crow::HTTPMethod::Get)(
+      [&loop, &timestamp_to_ms](const crow::request& req, const std::string& venue_id) {
+        const char* sym = req.url_params.get("symbol");
+        if (sym == nullptr || *sym == '\0') {
+          crow::json::wvalue err;
+          err["error"] = "symbol_required";
+          return crow::response(400, err);
+        }
+        std::size_t levels = 0;
+        if (const char* lv = req.url_params.get("levels")) {
+          try { levels = static_cast<std::size_t>(std::max(0L, std::stol(lv))); } catch (...) { levels = 0; }
+        }
+        const auto snap = loop.GetDeepBook(venue_id, sym);
+        if (!snap.has_value()) {
+          crow::json::wvalue err;
+          err["error"] = "no_deep_book";
+          return crow::response(404, err);
+        }
+        // Глубокий стакан живёт, только пока арендован (ADR-070, динамический режим): после
+        // истечения аренды последний снимок устаревает — считать по нему кривые нельзя.
+        const int64_t snap_ms = snap->has_timestamp() ? timestamp_to_ms(snap->timestamp()) : 0;
+        const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const int64_t max_age_ms = std::max(1000, cex::common::Env::get_int("VENUES_DEEP_BOOK_MAX_AGE_MS", 30000));
+        if (snap_ms <= 0 || now_ms - snap_ms > max_age_ms) {
+          crow::json::wvalue err;
+          err["error"] = "deep_book_stale";
+          err["age_ms"] = snap_ms > 0 ? (now_ms - snap_ms) : -1;
+          return crow::response(404, err);
+        }
+        const auto res = cex::venues::app::ComputeSlopeMethods(*snap, levels);
+        if (!res.has_value()) {
+          crow::json::wvalue err;
+          err["error"] = "insufficient_book";
+          return crow::response(422, err);
+        }
+        crow::json::wvalue out;
+        out["venue_id"] = venue_id;
+        out["symbol"] = std::string(sym);
+        out["timestamp_ms"] = snap->has_timestamp() ? timestamp_to_ms(snap->timestamp()) : 0;
+        out["levels_requested"] = levels;
+        out["levels_bid"] = snap->bid_prices_size();
+        out["levels_ask"] = snap->ask_prices_size();
+        out["mid"] = res->mid;
+        out["depth_bid"] = res->depth_bid;
+        out["depth_ask"] = res->depth_ask;
+        for (std::size_t i = 0; i < res->methods.size(); ++i) {
+          const auto& m = res->methods[i];
+          out["methods"][i]["method"] = m.kind;
+          out["methods"][i]["alpha_ext_bid"] = m.alpha_bid;
+          out["methods"][i]["alpha_ext_ask"] = m.alpha_ask;
+          out["methods"][i]["alpha_ext"] = m.alpha_ext;
+          out["methods"][i]["beta_t"] = m.beta_raw;
+        }
         return crow::response(200, out);
       });
   CROW_ROUTE(admin, "/api/v1/venues/<string>/curves").methods(crow::HTTPMethod::Get)(

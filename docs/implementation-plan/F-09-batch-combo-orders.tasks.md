@@ -269,7 +269,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 - proto компилируется без ошибок; `ExecutionGroup.execution_group_id` существует; `LegResult.exec_price` имеет тип `fob.common.v1.Decimal` (не double)
 
 **Acceptance criteria:**
-- `GroupSolverDiagnostics.group_residual_norm` имеет тип `double` (допустимо по CLAUDE.md §9)
+- `GroupSolverDiagnostics.group_residual_norm` имеет тип `double` (допустимо по [.claude/rules/data.md](../../.claude/rules/data.md))
 - Все финансовые поля (`exec_qty`, `exec_price`, `exec_notional`, `execution_scale`) имеют тип `fob.common.v1.Decimal`
 - `ExecutionGroup.meta` поле 1 типа `fob.common.v1.EventMeta`
 
@@ -593,7 +593,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 **Tests to add:**
 - Basket с 2 ногами: binding leg = та у которой меньший feasible cap
-- Combined VWAP = sum(execQty * execPrice) / sum(execQty) по формуле CLAUDE.md §8.5
+- Combined VWAP = sum(execQty * execPrice) / sum(execQty) по формуле [docs/04-domain/core-concepts-and-invariants.md](../04-domain/core-concepts-and-invariants.md)
 
 **Acceptance criteria:**
 - Preview не создаёт записей в БД (read-only по смыслу)
@@ -665,7 +665,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 **Acceptance criteria:**
 - INSERT parent + legs + constraints + links выполняется в одной PG-транзакции (атомарно)
-- `NUMERIC(38,18)` для всех Decimal полей (CLAUDE.md §9)
+- `NUMERIC(38,18)` для всех Decimal полей ([.claude/rules/data.md](../../.claude/rules/data.md))
 
 **Definition of Done:**
 - Build: зелёный
@@ -1119,7 +1119,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 **Acceptance criteria:**
 - `strict_atomic` без venue support → `GROUP_STATUS_CANCELLED_BY_ATOMICITY` + `risk.alerts GROUPED_ATOMICITY_FAILURE`
-- Реальные venue credentials — не в репозитории (CLAUDE.md §22)
+- Реальные venue credentials — не в репозитории ([CLAUDE.md §1](../../CLAUDE.md))
 
 **Definition of Done:**
 - Build: зелёный
@@ -1154,7 +1154,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 - `GROUP_STATUS_CANCELLED_BY_ATOMICITY`: нет постингов
 
 **Acceptance criteria:**
-- Ledger применяет `Decimal` (не float) для всех балансов (CLAUDE.md §9)
+- Ledger применяет `Decimal` (не float) для всех балансов ([.claude/rules/data.md](../../.claude/rules/data.md))
 - Повторное применение того же `executionGroupId` — no-op (idempotent consumer pattern)
 - `GROUP_STATUS_COMPENSATING` → compensation postings (reverse/hedge, идемпотентно по groupId)
 
@@ -1214,7 +1214,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 
 **Acceptance criteria:**
 - Structured JSON logs с `parent_order_id`, `execution_group_id`, `batch_id`, `group_status`
-- Consumer lag метрика доступна (CLAUDE.md §19)
+- Consumer lag метрика доступна ([.claude/rules/testing.md](../../.claude/rules/testing.md))
 
 **Definition of Done:**
 - Build: зелёный
@@ -1239,7 +1239,7 @@ Phase K: integration + E2E tests (T-F09-090..096) — after all service phases
 - `Testing/f09_olap_vwap_smoke.sh` — вставить 2 LegFill, проверить combined VWAP через SELECT
 
 **Acceptance criteria:**
-- `grouped_quality_metrics.combined_vwap` = sum(qty*price)/sum(qty) по формуле из CLAUDE.md §8.5
+- `grouped_quality_metrics.combined_vwap` = sum(qty*price)/sum(qty) по формуле из [docs/04-domain/core-concepts-and-invariants.md](../04-domain/core-concepts-and-invariants.md)
 - `grouped_replay_results` не смешивается с live `grouped_leg_fills`
 
 **Definition of Done:**

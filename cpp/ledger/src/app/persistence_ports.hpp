@@ -29,7 +29,7 @@ class PositionsUpdatePublisherPort {
 // ---------------------------------------------------------------------------
 // F-06 (T-F06-020) — read/write models for the F-06 `positions` / `accounts`
 // tables (DISTINCT from the legacy per-currency `ledger_positions`).
-// All monetary fields are Decimal (CLAUDE.md §9). side: "long"|"short"|"flat".
+// All monetary fields are Decimal (.claude/rules/data.md). side: "long"|"short"|"flat".
 // ---------------------------------------------------------------------------
 struct AccountRow {
   std::string user_id;
@@ -149,6 +149,102 @@ class HedgeflowPnlSinkPort {
   virtual void UpdateHedgePnlDelta(const std::string& hedge_flow_id,
                                    const std::string& pnl_delta,
                                    const std::string& fee_delta) = 0;
+  // F-18 #6 (T-F18-804): аккумулировать РАСЧЁТНУЮ band-комиссию зоны в
+  // hedgeflows.band_fee_estimated (отдельно от tot_fee — реальной venue-fee).
+  // Дефолтное тело (не pure) — не ломает mock-реализации в тестах.
+  virtual void UpdateBandFeeDelta(const std::string& /*hedge_flow_id*/,
+                                  const std::string& /*band_fee_delta*/) {}
+  // F-18 #8 (ADR-068, observation-only): аккумулировать признание прибыли по факту к
+  // марке (mid клиринга) в hedgeflows.house_realized_pnl и разрыв план/факт в
+  // hedgeflows.plan_fact_gap — НАБЛЮДАЕМЫЕ величины, баланс __ce_house__ НЕ двигается.
+  // Дефолтное тело (не pure) — не ломает mock-реализации в тестах.
+  virtual void UpdateHouseRealizedDelta(const std::string& /*hedge_flow_id*/,
+                                        const std::string& /*house_realized_delta*/,
+                                        const std::string& /*plan_fact_gap_delta*/) {}
+};
+
+// ---------------------------------------------------------------------------
+// F-18 v2 (T-F18-202/204, ADR-061 §7, ADR-063) — позиция виртуального
+// контрагента CE v2 (AGENT: переводчик/арбитражёр). ОТДЕЛЬНАЯ от `accounts`
+// (docs/07-data/ce-agent-position.md, party_type-раздел): знаковая, БЕЗ
+// CHECK >= 0, ключ (agent_id, asset, venue) — трёхсоставной (прецедент
+// sim_positions, ADR-016). `position` = c_j (накопленная клирингом,
+// c ← c + f). `in_flight` зарезервировано для Э3 (полоса ±q, T-F18-304) —
+// в этой таске всегда 0 (эмиссии ещё нет).
+// ---------------------------------------------------------------------------
+struct AgentPositionRow {
+  std::string agent_id;
+  std::string agent_kind;   // "translator" | "arbitrageur" | "" (неизвестно)
+  std::string asset;
+  std::string venue;
+  cex::common::Decimal position{0, 0};    // c_j, ЗНАКОВАЯ, накопленная клирингом
+  cex::common::Decimal in_flight{0, 0};   // committed (Э3+), ЗНАКОВАЯ
+  cex::common::Decimal realized_vs_fair{0, 0};  // ADR-072 §C: накопл. заработок vs fair (quote), персист
+  std::string last_batch_id;              // последний такт, менявший позицию
+  int64_t updated_at_ms{0};
+};
+
+// ADR-087 (модель C′): книга агента по справедливой цене — абсолютное состояние (одна строка на агента, таблица
+// ce_agent_pnl_book). qty/avg_fair — открытый остаток и средняя справедливая стоимость его входа; edge — накопленный R внутренней
+// биржи; ext_realized — накопленный R внешних бирж (оба — в валюте котировки quote).
+struct AgentPnlBookRow {
+  std::string agent_id;
+  std::string agent_kind;   // "translator" | "arbitrageur"
+  cex::common::Decimal qty{0, 0};
+  cex::common::Decimal avg_fair{0, 0};
+  cex::common::Decimal edge{0, 0};
+  cex::common::Decimal ext_realized{0, 0};
+  std::string quote;        // валюта котировки значений ("" — не известна; курс в USDT тогда неизвестен до новой сделки)
+  std::string last_batch_id;
+  int64_t since_ms{0};
+};
+
+// Port for the `ce_agent_position` table (T-F18-204). Единственная мутация —
+// накопление c ← c + delta (delta = f_j, сырой поток такта), идемпотентное по
+// batch_id (ADR-061 §7: UPSERT-guard `WHERE last_batch_id IS DISTINCT FROM
+// $batch_id`). GetPositions — read-only проекция для GetAgentPositions RPC /
+// стартовой загрузки write-through кэша LedgerUseCases.
+class AgentPositionRepositoryPort {
+ public:
+  virtual ~AgentPositionRepositoryPort() = default;
+  // Применить f_j к (agent_id, asset, venue), защищено guard'ом по batch_id.
+  // Возвращает накопленную запись ПОСЛЕ применения (или текущую, если guard
+  // отсёк повторную доставку того же batch_id — at-least-once Kafka).
+  virtual AgentPositionRow ApplyDelta(const std::string& agent_id,
+                                      const std::string& agent_kind,
+                                      const std::string& asset,
+                                      const std::string& venue,
+                                      const cex::common::Decimal& delta,
+                                      const std::string& batch_id,
+                                      int64_t updated_at_ms) = 0;
+  // Прочитать текущие позиции. Пустые векторы фильтров = без фильтра
+  // (вернуть все агенты / активы / площадки соответственно).
+  virtual std::vector<AgentPositionRow> GetPositions(
+      const std::vector<std::string>& agent_ids,
+      const std::vector<std::string>& assets,
+      const std::vector<std::string>& venues) = 0;
+  // F-18 v2 · Э3/Э4 (ADR-061 §4): аддитивно применить сдвиги, вызванные
+  // хеджем — НЕ идемпотентно по batch_id (это execution-путь, не клиринг):
+  // position += position_delta, in_flight += in_flight_delta. Оба знаковые,
+  // в единицах позиции (k-USDT). Строка обязана существовать (создаётся
+  // клирингом раньше эмиссии); при отсутствии — no-op. Пустой default для
+  // no-op/тестовых репозиториев.
+  // realized_delta (ADR-072 §C) — аддитивный прирост realized_vs_fair (quote), чтобы
+  // заработок переживал рестарт ledger; деф 0 (эмиссия/сброс/нумерарий не копят).
+  virtual void ApplyHedge(const std::string& /*agent_id*/,
+                          const std::string& /*asset*/,
+                          const std::string& /*venue*/,
+                          const cex::common::Decimal& /*position_delta*/,
+                          const cex::common::Decimal& /*in_flight_delta*/,
+                          int64_t /*updated_at_ms*/,
+                          const cex::common::Decimal& /*realized_delta*/ = cex::common::Decimal{0, 0}) {}
+
+  // ADR-087: записать абсолютное состояние книг (один пакетный запрос на такт), загрузить при старте, сбросить (пусто = все агенты).
+  virtual void SaveBooks(const std::vector<AgentPnlBookRow>& /*books*/) {}
+  // false — не удалось прочитать (схема не готова, сбой PG): вызывающий НЕ должен считать, что книг нет, иначе пересев по текущей
+  // позиции перезапишет сохранённые книги. true и пустой список — книг действительно нет.
+  virtual bool LoadBooks(std::vector<AgentPnlBookRow>& out) { out.clear(); return true; }
+  virtual void ResetPnl(const std::vector<std::string>& /*agent_ids*/) {}
 };
 
 }  // namespace cex::ledger::app

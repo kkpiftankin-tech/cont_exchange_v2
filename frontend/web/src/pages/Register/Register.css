@@ -5,7 +5,7 @@
     align-items: center;
     justify-content: stretch;
     min-height: 100vh;
-    min-width: 100vw;
+    min-width: 100%;
     background: radial-gradient(circle at left top, #50129E -200%, black 100%),
     linear-gradient(135deg, #50129E -150%, black);
     background-blend-mode: color-dodge;

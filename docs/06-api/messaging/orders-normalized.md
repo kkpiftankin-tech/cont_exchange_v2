@@ -44,8 +44,8 @@
 - [UC-F03-01](../../02-system/use-cases/UC-F03-01-amend-cancel-order/use-case.md)
 - [UC-F09-01](../../02-system/use-cases/UC-F09-01-create-combo-order/use-case.md)
 - [UC-F10-01](../../02-system/use-cases/UC-F10-01-publish-mm-curve/use-case.md)
-- [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md)
-- [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md)
+- [UC-F11-06](../../02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md)
+- [UC-F15-07](../../02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md)
 
 ## Used In Sequence Diagrams
 

@@ -39,7 +39,7 @@
 
 ## Participates In Use Cases
 
-- [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F13-01](../../02-system/use-cases/UC-F13-01-generate-posttrade-report/use-case.md), [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md), [UC-F17-01](../../02-system/use-cases/UC-F17-01-fire-alert/use-case.md)
+- [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md), [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md), [UC-F13-01](../../02-system/use-cases/UC-F13-01-generate-posttrade-report/use-case.md), [UC-F15-07](../../02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md), [UC-F16-01](../../02-system/use-cases/UC-F16-01-trigger-kill-switch/use-case.md), [UC-F17-01](../../02-system/use-cases/UC-F17-01-fire-alert/use-case.md)
 
 ## Participates In Sequence Diagrams
 

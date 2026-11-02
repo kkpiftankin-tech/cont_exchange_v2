@@ -1,14 +1,33 @@
 #include "app/market_data_uc.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <limits>
 #include <thread>
 
+#include <pqxx/pqxx>  // ADR-050/052: runtime-конфиг окна клиринга из Postgres
+
+#include "cex/common/data_validity.hpp"
+#include "cex/common/env.hpp"
 #include "cex/common/log.hpp"
 #include "infra/clickhouse/clickhouse_liquidity_curve_storage.hpp"
 // F-05A (T-F05A-205): векторизация внешней ликвидности → marketdata.vectorized.
+#include <cstdlib>  // std::getenv/atof — F-05A CE θ/params
+#include <map>
+#include <set>
+
 #include "app/curve_to_levels.hpp"
+#include "infra/postgres/postgres_asset_volatility_repository.hpp"  // F-18 D1+#7 (T-F18-702)
+#include "app/ports/i_ce_clearing_publisher.hpp"  // F-05A CE (вариант A)
 #include "app/ports/i_vectorized_publisher.hpp"
+#include "domain/agent_builder.hpp"  // F-05A CE §A1
+#include "domain/fill_depth_scale.hpp"  // ADR-082 шаг 1
+#include "domain/depth_trust_scale.hpp"  // ADR-085: уценка устаревших котировок, капитальный предел
+#include "domain/ce_input_guard.hpp"  // защита входа CE-клиринга от несогласованности
+#include "domain/cross_depth_scale.hpp"  // ADR-064 (доп. 2026-10-29): глубина кросс-пары в единицах номинала
 #include "app/ports/i_vector_segment_storage.hpp"
 #include "app/ports/i_vector_clearing_result_storage.hpp"
 #include "transport/mappers/vectorized_liquidity.hpp"
@@ -22,6 +41,14 @@ namespace {
 std::string NormalizeAsset(std::string s) {
   s.erase(std::remove(s.begin(), s.end(), '/'), s.end());
   return s;
+}
+
+// F-05A ADR-050: масштаб Decimal на вес свежести f∈[0,1] (для q_max сегмента).
+cex::common::Decimal ScaleDecimal(const cex::common::Decimal& d, double f) {
+  cex::common::Decimal out = d;
+  out.units = static_cast<std::int64_t>(
+      std::llround(static_cast<double>(d.units) * f));
+  return out;
 }
 }  // namespace
 
@@ -37,7 +64,8 @@ MarketDataUseCases::MarketDataUseCases(
     infra::MarketDataStreamHub* stream_hub,
     infra::PgMarketDataConfig* pg_config,
     IVectorizedPublisher* vectorized_publisher,
-    MarketDataConfig md_config)
+    MarketDataConfig md_config,
+    ICeClearingPublisher* ce_publisher)
     : batch_storage_(batch_storage),
       execution_storage_(execution_storage),
       memory_curve_storage_(memory_curve_storage),
@@ -47,10 +75,44 @@ MarketDataUseCases::MarketDataUseCases(
       snapshot_publisher_(snapshot_publisher),
       risk_publisher_(risk_publisher),
       vectorized_publisher_(vectorized_publisher),
+      ce_publisher_(ce_publisher),
       stream_hub_(stream_hub),
       pg_config_(pg_config),
       md_config_(md_config),
-      update_uc_(ob_storage, publisher) {}
+      update_uc_(ob_storage, publisher) {
+  // F-05A ADR-050: batch-window aggregation config (env, dev-defaults).
+  vector_window_enabled_ = cex::common::Env::get_bool("F05A_BATCH_WINDOW_ENABLED", false);
+  vector_linear_segments_ = cex::common::Env::get_bool("F05A_LINEAR_SEGMENTS_ENABLED", false);
+  vector_two_sided_ = cex::common::Env::get_bool("F05A_TWO_SIDED_ENABLED", false);
+  ce_agents_enabled_ = cex::common::Env::get_bool("CE_AGENTS_ENABLED", false);
+  vector_window_ms_ = static_cast<std::int64_t>(
+      cex::common::Env::get_int("F05A_BATCH_WINDOW_MS", 1000));
+  vector_stale_ms_ = static_cast<std::int64_t>(
+      cex::common::Env::get_int("F05A_STALE_LEVEL_MS", 2000));
+  clearing_cfg_pg_conn_ = cex::common::Env::get_string(
+      "POSTGRES_CONN",
+      "host=postgres port=5432 dbname=exchange user=exchange password=exchange");
+
+  // CR-F18-016 (инцидент 2026-10-29): синхронный INSERT ≈ 84 КБ на кривую выполнялся в потоке потребителя, общем для всех
+  // топиков. При перегрузе хоста и ClickHouse потребитель отставал от потока кривых, кривые приходили старше порога
+  // свежести, окно клиринга пустело и ce.clearing.input не публиковался, пока очередь не съедена (≈ 85 минут).
+  // Теперь история пишется отдельным потоком; MARKET_DATA_CH_ASYNC=0 возвращает синхронную запись.
+  if (ch_curve_storage_ != nullptr && cex::common::Env::get_bool("MARKET_DATA_CH_ASYNC", true)) {
+    const std::size_t capacity = static_cast<std::size_t>(
+        std::max(1, cex::common::Env::get_int("MARKET_DATA_CH_QUEUE_MAX", 600)));  // ≈ 3–4 мин потока: BFF читает кривые за последние 5 мин
+    curve_sink_ = std::make_unique<infra::AsyncSink<fob::venue::v1::VenueLiquidityCurve>>(
+        capacity,
+        [this](const fob::venue::v1::VenueLiquidityCurve& curve) { ch_curve_storage_->Save(curve); },
+        [capacity](std::uint64_t dropped_total, std::size_t depth) {
+          cex::common::log_json("WARN",
+                                "ClickHouse: очередь записи кривых переполнена, самые старые кривые не попали в историю",
+                                {{"service", "market_data"},
+                                 {"dropped_total", std::to_string(dropped_total)},
+                                 {"depth", std::to_string(depth)},
+                                 {"capacity", std::to_string(capacity)}});
+        });
+  }
+}
 
 std::string MarketDataUseCases::key(const std::string& venue, const std::string& symbol) {
   return venue + "|" + symbol;
@@ -68,6 +130,17 @@ void MarketDataUseCases::OnMarketDataRaw(const fob::marketdata::v1::MarketDataRa
   const auto& t = evt.ticker();
   last_ticker_[key(t.venue(), t.instrument().symbol())] = t;
   update_uc_.OnMarketDataRaw(evt);
+  if (t.has_bid() && t.has_ask()) {
+    const double bid = static_cast<double>(common::Decimal::from_proto(t.bid()));
+    const double ask = static_cast<double>(common::Decimal::from_proto(t.ask()));
+    if (bid > 0.0 && ask >= bid) {
+      // Время СОБЫТИЯ снимка биржи, а не приход сообщения: при воспроизведении очереди после перезапуска
+      // сообщения приходят пачкой (Δt≈0 при реальном движении цены) и раздули бы σ на минуты.
+      double t_s = static_cast<double>(t.timestamp().seconds()) + 1e-9 * static_cast<double>(t.timestamp().nanos());
+      if (!(t_s > 0.0)) t_s = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+      UpdateVenueVolatility(t.venue() + "|" + NormalizeAsset(t.instrument().symbol()), 0.5 * (bid + ask), t_s);
+    }
+  }
 }
 
 void MarketDataUseCases::OnBatchResult(const fob::matching::v1::BatchResult& batch) {
@@ -216,7 +289,11 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
 
   // Save to ClickHouse for historical analytics
   if (ch_curve_storage_ != nullptr) {
-    ch_curve_storage_->Save(curve);
+    if (curve_sink_) {
+      curve_sink_->Push(curve);  // копия в очередь; запись — в потоке-писателе, поток потребителя не ждёт ClickHouse
+    } else {
+      ch_curve_storage_->Save(curve);
+    }
   } else {
     cex::common::log_json("WARN", "ClickHouse curve storage is not configured",
                           {{"venue", curve.venue_id()}, {"symbol", curve.instrument().symbol()}});
@@ -242,9 +319,23 @@ void MarketDataUseCases::OnLiquidityCurve(const fob::venue::v1::VenueLiquidityCu
                           ch_curve_storage_ != nullptr ? "true" : "false"},
                          {"source_file", "cpp/market_data/src/app/market_data_uc.cpp"}});
 
+  // F-05A ADR-050: в оконном режиме кривая НЕ векторизуется поканально — кладётся
+  // в буфер (новая вытесняет старую на ключ venue|pair); агрегированный клиринг
+  // над общим asset-basis собирает таймер FlushVectorWindow.
+  if (vector_window_enabled_) {
+    const std::int64_t ts_ms = curve.timestamp().seconds() * 1000 +
+                               curve.timestamp().nanos() / 1000000;
+    std::lock_guard<std::mutex> lk(vector_window_mu_);
+    vector_window_buffer_[key(curve.venue_id(), curve.instrument().symbol())] =
+        BufferedCurve{curve, ts_ms};
+    return;
+  }
+
   // F-05A (T-F05A-205/206): векторизация кривой → сегменты W → publish + persist.
   if (vectorized_publisher_ != nullptr || vector_segment_storage_ != nullptr) {
-    auto levels = LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
+    auto levels = vector_linear_segments_  // ADR-051: 1 линейный сегмент/сторону
+                      ? LinearSegmentsFromCurve(curve, vectorize_cfg_.decimal_scale)
+                      : LevelsFromCurve(curve, vectorize_cfg_.decimal_scale);
     domain::VectorizeResult vr = domain::Vectorize(levels, vectorize_cfg_);
     if (!vr.segments.empty()) {
       const std::string batch_id =
@@ -346,6 +437,28 @@ void MarketDataUseCases::ProcessSnapshot(domain::MarketDataSnapshot snap) {
   {
     std::lock_guard<std::mutex> lg(mu_);
     last_snapshot_[snap.asset] = snap;
+  }
+
+  // 1b. F-18 D1+#7 (T-F18-702): EWMA-σ волатильности mid → ce_asset_volatility.
+  //     EWMA считаем под mu_, PG-запись (троттлинг) — ВНЕ лока. Активно только
+  //     если repo подключён (env CE_VOL_ENABLED в main). ledger читает σ для Γ=γσ²τ.
+  if (vol_repo_) {
+    const double mid = static_cast<double>(snap.mid);
+    const long long now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    double sigma = 0.0;
+    long long samples = 0;
+    bool write_vol = false;
+    {
+      std::lock_guard<std::mutex> lg(mu_);
+      write_vol = UpdateAssetVolatilityLocked(snap.asset, mid, now_ms, &sigma, &samples);
+    }
+    if (write_vol) {
+      vol_repo_->Upsert(snap.asset, /*venue=*/"", sigma,
+                        static_cast<int>(vol_halflife_sec_), samples);
+    }
   }
 
   // 2. volume24h + персист в ClickHouse — ТРОТТЛИНГ на asset (не чаще раза в 15с).
@@ -458,12 +571,811 @@ void MarketDataUseCases::StopStaleSweeper() {
   if (sweeper_thread_.joinable()) sweeper_thread_.join();
 }
 
+// ADR-050/052: runtime-конфиг окна из PG (таблица f05a_clearing_config). TTL 2с,
+// чтобы UI-изменения применялись быстро, но без нагрузки на PG. Ошибки PG молча
+// игнорируются (остаются текущие значения). Вызывается только из таймер-потока.
+void MarketDataUseCases::RefreshClearingConfigFromPg() {
+  const std::int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  if (now_ms - clearing_cfg_last_read_ms_ < 2000) return;  // TTL
+  clearing_cfg_last_read_ms_ = now_ms;
+  try {
+    pqxx::connection c(clearing_cfg_pg_conn_);
+    pqxx::work tx(c);
+    const pqxx::row r = tx.exec1(
+        "SELECT batch_window_ms, stale_level_ms, ce_taker_fee_bps"
+        " FROM f05a_clearing_config WHERE id=1");
+    const std::int64_t w = r[0].as<std::int64_t>();
+    const std::int64_t s = r[1].as<std::int64_t>();
+    if (w >= 100 && w <= 600000) vector_window_ms_ = w;   // [100мс, 10мин]
+    if (s >= 100 && s <= 3600000) vector_stale_ms_ = s;   // [100мс, 60мин]
+    // Комиссия тейкера, настраиваемая с фронта: <0 = из стакана venue; 0 = линейные кривые.
+    const double fee = r[2].as<double>();
+    if (fee <= 1000.0) ce_taker_fee_bps_ = fee;           // санити: не больше 100%
+  } catch (const std::exception&) {
+    // PG недоступен/нет строки — оставляем текущие значения.
+  }
+}
+
+// F-05A ADR-050: таймер-поток окна. No-op, если флаг выключен.
+void MarketDataUseCases::StartVectorWindow() {
+  if (!vector_window_enabled_) return;
+  vector_window_running_.store(true);
+  vector_window_thread_ = std::thread([this] {
+    while (vector_window_running_.load()) {
+      RefreshClearingConfigFromPg();  // подхватываем runtime-настройки окна
+      std::this_thread::sleep_for(std::chrono::milliseconds(vector_window_ms_));
+      if (!vector_window_running_.load()) break;
+      const std::int64_t now_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+      FlushVectorWindow(now_ms);
+    }
+  });
+  cex::common::log_json("INFO", "F-05A batch-window aggregator started",
+                        {{"service", "market_data"},
+                         {"window_ms", std::to_string(vector_window_ms_)},
+                         {"stale_ms", std::to_string(vector_stale_ms_)}});
+}
+
+void MarketDataUseCases::StopVectorWindow() {
+  vector_window_running_.store(false);
+  if (vector_window_thread_.joinable()) vector_window_thread_.join();
+}
+
+// Собрать окно: свежие кривые всех venue×pair → общий asset-basis → один
+// marketdata.vectorized. Вес свежести f убывает с возрастом и масштабирует q_max;
+// за жёстким порогом уровень отбрасывается (ADR-050).
+void MarketDataUseCases::FlushVectorWindow(std::int64_t window_close_ms) {
+  std::vector<BufferedCurve> fresh;
+  {
+    std::lock_guard<std::mutex> lk(vector_window_mu_);
+    fresh.reserve(vector_window_buffer_.size());
+    for (const auto& [k, bc] : vector_window_buffer_) fresh.push_back(bc);
+  }
+  if (fresh.empty()) return;
+
+  // Детерминированный порядок (ADR-050 §7, AC-F05A-010): unordered_map даёт
+  // непредсказуемый порядок → seg_index/x «плавали» бы, ломая replay F-15.
+  std::sort(fresh.begin(), fresh.end(), [](const BufferedCurve& a, const BufferedCurve& b) {
+    if (a.curve.venue_id() != b.curve.venue_id())
+      return a.curve.venue_id() < b.curve.venue_id();
+    return a.curve.instrument().symbol() < b.curve.instrument().symbol();
+  });
+
+  std::vector<domain::ExternalOrderLevel> levels;   // per-level / linear путь
+  std::vector<fob::venue::v1::VenueLiquidityCurve> fresh_curves;  // two-sided путь
+  std::map<std::string, std::int64_t> curve_ts;  // "venue|SYMBOL" → event_ts_ms (возраст якоря, ADR-075)
+  int stale_dropped = 0;
+  std::vector<fob::marketdata::v1::CeDroppedQuote> stale_list;   // ADR-079: идентичность отброшенных
+  // ADR-078 §7 (флаг CE_STALE_EPS_PM, деф 0 ⇒ выключено): жёсткий порог устаревания зависит от волатильности пары —
+  // у бурной пары данные годны недолго, у тихой дольше: τ = (ε/(zσ))², зажим [CE_STALE_MIN_S, CE_STALE_MAX_S].
+  // Заданный оператором stale_level_ms остаётся потолком: адаптация порог только ужесточает.
+  const char* stale_eps_env = std::getenv("CE_STALE_EPS_PM");
+  const double stale_eps = stale_eps_env ? std::max(0.0, std::atof(stale_eps_env)) / 1000.0 : 0.0;
+  std::map<std::string, double> stale_sigma;
+  double stale_lo_s = 10.0, stale_hi_s = 180.0;
+  int stale_adaptive = 0;
+  double stale_limit_min_s = 0.0;
+  std::int64_t age_min_ms = std::numeric_limits<std::int64_t>::max();  // CR-F18-016: возраст кривых окна для диагностики пропуска
+  std::int64_t age_max_ms = std::numeric_limits<std::int64_t>::min();
+  if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
+    stale_sigma = VenueSigmaSnapshot(cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20));
+    const char* lo_env = std::getenv("CE_STALE_MIN_S");
+    const char* hi_env = std::getenv("CE_STALE_MAX_S");
+    if (lo_env) stale_lo_s = std::max(0.1, std::atof(lo_env));
+    if (hi_env) stale_hi_s = std::max(stale_lo_s, std::atof(hi_env));
+  }
+  for (const auto& bc : fresh) {
+    const std::int64_t age = window_close_ms - bc.event_ts_ms;
+    age_min_ms = std::min(age_min_ms, age);
+    age_max_ms = std::max(age_max_ms, age);
+    std::int64_t stale_limit_ms = vector_stale_ms_;
+    if (stale_eps > 0.0 && vector_stale_ms_ > 0) {
+      // σ собственной площадки кривой: ключ "venue|BTCUSDT" (символ "BTC/USDT" без '/')
+      std::string sym = bc.curve.venue_id() + "|" + bc.curve.instrument().symbol();
+      sym.erase(std::remove(sym.begin(), sym.end(), '/'), sym.end());
+      std::optional<double> sigma;
+      if (const auto sg = stale_sigma.find(sym); sg != stale_sigma.end()) sigma = sg->second;
+      const double limit_s = cex::common::HardStaleLimitSeconds(
+          sigma, stale_eps, stale_lo_s, stale_hi_s, static_cast<double>(vector_stale_ms_) / 1000.0);
+      stale_limit_ms = static_cast<std::int64_t>(limit_s * 1000.0);
+      if (sigma.has_value()) {
+        ++stale_adaptive;
+        if (stale_limit_min_s <= 0.0 || limit_s < stale_limit_min_s) stale_limit_min_s = limit_s;
+      }
+    }
+    if (stale_limit_ms > 0 && age >= stale_limit_ms) {
+      ++stale_dropped;
+      {  // ADR-079: кто именно отброшен и по какому пределу (для диагностики «почему нет потока»)
+        fob::marketdata::v1::CeDroppedQuote dq;
+        dq.set_asset(bc.curve.instrument().base());
+        dq.set_quote(bc.curve.instrument().quote());
+        dq.set_venue(bc.curve.venue_id());
+        dq.set_reason("stale");
+        dq.set_age_ms(age);
+        auto* th = dq.mutable_threshold();
+        *th = cex::common::Decimal{stale_limit_ms, 0}.to_proto();
+        stale_list.push_back(std::move(dq));
+      }
+      continue;
+    }
+    if (vector_two_sided_) {                 // ADR-052: собираем свежие кривые
+      fresh_curves.push_back(bc.curve);
+      curve_ts[bc.curve.venue_id() + "|" + bc.curve.instrument().symbol()] = bc.event_ts_ms;
+      continue;
+    }
+    double f = 1.0;
+    if (vector_stale_ms_ > 0) {
+      f = 1.0 - static_cast<double>(age) / static_cast<double>(vector_stale_ms_);
+      if (f < 0.0) f = 0.0;
+      if (f > 1.0) f = 1.0;
+    }
+    auto lv = vector_linear_segments_  // ADR-051: 1 линейный сегмент/сторону
+                  ? LinearSegmentsFromCurve(bc.curve, vectorize_cfg_.decimal_scale)
+                  : LevelsFromCurve(bc.curve, vectorize_cfg_.decimal_scale);
+    for (auto& l : lv) {
+      l.quantity = ScaleDecimal(l.quantity, f);
+      l.remaining_quantity = ScaleDecimal(l.remaining_quantity, f);
+      // ADR-051: для линейного сегмента масштабируем и d_hl, чтобы наклон
+      // D=d_hl/q_max сохранялся (свежесть режет ёмкость и surplus, не наклон).
+      l.d_hl_override = ScaleDecimal(l.d_hl_override, f);
+      levels.push_back(std::move(l));
+    }
+  }
+
+  // ADR-052/053: один двусторонний сегмент на венью над общим basis; safe-translator
+  // берётся из curve.safe_translator() (venues посчитал из стакана). Иначе per-level/linear.
+  domain::VectorizeResult vr =
+      vector_two_sided_
+          ? TwoSidedSegmentsFromCurves(fresh_curves, vectorize_cfg_.decimal_scale)
+          : domain::Vectorize(levels, vectorize_cfg_);
+  if (vr.segments.empty()) {
+    // Окно без сегментов раньше пропускалось молча: при отставании потребителя все кривые старше порога, и ce.clearing.input
+    // не публиковался десятки минут без единой строки в журнале (инцидент 2026-10-29, CR-F18-016). Пишем причину раз в минуту.
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now_ms - last_empty_window_warn_ms_ >= 60000) {
+      last_empty_window_warn_ms_ = now_ms;
+      cex::common::log_json("WARN", "F-05A окно пропущено: нет свежих кривых для сегментов",
+                            {{"service", "market_data"},
+                             {"stage", "vector_window"},
+                             {"venues_pairs", std::to_string(fresh.size())},
+                             {"stale_dropped", std::to_string(stale_dropped)},
+                             {"fresh_curves", std::to_string(fresh_curves.size())},
+                             {"age_min_ms", std::to_string(age_min_ms)},
+                             {"age_max_ms", std::to_string(age_max_ms)},
+                             {"stale_cap_ms", std::to_string(vector_stale_ms_)},
+                             {"stale_limit_min_s", std::to_string(stale_limit_min_s)}});
+    }
+    return;
+  }
+
+  const std::string batch_id = "w|" + std::to_string(window_close_ms);
+  if (vectorized_publisher_ != nullptr) {
+    auto snap = transport::ToVectorizedSnapshot(vr, batch_id, window_close_ms,
+                                                vectorize_cfg_.decimal_scale);
+    vectorized_publisher_->Publish(snap);
+  }
+  if (vector_segment_storage_ != nullptr) {
+    vector_segment_storage_->SaveSegments(batch_id, vr, window_close_ms);
+  }
+  // F-05A CE (вариант A): те же свежие кривые окна → book-derived агенты → ce.clearing.input.
+  if (ce_agents_enabled_ && ce_publisher_ != nullptr && !fresh_curves.empty()) {
+    BuildAndPublishCeClearingInput(fresh_curves, batch_id, window_close_ms, curve_ts, stale_list);
+  }
+  cex::common::log_json("INFO", "F-05A vector window flushed",
+                        {{"service", "market_data"},
+                         {"stage", "vector_window"},
+                         {"topic", "marketdata.vectorized"},
+                         {"batch_id", batch_id},
+                         {"venues_pairs", std::to_string(fresh.size())},
+                         {"num_segments", std::to_string(vr.segments.size())},
+                         {"num_assets", std::to_string(vr.basis.num_assets)},
+                         {"stale_dropped", std::to_string(stale_dropped)},
+                         {"stale_adaptive", std::to_string(stale_adaptive)},
+                         {"stale_limit_min_s", std::to_string(stale_limit_min_s)}});
+}
+
+// F-05A CE (вариант A): свежие кривые окна → book-derived quote-агенты (agent_builder §A1)
+// → CeClearingInput (agents + марки μ + P0) → ce.clearing.input. matching добавит плечи
+// перевода/запаса из env и решит клиринг.
+//
+// ADR-064 (флаг CE_CROSS_PAIRS, default OFF): по умолчанию — только пары base/numeraire,
+// как раньше (байт-в-байт регрессия). При CE_CROSS_PAIRS=1 переводчик обобщается на ЛЮБУЮ
+// пару base/quote — обрабатываются и прямые кросс-пары (напр. ETH/BTC), чтобы агенты
+// соответствовали реальным парам стаканов площадок, а не только X/номинал.
+void MarketDataUseCases::BuildAndPublishCeClearingInput(
+    const std::vector<fob::venue::v1::VenueLiquidityCurve>& curves,
+    const std::string& batch_id, std::int64_t window_close_ms,
+    const std::map<std::string, std::int64_t>& curve_ts_ms,
+    const std::vector<fob::marketdata::v1::CeDroppedQuote>& stale_dropped) {
+  const char* num_env = std::getenv("CE_NUMERAIRE");
+  const std::string numeraire = num_env ? std::string(num_env) : std::string("USDT");
+  const char* theta_env = std::getenv("CE_AGENT_THETA");
+  const double theta = theta_env ? std::atof(theta_env) : 0.5;
+  // Множитель ½-спреда в полке агента (dead_zone). Дефолт 0 ⇒ полка нулевая
+  // (решение владельца: переводчики клирят ликвидность книг, не простаивая на
+  // полуспреде). Настраивается с фронта через env CE_DEAD_ZONE_HALF_SPREAD_MULT.
+  const char* hsm_env = std::getenv("CE_DEAD_ZONE_HALF_SPREAD_MULT");
+  const double half_spread_mult = hsm_env ? std::atof(hsm_env) : 0.0;
+  // Порог широкого спреда (‰): тонкие/ненадёжные книги (кросс-пары с рассинхроном,
+  // почти пустой стакан) сохраняют полный ½спред как полку. Дефолт 20‰.
+  const char* wsg_env = std::getenv("CE_DEAD_ZONE_WIDE_SPREAD_PM");
+  const double wide_spread_guard_pm = wsg_env ? std::atof(wsg_env) : 20.0;
+  // ADR-065 Q1 (§6.4): комиссия НЕ в полке кривой, только в порогах band. Дефолт false;
+  // CE_COMMISSION_IN_POLKA=1 возвращает §A1 (полка = комиссия + ½спред).
+  const bool commission_in_polka = cex::common::Env::get_bool("CE_COMMISSION_IN_POLKA", false);
+  const bool cross_pairs = cex::common::Env::get_bool("CE_CROSS_PAIRS", false);
+  auto to_dec = [](double x) {
+    return cex::common::Decimal{static_cast<std::int64_t>(std::llround(x * 1e8)), 8}.to_proto();
+  };
+
+  // ADR-075: age-aware полка. k=0 (деф) ⇒ не читаем σ и не меняем поведение.
+  const char* age_k_env = std::getenv("CE_AGE_DEAD_ZONE_K");
+  const double age_dead_zone_k = age_k_env ? std::max(0.0, std::atof(age_k_env)) : 0.0;
+  const long long sigma_min_samples = cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20);
+  const std::map<std::string, double> sigma_by_pair =
+      age_dead_zone_k > 0.0 ? SigmaSnapshot(sigma_min_samples) : std::map<std::string, double>{};
+
+  // ADR-077 этап B: способ α_ext агента-переводчика. 4 (деф) — прежний минорант; 5 — M5
+  // (регрессия на окне объёма). Любой сбой M5 откатывается на M4 внутри BuildQuoteAgent.
+  const int alpha_method = cex::common::Env::get_int("CE_ALPHA_METHOD", 4) == 5 ? 5 : 4;
+  const int m5_grid_points = std::max(8, static_cast<int>(cex::common::Env::get_int("CE_M5_GRID_POINTS", 32)));
+  const char* m5_cov_env = std::getenv("CE_M5_MIN_COVERAGE");
+  const double m5_min_coverage = m5_cov_env ? std::atof(m5_cov_env) : 0.5;
+  const char* m5_hsm_env = std::getenv("CE_M5_HALF_SPREAD_MULT");
+  const double m5_half_spread_mult = m5_hsm_env ? std::atof(m5_hsm_env) : 0.0;  // 0 ⇒ без полки (деф)
+  int m5_used = 0, m5_fallback = 0, m5_neg_intercept = 0;
+  double m5_ratio_max = 0.0;  // max α_M5/α_M4 по применённым агентам (оценка усиления потока)
+
+  struct Book {
+    std::string base, quote, venue;
+    std::int64_t ts_ms{0};  // время события кривой (0 ⇒ неизвестно ⇒ age-полка не применяется)
+    double tau_ms{0.0};  // τ кривой (v = q/τ) — для согласования скорости с окном батча
+    std::vector<domain::ExternalOrderLevel> levels;
+    double v_cal_quote{0.0};  // ADR-077: окно V_cal в ед. котируемой валюты (тег кривой; 0 ⇒ нет)
+  };
+  std::vector<Book> books;
+  // P0 (опорная цена в numeraire) считается ТОЛЬКО из пар base/numeraire —
+  // кросс-пары (base/quote, quote≠numeraire) используют уже посчитанный P0.
+  std::map<std::string, std::pair<double, int>> p0acc;  // base → (Σ mid, count)
+  std::set<std::string> venues_set;
+  std::vector<std::string> assets_order;
+  std::set<std::string> assets_seen;
+  for (const auto& c : curves) {
+    const std::string base = c.instrument().base();
+    const std::string quote = c.instrument().quote();
+    const std::string venue = c.venue_id();
+    if (base.empty() || venue.empty() || quote.empty()) continue;
+    // CE_CROSS_PAIRS=0 (default): только base/numeraire — прежний фильтр, регрессия.
+    if (!cross_pairs && quote != numeraire) continue;
+    auto levels = LevelsFromCurve(c, vectorize_cfg_.decimal_scale);
+    double bb = -1.0, ba = -1.0;
+    for (const auto& l : levels) {
+      const double p = static_cast<double>(l.price);
+      if (p <= 0.0) continue;
+      if (l.side == domain::LevelSide::kBid) bb = std::max(bb, p);
+      else ba = (ba < 0.0) ? p : std::min(ba, p);
+    }
+    if (bb <= 0.0 || ba <= 0.0) continue;
+    if (quote == numeraire) {  // P0_base — только из пар к номиналу (ADR-064)
+      p0acc[base].first += 0.5 * (bb + ba);
+      p0acc[base].second += 1;
+    }
+    venues_set.insert(venue);
+    if (assets_seen.insert(base).second) assets_order.push_back(base);
+    // Кросс-пара: quote тоже tradeable-актив (не numeraire) — регистрируем его
+    // узел asset@venue в графе наравне с base (ADR-064 §Последствия).
+    if (quote != numeraire && assets_seen.insert(quote).second) assets_order.push_back(quote);
+    const auto ts_it = curve_ts_ms.find(venue + "|" + c.instrument().symbol());
+    double v_cal_quote = 0.0;  // ADR-077: тег окна глубины, если venues его выставил
+    {
+      const auto& tags = c.meta().tags();
+      const auto tg = tags.find("depth_window.v_cal_quote");
+      if (tg != tags.end()) {
+        char* end = nullptr;
+        const double v = std::strtod(tg->second.c_str(), &end);
+        if (end != tg->second.c_str() && std::isfinite(v) && v > 0.0) v_cal_quote = v;
+      }
+    }
+    books.push_back({base, quote, venue, ts_it != curve_ts_ms.end() ? ts_it->second : 0,
+                     c.tau_ms(), std::move(levels), v_cal_quote});
+  }
+  if (books.empty()) return;
+  std::map<std::string, double> p0;
+  for (const auto& [a, sc] : p0acc) p0[a] = sc.second > 0 ? sc.first / sc.second : 0.0;
+
+  fob::marketdata::v1::CeClearingInput out;
+  out.set_batch_id(batch_id);
+  out.set_event_time_ms(window_close_ms);
+  out.set_numeraire(numeraire);
+  std::map<std::string, std::pair<double, double>> markacc;  // base → (Σ α·anchor, Σ α)
+  // 1-й проход: строим валидных агентов, копим max глубину по активу.
+  struct Ag {
+    std::string base, quote, venue;
+    double anchor, depth, dead_zone;
+    double dz_age{0.0}, dz_spread{0.0}, dz_commission{0.0}, sigma_pm{0.0};   // ADR-079: из чего сложена полка
+    std::int64_t age_ms{0};
+  };
+  std::vector<fob::marketdata::v1::CeDroppedQuote> dropped_list;             // ADR-079: отброшенные котировки
+  std::vector<Ag> agents;
+  std::map<std::string, double> max_depth;
+  int skipped_no_p0 = 0;
+  int age_applied = 0, age_no_sigma = 0;  // ADR-075 наблюдаемость
+  double age_floor_max_pm = 0.0;
+  // Согласование скорости торговли, окна батча и цен: кривая моделирует v = q/τ
+  // (τ_eff калибрована по реальному обороту venue). CE-поток за такт = скорость·dt =
+  // глубина·(dt/τ). Масштабируем α агента на batch_window/τ_кривой, чтобы позиция
+  // менялась со скоростью реальной торговли биржи, а не «запаса» книги за такт.
+  const bool ce_speed_scale = cex::common::Env::get_bool("CE_SPEED_SCALE", true);
+  const double batch_window_ms =
+      static_cast<double>(cex::common::Env::get_int("F05A_BATCH_WINDOW_MS", 1000));
+  // ADR-064 (дополнение 2026-10-29, OQ-F18v2-37): α строится в единицах котируемой валюты пары (у ETH/BTC — BTC на ‰), а клиринг складывает потоки в
+  // номинале. Флаг включает приведение α кросс-пары к номиналу: α·P0_quote. Выключено (деф.) ⇒ множитель 1, поведение побитно прежнее.
+  const bool cross_depth_numeraire = cex::common::Env::get_bool("CE_CROSS_DEPTH_NUMERAIRE", false);
+  int cross_depth_scaled = 0;
+  for (const auto& b : books) {
+    const double p0_base = p0.count(b.base) ? p0.at(b.base) : 0.0;
+    double reference_price = p0_base;
+    double p0_quote = 1.0;  // опорная цена котируемой валюты в номинале; для номинальной пары 1
+    if (b.quote != numeraire) {
+      // Кросс-пара (ADR-064 §Решение): reference_price = P0_base/P0_quote —
+      // согласовано с потенциалами узлов x[a@v]; для base/numeraire P0_quote=1,
+      // reference_price=P0_base (без изменений). Без P0_quote пара недостроима.
+      p0_quote = p0.count(b.quote) ? p0.at(b.quote) : 0.0;
+      if (p0_base <= 0.0 || p0_quote <= 0.0) { ++skipped_no_p0; continue; }
+      reference_price = p0_base / p0_quote;
+    }
+    domain::AgentBuilderConfig acfg;
+    acfg.theta = theta;
+    acfg.reference_price = reference_price;
+    acfg.taker_fee_bps_override = ce_taker_fee_bps_;  // настраиваемая комиссия (0 ⇒ линейно)
+    acfg.half_spread_mult = half_spread_mult;          // 0 ⇒ полка нулевая
+    acfg.wide_spread_guard_pm = wide_spread_guard_pm;  // тонкие книги сохраняют ½спред
+    acfg.commission_in_polka = commission_in_polka;    // ADR-065 Q1: комиссия в порогах, не в полке
+    // ADR-075: age-полка c += k·σ·√age. σ — EWMA пары (ce_asset_volatility, ‰/√с = σ·1000),
+    // возраст — от времени события кривой до закрытия окна. Нет σ/времени ⇒ член нулевой.
+    if (age_dead_zone_k > 0.0 && b.ts_ms > 0) {
+      const auto sg = sigma_by_pair.find(b.base + b.quote);
+      if (sg != sigma_by_pair.end()) {
+        acfg.age_dead_zone_k = age_dead_zone_k;
+        acfg.sigma_pm = sg->second * 1000.0;
+        acfg.snapshot_age_ms = static_cast<double>(std::max<std::int64_t>(0, window_close_ms - b.ts_ms));
+        ++age_applied;
+        age_floor_max_pm = std::max(
+            age_floor_max_pm, age_dead_zone_k * acfg.sigma_pm * std::sqrt(acfg.snapshot_age_ms / 1000.0));
+      } else {
+        ++age_no_sigma;
+      }
+    }
+    acfg.alpha_method = alpha_method;
+    acfg.depth_window_quote = b.v_cal_quote;
+    acfg.m5_grid_points = m5_grid_points;
+    acfg.m5_min_coverage = m5_min_coverage;
+    acfg.m5_half_spread_mult = m5_half_spread_mult;
+    const domain::QuoteAgent a = domain::BuildQuoteAgent(b.levels, acfg);
+    if (!a.valid) {
+      fob::marketdata::v1::CeDroppedQuote dq;   // ADR-079: нулевая глубина — котировка не попадёт в клиринг
+      dq.set_asset(b.base);
+      dq.set_venue(b.venue);
+      if (b.quote != numeraire) dq.set_quote(b.quote);
+      dq.set_reason("invalid_depth");
+      dq.set_age_ms(b.ts_ms > 0 ? std::max<std::int64_t>(0, window_close_ms - b.ts_ms) : 0);
+      dropped_list.push_back(std::move(dq));
+      continue;
+    }
+    if (alpha_method == 5) {
+      if (a.alpha_method_used == 5) {
+        ++m5_used;
+        if (a.m5_negative_intercept) ++m5_neg_intercept;
+        if (a.alpha_m4 > 0.0) m5_ratio_max = std::max(m5_ratio_max, a.alpha_m5 / a.alpha_m4);
+      } else {
+        ++m5_fallback;
+      }
+    }
+    // Масштаб скорости: глубина(запас) → скорость·dt = глубина·(dt/τ). τ≤0 или
+    // выключено ⇒ прежнее поведение (без масштаба, регрессия).
+    double depth = a.depth;
+    if (ce_speed_scale && b.tau_ms > 0.0 && batch_window_ms > 0.0) {
+      double s = batch_window_ms / b.tau_ms;  // dt/τ
+      if (s < 1e-6) s = 1e-6; else if (s > 100.0) s = 100.0;
+      depth *= s;
+    }
+    // Единицы глубины: у кросс-пары α в котируемой валюте, клиринг считает в номинале ⇒ α·P0_quote (константа окна). Номинальные пары — множитель 1.
+    if (const double nf = domain::CrossDepthNumeraireFactor(cross_depth_numeraire, b.quote, numeraire, p0_quote); nf != 1.0) {
+      depth *= nf;
+      ++cross_depth_scaled;
+    }
+    agents.push_back({b.base, b.quote, b.venue, a.anchor_pm, depth, a.dead_zone_pm,
+                      a.dz_age_pm, a.dz_spread_pm, a.dz_commission_pm, acfg.sigma_pm,
+                      // возраст снимка известен и при CE_AGE_DEAD_ZONE_K=0 (acfg его тогда не заполняет)
+                      b.ts_ms > 0 ? std::max<std::int64_t>(0, window_close_ms - b.ts_ms) : 0});
+    // ADR-064: max глубина копится по ПАРЕ (base|quote), а не по base. Глубины
+    // разных валют котировки несравнимы (ETH/BTC в BTC vs ETH/USDT в USDT; при CE_CROSS_DEPTH_NUMERAIRE=1 кросс-глубина приведена к номиналу
+    // выше, но сравнение между парами всё равно не нужно) — «тонкость» сравнивается только между площадками одной пары.
+    const std::string pk = b.base + "|" + b.quote;
+    if (depth > max_depth[pk]) max_depth[pk] = depth;
+  }
+  if (age_dead_zone_k > 0.0)
+    cex::common::log_json("INFO", "CE clearing: age-aware полка (ADR-075)",
+                          {{"batch_id", batch_id},
+                           {"k", std::to_string(age_dead_zone_k)},
+                           {"applied", std::to_string(age_applied)},
+                           {"no_sigma", std::to_string(age_no_sigma)},
+                           {"max_age_floor_pm", std::to_string(age_floor_max_pm)}});
+  if (cross_depth_numeraire) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_cross_depth_log_ms{0};
+    std::int64_t prev_cd = last_cross_depth_log_ms.load();
+    if (window_close_ms - prev_cd >= 60000 && last_cross_depth_log_ms.compare_exchange_strong(prev_cd, window_close_ms))
+      cex::common::log_json("INFO", "CE clearing: глубина кросс-пар приведена к номиналу α·P0_quote (ADR-064, доп. 2026-10-29)",
+                            {{"batch_id", batch_id}, {"scaled_quotes", std::to_string(cross_depth_scaled)}});
+  }
+  if (alpha_method == 5)
+    cex::common::log_json("INFO", "CE clearing: α по M5 (ADR-077)",
+                          {{"batch_id", batch_id},
+                           {"m5_used", std::to_string(m5_used)},
+                           {"m5_fallback_m4", std::to_string(m5_fallback)},
+                           {"m5_negative_intercept", std::to_string(m5_neg_intercept)},
+                           {"max_alpha_ratio_m5_m4", std::to_string(m5_ratio_max)}});
+  if (skipped_no_p0 > 0)
+    cex::common::log_json("DEBUG", "CE clearing: кросс-пара без P0_quote пропущена",
+                          {{"batch_id", batch_id}, {"skipped", std::to_string(skipped_no_p0)}});
+  // Фильтр тонких/ненадёжных venue: глубина < ratio·max по активу (env CE_MIN_DEPTH_RATIO,
+  // деф 0.05). Тонкие venue дают выбросные/устаревшие цены → fake-арбитраж → раздувание
+  // позиции биржи (см. bug 2026-09-14: coinbase выброс −2.5‰ гнал BTC/SOL). ADR-057.
+  const char* mdr = std::getenv("CE_MIN_DEPTH_RATIO");
+  const double min_ratio = mdr ? std::atof(mdr) : 0.05;
+  // Форс-кип venue (env CE_FORCE_KEEP_VENUES=comma) — оставить в клиринге даже при
+  // тонкой глубине. Для DEX (uniswap_v3): честно расходящаяся AMM-цена — легитимный
+  // источник CEX↔DEX арбитража, НЕ выброс (в отличие от тонкого coinbase, который
+  // фильтр по-прежнему выкидывает). Решение владельца 2026-09-16.
+  std::set<std::string> force_keep;
+  if (const char* fk = std::getenv("CE_FORCE_KEEP_VENUES")) {
+    std::string cur;
+    for (const char* p = fk; ; ++p) {
+      if (*p == ',' || *p == '\0') { if (!cur.empty()) force_keep.insert(cur); cur.clear(); if (*p == '\0') break; }
+      else cur += *p;
+    }
+  }
+  std::set<std::string> kept_venues;
+  int dropped = 0;
+  // ADR-082 шаг 1: множитель глубины по коэффициенту исполнения биржи f. Применяется ПОСЛЕ фильтра тонких: фильтр сравнивает
+  // сырую глубину с максимумом по паре (оценка надёжности книги), а f должен уменьшить кривую тонкой биржи, не выкинув её из
+  // клиринга целиком. Читатель выключен (nullptr) ⇒ ни одного обращения, прежнее поведение.
+  domain::VenueFillSnapshot liq_snapshot;
+  const domain::FillDepthScaleConfig& fill_cfg = fill_depth_cfg_;
+  const bool depth_fill = static_cast<bool>(fill_source_);
+  if (depth_fill) liq_snapshot = fill_source_();
+  int fill_scaled = 0;
+  double fill_scale_min = 1.0;
+  std::string fill_scale_list;
+  // ADR-085: уценка устаревших котировок (CE_TRUST_MODE) и капитальный предел глубины (CE_CAPITAL_W_T_K, CE_CAPITAL_GAMMA_PM). Оба выключены
+  // по умолчанию ⇒ ни одного обращения к σ, прежнее поведение. Как и f, применяются ПОСЛЕ фильтра тонких котировок: фильтр сравнивает сырую
+  // глубину с максимумом по паре (оценка надёжности книги), а вес и предел уменьшают кривую в клиринге. Основание — «Кривые котирования»
+  // §2.3 (уценка: глубина падает с возрастом источника до нуля) и ур. (6.2): α_T = min{θα_ext, W_T/(γσ²τ)}.
+  const auto env_d = [](const char* name, const double def) {
+    const char* v = std::getenv(name);
+    if (v == nullptr || *v == '\0') return def;
+    char* end = nullptr;
+    const double x = std::strtod(v, &end);
+    return (end == v || *end != '\0' || !std::isfinite(x)) ? def : x;
+  };
+  domain::TrustScaleConfig trust_cfg;
+  trust_cfg.mode = domain::ParseTrustMode(cex::common::Env::get_string("CE_TRUST_MODE", "OFF"));
+  trust_cfg.t_stale_s = std::max(0.0, env_d("CE_TRUST_TSTALE_S", 60.0));
+  trust_cfg.psi_min = std::min(0.99, std::max(0.0, env_d("CE_TRUST_PSI_MIN", 0.05)));
+  const bool trust_on = trust_cfg.mode != domain::TrustMode::kOff;
+  // W_T — капитал конкретного переводчика (базовый документ), поэтому задаётся по ключу «биржа|пара» (CE_CAPITAL_W_T_K_BY_KEY, например
+  // "binance|BTCUSDT:3000,okx|ETHUSDT:1500"); CE_CAPITAL_W_T_K — запасное значение для пар без записи, 0 ⇒ у таких пар предела нет.
+  const double cap_w_t_k = env_d("CE_CAPITAL_W_T_K", 0.0);        // запасное W_T, тыс. USDT
+  const domain::CapitalByKey cap_by_key = domain::ParseCapitalByKey(cex::common::Env::get_string("CE_CAPITAL_W_T_K_BY_KEY", ""));
+  const double cap_gamma = env_d("CE_CAPITAL_GAMMA_PM", 0.0);     // γ, 1/‰
+  const bool cap_on = (cap_w_t_k > 0.0 || !cap_by_key.w_t_k.empty()) && cap_gamma > 0.0;
+  // Предел возраста режима LINEAR — константа CE_TRUST_TSTALE_S. Опция CE_TRUST_TSTALE_ADAPTIVE=1 берёт его из адаптивного порога по σ площадки,
+  // которым векторный путь жёстко исключает устаревшие кривые (CE_STALE_EPS_PM, ADR-078): вес доходит до нуля там же, где данные отсекаются.
+  // По умолчанию выключена: на dev этот порог упирается в нижнюю границу 10 с, а обычный возраст снимков из-за периода опроса 3–9 с — 4–9 с,
+  // поэтому вес обычных котировок падал до 0,1–0,6 (замер 2026-10-26, ADR-085).
+  const bool trust_adaptive = cex::common::Env::get_bool("CE_TRUST_TSTALE_ADAPTIVE", false);
+  const double trust_eps = trust_adaptive ? std::max(0.0, env_d("CE_STALE_EPS_PM", 0.0)) / 1000.0 : 0.0;
+  const double trust_lo_s = std::max(0.1, env_d("CE_STALE_MIN_S", 10.0));
+  const double trust_hi_s = std::max(trust_lo_s, env_d("CE_STALE_MAX_S", 180.0));
+  // σ0 режима DISP: явное CE_TRUST_SIG0_PM, иначе привязка к допуску жёсткого предела σ0 = ε/z, при которой T_ς совпадает с возрастом
+  // ValidAgeSeconds (вес 1/2 ровно на нём); нет и допуска ⇒ 0,5‰ (дискретность тика).
+  {
+    const double sig0_env = env_d("CE_TRUST_SIG0_PM", 0.0);
+    trust_cfg.sig0_pm = sig0_env > 0.0 ? sig0_env : (trust_eps > 0.0 ? 1000.0 * trust_eps / cex::common::kValidityZ : 0.5);
+  }
+  const bool need_venue_sigma = cap_on || trust_cfg.mode == domain::TrustMode::kDisp || (trust_on && trust_eps > 0.0);
+  const std::map<std::string, double> venue_sigma =
+      need_venue_sigma ? VenueSigmaSnapshot(cex::common::Env::get_int("CE_AGE_SIGMA_MIN_SAMPLES", 20)) : std::map<std::string, double>{};
+  const double tact_s = batch_window_ms / 1000.0;   // τ капитального предела — длительность такта клиринга
+  int trust_applied = 0, trust_excluded = 0, trust_zero_depth = 0, cap_applied = 0, cap_no_data = 0;
+  double trust_min = 1.0, cap_ratio_min = 1.0;
+  std::set<std::string> trust_excluded_assets;   // активы, у которых хотя бы одну котировку убрал вес или нулевая глубина
+  for (const auto& ag : agents) {
+    // тонкий → искл., КРОМЕ форс-кип venue (реальный расходящийся источник арбитража).
+    // ADR-064: порог считается по ПАРЕ (base|quote) — иначе кросс-пара (ETH/BTC)
+    // всегда «тонкая» против глубокого ETH/USDT (разные валюты котировки).
+    const std::string pk = ag.base + "|" + ag.quote;
+    if (!force_keep.count(ag.venue) && ag.depth < min_ratio * max_depth[pk]) {
+      ++dropped;
+      fob::marketdata::v1::CeDroppedQuote dq;   // ADR-079: тонкая котировка и порог глубины
+      dq.set_asset(ag.base);
+      dq.set_venue(ag.venue);
+      if (ag.quote != numeraire) dq.set_quote(ag.quote);
+      dq.set_reason("thin_depth");
+      dq.set_age_ms(ag.age_ms);
+      *dq.mutable_depth() = to_dec(ag.depth);
+      *dq.mutable_threshold() = to_dec(min_ratio * max_depth[pk]);
+      dropped_list.push_back(std::move(dq));
+      continue;
+    }
+    // ADR-085: σ площадки (‰/√с; ключ как у векторного пути: venue|BASEQUOTE) для уценки DISP и капитального предела.
+    double sigma_pm_venue = 0.0;
+    const std::string pair_key = ag.venue + "|" + ag.base + ag.quote;
+    if (trust_on || cap_on) {
+      if (const auto sg = venue_sigma.find(pair_key); sg != venue_sigma.end()) sigma_pm_venue = sg->second * 1000.0;
+    }
+    // Капитальный предел — внешнее ограничение тактовой глубины; только для котировок к номиналу: у кросс-пары (при CE_CROSS_DEPTH_NUMERAIRE=0)
+    // глубина в валюте её котировки, и W_T в тыс. USDT с ней не сравнима (ADR-064); при =1 глубина в номинале, но капитал кросс-переводчика
+    // отдельно не задан, поэтому предел для кросс-пар по-прежнему не применяется (ADR-064, дополнение 2026-10-29). Нет σ площадки или такта ⇒ предела нет (без данных глубину не режем).
+    double cap_flow = std::numeric_limits<double>::infinity();
+    if (cap_on && ag.quote == numeraire) {
+      // Капитал именно этого переводчика; нет ни записи по ключу, ни запасного значения (или явный 0) ⇒ у пары предела нет и это не «нет данных».
+      const double w_t_k = domain::ResolveCapitalW(cap_by_key, pair_key, cap_w_t_k);
+      if (w_t_k > 0.0) {
+        if (sigma_pm_venue > 0.0) cap_flow = domain::CapitalDepthCap(w_t_k, cap_gamma, sigma_pm_venue, tact_s);
+        if (!std::isfinite(cap_flow)) ++cap_no_data;
+      }
+    }
+    double fill_scale = 1.0;
+    if (depth_fill) {
+      const double sc = domain::ResolveFillDepthScale(liq_snapshot, ag.venue, ag.base, ag.quote, fill_cfg);
+      if (sc < 1.0) {
+        fill_scale = sc;
+        ++fill_scaled;
+        fill_scale_min = std::min(fill_scale_min, sc);
+        if (fill_scale_list.size() < 400) {
+          char buf[64];
+          std::snprintf(buf, sizeof(buf), "%s|%s/%s=%.2f;", ag.venue.c_str(), ag.base.c_str(), ag.quote.c_str(), sc);
+          fill_scale_list += buf;
+        }
+      }
+    }
+    double trust_weight = 1.0;
+    if (trust_on && ag.age_ms > 0) {
+      double t_stale_s = trust_cfg.t_stale_s;
+      if (trust_cfg.mode == domain::TrustMode::kLinear && trust_eps > 0.0 && sigma_pm_venue > 0.0)
+        t_stale_s = cex::common::HardStaleLimitSeconds(std::optional<double>(sigma_pm_venue / 1000.0), trust_eps, trust_lo_s, trust_hi_s,
+                                                       trust_cfg.t_stale_s);
+      trust_weight = domain::AgeTrustWeight(trust_cfg, static_cast<double>(ag.age_ms) / 1000.0, t_stale_s, sigma_pm_venue);
+      if (domain::TrustExcluded(trust_cfg, trust_weight)) {
+        // Вес дошёл до нуля: котировка устарела настолько, что её кривая не должна влиять (нулевая глубина в клиринг не идёт).
+        ++trust_excluded;
+        trust_excluded_assets.insert(ag.base);
+        fob::marketdata::v1::CeDroppedQuote dq;
+        dq.set_asset(ag.base);
+        dq.set_venue(ag.venue);
+        if (ag.quote != numeraire) dq.set_quote(ag.quote);
+        dq.set_reason("stale");
+        dq.set_age_ms(ag.age_ms);
+        *dq.mutable_threshold() = to_dec(domain::TrustDropThresholdMs(trust_cfg, t_stale_s, sigma_pm_venue));
+        dropped_list.push_back(std::move(dq));
+        continue;
+      }
+      if (trust_weight < 1.0) {
+        ++trust_applied;
+        trust_min = std::min(trust_min, trust_weight);
+      }
+    }
+    // α = w·f·min{θα_ext, cap}: порядок — в domain::ComposeDepth. Выключено ⇒ множители 1 и предела нет, глубина совпадает бит в бит.
+    const domain::DepthComposition comp = domain::ComposeDepth(ag.depth, cap_flow, fill_scale, trust_weight);
+    double depth_out = comp.depth;
+    if (comp.capped) {
+      ++cap_applied;
+      if (ag.depth > 0.0) cap_ratio_min = std::min(cap_ratio_min, cap_flow / ag.depth);
+    }
+    // Нулевую глубину в клиринг не передаём (в отчёте ReportCe слагаемое f²/(2·depth) при нуле даёт 0/0): после всех множителей глубина ниже
+    // разрешения to_dec (1e-8) — исключение, как у ветки invalid_depth. Только при включённых механизмах: выключено — прежнее поведение.
+    if ((trust_on || cap_on) && !(depth_out >= 1e-8)) {
+      ++trust_zero_depth;
+      trust_excluded_assets.insert(ag.base);
+      fob::marketdata::v1::CeDroppedQuote dq;
+      dq.set_asset(ag.base);
+      dq.set_venue(ag.venue);
+      if (ag.quote != numeraire) dq.set_quote(ag.quote);
+      dq.set_reason("invalid_depth");
+      dq.set_age_ms(ag.age_ms);
+      *dq.mutable_depth() = to_dec(std::isfinite(depth_out) ? depth_out : 0.0);  // NaN в to_dec — неопределённое поведение llround
+      dropped_list.push_back(std::move(dq));
+      continue;
+    }
+    auto* q = out.add_quotes();
+    q->set_asset(ag.base);
+    q->set_venue(ag.venue);
+    *q->mutable_anchor() = to_dec(ag.anchor);
+    *q->mutable_depth() = to_dec(depth_out);
+    *q->mutable_dead_zone() = to_dec(ag.dead_zone);
+    // ADR-079: из чего сложена полка и откуда возраст/σ (клиринг не читает, только диагностика)
+    *q->mutable_dz_age() = to_dec(ag.dz_age);
+    *q->mutable_dz_spread() = to_dec(ag.dz_spread);
+    *q->mutable_dz_commission() = to_dec(ag.dz_commission);
+    q->set_snapshot_age_ms(ag.age_ms);
+    *q->mutable_sigma_pm() = to_dec(ag.sigma_pm);
+    // ADR-064: quote непуст только для кросс-пар; для номинальных пар оставляем
+    // пустым (обратная совместимость — "пусто ⇒ numeraire").
+    if (ag.quote != numeraire) q->set_quote(ag.quote);
+    markacc[ag.base].first += depth_out * ag.anchor;
+    markacc[ag.base].second += depth_out;
+    kept_venues.insert(ag.venue);
+  }
+  if (depth_fill) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_fill_log_ms{0};
+    std::int64_t prev = last_fill_log_ms.load();
+    if (window_close_ms - prev >= 60000 && last_fill_log_ms.compare_exchange_strong(prev, window_close_ms)) {
+      cex::common::log_json("INFO", "CE clearing: глубина × коэффициент исполнения f (ADR-082)",
+                            {{"batch_id", batch_id},
+                             {"scaled_quotes", std::to_string(fill_scaled)},
+                             {"quotes", std::to_string(out.quotes_size())},
+                             {"min_scale", std::to_string(fill_scale_min)},
+                             {"snapshot_pairs", std::to_string(liq_snapshot.size())},
+                             {"scales", fill_scale_list}});
+    }
+  }
+  if (trust_on || cap_on) {
+    // не чаще раза в минуту: окно клиринга идёт каждую секунду
+    static std::atomic<std::int64_t> last_trust_log_ms{0};
+    std::int64_t prev = last_trust_log_ms.load();
+    if (window_close_ms - prev >= 60000 && last_trust_log_ms.compare_exchange_strong(prev, window_close_ms)) {
+      cex::common::log_json("INFO", "CE clearing: уценка устаревших котировок и капитальный предел (ADR-085)",
+                            {{"batch_id", batch_id},
+                             {"trust_mode", trust_on ? (trust_cfg.mode == domain::TrustMode::kLinear ? "LINEAR" : "DISP") : "OFF"},
+                             {"trust_applied", std::to_string(trust_applied)},
+                             {"trust_excluded", std::to_string(trust_excluded)},
+                             {"trust_min_weight", std::to_string(trust_min)},
+                             {"age_floor_k_adr075", std::to_string(age_dead_zone_k)},   // k>0 вместе с уценкой — двойной учёт возраста
+                             {"capital_on", cap_on ? "1" : "0"},
+                             {"capital_by_key", std::to_string(cap_by_key.w_t_k.size())},          // записей капитала по «бирже|паре»
+                             {"capital_by_key_malformed", std::to_string(cap_by_key.malformed)},   // нечитаемых записей (опечатка в настройке)
+                             {"capital_applied", std::to_string(cap_applied)},
+                             {"capital_min_ratio", std::to_string(cap_ratio_min)},
+                             {"capital_no_data", std::to_string(cap_no_data)},   // нет σ площадки или такта: предел не применён
+                             {"zero_depth_dropped", std::to_string(trust_zero_depth)},
+                             {"quotes", std::to_string(out.quotes_size())}});
+    }
+  }
+  if (out.quotes_size() == 0) return;
+  // Активы, на которые ссылается хотя бы одна оставшаяся котировка — и как базовый, и как котируемая валюта кросс-пары (ETH/BTC ссылается на BTC).
+  std::vector<domain::CeQuoteRef> quote_refs;
+  quote_refs.reserve(static_cast<std::size_t>(out.quotes_size()));
+  for (const auto& q : out.quotes()) quote_refs.push_back({q.asset(), q.quote(), q.venue()});
+  const std::set<std::string> referenced_assets = domain::ReferencedAssets(quote_refs, numeraire);
+  // Актив, на который не осталось ссылок ни в одной роли (все его котировки убрал вес или нулевая глубина), в клиринг не идёт. Убирать актив,
+  // на который ссылается кросс-пара, нельзя: matching не найдёт узел и упадёт (инцидент 2026-10-26).
+  for (const auto& a : domain::SelectClearingAssets(assets_order, trust_excluded_assets, referenced_assets)) {
+    out.add_assets(a);
+    auto* m = out.add_marks();
+    m->set_asset(a);
+    const double mu = markacc[a].second > 0.0 ? markacc[a].first / markacc[a].second : 0.0;
+    *m->mutable_mark() = to_dec(mu);
+    *m->mutable_reference_price() = to_dec(p0[a]);
+  }
+  for (const auto& v : venues_set)
+    if (kept_venues.count(v)) out.add_venues(v);  // только venue, пережившие фильтр
+  if (dropped > 0)
+    cex::common::log_json("INFO", "CE clearing: тонкие venue отфильтрованы",
+                          {{"batch_id", batch_id}, {"dropped_agents", std::to_string(dropped)},
+                           {"kept_quotes", std::to_string(out.quotes_size())},
+                           {"min_depth_ratio", std::to_string(min_ratio)}});
+
+  for (const auto& dq : stale_dropped) *out.add_dropped() = dq;   // ADR-079: отброшенные как устаревшие
+  for (const auto& dq : dropped_list) *out.add_dropped() = dq;     // и по глубине / нулевой глубине
+  {
+    // Защита: вход, в котором котировка ссылается на актив или площадку вне списков, роняет matching (node_index.at → std::out_of_range → terminate,
+    // а после перезапуска то же сообщение читается снова). Такой вход не публикуем.
+    const std::vector<std::string> out_assets(out.assets().begin(), out.assets().end());
+    const std::vector<std::string> out_venues(out.venues().begin(), out.venues().end());
+    // Номинал по умолчанию тот же, что подставляет matching при пустом numeraire входа.
+    const int bad = domain::FindInconsistentQuote(out_assets, out_venues, numeraire.empty() ? std::string("USDT") : numeraire, quote_refs);
+    if (bad >= 0) {
+      // не чаще раза в минуту: окно клиринга идёт каждую секунду, а устойчивая ошибка дала бы десятки тысяч строк в сутки
+      static std::atomic<std::int64_t> last_guard_log_ms{0};
+      static std::atomic<std::int64_t> rejected_windows{0};  // сколько окон отклонено с запуска процесса: молчаливый стоп должен быть виден в журнале
+      const std::int64_t rejected = rejected_windows.fetch_add(1) + 1;
+      std::int64_t prev_guard = last_guard_log_ms.load();
+      if (window_close_ms - prev_guard >= 60000 && last_guard_log_ms.compare_exchange_strong(prev_guard, window_close_ms)) {
+        const auto& q = out.quotes(bad);
+        cex::common::log_json("ERROR", "CE clearing: вход несогласован (котировка ссылается на актив или площадку вне списков), не публикуется",
+                              {{"batch_id", batch_id}, {"asset", q.asset()}, {"quote", q.quote()}, {"venue", q.venue()},
+                               {"assets", std::to_string(out.assets_size())}, {"venues", std::to_string(out.venues_size())},
+                               {"rejected_windows_total", std::to_string(rejected)}});
+      }
+      return;
+    }
+  }
+  ce_publisher_->Publish(out);
+  cex::common::log_json("INFO", "F-05A CE ce.clearing.input",
+                        {{"service", "market_data"},
+                         {"topic", "ce.clearing.input"},
+                         {"batch_id", batch_id},
+                         {"quotes", std::to_string(out.quotes_size())},
+                         {"assets", std::to_string(out.assets_size())},
+                         {"venues", std::to_string(out.venues_size())}});
+}
+
 std::optional<common::Decimal> MarketDataUseCases::GetCurrentMid(
     const std::string& asset) const {
   std::lock_guard<std::mutex> lg(mu_);
   const auto it = last_snapshot_.find(asset);
   if (it == last_snapshot_.end()) return std::nullopt;
   return it->second.mid;
+}
+
+// F-18 D1+#7 (T-F18-702): time-aware EWMA дисперсии лог-доходностей mid per актив.
+// Вызывается ПОД mu_. r = ln(mid/prev); var_persec = r²/Δt; ewma_var убывает с
+// весом w=exp(−Δt/halflife). σ=sqrt(ewma_var). Возвращает true, если пора писать
+// в PG (троттлинг vol_write_period_sec) — тогда out_sigma/out_samples заполнены.
+bool MarketDataUseCases::UpdateAssetVolatilityLocked(const std::string& asset,
+                                                     double mid, long long now_ms,
+                                                     double* out_sigma,
+                                                     long long* out_samples) {
+  if (!(mid > 0.0)) return false;
+  std::lock_guard<std::mutex> vol_lg(vol_mu_);  // порядок mu_ → vol_mu_ (см. заголовок)
+  VolState& st = vol_state_[asset];
+  if (!st.init) {
+    st.init = true;
+    st.prev_mid = mid;
+    st.last_ms = now_ms;
+    return false;  // первая точка — доходности ещё нет
+  }
+  const double dt_sec = std::max(0.05, (now_ms - st.last_ms) / 1000.0);
+  const double r = std::log(mid / st.prev_mid);
+  const double var_persec = (r * r) / dt_sec;  // дисперсия доходности за секунду
+  const double w = std::exp(-dt_sec / std::max(1e-6, vol_halflife_sec_));
+  st.ewma_var = st.init && st.samples > 0
+                    ? (w * st.ewma_var + (1.0 - w) * var_persec)
+                    : var_persec;  // первый апдейт — seed без сглаживания
+  st.prev_mid = mid;
+  st.last_ms = now_ms;
+  st.samples += 1;
+
+  if (now_ms - st.last_write_ms < static_cast<long long>(vol_write_period_sec_ * 1000.0)) {
+    return false;  // троттлинг — писать рано
+  }
+  st.last_write_ms = now_ms;
+  if (out_sigma) *out_sigma = std::sqrt(std::max(0.0, st.ewma_var));
+  if (out_samples) *out_samples = st.samples;
+  return true;
+}
+
+void MarketDataUseCases::UpdateVenueVolatility(const std::string& venue_symbol_key, const double mid, const double t_s) {
+  // Порогу устаревания нужна устойчивая σ: берётся max(быстрая 60 с, медленная 300 с), см. DualHorizonVolatility.
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  venue_vol_.try_emplace(venue_symbol_key).first->second.Update(t_s, mid);
+}
+
+std::map<std::string, double> MarketDataUseCases::VenueSigmaSnapshot(long long min_samples) const {
+  std::map<std::string, double> out;
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  for (const auto& [k, est] : venue_vol_) {
+    if (const auto s = est.Sigma(min_samples)) out[k] = *s;
+  }
+  return out;
+}
+
+std::map<std::string, double> MarketDataUseCases::SigmaSnapshot(long long min_samples) const {
+  std::map<std::string, double> out;
+  std::lock_guard<std::mutex> lg(vol_mu_);
+  for (const auto& [sym, st] : vol_state_) {
+    if (st.init && st.samples >= min_samples && st.ewma_var > 0.0) out[sym] = std::sqrt(st.ewma_var);
+  }
+  return out;
 }
 
 std::optional<fob::marketdata::v1::Ticker> MarketDataUseCases::GetLastTicker(

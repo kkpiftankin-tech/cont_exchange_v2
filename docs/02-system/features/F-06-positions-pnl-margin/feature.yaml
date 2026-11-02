@@ -1,9 +1,14 @@
 feature:
   id: F-06
   name: Positions / PnL / Margin
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-LEDGER-001  # балансы и резервы
+  - FR-LEDGER-002  # применение fills
 
 description: >
   Учёт балансов (available/reserved), позиций и PnL пользователей.

@@ -50,7 +50,7 @@ IN-005 описывает **Execution Planning** как самостоятель
 
 ## Почему **не** оставлять Planning внутри matching
 
-CLAUDE.md §10.3 явно говорит: `matching не решает matching хеджа` (`matching не торгует`, `venues не принимает бизнес-решения о хеджировании`). Execution Planning принимает бизнес-решения о routing — это **не** matching domain. Логичнее держать рядом с `venue-execution-adapter`, потому что:
+[.claude/rules/cpp.md](../../../.claude/rules/cpp.md) явно говорит: `matching не решает matching хеджа` (`matching не торгует`, `venues не принимает бизнес-решения о хеджировании`). Execution Planning принимает бизнес-решения о routing — это **не** matching domain. Логичнее держать рядом с `venue-execution-adapter`, потому что:
 
 - Planning потребляет `venue.liquidity.fob` (от F-11) — тот же source, что и Adapter использует через EVC.
 - Planning вызывает `RiskService.PreHedgeCheck` — тот же путь, что и Adapter при validation.

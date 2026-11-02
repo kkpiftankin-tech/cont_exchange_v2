@@ -10,6 +10,8 @@ draft (proto-defined)
 
 В сервисных диаграммах часто упоминается как `Reserve` — это сокращение от `ReserveFunds`.
 
+**T-F18-205 (ADR-063, F-18 v2):** для `party_type = PARTY_TYPE_AGENT` (виртуальный контрагент CE — переводчик/арбитражёр) `ReserveFunds` — **no-op success**: нет проверки `available >= amount`, нет мутации `balances_`/`accounts`, нет записи в `reservations_` (агенту нечего освобождать через `ReleaseFunds`). Его знаковую позицию ведёт `ce_agent_position` ([ce-agent-position.md](../../07-data/ce-agent-position.md)), а не `accounts` — несовместимые инварианты (CLIENT: `free_balance >= 0` CHECK; AGENT: знаковая, может уходить в минус, ADR-061 A6). `party_type` не задан (`PARTY_TYPE_UNSPECIFIED`) → поведение как раньше (CLIENT).
+
 ## Transport
 
 gRPC
@@ -52,6 +54,10 @@ message ReserveFundsRequest {
   string currency = 10;
   fob.common.v1.Decimal amount = 11;
   ReserveReason reason = 12;
+  // T-F18-205 (ADR-063): default PARTY_TYPE_UNSPECIFIED = CLIENT (обратная
+  // совместимость — order_flow не заполняет это поле). PARTY_TYPE_AGENT →
+  // no-op success (см. Purpose выше). fob.common.v1.PartyType — common.proto.
+  fob.common.v1.PartyType party_type = 13;
 }
 
 message ReserveFundsResponse {

@@ -23,7 +23,7 @@ related:
 разрядах ломает резервы, расчёт маржи и реконсиляцию.
 
 `contracts/proto/fob/common/v1/common.proto` уже определяет `Decimal`
-(`value = units * 10^(-scale)`). CLAUDE.md §9 уже запрещает `double` для
+(`value = units * 10^(-scale)`). [.claude/rules/data.md](../../../.claude/rules/data.md) уже запрещает `double` для
 денежных величин. Этот ADR фиксирует решение явно.
 
 ## Решение

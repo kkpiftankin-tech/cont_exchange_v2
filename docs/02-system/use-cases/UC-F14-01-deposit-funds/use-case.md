@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F14-01
+title: Депозит средств
 level: sea
+feature: F-14
+system-sequence: sequences/SEQ-UC-F14-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F14-UC-F14-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F14-01. Депозит средств
 

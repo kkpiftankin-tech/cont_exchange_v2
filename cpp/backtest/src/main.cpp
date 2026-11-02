@@ -15,7 +15,7 @@
 //       * /metrics                  — Prometheus.
 //       * Replay retry session API.
 //
-// CLAUDE.md §15 §17: replay должен deterministic — тот же input даёт
+// cpp/matching/CLAUDE.md, cpp/ledger/CLAUDE.md: replay должен deterministic — тот же input даёт
 // тот же output. Replay использует isolation matching solver (cpp/matching
 // GrpcIsolationSolverService) чтобы не trogать live state.
 // ============================================================================

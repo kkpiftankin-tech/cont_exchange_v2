@@ -1,9 +1,14 @@
 feature:
   id: F-13
   name: Post-Trade Report
-  status: not-implemented
+  lifecycle: planned  # planned | active | deprecated
+  status: {docs: partial, code: none, runtime: none}  # было: not-implemented
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-REPORT-001  # post-trade отчёт
+  - FR-REPORT-002  # регуляторная выгрузка
 
 description: >
   Детальный отчёт по завершённой FlowOrder: фактический VWAP, IS

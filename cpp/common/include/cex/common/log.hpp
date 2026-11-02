@@ -9,7 +9,7 @@
 //   Формат:
 //     {"ts":"2026-06-09T07:00:00.123Z","level":"INFO","msg":"...","field1":"v1",...}
 //
-// Уровни (CLAUDE.md §19):
+// Уровни (.claude/rules/testing.md):
 //   "DEBUG", "INFO", "WARN", "ERROR", "FATAL".
 //
 // Особенности:

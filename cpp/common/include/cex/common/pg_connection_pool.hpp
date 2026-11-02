@@ -24,7 +24,7 @@
 // позволяет подставить fake-соединение в unit-тесте без живой БД. Production
 // alias PgConnectionPool = BasicPgConnectionPool<pqxx::connection>.
 //
-// CLAUDE.md §12.3: размер пула / DSN читаются через cex::common::Env, не
+// .claude/rules/cpp.md: размер пула / DSN читаются через cex::common::Env, не
 // хардкодятся. §12.2: lifecycle потоков/ресурсов явный.
 // ============================================================================
 

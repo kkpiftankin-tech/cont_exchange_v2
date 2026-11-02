@@ -1,144 +1,73 @@
 # Интеграция проектного ingest и SDLC-агентов
 
-> Назначение: связать **проектный ingest-процесс** (`incoming-docs/` + skill
-> `ingest-docs` + агент `docs-ingestion-engineer` #13) и **SDLC-агентов**
-> (`sdlc-coordinator` #00 + специалисты #01–#15) в **единый поток**, где они
-> дополняют, а не дублируют друг друга.
->
-> Статус: canonical. Связано с [CLAUDE.md §0a](../../CLAUDE.md),
-> [.claude/skills/ingest-docs/SKILL.md](../../.claude/skills/ingest-docs/SKILL.md),
-> [ADR-018 (design traceability chain)](../03-architecture/adr/ADR-018-design-traceability-chain.md),
-> [ADR-029 (LLM-assisted development governance)](../03-architecture/adr/ADR-029-llm-assisted-development-governance.md).
+> **Статус: superseded by [ADR-086](../03-architecture/adr/ADR-086-two-axis-reply-routing.md)
+> (2026-10-27).** Этот документ описывал единый обязательный сэндвич
+> `ingress(open) → agent(refine) → ingress(close)` как единственный путь для
+> любого изменения в `docs/` — модель отменена. Текущая модель маршрутизации
+> — [`.claude/rules/agent-routing.md`](../../.claude/rules/agent-routing.md)
+> (классы S/M/L/XL, триггеры эскалации) и целевая двухосевая модель из
+> [IN-019](../../incoming-docs/IN-019.meta.md) (внедряется поэтапно,
+> `docs/00-methodology/feature-development-process.md`). Текст ниже
+> сохранён как историческая запись отменённой модели — не инструкция к
+> исполнению.
 
-## 1. Корень противоречия
+## Что осталось в силе: приём входящих документов
 
-| Процесс | Что заявляет | Риск |
-| --- | --- | --- |
-| `ingest-docs` skill / `docs-ingestion-engineer` #13 | DoD: один агент делает **всё** — register → … → feature.yaml, use cases, sequences, контракты, схемы, ADR, tasks, traceability. | Авторствует артефакты, которые по SDLC принадлежат специалистам. |
-| `sdlc-coordinator` #00 | 14-этапный цикл; **каждый** артефакт пишет свой специалист (#01–#10). | Параллельный запуск с ingest — оба пишут одни файлы. |
+Единственная часть этого документа, не отменённая ADR-086, —
+**intake входящих документов**, не весь сэндвич по всем уровням SDLC:
 
-## 2. Разделение ответственности
+1. Документ приходит вложением в чат → хук `UserPromptSubmit`
+   ([tools/auto-archive-attachments.py](../../tools/auto-archive-attachments.py))
+   сохраняет его в [incoming-docs/](../../incoming-docs/) **до** того, как
+   ассистент его увидит (бинарные вложения — PDF и т.п. — хук не берёт,
+   сохраняются вручную по прецеденту IN-013/IN-017/IN-018/IN-019).
+2. Регистрация как `IN-NNN` — навык
+   [`ingest-docs`](../../.claude/skills/ingest-docs/SKILL.md): Register →
+   Segment → Classify → Map → Normalize → Insert/Merge → Link bidirectionally
+   → Validate coverage → Generate implementation tasks. Запускается по
+   явному запросу пользователя, не автоматически.
+3. Агент [`docs-ingestion-engineer`](../../.claude/agents/13-docs-ingestion-engineer.md)
+   исполняет этот навык — **только** для входящих документов
+   (`incoming-docs/*.md`), не как writer-of-record для `docs/` на каждом
+   уровне жизненного цикла фичи (это и была отменённая часть модели).
 
-- **Проектный ingress = связность и исключение противоречий *между уровнями*.**
-  Это сквозной интегратор: приём (`incoming-docs/`), регистрация IN-NNN,
-  сегментация, классификация, placement, **traceability**, bidirectional links,
-  `Conflict Notes`/ADR, coverage gate. Он держит «общую картину» и следит, чтобы
-  уровни (business → system → domain → contracts → data → tests → tasks) не
-  противоречили друг другу.
-- **Агенты = специфика конкретной задачи *внутри уровня*.** Глубокое содержание
-  своего класса (домен-математика, proto-совместимость, схемы БД, перф-тесты),
-  с чтением **первичного источника** `incoming-docs/<source>`.
+Деталей обычных правок `docs/` — какой агент на каком уровне, кто пишет —
+здесь больше нет; см. `feature-development-process.md` и
+`.claude/rules/agent-routing.md`.
 
-## 3. Базовая единица: сэндвич на каждом уровне
+---
 
-Для **каждого уровня** жизненного цикла выполняется цикл из трёх шагов:
+## Историческая запись: отменённая модель «сэндвич на каждом уровне»
+
+*(текст ниже — как было принято до 2026-10-27; сохранён для истории и для
+понимания, почему некоторые старые `fragment-map.md`/`IN-NNN.meta.md`
+ссылаются на `Owner Agent` и `ingress(open/close)` — это следы отменённой
+модели, не опечатка.)*
+
+### Корень противоречия (исторический)
+
+Документ фиксировал противоречие между DoD навыка `ingest-docs` («один
+агент делает всё — от register до traceability») и 14-этапным циклом
+`sdlc-coordinator` («каждый артефакт пишет свой специалист») — оба писали
+одни и те же файлы. Решением было не «выбрать один», а ввести сэндвич
+(ниже), где `docs-ingestion-engineer` — единственный писатель `docs/`, а
+специалисты — только advisory (plan-mode).
+
+### Базовая единица: сэндвич на каждом уровне (исторический)
 
 ```text
 ┌─ ingress(open)  ─ проектный ingest открывает уровень
-│     • что и где на этом уровне (placement по matrix §5)
-│     • входная связность: какие артефакты предыдущих уровней он обязан
-│       уважать; какие IN-NNN-фрагменты сюда относятся
-│     • создаёт скелет/контекст и фиксирует ожидаемые связи
-│
-├─ agent(refine) ─ профильный специалист дорабатывает специфику
-│     • авторствует содержание уровня по матрице владения (§5)
-│     • читает incoming-docs/<source>, не выдумывает
-│     • возвращает нормализованный черновик (advisory)
-│
+│     • placement, входная связность
+├─ agent(refine) ─ профильный специалист дорабатывает специфику (advisory)
 └─ ingress(close) ─ проектный ingest закрывает уровень
-      • размещает содержание (writer-of-record для docs/)
-      • bidirectional links + traceability обновлены
-      • повторная проверка связности и исключение противоречий
-        (Conflict Notes / ADR при расхождении уровней)
-      • уровень помечается covered в coverage-matrix
+      • writer-of-record для docs/, traceability, bidirectional links
 ```
 
-Только после `ingress(close)` уровня переходим к `ingress(open)` следующего.
-Так связность поддерживается **инкрементально**, а не «в конце».
+### Матрица владения (исторический справочник)
 
-## 4. Применение сэндвича к уровням жизненного цикла
-
-Порядок уровней — из [sdlc-coordinator](../../.claude/agents/00-sdlc-coordinator.md)
-и 11-folder layout. На каждом — сэндвич §3.
-
-| # | Уровень | agent(refine) | ingress пишет в |
-| --- | --- | --- | --- |
-| 1 | Business (vision/goals/glossary) | business-analyst #01 | `docs/01-business/` |
-| 2 | System (feature.yaml, UC, FR/NFR, system seq) | system-analyst #02 | `docs/02-system/` |
-| 3 | Architecture / ADR | solution-architect #03 | `docs/03-architecture/` |
-| 4 | Domain (entities, events, rules, math) | trading-domain-specialist #06 | `docs/04-domain/` |
-| 5 | Service sequences / components | system-analyst #02 / cpp-service-architect #08 | `docs/05-components/` |
-| 6 | Contracts (gRPC/REST/Kafka) | proto-contract-designer #04 | `docs/06-api/` (+ devops #14 для `infra/kafka/`) |
-| 7 | Data (OLTP/OLAP/flow) | data-schema-designer #05 | `docs/07-data/` (+ devops #14 для `infra/postgres/`) |
-| 8 | Frontend Scope | frontend-architect #07 | feature.yaml `frontend` |
-| 9 | Backend layering plan | cpp-service-architect #08 | `docs/09-implementation/` |
-| 10 | Tests | test-architect #09 | `docs/10-testing/` |
-| 11 | Implementation tasks | implementation-planner #10 | `docs/implementation-plan/` |
-| 12 | Implementation | code-implementer #11 / devops #14 | `cpp/`, `frontend/`, `infra/` |
-| 13 | Review / quality gate | code-reviewer #12 / security-reviewer #15 | read-only |
-
-`sdlc-coordinator` #00 — навигатор: на каждом уровне отвечает «текущий уровень /
-чего не хватает / какого специалиста звать / с каким prompt / какие @-файлы».
-
-## 5. Матрица владения (classification → owner agent)
-
-«Owner Agent» авторствует содержание; **запись в `docs/`** делает
-`docs-ingestion-engineer` (writer-of-record), в `infra/` — `devops-engineer`.
-Специалисты #01–#10 — advisory/read-only.
-
-| Classification | Owner agent (content) | Уровень §4 |
-| --- | --- | --- |
-| `GLOSSARY`, `BUSINESS_REQUIREMENT` | business-analyst #01 | 1 |
-| `FEATURE` | #01 (candidate) → system-analyst #02 (formalize) | 1→2 |
-| `FUNCTIONAL_/NON_FUNCTIONAL_REQUIREMENT`, `ACTOR`, `EXTERNAL_SYSTEM` | system-analyst #02 | 2 |
-| `USE_CASE`, `SYSTEM_SEQUENCE_HINT` | system-analyst #02 | 2 |
-| `CONTAINER`, `COMPONENT`, architectural conflict → ADR | solution-architect #03 (+ cpp-service-architect #08) | 3/5 |
-| `DOMAIN_ENTITY`, `DOMAIN_EVENT`, `BUSINESS_RULE`, domain-math | trading-domain-specialist #06 | 4 |
-| `SERVICE_SEQUENCE_HINT`, `FID_CHAIN` | system-analyst #02 / cpp-service-architect #08 | 5 |
-| `CONTRACT_HINT`, `REST_/GRPC_CONTRACT`, `KAFKA_TOPIC` | proto-contract-designer #04 | 6 |
-| `DATA_MODEL`, `DATA_FLOW` | data-schema-designer #05 | 7 |
-| (user-facing FEATURE → Frontend Scope) | frontend-architect #07 | 8 |
-| `TEST_REQUIREMENT` | test-architect #09 | 10 |
-| `OPERATIONAL_REQUIREMENT` | devops-engineer #14 (**сам пишет** `infra/`) | 6/7/12 |
-| `IMPLEMENTATION_HINT` | implementation-planner #10 | 11 |
-| `METHODOLOGY`, `REPO_STRUCTURE` | human / coordinator | 0 |
-
-`fragment-map` дополняется колонкой **Owner Agent**, чтобы связь
-classification → специалист была явной и машиночитаемой (вход для `ingress(open)`
-каждого уровня).
-
-## 6. Оркестрация в текущем харнессе
-
-- Субагент не спавнит субагентов. Оркестратор — **главный цикл** (ассистент) или
-  явный `Workflow` (один уровень вложенности).
-- На каждом уровне главный цикл: вызывает `docs-ingestion-engineer` для
-  `ingress(open)` → профильного специалиста для `agent(refine)` →
-  `docs-ingestion-engineer` для `ingress(close)`.
-- Лёгкий режим: для простого фрагмента ingestion-engineer может пройти весь
-  сэндвич сам, встраивая профильное знание; специалист обязателен при наличии
-  формул/контрактов/инвариантов/перф-порогов (критерий — `severity` фрагмента).
-
-## 7. Правила недопущения конфликта
-
-- Один файл `docs/` — один писатель за проход (ingestion-engineer).
-- Специалисты не редактируют `docs/`/`contracts/`/`cpp/` (plan-mode).
-- Расхождение источника и docs → `Conflict Notes`; архитектурное → ADR
-  (CLAUDE.md §0a). Не молчаливый выбор.
-- Код — только после `docs/implementation-plan/F-XX-*.tasks.md` (ADR-007).
-- Новый Kafka-топик — только с `infra/kafka/create_topics.sh` +
-  `docs/06-api/messaging/` (proto #04 + devops #14).
-
-## 8. Текущее состояние IN-011 / F-09
-
-Уровни 1–4 пройдены (intake + ADR + feature/AC + use cases + system sequences;
-частично в «лёгком режиме» главного цикла). Остаток — по сэндвичу §3:
-
-| Уровень | agent(refine) | ingress(close) пишет |
-| --- | --- | --- |
-| 5 service sequences | system-analyst #02 | `SEQ-F09-UC-F09-0{1,2,3}-services` |
-| 6 contracts | proto-contract-designer #04 | grpc combo, messaging execution-groups (+ topics.md, create_topics.sh → #14) |
-| 7 data | data-schema-designer #05 | oltp/olap combo_*/grouped_* |
-| 4 domain (доп.) | trading-domain-specialist #06 | entities + business-rules §F-09 |
-| 10 tests | test-architect #09 | F-09 test plan |
-| 11 tasks | implementation-planner #10 | F-09-batch-combo-orders.tasks.md |
-| — traceability | ingress | source-to-artifact, coverage-matrix, feature-traceability |
+Полная таблица «уровень → agent(refine) → ingress пишет» и «classification
+→ owner agent» — в истории git этого файла (версия до 2026-10-27,
+`git log -p -- docs/00-methodology/ingest-and-agents-integration.md`).
+Актуальная таблица уровней — Р1…Р15 из
+[IN-019](../../incoming-docs/IN-019.meta.md) §3.2, пока ещё не
+зафиксированная как нормативная (Этап 6 плана).

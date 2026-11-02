@@ -230,7 +230,7 @@ useCases:
     docPath: docs/02-system/use-cases/UC-F11-05-execute-hedge-on-venue/use-case.md
     title: Исполнить child-ордер на площадке (cross-link F-12)
   - id: UC-F11-01-deprecated
-    docPath: docs/02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md
+    docPath: docs/02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md
     title: (legacy) Принять external market data
     note: оставлен для совместимости старых ссылок; рекомендуется использовать UC-F11-02
 

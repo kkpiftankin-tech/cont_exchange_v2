@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -8,6 +9,9 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+
+#include <grpcpp/grpcpp.h>
+#include "fob/ledger/v1/ledger.grpc.pb.h"  // inventory-skew: чтение c_j из ledger
 
 #include "app/run_batch_uc.hpp"
 #include "app/execution_intent_builder.hpp"
@@ -17,6 +21,7 @@
 #include "app/solver_metrics.hpp"
 #include "cex/common/kafka.hpp"
 #include "fob/marketdata/v1/vector_liquidity.pb.h"  // F-05A (T-F05A-305 1a)
+#include "domain/ce_clearing_snapshot.hpp"   // ADR-079: снимок решения CE-клиринга
 #include "domain/flow_order_repository.hpp"
 #include "domain/grouped_solver_bisection.hpp"
 #include "domain/solver_impl.hpp"
@@ -64,7 +69,20 @@ class MatchingLoop {
   };
   std::optional<OrderSnapshot> snapshot_order(const std::string& order_id) const;
 
+  // ADR-079: JSON-снимок ПОСЛЕДНЕГО решения CE-клиринга (потенциалы узлов, рёбра с отклонением/полкой/зазором/потоком,
+  // типовые циклы, отброшенные котировки). Пустая строка — клиринг ещё не считался. Сборка JSON — по запросу
+  // (HTTP /ce/clearing/last), на такт сохраняется только граф и результат.
+  std::string last_ce_clearing_snapshot_json() const;
+
  private:
+  struct CeSnapshotData {
+    domain::CeClearInput graph;
+    domain::CeClearResult res;
+    domain::CeSnapshotMeta meta;
+  };
+  mutable std::mutex ce_snap_mu_;
+  std::shared_ptr<const CeSnapshotData> ce_snap_;
+
   void consume_orders_loop();
   void batch_timer_loop();
   int refresh_batch_interval_ms();
@@ -74,6 +92,9 @@ class MatchingLoop {
   // F-05A (T-F05A-305 1a): consume marketdata.vectorized → solve → publish
   // matching.vector_clearing (диагностика; БЕЗ эмиссии денег/ledger).
   void on_vectorized_liquidity(const fob::marketdata::v1::VectorClearingInput& input);
+  // F-05A CE (ADR-055/056/057, вариант A): consume ce.clearing.input → AssembleCeGraph →
+  // ClearCe → ProjectPositionQuantity (per-leg по цене узла) → эмит ce.position.delta (ПЛАН).
+  void on_ce_clearing_input(const fob::marketdata::v1::CeClearingInput& input);
   void on_venue_health(const fob::venue::v1::VenueHealth& health);
   // MVP-5 (ADR-037): провал внешней combo-ноги → combo_compensations(pending).
   void on_external_execution_report(const fob::execution::v1::ExecutionReport& report);
@@ -130,6 +151,41 @@ class MatchingLoop {
   // лаге venue возможен over-fill сверх q_max и двойной постинг в ledger (§17).
   std::set<std::string> external_in_flight_;
   std::mutex external_inflight_mu_;
+
+  // Inventory-skew (обратная связь позиция→цена, F-18 v2): при накоплении позиции
+  // c_j эффективный якорь агента смещается (anchor_eff = anchor − clamp(γ·c_j)),
+  // разворачивая поток — позиции перестают дрейфовать. c_j читаем из ledger (владелец),
+  // чтобы учесть хедж-исполнения и кнопку сброса. TTL-кэш: клиринг идёт часто.
+  std::unique_ptr<fob::ledger::v1::LedgerService::Stub> ledger_stub_;
+  std::mutex inv_mu_;
+  std::map<std::string, double> inv_positions_;  // agent_id → c_j (k-USDT)
+  std::chrono::steady_clock::time_point inv_last_fetch_{};
+  bool inv_have_{false};
+  // agent_id → c_j из ledger, кэш на CE_INVENTORY_SKEW_REFRESH_MS. Пустой при сбое.
+  std::map<std::string, double> FetchAgentPositionsCached();
+
+  // Живая настройка inventory-skew из f05a_clearing_config (γ, клэмп) — без пересборки.
+  std::string postgres_dsn_;
+  std::mutex inv_cfg_mu_;
+  double inv_cfg_gamma_{0.0};
+  double inv_cfg_max_pm_{8.0};
+  double inv_cfg_arb_gamma_{0.0};   // ADR-071: γ_A ноги арбитражёра
+  double inv_cfg_arb_max_pm_{50.0}; // ADR-071: K_A клэмп сдвига арбитражёра
+  std::chrono::steady_clock::time_point inv_cfg_last_{};
+  bool inv_cfg_have_{false};
+  // Читает γ/клэмп переводчика И арбитражёра (ADR-071) из PG (кэш ~1с). Fallback — env,
+  // затем дефолты. Возврат: {γ_T, max_pm_T, γ_A, max_pm_A}.
+  struct InvSkewCfg { double gamma; double clamp; double arb_gamma; double arb_clamp; };
+  InvSkewCfg LoadInvSkewConfig();
+
+  // F-18 #7 scoped (T-F18-L02): троттл записи depth (α_e) per (asset,venue) в
+  // ce_asset_liquidity (reader — ledger, ликвидностная ось band). За флагом
+  // CE_LIQ_SIGNAL_ENABLED; период CE_LIQ_WRITE_MS. Запись — inline в matching_loop.cpp
+  // (там есть proto-типы). Возврат true, если пора писать (и обновляет last).
+  std::mutex liq_write_mu_;
+  std::chrono::steady_clock::time_point liq_write_last_{};
+  bool liq_write_have_{false};
+  bool ShouldWriteLiquidity();
 };
 
 }  // namespace cex::matching::app

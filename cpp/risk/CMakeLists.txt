@@ -77,6 +77,17 @@ if(BUILD_TESTING)
   target_compile_options(risk_grouped_risk_check_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME risk_grouped_risk_check_test COMMAND risk_grouped_risk_check_test)
 
+  # F-18 v2 · Э3 (T-F18-301/302): полоса ±q агента (pure domain, header-only).
+  add_executable(risk_ce_agent_band_test
+    tests/ce_agent_band_test.cpp
+  )
+  target_include_directories(risk_ce_agent_band_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(risk_ce_agent_band_test PRIVATE cex_common)
+  target_compile_options(risk_ce_agent_band_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME risk_ce_agent_band_test COMMAND risk_ce_agent_band_test)
+
   # F-06 (T-F06-031): margin calculator (U9/U10 — initial_margin, margin_call).
   add_executable(risk_margin_calculator_test
     tests/margin_calculator_test.cpp

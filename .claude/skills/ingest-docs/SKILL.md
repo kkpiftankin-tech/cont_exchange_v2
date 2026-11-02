@@ -24,26 +24,25 @@ For each incoming document, execute:
 8. Validate coverage
 9. Generate implementation tasks
 
-## Agent Integration (per-level sandwich)
+## Scope
 
-This skill is the **project ingress** layer — it owns *cross-level connectivity
-and contradiction-exclusion* (placement, traceability, links, Conflict Notes/ADR,
-coverage), **not** the deep content of every artifact. Deep content per level is
-authored by the owning specialist agent.
+This skill is the **project ingress** layer for incoming documents — it owns
+registering, segmenting, classifying, placing and tracing attachments from
+`incoming-docs/` into the repository (pipeline above). It is **not** a
+per-level SDLC sandwich: it does not own every artifact on every level of a
+feature's lifecycle, and it is not a mandatory `ingress(open) → agent(refine)
+→ ingress(close)` step before any doc change. That single-sandwich model was
+retired by [ADR-086](../../../docs/03-architecture/adr/ADR-086-two-axis-reply-routing.md)
+(2026-10-27) — see [`IN-019`](../../../incoming-docs/IN-019.meta.md) for the
+model replacing it. Routine changes to existing docs go through
+[`.claude/rules/agent-routing.md`](../../rules/agent-routing.md) (class
+S/M/L/XL) instead; this skill fires only for a genuinely new incoming
+document, same as before.
 
-Канонический процесс — **сэндвич на каждом уровне**:
-`ingress(open) → agent(refine) → ingress(close)` (см.
-[docs/00-methodology/ingest-and-agents-integration.md](../../../docs/00-methodology/ingest-and-agents-integration.md)).
-
-- `ingress(open)`: шаги 1–4 (Register/Segment/Classify/Map) + входная связность.
-- `agent(refine)`: профильный специалист по матрице владения (§5 интеграции)
-  авторствует содержание уровня, читая `incoming-docs/<source>`.
-- `ingress(close)`: шаги 5–9 (Normalize/Insert/Link/Validate/Tasks) + повторная
-  проверка связности и исключение противоречий.
-
-В `fragment-map` добавляй колонку **Owner Agent** (classification → специалист).
-Лёгкий режим (без специалиста) допустим только для простых фрагментов без
-формул/контрактов/инвариантов/перф-порогов.
+If a fragment needs deep domain content (formulas, contracts, invariants,
+perf thresholds), delegate to the owning specialist agent per
+`.claude/rules/agent-routing.md` §2 triggers — advisory, not a mandatory
+sandwich step.
 
 ## Source Archive Rule
 

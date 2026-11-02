@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F03-01
+title: Изменить или отменить FlowOrder
 level: sea
+feature: F-03
+system-sequence: sequences/SEQ-UC-F03-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F03-UC-F03-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F03-01. Изменить или отменить FlowOrder
 

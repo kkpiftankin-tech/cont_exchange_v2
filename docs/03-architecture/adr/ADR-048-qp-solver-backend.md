@@ -34,7 +34,7 @@ box), в отличие от ADR-034-постановки $\max \alpha$ (лин�
 (equality + box) и обе решаются одним backend.
 
 В `cpp/matching` сейчас QP-решателя нет (только `grouped_solver_bisection` +
-`simulated_solver`). Выбор либы над деньгами требует ADR (CLAUDE.md §3.3), затрагивает
+`simulated_solver`). Выбор либы над деньгами требует ADR ([CLAUDE.md §1](../../../CLAUDE.md)), затрагивает
 детерминизм F-15 replay (AC-F05A-011) и границу double↔Decimal (§9, ADR-005).
 
 ## Решение

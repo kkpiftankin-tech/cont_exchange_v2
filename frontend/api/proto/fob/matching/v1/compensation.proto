@@ -3,7 +3,7 @@ syntax = "proto3";
 // T-F09-064 (ADR-040): CompensationService — read + idempotent-resolve combo
 // compensations. matching остаётся единственным владельцем таблицы
 // `combo_compensations`; order_flow вызывает этот сервис как client (ADR-040 §2)
-// и сам создаёт reversing-FlowOrder (matching ордера не создаёт, CLAUDE.md §10.3).
+// и сам создаёт reversing-FlowOrder (matching ордера не создаёт, .claude/rules/cpp.md).
 // Сервис аддитивен (backward-compat); изменение тегов — breaking, требует ADR.
 package fob.matching.v1;
 

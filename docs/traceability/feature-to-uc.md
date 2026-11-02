@@ -18,7 +18,7 @@
 | F-03 | Order Lifecycle | UC-F03-01 Amend / Cancel Order |
 | F-04 | Batch Clearing Cycle | UC-F04-01 Run Batch Clearing |
 | F-05 | Live Market Data | UC-F05-01 Stream Market Data |
-| F-05A | Vectorized External Liquidity (F-09) | UC-F05A-01 Vectorize External Order Book; UC-F05A-02 Vector Clearing; UC-F05A-03 Display Vector Liquidity; UC-F05A-04 Validate Real Order Books; UC-F05A-05 Replay Vector Clearing |
+| F-05A | Vectorized External Liquidity (F-09) | UC-F05A-01 Vectorize External Order Book; UC-F05A-02 Vector Clearing; UC-F05A-03 Display Vector Liquidity; UC-F05A-04 Validate Real Order Books; UC-F05A-05 Replay Vector Clearing; UC-F05A-06 CE Tact with Virtual Counterparties (agents/nodes/3-level position, ADR-055..059) |
 | F-06 | Positions / PnL / Margin | UC-F06-01 Show Positions |
 | F-07 | Pre-trade Risk | UC-F07-01 Pre-trade Risk Check |
 | F-08 | Post-trade Risk / Liquidations | UC-F08-01 Liquidate Position |
@@ -31,6 +31,7 @@
 | F-15 | Backtest / Replay | UC-F15-01 Create Replay Session; UC-F15-01 Replay Historical Batch; UC-F15-02 Cancel Replay Session; UC-F15-03 A/B Compare Sessions; UC-F15-04 Audit Mode Replay; UC-F15-05 Retry Failed Session; UC-F15-06 Replay Determinism Check |
 | F-16 | Operator Console | UC-F16-01 Trigger Kill Switch |
 | F-17 | Monitoring & Alerts | UC-F17-01 Fire Alert |
+| F-18 | CE Virtual Counterparties — Translator/Arbitrageur Agents, Signed Agent Position & Band Hedge (v2) | **UC-F18-04** CE Tact + Band Hedge ±q (primary, v2); UC-F18-01 Form CE Capital · UC-F18-02 Derive CE Position · UC-F18-03 Hedge Net Position (v1 — superseded by UC-F18-04, ADR-061 planned) |
 | F-20 | Live Venue Simulator | (UC TBD — `02-system/use-cases/UC-F20-*` пока planned) |
 
 ## Notes
@@ -43,6 +44,11 @@
   legacy от IN-004; не блокирует ingest, но при ревизии унифицировать.
 - **F-20** — feature.yaml зарегистрирован, UC и L0/L1 sequences пока
   deferred (post-MVP, статус `planned`).
+- **F-18** переехала с v1 (UC-F18-01..03 «CE Capital, Net Position») на v2
+  (UC-F18-04 «Virtual Counterparties — Translator/Arbitrageur Agents, Signed
+  Agent Position & Band Hedge ±q»). v1 UC помечены superseded, но НЕ удалены
+  ([.claude/rules/docs-as-code.md](../../.claude/rules/docs-as-code.md) Conflict rule); модель заменяется под ADR-061 (planned,
+  supersede ADR-054/057). Сводка — [`F-18-v2-agents-review-summary.md`](../implementation-plan/F-18-v2-agents-review-summary.md).
 
 ## Связанные матрицы
 

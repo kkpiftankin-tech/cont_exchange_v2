@@ -26,6 +26,7 @@ bool expect(bool cond, const std::string& msg) {
 void TestConverged() {
   app::VectorClearingOutcome o;
   o.solve.x = {Decimal{2000000000000LL, 12}, Decimal{1000000000000LL, 12}};
+  o.solve.pi = {Decimal{80234500000000000LL, 12}, Decimal{1000000000000LL, 12}};
   o.solve.residual = {0.0, 0.0};
   o.solve.residual_norm = 0.0;
   o.solve.iterations = 5;
@@ -36,6 +37,7 @@ void TestConverged() {
   expect(r.batch_id() == "b1", "batch_id");
   expect(r.solver_status() == mv1::VECTOR_SOLVER_STATUS_CONVERGED, "status CONVERGED");
   expect(r.x_size() == 2 && r.x(0).units() == 2000000000000LL, "x mapped");
+  expect(r.pi_size() == 2 && r.pi(0).units() == 80234500000000000LL, "pi mapped");
   expect(r.residual_size() == 2, "residual per asset");
   expect(r.diagnostics().residual_norm() == 0.0 && r.diagnostics().iterations() == 5,
          "diagnostics");

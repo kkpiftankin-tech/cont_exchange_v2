@@ -46,6 +46,9 @@ jest.mock('../../../api/authService', () => ({
 
 jest.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
+  // NavBar (общая навигация) использует useLocation и Link — без них страница падала при рендере
+  useLocation: () => ({ pathname: '/' }),
+  Link: ({ to, children, ...rest }) => require('react').createElement('a', { href: to, ...rest }, children),
 }), { virtual: true });
 
 jest.mock('react-i18next', () => ({

@@ -1,9 +1,11 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F15-06
+title: Проверка детерминизма replay
 level: sea
+feature: F-15
+system-sequence: sequences/SEQ-UC-F15-06-system.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F15-06. Проверка детерминизма replay
 

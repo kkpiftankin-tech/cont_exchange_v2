@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +15,33 @@
 namespace cex::venues::infra {
 
 namespace {
+
+// Референсная USD-цена базового актива (для per-instrument масштаба sim-цен).
+// Профиль венью выражен в BTC-масштабе; k пересчитывает его под инструмент.
+double asset_usd_ref(const std::string& a) {
+  if (a == "BTC" || a == "XBT") return 79000.0;
+  if (a == "ETH") return 3000.0;
+  if (a == "SOL") return 180.0;
+  if (a == "BNB") return 600.0;
+  if (a == "LTC") return 90.0;
+  if (a == "XRP") return 0.60;
+  if (a == "DOGE") return 0.15;
+  if (a == "USDT" || a == "USD" || a == "USDC" || a == "DAI") return 1.0;
+  return 100.0;  // дефолт для неизвестного актива
+}
+
+// k = цена_пары / BTC_ref. Масштабирует ценовые поля профиля под инструмент.
+double instrument_price_scale_k(const std::string& symbol) {
+  const auto slash = symbol.find('/');
+  const std::string base = slash == std::string::npos ? symbol : symbol.substr(0, slash);
+  const std::string quote =
+      slash == std::string::npos ? std::string("USDT") : symbol.substr(slash + 1);
+  const double base_usd = asset_usd_ref(base);
+  const double quote_usd = asset_usd_ref(quote);
+  const double pair_price = quote_usd > 0.0 ? base_usd / quote_usd : base_usd;
+  const double k = pair_price / 79000.0;  // BTC_ref
+  return (k > 0.0 && std::isfinite(k)) ? k : 1.0;
+}
 
 struct SimulatedVenueProfile {
   int64_t base_mid_units{6840000};
@@ -345,7 +373,40 @@ std::optional<domain::VenueRawSnapshot> SimulatedVenueAdapter::RequestSnapshot(
   const std::size_t depth_levels = request.depth_levels == 0 ? 20 : request.depth_levels;
   const fob::common::v1::Instrument instrument = ResolveInstrument(request);
   const std::string venue_symbol = ResolveVenueSymbol(request);
-  const SimulatedVenueProfile profile = build_venue_profile(venue_id_, venue_type_);
+  SimulatedVenueProfile profile = build_venue_profile(venue_id_, venue_type_);
+
+  // Per-instrument масштаб: профиль венью выражен в BTC-масштабе; k приводит
+  // цены/спред/шаг под конкретную пару (сохраняя кросс-venue дисперсию).
+  const double k = instrument_price_scale_k(instrument.symbol());
+  if (std::fabs(k - 1.0) > 1e-12) {
+    const auto sc = [k](int64_t v) {
+      return std::max<int64_t>(1, static_cast<int64_t>(std::llround(static_cast<double>(v) * k)));
+    };
+    profile.base_mid_units =
+        std::max<int64_t>(1, static_cast<int64_t>(std::llround(
+                                 static_cast<double>(profile.base_mid_units) * k)));
+    profile.primary_wave_units = sc(profile.primary_wave_units);
+    profile.secondary_wave_units = sc(profile.secondary_wave_units);
+    profile.base_half_spread_units = sc(profile.base_half_spread_units);
+    profile.spread_wave_units = sc(profile.spread_wave_units);
+    profile.price_step_units = sc(profile.price_step_units);
+  }
+
+  // Демо/тест (revertible через env): per-venue смещение мида в ‰ для форсирования
+  // кросс-venue расхождения (арбитраж > комиссий) — SIM_VENUE_BIAS_PM_<venue> (напр.
+  // SIM_VENUE_BIAS_PM_okx=20 = +2%). По умолчанию 0 (нет смещения).
+  {
+    std::string bias_key = "SIM_VENUE_BIAS_PM_" + venue_id_;
+    const char* bias_env = std::getenv(bias_key.c_str());
+    if (bias_env != nullptr) {
+      const double bias_pm = std::atof(bias_env);
+      if (std::fabs(bias_pm) > 1e-9) {
+        profile.base_mid_units = std::max<int64_t>(
+            1, static_cast<int64_t>(std::llround(static_cast<double>(profile.base_mid_units) *
+                                                 std::exp(bias_pm / 1000.0))));
+      }
+    }
+  }
 
   ++sequence_;
   mid_price_units_ = compute_mid_price_units(profile, sequence_);

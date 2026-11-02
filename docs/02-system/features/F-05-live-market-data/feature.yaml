@@ -1,9 +1,13 @@
 feature:
   id: F-05
   name: Live Market Data
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-MD-001  # внутренние данные market data
 
 description: >
   Market Data Service вычисляет и публикует рыночные данные в реальном времени.

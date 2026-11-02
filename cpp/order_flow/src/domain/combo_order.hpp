@@ -8,7 +8,7 @@
 //
 // Сущности: BatchOrder → ComboOrder → Leg, плюс MultiLegConstraint и
 // ConditionalLink (граф OCO/bracket/conditional). Деньги/qty/price —
-// cex::common::Decimal (fixed-point, не double; CLAUDE.md §9).
+// cex::common::Decimal (fixed-point, не double; .claude/rules/data.md).
 // ============================================================================
 
 #include <cstdint>

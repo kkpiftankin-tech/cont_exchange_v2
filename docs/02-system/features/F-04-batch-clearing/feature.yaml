@@ -1,7 +1,8 @@
 feature:
   id: F-04
   name: Batch Clearing Cycle
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
 
@@ -15,6 +16,10 @@ theoreticalFoundation:
   adr: ADR-035
   implementationDoc: docs/09-implementation/solver-foundation.md
   primitives: [StandardAgent, LinearFeeAgent, MarketAggregation, ClearingPrice]
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-CLEAR-001  # непрерывный клиринг
+  - FR-LEDGER-002  # применение fills
 
 description: >
   Периодический батч-клиринг FlowOrder. ContinuousClearingSolver (Eigen3
@@ -163,7 +168,7 @@ knownIssues:
       consumer пишет дубликаты в `fills`. Соотношение 70 fills /
       ~34 batch ticks (171 сек / 5 сек) намекает на оба компонента.
 
-      Нарушает Ledger invariant из CLAUDE.md §17 "не применять fill
+      Нарушает Ledger invariant из cpp/ledger/CLAUDE.md "не применять fill
       дважды" и неявный domain invariant
       `SUM(fills[order_id]) <= flow_orders.total_qty`.
     location: cpp/matching/src/app/run_batch_uc.cpp, cpp/observability/

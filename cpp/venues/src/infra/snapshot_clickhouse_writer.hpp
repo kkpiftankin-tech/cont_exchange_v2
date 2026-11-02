@@ -16,6 +16,8 @@ struct SnapshotClickHouseConfig {
   std::string password{};
   long timeout_ms{3000};
   int retention_days{90};
+  // >0 — TTL в часах вместо дней (ADR-070: таблица глубоких снимков быстрой полосы).
+  int retention_hours{0};
 };
 
 // F11-NORM-5: ClickHouse writer for venue snapshots.

@@ -39,6 +39,7 @@
 - F-11 (External Venues LOB → FOB)
 - F-12 (Execution Hedge)
 - F-05 (Live Market Data) — поставщик `marketdata.raw`
+- [F-18 v2](../../02-system/features/F-18-ce-capital-position-hedge/) (CE Virtual Counterparties) — Э5: перевозы арбитражёра (симулятор), исполнение через ADR-060; код planned (гейт ADR-061)
 
 ## Participates In Features
 
@@ -46,7 +47,7 @@
 
 ## Participates In Use Cases
 
-- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)
+- [UC-F05-01](../../02-system/use-cases/UC-F05-01-stream-market-data/use-case.md), [UC-F11-06](../../02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md), [UC-F12-01](../../02-system/use-cases/UC-F12-01-auto-hedge-after-batch/use-case.md)
 
 ## Participates In Sequence Diagrams
 

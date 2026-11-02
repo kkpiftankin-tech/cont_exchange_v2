@@ -36,11 +36,11 @@ message VectorizedLiquiditySnapshot {
 Полные messages (`ExternalOrderLevel`, `AssetBasis`, `VectorFlowSegment`,
 `VectorClearingInput`, `VectorClearingResult`, `SurplusEvent`) — в
 `contracts/proto/fob/marketdata/v1/vector_liquidity.proto` (T-F05A-101). Денежные/
-количественные поля — `fob.common.v1.Decimal` (CLAUDE.md §9).
+количественные поля — `fob.common.v1.Decimal` ([.claude/rules/data.md](../../../.claude/rules/data.md)).
 
 ## Used In
 
-- Feature: [F-05A](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use cases: [UC-F05A-01](../../02-system/use-cases/UC-F05A-01-vectorize-external-orderbook/use-case.md) (producer path), [UC-F05A-02](../../02-system/use-cases/UC-F05A-02-vector-clearing/use-case.md) (consumer path)
 - Sequences: [SEQ-F05A-UC-F05A-01-services](../../05-components/sequences/SEQ-F05A-UC-F05A-01-services.md), [SEQ-F05A-UC-F05A-02-services](../../05-components/sequences/SEQ-F05A-UC-F05A-02-services.md)
 

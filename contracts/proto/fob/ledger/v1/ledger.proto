@@ -45,6 +45,14 @@ message ReserveFundsRequest {
   fob.common.v1.Decimal amount = 11;
 
   ReserveReason reason = 12;
+
+  // ADR-063 (F-18 v2, T-F18-205): кто резервирует. Аддитивно, default =
+  // PARTY_TYPE_UNSPECIFIED → трактуется как CLIENT (обратная совместимость —
+  // существующие вызывающие стороны, order_flow, не заполняют это поле).
+  // PARTY_TYPE_AGENT — ReserveFunds становится no-op success (см. handler):
+  // AGENT не резервирует и легитимно уходит в минус, его учёт ведёт
+  // ce_agent_position (docs/07-data/ce-agent-position.md), а не accounts.
+  fob.common.v1.PartyType party_type = 13;
 }
 
 message ReserveFundsResponse {
@@ -250,6 +258,271 @@ message GetHedgePnLResponse {
   repeated HedgePnL results = 2;
 }
 
+// F-18 (ADR-054 §10): валютный вектор биржи. Собственные активы биржи по каждой
+// валюте (house-аккаунт + внешние venue) и суммарные клиентские обязательства —
+// достаточно, чтобы risk посчитал NOP_a = активы_a − обязательства_a.
+message ExchangeCurrencyBalance {
+  string currency = 1;
+  fob.common.v1.Decimal own_total = 2;         // house-аккаунт (accounts['__ce_house__'])
+  fob.common.v1.Decimal venue_total = 3;       // Σ по внешним venue (собственные средства)
+  fob.common.v1.Decimal client_liability = 4;  // Σ клиентских балансов (обязательства)
+  fob.common.v1.Decimal assets_total = 5;      // own_total + venue_total (активы биржи в валюте)
+  // ADR-057/058: committed по активу (in-flight план, ещё не подтверждён execution.reports).
+  // risk считает Z_a = (assets − client) + in_flight + in_transit. Аддитивно, старые consumers целы.
+  fob.common.v1.Decimal in_flight = 6;
+}
+message GetExchangeBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string currencies = 2;              // пусто = все валюты
+}
+message GetExchangeBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated ExchangeCurrencyBalance balances = 2;
+  string house_account_id = 3;                 // '__ce_house__'
+  // Идентификатор запуска ledger. Остатки внешних бирж ledger хранит в памяти и обнуляет при перезапуске; смена boot_id позволяет
+  // потребителю (BFF, прибыль системы по остаткам, ADR-084) задать новую базу вместо ложного торгового результата. Аддитивное поле.
+  string boot_id = 4;
+}
+
+// F-18 §11: снапшот позиции биржи по одному клирингу (старая → Δ → новая).
+// NOP_a = активы_a − обязательства_a; snapshot берётся ДО и ПОСЛЕ применения
+// fills батча в ledger (attribution по batch_id).
+message BatchNopItem {
+  string currency = 1;
+  fob.common.v1.Decimal nop_before = 2;
+  fob.common.v1.Decimal delta = 3;
+  fob.common.v1.Decimal nop_after = 4;
+}
+message BatchNopSnapshot {
+  string batch_id = 1;
+  int64 event_time_ms = 2;
+  repeated BatchNopItem items = 3;
+}
+message GetExchangeNopHistoryRequest {
+  fob.common.v1.EventMeta meta = 1;
+  int32 limit = 2;                             // сколько последних клирингов (0 = дефолт)
+  string batch_id = 3;                         // если задан — вернуть только этот клиринг
+}
+message GetExchangeNopHistoryResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated BatchNopSnapshot snapshots = 2;     // свежие сверху
+}
+
+// ADR-057 — узловой остаток «валюта@площадка». Уровень узла позиции: qty (факт),
+// target (цель Q*), in_transit (в пути на приход). Меняется только подтверждениями.
+message NodeBalance {
+  string asset = 1;
+  string venue = 2;                            // "Binance" | "__book__"
+  fob.common.v1.Decimal qty = 3;
+  fob.common.v1.Decimal target = 4;
+  fob.common.v1.Decimal in_transit = 5;
+}
+message GetNodeBalancesRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string assets = 2;                  // пусто = все активы
+}
+message GetNodeBalancesResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated NodeBalance nodes = 2;
+}
+// ADR-057 — перевод валюты между узлами (связка-арбитражёр): списание с from_venue,
+// приход в in_transit to_venue. Идемпотентно по transfer_id.
+message ApplyNodeTransferRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string transfer_id = 2;                      // idempotency key
+  string asset = 3;
+  string from_venue = 4;
+  string to_venue = 5;
+  fob.common.v1.Decimal qty = 6;
+}
+
+// T-F18-008/203 (ADR-061 §7, ADR-063): знаковая накопленная позиция CE-агента
+// (виртуального контрагента: переводчик | арбитражёр) — c_j такта клиринга.
+// ОТДЕЛЬНО от NodeBalance (уровень узла активов биржи, неотрицательный факт) —
+// AgentPosition агрегирует по (agent_id, asset, venue), позиция может быть
+// отрицательной (ADR-061 A6). agent_kind — строка ("translator" |
+// "arbitrageur"), а не общий enum: ключ и CHECK хранятся так же в PG
+// ce_agent_position (docs/07-data/ce-agent-position.md), лишний enum/пакетная
+// связь ledger↔treasury здесь не нужна. in_flight — зарезервировано для Э3
+// (полоса ±q, T-F18-304); до Э3 всегда 0.
+message AgentPosition {
+  string agent_id = 1;                        // "T_BTC" | "A_BTC_BO" (= имя ребра CeEdge.name)
+  string agent_kind = 2;                       // "translator" | "arbitrageur" | "" (неизвестно)
+  string asset = 3;                            // "BTC" | "USDT" ...
+  string venue = 4;                            // площадка узла; "" = route-level (арбитражёр, V=2)
+  fob.common.v1.Decimal position = 5;          // c_j, ЗНАКОВАЯ, накопленная клирингом
+  fob.common.v1.Decimal in_flight = 6;         // committed (Э3+), ЗНАКОВАЯ, пока всегда 0
+  int64 updated_at_ms = 7;                     // unix ms последнего изменения
+  string last_batch_id = 8;                    // последний такт, менявший позицию
+  // F-18 v2 · Э3 (T-F18-303): последняя цена узла P_node (USDT/актив), по которой
+  // клиринг делил value→qty (AgentDelta.price_used). Нужна risk для перевода
+  // избытка полосы (в стоимости) в количество актива хедж-заявки. Аддитивно,
+  // 0 у арбитражёров и до первой дельты (risk такие пропускает).
+  fob.common.v1.Decimal reference_price = 9;  // цена ПАРЫ P(base)/P(quote) (номинал ⇒ P(base))
+  // Пары X/Y (2026-09-17): котируемая валюта пары агента (QUOTE-ребро; номинал ⇒
+  // "USDT"). Для отображения пары base/quote на фронте и корреляции с заявками.
+  string quote = 10;
+  // P(base) в USDT (абсолютная цена базового актива). reference_price даёт лишь
+  // отношение P_base/P_quote — для корректного разложения стоимости c_j на ноги в
+  // СВОИХ валютах пары (base_qty=value/P_base, quote_qty=value/P_quote, где
+  // P_quote=base_price/reference_price) нужна одна абсолютная цена. Номинал ⇒
+  // base_price=reference_price=P_base. 0 у арбитражёров/до первой дельты.
+  fob.common.v1.Decimal base_price = 11;
+  // ADR-072 §C: накопленный РЕАЛЬНЫЙ заработок агента на внешних сделках
+  // относительно справедливой цены F_0 (в валюте quote): SELL (avg−F_0)·q +
+  // BUY (F_0−avg)·q, суммарно по подтверждённым хедж-филлам. Аддитивно, 0 до
+  // первого филла. BFF переводит quote→USDT и показывает как "заработок".
+  fob.common.v1.Decimal realized_vs_fair = 12;
+  // Порядок в порогах (одно место расчёта — ledger, per-currency, vol/liq-масштаб
+  // ADR-066): фактические z_lim (Z̄lim, вход в хедж) и z_mkt (Z̄mkt, тейкер-сброс),
+  // k-USDT. BFF/фронт ОТОБРАЖАЮТ их и НЕ пересчитывают (устранение дисплей≠реальность).
+  // 0 до первого расчёта порога по агенту.
+  fob.common.v1.Decimal z_lim = 13;
+  fob.common.v1.Decimal z_mkt = 14;
+  // ADR-088 (CALC-CE-HEDGE-THRESHOLD-MODEL): пороги хеджа по модели оптимального управления — только чтение.
+  // Заполняется при ЭФФЕКТИВНОМ режиме shadow|on (min потолка окружения CE_HMODEL_MODE, переключателя PG ce_hmodel_mode и
+  // предохранителя); при эффективном off не заполняется (на проводе 0 байт). Состояние в памяти
+  // ledger, не персистится: после рестарта computed=false до первого пересчёта. Аддитивно (поле 15, прежние поля
+  // не менялись).
+  AgentHedgeModel hedge_model = 15;
+}
+
+// Режим рынка по числу Пекле на пороге тейкера (CALC-CE-HEDGE-THRESHOLD-MODEL §3.6).
+enum HedgeModelRegime {
+  HEDGE_MODEL_REGIME_UNSPECIFIED = 0;
+  HEDGE_MODEL_REGIME_NOISE = 1;   // шум потока: решение «мейкер + тейкер»
+  HEDGE_MODEL_REGIME_MIXED = 2;   // смешанный: рыночный порог плавно сужается потоком
+  HEDGE_MODEL_REGIME_DRIFT = 3;   // устойчивый поток: рыночный порог = дрейфовая полоса, мейкер-зона схлопнута
+}
+
+// Модельные пороги хеджа агента. Единицы: пороги и оценки — тыс. USDT (оценка шума — на √мин, дрейфа — в минуту),
+// масштаб Decimal 6. Отсутствие Decimal-поля (has_*) = «не посчитано»; ноль — законное значение (ребейт мейкера
+// даёт b_m=0, чисто фиксированная плата сети даёт transfer_target=0), поэтому наличие определять по has_*, а не по >0.
+message AgentHedgeModel {
+  bool computed = 1;                          // пороги посчитаны (все входы допустимы)
+  HedgeModelRegime regime = 2;                // только у переводчика при computed
+  fob.common.v1.Decimal b_m = 3;              // порог мейкера модели (z_lim после ограничений)
+  fob.common.v1.Decimal b_t = 4;              // порог тейкера модели (z_mkt после ограничений)
+  fob.common.v1.Decimal sz_est = 5;           // шум потока ς_z (оценка или значение по умолчанию, см. est_minutes)
+  fob.common.v1.Decimal mu_est = 6;           // устойчивый поток μ, ЗНАКОВЫЙ
+  double peclet = 7;                          // число Пекле на пороге тейкера (диагностика)
+  fob.common.v1.Decimal transfer_threshold = 8;  // порог перевода B, только связка
+  fob.common.v1.Decimal transfer_target = 9;     // цель перевода b, только связка
+  int64 computed_at_ms = 10;                  // unix ms последнего расчёта
+  bool applied = 11;                          // эффективный режим on: пороги модели применены к заявкам (иначе только наблюдение)
+  uint32 est_minutes = 12;                    // минут накоплено для оценки ς_z и μ; 0 ⇒ ς_z взят по умолчанию
+  fob.common.v1.Decimal sigma_bps = 13;       // волатильность курса пары ς, bps за √мин (из ce_asset_volatility)
+  fob.common.v1.Decimal fee_maker_bps = 14;   // комиссия мейкера без спреда, bps
+  fob.common.v1.Decimal fee_taker_bps = 15;   // комиссия тейкера без спреда, bps
+  uint32 params_hash = 16;                    // версия набора настроек модели (γ, κ, a, s/2, θ, K, …) — для истории
+  string mode = 17;                           // "shadow" | "on"
+  string reason = 18;                         // почему не посчитано (computed=false): sigma_stale, no_sigma, invalid_input, budget, …
+  fob.common.v1.Decimal theta_est = 19;       // оценка скорости возврата позиции θ (диагностика; в расчёте берётся настройка), 1/мин
+  // ADR-088, поправка о сглаживании: b_m/b_t/transfer_* выше — ЭФФЕКТИВНЫЕ (сглаженные, с потолком); ниже сырой расчёт этого такта.
+  fob.common.v1.Decimal b_m_raw = 20;         // сырой порог мейкера до сглаживания, тыс. USDT (только переводчик при computed)
+  fob.common.v1.Decimal b_t_raw = 21;         // сырой порог тейкера до сглаживания
+  fob.common.v1.Decimal transfer_threshold_raw = 22;  // сырой B связки
+  fob.common.v1.Decimal transfer_target_raw = 23;     // сырая цель b связки
+  string mode_ceiling = 24;                   // потолок окружения CE_HMODEL_MODE: "off" | "shadow" | "on" (mode — эффективный: min(потолок, PG, предохранитель))
+}
+message GetAgentPositionsRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;               // пусто = все агенты
+  repeated string assets = 3;                  // пусто = все активы
+  repeated string venues = 4;                  // пусто = все площадки
+}
+message GetAgentPositionsResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated AgentPosition positions = 2;
+}
+
+// F-18 v2 (наблюдаемость такта клиринга, ADR-061 §1/§7): ОДНА per-agent
+// дельта ОДНОГО такта клиринга (batch_id) — ДО → Δ → ПОСЛЕ. В отличие от
+// AgentPosition (текущая накопленная позиция без привязки к такту),
+// AgentPositionDelta — снимок ИМЕННО этого клиринга, читается из ring-истории
+// ledger (ApplyPositionDelta), а не из write-through кэша agent_positions_.
+message AgentPositionDelta {
+  string agent_id = 1;                          // "T_BTC" | "A_BTC_BO"
+  string agent_kind = 2;                        // "translator" | "arbitrageur" | ""
+  string asset = 3;                             // "BTC" | "USDT" ...
+  string venue = 4;                             // площадка узла; "" = route-level
+  fob.common.v1.Decimal position_before = 5;    // c_j ДО применения этой дельты
+  fob.common.v1.Decimal delta = 6;              // f_j, ЗНАКОВАЯ дельта этого такта
+  fob.common.v1.Decimal position_after = 7;     // c_j ПОСЛЕ = ДО + Δ
+}
+message ResetAgentPositionsRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;                // пусто = ВСЕ агенты (полный сброс к нулю)
+}
+message ResetAgentPositionsResponse {
+  fob.common.v1.EventMeta meta = 1;
+  uint32 cleared = 2;                           // сколько агентских позиций сброшено
+}
+message GetAgentPositionDeltasRequest {
+  fob.common.v1.EventMeta meta = 1;
+  string batch_id = 2;                          // такт клиринга (обязателен)
+}
+message GetAgentPositionDeltasResponse {
+  fob.common.v1.EventMeta meta = 1;
+  repeated AgentPositionDelta deltas = 2;        // пусто = такт не менял позиции агентов
+}
+
+// ADR-087 (CALC-CE-AGENT-PNL): заработок агента CE в USDT — три группы (внутренняя биржа, внешние биржи, итого),
+// в каждой R (реализованный), U (нереализованный) и R+U. Всё посчитано в ledger; BFF и фронт арифметики не делают.
+// Модель C′: на внутренней бирже всё реализуется в такте клиринга (u = 0 всегда), нереализованное бывает только на внешних биржах.
+// R и U известны независимо. R не требует текущей справедливой цены остатка (известен сразу после перезапуска ledger); для пар не к
+// USDT ему нужен курс валюты котировки (цена базы и цена пары), пока его нет — R неизвестен. U требует текущей справедливой цены
+// остатка (остатка нет — U = 0 без цены).
+// Изменение смысла поля 1 (до появления поля 5 has_data значил «R и U известны сразу»): допустимо, пока GetAgentPnl не вышел за
+// рамки dev; отдельный ADR не нужен, зафиксировано в ADR-087.
+message PnlGroup {
+  bool has_data = 1;                              // false ⇒ r НЕ задан (нет данных — это не ноль)
+  fob.common.v1.Decimal r = 2;                    // USDT
+  fob.common.v1.Decimal u = 3;                    // USDT; задан при u_has_data
+  fob.common.v1.Decimal r_plus_u = 4;             // USDT, r + u; задан при has_data и u_has_data
+  bool u_has_data = 5;                            // false ⇒ u и r_plus_u НЕ заданы (остаток есть, цена оценки пока не известна)
+}
+message AgentPnl {
+  string agent_id = 1;                            // "T_BTC_binance" | "A_BTC_binancekraken"
+  string agent_kind = 2;                          // "translator" | "arbitrageur" | ""
+  string asset = 3;                               // базовый актив
+  string quote = 4;                               // котируемая валюта пары ("USDT" у пар к USDT и у связки)
+  repeated string venues = 5;                     // площадки ног: переводчик одна, связка две
+  PnlGroup internal = 6;                          // внутренняя биржа CE
+  PnlGroup external = 7;                          // внешние биржи, все вместе
+  PnlGroup total = 8;                             // internal + external
+  int64 mark_age_ms = 9;                          // возраст цены оценки m; -1 ⇒ цена неизвестна
+  uint32 ext_fills = 10;                          // число внешних хедж-исполнений с запуска ledger
+  int64 since_ms = 11;                            // начало накопления, unix ms; 0 ⇒ не начато
+}
+message AgentPnlTotals {
+  PnlGroup internal = 1;                          // R — сумма по агентам с известным R, U — сумма по агентам с известным U
+  PnlGroup external = 2;
+  PnlGroup total = 3;                             // r_plus_u итогов задан только когда incomplete_agents = 0 (иначе слагаемые из разных выборок)
+  uint32 agent_count = 4;                         // сколько агентов в ответе
+  uint32 incomplete_agents = 5;                   // у скольких R или U неизвестны (has_data = false или u_has_data = false в итоговой группе)
+}
+message KindPnlTotals {
+  string agent_kind = 1;                          // "translator" | "arbitrageur"
+  PnlGroup internal = 2;                          // R — сумма по агентам вида с известным R, U — с известным U
+  PnlGroup external = 3;
+  PnlGroup total = 4;                             // r_plus_u задан только когда incomplete_agents = 0
+  uint32 agent_count = 5;                         // сколько агентов этого вида в ответе
+  uint32 incomplete_agents = 6;                   // у скольких R или U неизвестны (has_data = false или u_has_data = false в итоговой группе)
+}
+message GetAgentPnlRequest {
+  fob.common.v1.EventMeta meta = 1;
+  repeated string agent_ids = 2;                  // пусто = все агенты
+}
+message GetAgentPnlResponse {
+  fob.common.v1.EventMeta meta = 1;
+  string currency = 2;                            // "USDT"
+  repeated AgentPnl agents = 3;
+  AgentPnlTotals totals = 4;                      // строка «все агенты»
+  bool enabled = 5;                               // CE_AGENT_PNL_ENABLED
+  repeated KindPnlTotals by_kind = 6;             // итоги по видам агентов (панель «Живые позиции»: переводчики, арбитражёры)
+}
+
 service LedgerService {
   // Query current balances (sync)
   rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
@@ -286,4 +559,37 @@ service LedgerService {
 
   // F-06: get user's open positions (symbol, side, qty, avg entry, mark, PnL)
   rpc GetPositions(GetPositionsRequest) returns (GetPositionsResponse);
+
+  // F-18 (ADR-054 §10): валютный вектор биржи (house-аккаунт + venue + client
+  // liabilities) — вход для расчёта NOP в risk и для UI.
+  rpc GetExchangeBalances(GetExchangeBalancesRequest) returns (GetExchangeBalancesResponse);
+
+  // F-18 (§11): история позиции биржи по клирингам (старая → Δ → новая), для
+  // привязки к результату клиринга на вкладке Clearing.
+  rpc GetExchangeNopHistory(GetExchangeNopHistoryRequest) returns (GetExchangeNopHistoryResponse);
+
+  // ADR-057 (CE-агенты): узловые остатки «валюта@площадка» (уровень узла позиции) —
+  // вход для клиринга (исполнимость ноги) и для risk (Z_a).
+  rpc GetNodeBalances(GetNodeBalancesRequest) returns (GetNodeBalancesResponse);
+
+  // ADR-057: применить перевод валюты между узлами (связка-арбитражёр), идемпотентно.
+  rpc ApplyNodeTransfer(ApplyNodeTransferRequest) returns (google.protobuf.Empty);
+
+  // T-F18-008/203 (ADR-061 §7): знаковые накопленные позиции CE-агентов
+  // (переводчик/арбитражёр) — вход для A2 (сдвиг якоря σ*=m+ρ·c) и A7
+  // (полоса ±q) в matching/risk, и для UI/observability.
+  rpc GetAgentPositions(GetAgentPositionsRequest) returns (GetAgentPositionsResponse);
+
+  // F-18 v2 (наблюдаемость такта клиринга): per-agent дельты ОДНОГО такта
+  // (batch_id) — ДО → Δ → ПОСЛЕ, для вкладки Clearing (замена house-секции).
+  rpc GetAgentPositionDeltas(GetAgentPositionDeltasRequest) returns (GetAgentPositionDeltasResponse);
+
+  // F-18 v2 (кнопка «сброс позиций» на вкладке Clearing): обнуляет накопленные
+  // позиции агентов (c_j→0), in_flight и band-хеджи — чтобы наблюдать расхождение
+  // позиций с нуля. РЕАЛЬНЫЙ сброс состояния владельца (ledger), не фронт-фикс.
+  rpc ResetAgentPositions(ResetAgentPositionsRequest) returns (ResetAgentPositionsResponse);
+
+  // ADR-087 (вкладка «PnL»): заработок агентов CE — внутренняя биржа, внешние биржи, итого; R, U и R+U в USDT.
+  // Read-only, считается в ledger (книга внутренней биржи + внешние суммы хедж-исполнений).
+  rpc GetAgentPnl(GetAgentPnlRequest) returns (GetAgentPnlResponse);
 }

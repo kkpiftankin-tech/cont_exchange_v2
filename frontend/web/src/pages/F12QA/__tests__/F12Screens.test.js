@@ -165,6 +165,9 @@ jest.mock('axios', () => ({
 jest.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
   useSearchParams: () => [new URLSearchParams(mockSearchParams), jest.fn()],
+  // NavBar (общая навигация) использует useLocation и Link — без них страница падала при рендере
+  useLocation: () => ({ pathname: '/' }),
+  Link: ({ to, children, ...rest }) => require('react').createElement('a', { href: to, ...rest }, children),
 }), { virtual: true });
 
 jest.mock('../../../api/authService', () => ({

@@ -2,7 +2,7 @@
 // postgres_execution_groups_repository.cpp — F-09 (T-F09-047). См. .hpp.
 //
 // Строки статусов/политик совпадают с DDL (infra/postgres/init.sql, блок F-09).
-// Деньги — NUMERIC через Decimal::to_string() (CLAUDE.md §9, без double).
+// Деньги — NUMERIC через Decimal::to_string() (.claude/rules/data.md, без double).
 // ============================================================================
 
 #include "infra/postgres_execution_groups_repository.hpp"

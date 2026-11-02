@@ -117,10 +117,20 @@ Decimal Decimal::div(const Decimal& a, const Decimal& b, int32_t result_scale) {
   // result ≈ a/b с result_scale знаками:
   //   result_units = round( a.units / b.units * 10^(result_scale - a.scale + b.scale) ).
   // Чтобы остаться в целых числах, домножаем числитель (k>=0) или знаменатель (k<0).
-  const int32_t k = result_scale - a.scale + b.scale;
+  int32_t k = result_scale - a.scale + b.scale;
+  int32_t out_scale = result_scale;
   __int128 num = a.units;
   __int128 den = b.units;
   if (k >= 0) {
+    // 10^k может вывести числитель за пределы __int128 — знак результата меняется молча (в ledger это давало отрицательную среднюю
+    // цену входа при обороте книги выше ≈17 тыс. USDT: числитель в масштабе 14, знаменатель в 18, k = 20). Тогда снижаем масштаб
+    // результата, пока произведение помещается: значение верное, меньше знаков (как и у normalize_i128 при переполнении int64).
+    const __int128 kI128Max = static_cast<__int128>(~static_cast<unsigned __int128>(0) >> 1);
+    const __int128 abs_n = num < 0 ? -num : num;
+    while (k > 0 && (k > 37 || (abs_n != 0 && abs_n > kI128Max / pow10_i128(k)))) {
+      --k;
+      --out_scale;
+    }
     num *= pow10_i128(k);
   } else {
     den *= pow10_i128(-k);
@@ -134,7 +144,7 @@ Decimal Decimal::div(const Decimal& a, const Decimal& b, int32_t result_scale) {
   if (2 * remainder >= abs_den) {
     quotient += 1;
   }
-  return normalize_i128(negative ? -quotient : quotient, result_scale);
+  return normalize_i128(negative ? -quotient : quotient, out_scale);
 }
 
 Decimal Decimal::min(const Decimal& a, const Decimal& b) {

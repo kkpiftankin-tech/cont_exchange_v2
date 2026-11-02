@@ -19,7 +19,7 @@ related:
 [ADR-001](ADR-001-event-driven-microservices.md) и
 [ADR-003](ADR-003-kafka-redpanda-broker.md) фиксируют at-least-once Kafka, но
 конкретные правила упорядочивания, идемпотентности и delivery-семантики
-разбросаны по CLAUDE.md §13 и коду consumers. Для финансовых потоков
+разбросаны по [.claude/rules/contracts.md](../../../.claude/rules/contracts.md) и коду consumers. Для финансовых потоков
 (fills, execution reports, ledger mutations) это критично и должно быть
 зафиксировано как единое архитектурное правило.
 

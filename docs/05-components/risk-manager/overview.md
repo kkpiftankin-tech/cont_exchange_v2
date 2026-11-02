@@ -45,6 +45,7 @@ Pre-trade и post-trade рисковая логика. Управляет kill s
 
 - F-07 (Pre-trade Risk Control)
 - F-12 (Execution Hedge) — TODO post-trade ветка
+- [F-18 v2](../../02-system/features/F-18-ce-capital-position-hedge/) (CE Virtual Counterparties) — решение об эмиссии за полосу `±q`, veto через `PreHedgeCheck` (ACCEPT/REJECT/RESIZE/HALT); код planned (гейт ADR-061)
 
 ## Participates In Features
 

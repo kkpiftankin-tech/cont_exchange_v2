@@ -17,7 +17,7 @@ Service Interaction Sequence
 
 ## Use Case
 
-- [UC-F11-01](../../02-system/use-cases/UC-F11-01-ingest-external-marketdata/use-case.md)
+- [UC-F11-06](../../02-system/use-cases/UC-F11-06-ingest-external-marketdata-legacy/use-case.md)
 
 ## Participants
 

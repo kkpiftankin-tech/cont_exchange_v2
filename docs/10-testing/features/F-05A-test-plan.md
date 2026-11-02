@@ -6,8 +6,8 @@ owner: core-team
 source:
   - IN-014 §8 (Testing), §9 (Acceptance Criteria), §3/§13/§16 (Математика/Domain/Algorithm)
 related:
-  - docs/02-system/features/F-05-live-market-data/F-05A-feature.yaml
-  - docs/02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md
+  - docs/02-system/features/F-05A-vectorized-external-liquidity/feature.yaml
+  - docs/02-system/features/F-05A-vectorized-external-liquidity/README.md
   - docs/05-components/sequences/SEQ-F05A-UC-F05A-01-services.md
   - docs/05-components/sequences/SEQ-F05A-UC-F05A-02-services.md
   - docs/07-data/vector-clearing-results.md
@@ -106,7 +106,7 @@ Fixture metadata: `fixture_id`, `venue`, `endpoint`, `capture_time_utc`, `symbol
 
 ## Трассировка
 
-- Feature: [F-05A](../../02-system/features/F-05-live-market-data/addendum-F05A-vectorized-external-liquidity.md)
+- Feature: [F-05A](../../02-system/features/F-05A-vectorized-external-liquidity/README.md)
 - Use cases: UC-F05A-01..05; Sequences: SEQ-F05A-UC-F05A-01..05-services
 - Data: [vector-clearing-results](../../07-data/vector-clearing-results.md), [vector-flow-segments](../../07-data/vector-flow-segments.md)
 - Implementation: [F-05A tasks §Phase 5](../../implementation-plan/F-05A-vectorized-external-liquidity.tasks.md)

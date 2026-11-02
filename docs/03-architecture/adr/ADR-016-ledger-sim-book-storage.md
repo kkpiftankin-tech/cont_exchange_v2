@@ -65,7 +65,7 @@ Ledger сейчас хранит:
    `sim_session_id` и должны обнуляться/архивироваться при завершении
    SimSession (status=COMPLETED). Боевые позиции живут вечно. Смешение
    в одной таблице усложняет retention и cleanup.
-3. **CLAUDE.md §17 (Ledger rules).** Явно: «смешивать user balance и
+3. **[cpp/ledger/CLAUDE.md](../../../cpp/ledger/CLAUDE.md) (Ledger rules).** Явно: «смешивать user balance и
    exchange hedge balance — запрещено», «settlement на основе
    floating-point money — запрещено». Sim-book — это ещё одна
    изолированная книга; отдельные таблицы соответствуют духу правила.

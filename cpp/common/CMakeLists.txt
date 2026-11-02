@@ -73,6 +73,12 @@ if(BUILD_TESTING)
   target_compile_options(cex_common_compensation_reversal_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME cex_common_compensation_reversal_test COMMAND cex_common_compensation_reversal_test)
 
+  # ADR-078 §7: срок годности данных по волатильности (header-only, чистые формулы + оценщик σ).
+  add_executable(cex_common_data_validity_test tests/data_validity_test.cpp)
+  target_link_libraries(cex_common_data_validity_test PRIVATE cex_common)
+  target_compile_options(cex_common_data_validity_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME cex_common_data_validity_test COMMAND cex_common_data_validity_test)
+
   # P2: PgConnectionPool unit test. Header-only, so the test TU links libpqxx
   # directly. Built only when libpqxx is available (same guard as ledger/risk);
   # uses a FakeConnection seam to test acquire/release/reuse without a real DB.

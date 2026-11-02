@@ -116,6 +116,47 @@ void TestEndToEnd() {
   expect(r.x.size() == 2, "e2e: x has 2 quantized entries");
   // x_i должны быть неотрицательны (box 0≤x) с точностью квантования.
   expect(r.x[0].units >= 0 && r.x[1].units >= 0, "e2e: x >= 0");
+  // pi (клиринговые цены) извлечены из дуальных OSQP: ровно N=1 запись, конечна.
+  expect(r.pi.size() == 1, "e2e: pi has N=1 entry (clearing price per asset)");
+}
+
+// ADR-052: academic двусторонний клиринг против закрытой формы §5.1.1.
+// 2 венью, одна пара, w=[1,−1] (чистое направление), знаковый box. Ожидаем
+// x_i = (p*−a_i)/m_i, p* = (Σ a/m)/(Σ 1/m). Гейт корректности переформулировки.
+void TestTwoSidedClosedForm() {
+  auto seg = [](double anchor, double slope) {
+    dm::VectorSegment s;
+    s.w = {1.0, -1.0};      // чистое направление (2 актива)
+    s.anchor = anchor;      // a_i = mid венью
+    s.slope = slope;        // m_i
+    s.q_min = -10.0;        // знаковый box (не связывает)
+    s.q_max = 10.0;
+    return s;
+  };
+  // a1=100, a2=102, m1=m2=1 → p*=101 → x1=+1, x2=−1 (сумма 0).
+  std::vector<dm::VectorSegment> segs = {seg(100.0, 1.0), seg(102.0, 1.0)};
+
+  cex::matching::infra::OsqpBackend be;
+  dm::VectorQpSolver solver(be, dm::QpParams{}, /*tol=*/1e-4, /*scale=*/12,
+                            /*two_sided=*/true);
+  dm::VectorClearingResult r = solver.Solve(segs, /*num_assets=*/2);
+
+  expect(r.status == dm::VectorSolveStatus::kConverged, "twosided: converged");
+  expect(r.x.size() == 2, "twosided: 2 signed x");
+  const double x0 = static_cast<double>(r.x[0]);
+  const double x1 = static_cast<double>(r.x[1]);
+  expect(approx(x0, 1.0), "twosided: x0=+1 (низкий anchor покупает)");
+  expect(approx(x1, -1.0), "twosided: x1=−1 (высокий anchor продаёт)");
+  expect(approx(x0 + x1, 0.0), "twosided: Σx=0 (баланс)");
+
+  // Асимметрия наклонов: a1=100,a2=110,m1=1,m2=4 → p*=(100/1+110/4)/(1/1+1/4)=102.
+  std::vector<dm::VectorSegment> segs2 = {seg(100.0, 1.0), seg(110.0, 4.0)};
+  segs2[1].slope = 4.0;
+  dm::VectorClearingResult r2 = solver.Solve(segs2, 2);
+  expect(approx(static_cast<double>(r2.x[0]), 2.0),
+         "twosided: x0=(102−100)/1=+2");
+  expect(approx(static_cast<double>(r2.x[1]), -2.0),
+         "twosided: x1=(102−110)/4=−2");
 }
 
 }  // namespace
@@ -125,6 +166,7 @@ int main() {
   TestBoxActive();
   TestEquality();
   TestEndToEnd();
+  TestTwoSidedClosedForm();
 
   if (g_failures == 0) {
     std::cout << "osqp_backend_test: ALL PASSED\n";

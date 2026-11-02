@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F09-03
+title: External leg execution / compensating
 level: sea
+feature: F-09
+system-sequence: sequences/SEQ-UC-F09-03-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F09-UC-F09-03-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F09-03. External leg execution / compensating
 

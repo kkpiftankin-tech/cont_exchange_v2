@@ -17,7 +17,7 @@
 //   - "fill_rate" — % fills relative production.
 //   Mode задаётся в session config snapshot (JSON).
 //
-// CLAUDE.md §15: replay должен быть deterministic. Solver config snapshot
+// cpp/matching/CLAUDE.md: replay должен быть deterministic. Solver config snapshot
 // фиксируется при start, не может меняться during run.
 //
 // Связанные artifacts:

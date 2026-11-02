@@ -1,9 +1,13 @@
 feature:
   id: F-07
   name: Pre-trade Risk Control
-  status: in-progress-mvp
+  lifecycle: active  # planned | active | deprecated
+  status: {docs: partial, code: partial, runtime: dev}  # было: in-progress-mvp
   owner: core-team
   level: kite
+
+parentRequirements:  # FR-* — docs/02-system/functional-requirements.md (Этап 1 п.6, ADR-086/IN-019)
+  - FR-RISK-001  # pre-trade контроль
 
 description: >
   Синхронные pre-trade проверки нового FlowOrder: kill-switch, sanity checks,

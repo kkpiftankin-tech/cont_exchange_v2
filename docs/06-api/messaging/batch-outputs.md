@@ -44,7 +44,7 @@
 - [UC-F04-01](../../02-system/use-cases/UC-F04-01-run-batch-clearing/use-case.md)
 - [UC-F08-01](../../02-system/use-cases/UC-F08-01-liquidate-position/use-case.md)
 - [UC-F13-01](../../02-system/use-cases/UC-F13-01-generate-posttrade-report/use-case.md)
-- [UC-F15-01](../../02-system/use-cases/UC-F15-01-replay-historical-batch/use-case.md)
+- [UC-F15-07](../../02-system/use-cases/UC-F15-07-replay-historical-batch-legacy/use-case.md)
 
 ## Used In Sequence Diagrams
 

@@ -60,6 +60,51 @@ QpProblem VectorQpSolver::AssembleProblem(const std::vector<VectorSegment>& segm
   return prob;
 }
 
+// ADR-052 (academic двусторонний): min Σ[½ m_i x_i² + a_i x_i] s.t. Wx=0,
+// x_min ≤ x ≤ x_max. Standard-form OSQP: P=diag(m), q=a, A=[W;I], l=[0;q_min],
+// u=[0;q_max]. Знаковый box (продажа/покупка на одной кривой). p*=дуальная Wx=0.
+QpProblem VectorQpSolver::AssembleProblemTwoSided(
+    const std::vector<VectorSegment>& segments, int num_assets) {
+  const int I = static_cast<int>(segments.size());
+  const int N = std::max(0, num_assets);
+
+  QpProblem prob;
+  prob.num_assets = N;
+  prob.num_segments = I;
+
+  Eigen::MatrixXd W = Eigen::MatrixXd::Zero(N, I);
+  Eigen::VectorXd a = Eigen::VectorXd::Zero(I);      // anchors (mid)
+  Eigen::VectorXd m = Eigen::VectorXd::Zero(I);      // slopes (P диагональ)
+  Eigen::VectorXd lbox = Eigen::VectorXd::Zero(I);   // x_min (≤0)
+  Eigen::VectorXd ubox = Eigen::VectorXd::Zero(I);   // x_max (≥0)
+
+  for (int j = 0; j < I; ++j) {
+    const VectorSegment& seg = segments[static_cast<std::size_t>(j)];
+    const int rows = std::min<int>(N, static_cast<int>(seg.w.size()));
+    for (int i = 0; i < rows; ++i) {
+      W(i, j) = seg.w[static_cast<std::size_t>(i)];
+    }
+    a(j) = seg.anchor;
+    m(j) = std::max(seg.slope, kQFloor);   // P SPD ⇒ slope > 0
+    lbox(j) = std::min(0.0, seg.q_min);
+    ubox(j) = std::max(0.0, seg.q_max);
+  }
+
+  prob.P = Eigen::MatrixXd(m.asDiagonal());
+  prob.q = a;                              // academic: q = +a (anchor)
+
+  prob.A = Eigen::MatrixXd::Zero(N + I, I);
+  if (N > 0) prob.A.topRows(N) = W;
+  prob.A.bottomRows(I) = Eigen::MatrixXd::Identity(I, I);
+
+  prob.l = Eigen::VectorXd::Zero(N + I);
+  prob.u = Eigen::VectorXd::Zero(N + I);
+  prob.l.tail(I) = lbox;                   // знаковый box: q_min ≤ x ≤ q_max
+  prob.u.tail(I) = ubox;
+
+  return prob;
+}
+
 cex::common::Decimal VectorQpSolver::Quantize(double value) const {
   if (!std::isfinite(value)) {
     return cex::common::Decimal{0, decimal_scale_};
@@ -80,7 +125,9 @@ VectorClearingResult VectorQpSolver::Solve(const std::vector<VectorSegment>& seg
     return result;
   }
 
-  const QpProblem prob = AssembleProblem(segments, num_assets);
+  const QpProblem prob = two_sided_
+                             ? AssembleProblemTwoSided(segments, num_assets)
+                             : AssembleProblem(segments, num_assets);
   const QpSolution sol = backend_.Solve(prob, params_);
 
   // Backend не дал полезного решения → failed (без частичных денежных проводок).
@@ -113,6 +160,16 @@ VectorClearingResult VectorQpSolver::Solve(const std::vector<VectorSegment>& seg
   result.x.reserve(static_cast<std::size_t>(I));
   for (int j = 0; j < I; ++j) {
     result.x.push_back(Quantize(sol.x(j)));
+  }
+
+  // pi = клиринговые цены по активам = первые N дуальных OSQP (тень Wx=0).
+  // Квантуем на границе денег (§9), индекс = порядок AssetBasis. Если backend
+  // не вернул y нужной длины — оставляем pi пустым (диагностируемо, без мусора).
+  if (N > 0 && static_cast<int>(sol.y.size()) >= N) {
+    result.pi.reserve(static_cast<std::size_t>(N));
+    for (int i = 0; i < N; ++i) {
+      result.pi.push_back(Quantize(sol.y(i)));
+    }
   }
   result.iterations = sol.iterations;
 

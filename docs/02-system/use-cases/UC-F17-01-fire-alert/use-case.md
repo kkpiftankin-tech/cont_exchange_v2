@@ -1,9 +1,12 @@
-<!-- IN-013 frontmatter — Cockburn decomposition level.
 ---
-id: use-case
+id: UC-F17-01
+title: Сгенерировать alert и нотифицировать on-call
 level: sea
+feature: F-17
+system-sequence: sequences/SEQ-UC-F17-01-system.md
+service-sequence: ../../../05-components/sequences/SEQ-F17-UC-F17-01-services.md
+status: active  # draft | active | superseded | deprecated
 ---
--->
 
 # UC-F17-01. Сгенерировать alert и нотифицировать on-call
 

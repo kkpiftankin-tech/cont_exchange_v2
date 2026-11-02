@@ -64,7 +64,7 @@ inline FilledVolumeUpdate ComputeFilledVolumeUpdate(
   // Decimal::cmp без implicit-rescale внутри сравнения.
   const cex::common::Decimal zero{0, executed_qty_delta_portfolio_units.scale};
 
-  // Инвариант: delta >= 0. Отрицательное исполнение запрещено (см. CLAUDE.md §15).
+  // Инвариант: delta >= 0. Отрицательное исполнение запрещено (см. cpp/matching/CLAUDE.md).
   // cmp возвращает -1/0/+1; <0 значит delta < zero.
   if (cex::common::Decimal::cmp(executed_qty_delta_portfolio_units, zero) < 0) {
     throw std::invalid_argument("executed_qty_delta_portfolio_units must be non-negative");
